@@ -1,12 +1,13 @@
 """FastAPI control-plane application.
 
-M1a exposes only operational endpoints:
+Operational endpoints:
 
 - ``GET /health``        liveness  (process is up)
-- ``GET /health/ready``  readiness (dependencies reachable — Postgres in M1a)
+- ``GET /health/ready``  readiness (Postgres + Redis reachable)
 - ``GET /version``       the running package version
 
-The control plane never executes workflow steps; that is the worker's job.
+Identity/tenancy endpoints are mounted from ``nlw.api.routers``. The control
+plane never executes workflow steps; that is the worker's job.
 """
 
 from collections.abc import AsyncIterator, Awaitable
@@ -17,9 +18,11 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from nlw import __version__
+from nlw.api.routers import identity
+from nlw.auth.supabase import build_auth_provider
 from nlw.core.config import Settings, get_settings
 from nlw.core.logging import configure_logging
-from nlw.db.session import check_connection, create_engine
+from nlw.db.session import check_connection, create_engine, create_sessionmaker
 from nlw.worker.broker import check_redis
 
 log = structlog.get_logger(__name__)
@@ -31,6 +34,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     configure_logging(settings)
     app.state.engine = create_engine(settings)
+    app.state.sessionmaker = create_sessionmaker(app.state.engine)
+    app.state.auth_provider = build_auth_provider(settings)
     log.info("api.startup", app_env=settings.app_env)
     try:
         yield
@@ -44,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     app = FastAPI(title="NLW Control Plane", version=__version__, lifespan=lifespan)
     app.state.settings = settings
+    app.include_router(identity.router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

@@ -7,17 +7,18 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M1 — Foundation & walking skeleton |
-| Current milestone | **M1b — Worker roundtrip** (`feat/worker-roundtrip`, in progress) |
-| Completed milestones | M0 — Repo init & skeleton · M1a — Runtime spine |
-| Next milestone | M2 — Auth + tenant model + isolation (`feat/tenant-model`) |
+| Current phase | M2 — Auth + tenant model + isolation |
+| Current milestone | **M2a — Identity, tenancy model, auth context** (`feat/tenant-model`, in progress) |
+| Completed milestones | M0 · M1a · M1b (M1 complete) |
+| Next milestone | M2b — Database-enforced RLS isolation (`feat/tenant-rls`) |
 | Release status | pre-alpha, nothing deployed |
 
-M1 is delivered in two reviewable PRs: **M1a** (config, logging, FastAPI
-health/version, Docker+compose api/postgres/redis, Alembic baseline, CI —
-ADR-001) and **M1b** (Dramatiq broker + ping actor, worker & scheduler
-containers, enqueue→worker roundtrip, integration tests — ADR-002). M1a is
-merged to `main`; M1b completes the five-service walking skeleton.
+M2 is delivered in two reviewable PRs: **M2a** (Supabase `AuthProvider`
+[JWKS-first], `users`/`workspaces`/`memberships`, `X-Workspace-Id` tenant
+context, membership-authoritative authorization, app-layer isolation tests —
+ADR-007) and **M2b** (restricted `nlw_app` runtime role, role provisioning
+bootstrap, `SET LOCAL app.tenant_id`, RLS policies, cross-tenant RLS probe —
+ADR-003). M2a's isolation is app-layer; the DB-enforced guarantee lands in M2b.
 
 ## Milestone roadmap (revised ordering)
 
@@ -55,13 +56,14 @@ Demonstration workflow target:
 
 See [`docs/adr/`](adr/). Accepted so far:
 
-- [ADR-000 — Engineering toolchain](adr/ADR-000-toolchain.md) — **Accepted**
+- [ADR-000 — Engineering toolchain](adr/ADR-000-toolchain.md)
+- [ADR-001 — PostgreSQL as the system of record](adr/ADR-001-postgres-state-store.md)
+- [ADR-002 — Redis + Dramatiq (transport only)](adr/ADR-002-redis-dramatiq-queue.md)
+- [ADR-007 — Authentication provider (Supabase, identity only)](adr/ADR-007-auth-provider.md)
 
-Planned: ADR-001 Postgres state store · ADR-002 Redis/Dramatiq queue ·
-ADR-003 Multi-tenant isolation · ADR-004 Planner/executor separation ·
-ADR-005 BYOK provider model · ADR-006 Connector/tool separation ·
-ADR-007 Auth provider (Supabase) · ADR-008 Deployment strategy ·
-ADR-009 SQL safety.
+Planned: ADR-003 Multi-tenant isolation (M2b) · ADR-004 Planner/executor
+separation · ADR-005 BYOK provider model · ADR-006 Connector/tool separation ·
+ADR-008 Deployment strategy · ADR-009 SQL safety.
 
 ## Runbooks
 
@@ -75,7 +77,10 @@ provider 429, credentials expired, workflow stuck RUNNING, migration failed).
 
 ## Open risks
 
-- Cross-tenant isolation is unproven until M2 introduces isolation tests.
+- **Isolation is app-layer only until M2b.** M2a enforces tenancy via
+  membership-checked repositories (tested), but the app still connects as the DB
+  owner. Database-enforced isolation (restricted `nlw_app` role + RLS + the
+  cross-tenant probe) lands in M2b.
 - Action connectors (M7) have an unavoidable at-least-once send window on a
   crash between "side effect sent" and "state written." Mitigated with
   idempotency keys and required approvals; documented as a known limitation.

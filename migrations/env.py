@@ -12,10 +12,8 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from nlw.core.config import get_settings
+from nlw.db import models  # noqa: F401  (register models on Base.metadata)
 from nlw.db.base import Base
-
-# Import model modules here so their tables register on Base.metadata.
-# (None yet in M1a; added from M2 as models land.)
 
 config = context.config
 
