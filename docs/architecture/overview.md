@@ -32,6 +32,19 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
 - The LLM proposes; deterministic code enforces every invariant
   (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling).
 
+## Identity & tenancy (M2a)
+
+- `nlw.auth` — `AuthProvider.verify_token → AuthedIdentity`; `SupabaseAuthProvider`
+  verifies **JWKS (RS256/ES256)** as the production target, with legacy HS256 for
+  dev; checks signature, `exp`, `aud`, `iss`. See [ADR-007](../adr/ADR-007-auth-provider.md).
+- `nlw.db.models` — `users`, `workspaces`, `memberships` (Alembic `0002`).
+- `nlw.tenancy` — `Role` + `TenantContext(user_id, tenant_id, role)`.
+- `nlw.api` — `/me`, `/workspaces` (GET/POST), `/workspaces/current`. Tenant is
+  selected by `X-Workspace-Id` but **membership is authoritative**; role gates
+  actions. First-sight user provisioning is idempotent/race-safe.
+- Isolation is **app-layer** here; the DB-enforced guarantee (restricted role +
+  RLS) is M2b.
+
 ## Built so far (through M1b)
 
 - `nlw.core.config` — env-driven `Settings` (pydantic-settings).
