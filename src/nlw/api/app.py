@@ -9,7 +9,7 @@ M1a exposes only operational endpoints:
 The control plane never executes workflow steps; that is the worker's job.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 
 import structlog
@@ -20,6 +20,7 @@ from nlw import __version__
 from nlw.core.config import Settings, get_settings
 from nlw.core.logging import configure_logging
 from nlw.db.session import check_connection, create_engine
+from nlw.worker.broker import check_redis
 
 log = structlog.get_logger(__name__)
 
@@ -54,15 +55,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health/ready")
     async def ready() -> JSONResponse:
+        settings_: Settings = app.state.settings
         checks: dict[str, str] = {}
         healthy = True
-        try:
-            await check_connection(app.state.engine)
-            checks["postgres"] = "ok"
-        except Exception as exc:  # readiness must never raise; report it
-            checks["postgres"] = "down"
-            healthy = False
-            log.warning("readiness.postgres_unreachable", error=str(exc))
+
+        async def probe(name: str, coro: Awaitable[None]) -> None:
+            nonlocal healthy
+            try:
+                await coro
+                checks[name] = "ok"
+            except Exception as exc:  # readiness must never raise; report it
+                checks[name] = "down"
+                healthy = False
+                log.warning("readiness.check_failed", dependency=name, error=str(exc))
+
+        await probe("postgres", check_connection(app.state.engine))
+        await probe("redis", check_redis(settings_))
         return JSONResponse(
             status_code=200 if healthy else 503,
             content={"status": "ready" if healthy else "not_ready", "checks": checks},

@@ -1,8 +1,20 @@
-# Local development topology.
+# Local development topology (M1b): five services.
 #
-# M1a: api + postgres + redis. The worker and scheduler services join in M1b to
-# complete the five-service topology. Application containers are stateless;
-# durable state lives in the postgres volume.
+#   postgres  — system of record (stateful; published on 5433)
+#   redis     — queue transport only (ADR-002)
+#   api       — FastAPI control plane
+#   worker    — Dramatiq consumer (executes actors)
+#   scheduler — heartbeat only for now (real scheduling in M8)
+#
+# The api/worker/scheduler roles are one image, selected by command, sharing one
+# environment block. Application containers are stateless; only postgres (and
+# its volume) is durable.
+
+x-app-env: &app-env
+  APP_ENV: local
+  LOG_LEVEL: info
+  DATABASE_URL: postgresql+psycopg://nlw:nlw@postgres:5432/nlw
+  REDIS_URL: redis://redis:6379/0
 
 services:
   postgres:
@@ -35,11 +47,7 @@ services:
 
   api:
     build: .
-    environment:
-      APP_ENV: local
-      LOG_LEVEL: info
-      DATABASE_URL: postgresql+psycopg://nlw:nlw@postgres:5432/nlw
-      REDIS_URL: redis://redis:6379/0
+    environment: *app-env
     ports:
       - "8000:8000"
     depends_on:
@@ -47,6 +55,33 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  worker:
+    build: .
+    command: ["dramatiq", "nlw.worker.actors", "--processes", "1", "--threads", "4"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f dramatiq > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  scheduler:
+    build: .
+    command: ["python", "-m", "nlw.scheduler"]
+    environment: *app-env
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f nlw.scheduler > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 volumes:
   pgdata:

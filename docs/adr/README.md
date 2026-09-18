@@ -17,6 +17,7 @@ decision, numbered and never deleted (supersede instead of removing).
 |-----|-------|--------|
 | [000](ADR-000-toolchain.md) | Engineering toolchain | Accepted |
 | [001](ADR-001-postgres-state-store.md) | PostgreSQL as the system of record | Accepted |
+| [002](ADR-002-redis-dramatiq-queue.md) | Redis + Dramatiq as the execution queue (transport only) | Accepted |
 
 ## Template
 

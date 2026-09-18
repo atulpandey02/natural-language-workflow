@@ -8,15 +8,16 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M1 — Foundation & walking skeleton |
-| Current milestone | **M1a — Runtime spine** (`feat/foundation`, in progress) |
-| Completed milestones | M0 — Repo init & skeleton |
-| Next milestone | M1b — Worker roundtrip (`feat/worker-roundtrip`) |
+| Current milestone | **M1b — Worker roundtrip** (`feat/worker-roundtrip`, in progress) |
+| Completed milestones | M0 — Repo init & skeleton · M1a — Runtime spine |
+| Next milestone | M2 — Auth + tenant model + isolation (`feat/tenant-model`) |
 | Release status | pre-alpha, nothing deployed |
 
 M1 is delivered in two reviewable PRs: **M1a** (config, logging, FastAPI
 health/version, Docker+compose api/postgres/redis, Alembic baseline, CI —
 ADR-001) and **M1b** (Dramatiq broker + ping actor, worker & scheduler
-containers, enqueue→worker roundtrip, integration tests — ADR-002).
+containers, enqueue→worker roundtrip, integration tests — ADR-002). M1a is
+merged to `main`; M1b completes the five-service walking skeleton.
 
 ## Milestone roadmap (revised ordering)
 
