@@ -5,9 +5,11 @@ description = "Natural Language Workflow Platform — production, self-hostable 
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.0",
+    "dramatiq[redis]>=2.2.1",
     "fastapi>=0.141.1",
     "psycopg[binary]>=3.3.5",
     "pydantic-settings>=2.15.0",
+    "redis>=8.1.0",
     "sqlalchemy[asyncio]>=2.0.54",
     "structlog>=26.1.0",
     "uvicorn[standard]>=0.53.0",
@@ -20,7 +22,7 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=1.4.0",
     "httpx>=0.28.1",
-    "testcontainers[postgres]>=4.15.0",
+    "testcontainers[postgres,redis]>=4.15.0",
 ]
 
 [build-system]

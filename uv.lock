@@ -288,6 +288,20 @@ wheels = [
 ]
 
 [[package]]
+name = "dramatiq"
+version = "2.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/14/6d/d056a8ba251c216da054fc5db9ad7931bfb9ab28851e8b86acd770ce8867/dramatiq-2.2.1.tar.gz", hash = "sha256:f9fbbd2feea27b3fa4085446242a24d86f78288b20c78a93f9f0bdbd7d908cd5", size = 109994, upload-time = "2026-09-02T07:55:09.979Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8c/13/0550ff585ade7b423e2ecaac29c4ab88673a58ae92ef25b6629089a2b92c/dramatiq-2.2.1-py3-none-any.whl", hash = "sha256:4e2466d07d5a1c4910b49944e5b45704c123b82325384e1319f6d08d94559c46", size = 127754, upload-time = "2026-09-02T07:55:08.423Z" },
+]
+
+[package.optional-dependencies]
+redis = [
+    { name = "redis" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.141.1"
 source = { registry = "https://pypi.org/simple" }
@@ -706,9 +720,11 @@ version = "0.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "dramatiq", extra = ["redis"] },
     { name = "fastapi" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
+    { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
     { name = "uvicorn", extra = ["standard"] },
@@ -721,15 +737,17 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
-    { name = "testcontainers" },
+    { name = "testcontainers", extra = ["redis"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
+    { name = "dramatiq", extras = ["redis"], specifier = ">=2.2.1" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.5" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
+    { name = "redis", specifier = ">=8.1.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.54" },
     { name = "structlog", specifier = ">=26.1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.53.0" },
@@ -742,7 +760,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "ruff", specifier = ">=0.6" },
-    { name = "testcontainers", extras = ["postgres"], specifier = ">=4.15.0" },
+    { name = "testcontainers", extras = ["postgres", "redis"], specifier = ">=4.15.0" },
 ]
 
 [[package]]
@@ -1047,6 +1065,15 @@ wheels = [
 ]
 
 [[package]]
+name = "redis"
+version = "8.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/99/604f0b666d4c616d891cf77ebb9db6bb21601344c051aebf1b72b9ff915f/redis-8.1.0.tar.gz", hash = "sha256:6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25", size = 5254356, upload-time = "2026-07-30T08:51:00.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/9d/c5731f6e3608663d4d3656fd8d3aecee8b509c3082818f5a13eae925baea/redis-8.1.0-py3-none-any.whl", hash = "sha256:a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb", size = 560618, upload-time = "2026-07-30T08:50:58.497Z" },
+]
+
+[[package]]
 name = "requests"
 version = "2.34.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1168,6 +1195,11 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4b/13/2cc466bddf26d0085f30a2b2bd56b7f8708b54a54db833eec97c5c69129b/testcontainers-4.15.0.tar.gz", hash = "sha256:085cde086337632e19002719460b7b80bbab2bdd51bb3ea04f77d0de96504706", size = 95340, upload-time = "2026-07-24T23:08:01.731Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/00/7e/424aac8b355597835deb333e757a0e94b5ccf38ad00f07fe6ed1f4e17c88/testcontainers-4.15.0-py3-none-any.whl", hash = "sha256:8796c14e76604031ad39cf0ed3b8e9806283a1fbf5270965c2b1c594caa31b74", size = 160771, upload-time = "2026-07-24T23:08:00.13Z" },
+]
+
+[package.optional-dependencies]
+redis = [
+    { name = "redis" },
 ]
 
 [[package]]

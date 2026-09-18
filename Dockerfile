@@ -9,6 +9,11 @@ ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
     PATH="/app/.venv/bin:$PATH"
 
+# procps provides pgrep for the worker/scheduler container healthchecks.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends procps \
+    && rm -rf /var/lib/apt/lists/*
+
 # uv provides fast, reproducible installs from the committed lockfile.
 COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /usr/local/bin/uv
 
