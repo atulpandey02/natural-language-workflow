@@ -24,9 +24,12 @@ class Settings(BaseSettings):
     app_env: Environment = "local"
     log_level: str = "info"
 
-    # SQLAlchemy URL using the psycopg (v3) driver, valid for both the async
-    # application engine and the sync Alembic engine.
-    database_url: str = "postgresql+psycopg://nlw:nlw@localhost:5432/nlw"
+    # Application runtime connection: the RESTRICTED nlw_app role (no superuser,
+    # no BYPASSRLS). RLS + SET LOCAL app.* GUCs enforce tenant isolation.
+    database_url: str = "postgresql+psycopg://nlw_app:nlw_app@localhost:5432/nlw"
+    # Migration/owner connection used by Alembic only (DDL + grants + policies).
+    # Falls back to database_url when unset.
+    database_migration_url: str | None = None
     redis_url: str = "redis://localhost:6379/0"
 
     # --- Authentication (Supabase; identity only) ---

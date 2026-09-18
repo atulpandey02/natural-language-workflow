@@ -56,9 +56,24 @@ jobs:
         with:
           version: "0.12"
       - run: uv sync --frozen
-      - name: Apply migrations
+      - name: Bootstrap restricted runtime role (bootstrap, not a migration)
         env:
-          DATABASE_URL: postgresql+psycopg://nlw:nlw@localhost:5432/nlw
+          OWNER_URL: postgresql://nlw:nlw@localhost:5432/nlw
+        run: |
+          uv run python - <<'PY'
+          import os, psycopg
+          with psycopg.connect(os.environ["OWNER_URL"], autocommit=True) as conn:
+              conn.execute(
+                  "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_app') "
+                  "THEN CREATE ROLE nlw_app LOGIN PASSWORD 'nlw_app' "
+                  "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; END $$;"
+              )
+              conn.execute("GRANT CONNECT ON DATABASE nlw TO nlw_app")
+              conn.execute("GRANT USAGE ON SCHEMA public TO nlw_app")
+          PY
+      - name: Apply migrations (as owner)
+        env:
+          DATABASE_MIGRATION_URL: postgresql+psycopg://nlw:nlw@localhost:5432/nlw
         run: uv run alembic upgrade head
 
   docker-build:

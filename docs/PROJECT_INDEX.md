@@ -8,17 +8,18 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M2 — Auth + tenant model + isolation |
-| Current milestone | **M2a — Identity, tenancy model, auth context** (`feat/tenant-model`, in progress) |
-| Completed milestones | M0 · M1a · M1b (M1 complete) |
-| Next milestone | M2b — Database-enforced RLS isolation (`feat/tenant-rls`) |
+| Current milestone | **M2b — Database-enforced RLS isolation** (`feat/tenant-rls`, in review) |
+| Completed milestones | M0 · M1a · M1b · M2a |
+| Next milestone | M3 — Durable workflow engine (`feat/workflow-engine`) |
 | Release status | pre-alpha, nothing deployed |
 
 M2 is delivered in two reviewable PRs: **M2a** (Supabase `AuthProvider`
 [JWKS-first], `users`/`workspaces`/`memberships`, `X-Workspace-Id` tenant
 context, membership-authoritative authorization, app-layer isolation tests —
 ADR-007) and **M2b** (restricted `nlw_app` runtime role, role provisioning
-bootstrap, `SET LOCAL app.tenant_id`, RLS policies, cross-tenant RLS probe —
-ADR-003). M2a's isolation is app-layer; the DB-enforced guarantee lands in M2b.
+bootstrap, two transaction-local GUCs `app.user_id`/`app.tenant_id`, RLS
+policies, and a raw-SQL cross-tenant probe — ADR-003). With M2b, tenant
+isolation is enforced by the database, not just the application.
 
 ## Milestone roadmap (revised ordering)
 
@@ -59,11 +60,11 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-000 — Engineering toolchain](adr/ADR-000-toolchain.md)
 - [ADR-001 — PostgreSQL as the system of record](adr/ADR-001-postgres-state-store.md)
 - [ADR-002 — Redis + Dramatiq (transport only)](adr/ADR-002-redis-dramatiq-queue.md)
+- [ADR-003 — Multi-tenant isolation strategy (RLS + restricted role)](adr/ADR-003-multi-tenant-isolation.md)
 - [ADR-007 — Authentication provider (Supabase, identity only)](adr/ADR-007-auth-provider.md)
 
-Planned: ADR-003 Multi-tenant isolation (M2b) · ADR-004 Planner/executor
-separation · ADR-005 BYOK provider model · ADR-006 Connector/tool separation ·
-ADR-008 Deployment strategy · ADR-009 SQL safety.
+Planned: ADR-004 Planner/executor separation · ADR-005 BYOK provider model ·
+ADR-006 Connector/tool separation · ADR-008 Deployment strategy · ADR-009 SQL safety.
 
 ## Runbooks
 
@@ -77,10 +78,6 @@ provider 429, credentials expired, workflow stuck RUNNING, migration failed).
 
 ## Open risks
 
-- **Isolation is app-layer only until M2b.** M2a enforces tenancy via
-  membership-checked repositories (tested), but the app still connects as the DB
-  owner. Database-enforced isolation (restricted `nlw_app` role + RLS + the
-  cross-tenant probe) lands in M2b.
 - Action connectors (M7) have an unavoidable at-least-once send window on a
   crash between "side effect sent" and "state written." Mitigated with
   idempotency keys and required approvals; documented as a known limitation.
