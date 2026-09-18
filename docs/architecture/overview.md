@@ -42,8 +42,11 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
 - `nlw.api` — `/me`, `/workspaces` (GET/POST), `/workspaces/current`. Tenant is
   selected by `X-Workspace-Id` but **membership is authoritative**; role gates
   actions. First-sight user provisioning is idempotent/race-safe.
-- Isolation is **app-layer** here; the DB-enforced guarantee (restricted role +
-  RLS) is M2b.
+- Isolation is enforced by the **database** (M2b): the app connects as a
+  restricted `nlw_app` role (no `BYPASSRLS`); RLS policies on `workspaces` and
+  `memberships` are keyed on two transaction-local GUCs (`app.user_id` set at
+  auth, `app.tenant_id` set only after membership is confirmed). Migrations run
+  as the `nlw` owner. See [ADR-003](../adr/ADR-003-multi-tenant-isolation.md).
 
 ## Built so far (through M1b)
 

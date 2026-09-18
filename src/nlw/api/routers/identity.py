@@ -45,9 +45,10 @@ async def create_workspace(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> WorkspaceOut:
+    # INSERT policies allow creating a workspace and one's own owner membership;
+    # the request transaction commits at teardown.
     workspace = await WorkspaceRepository(session).create(body.name, _slugify(body.name))
     await MembershipRepository(session).create(user.id, workspace.id, Role.OWNER)
-    await session.commit()
     return WorkspaceOut(
         id=workspace.id, name=workspace.name, slug=workspace.slug, role=Role.OWNER.value
     )

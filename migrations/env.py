@@ -20,7 +20,13 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+# Migrations run as the owner/migration role. Prefer an explicitly configured
+# URL (tests set it directly), then the migration URL, then the runtime URL.
+if not config.get_main_option("sqlalchemy.url"):
+    settings = get_settings()
+    config.set_main_option(
+        "sqlalchemy.url", settings.database_migration_url or settings.database_url
+    )
 
 target_metadata = Base.metadata
 

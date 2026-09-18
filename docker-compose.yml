@@ -10,11 +10,19 @@
 # environment block. Application containers are stateless; only postgres (and
 # its volume) is durable.
 
+# The app runs as the restricted nlw_app role (RLS-enforced). Migrations run as
+# the nlw owner via DATABASE_MIGRATION_URL, e.g.:
+#   docker compose run --rm api alembic upgrade head
 x-app-env: &app-env
   APP_ENV: local
   LOG_LEVEL: info
-  DATABASE_URL: postgresql+psycopg://nlw:nlw@postgres:5432/nlw
+  DATABASE_URL: postgresql+psycopg://nlw_app:nlw_app@postgres:5432/nlw
+  DATABASE_MIGRATION_URL: postgresql+psycopg://nlw:nlw@postgres:5432/nlw
   REDIS_URL: redis://redis:6379/0
+  # Supabase auth config, passed through from the host env (never committed).
+  # Production target is JWKS via SUPABASE_URL; SUPABASE_JWT_SECRET is dev-only.
+  SUPABASE_URL: ${SUPABASE_URL:-}
+  SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
 
 services:
   postgres:
@@ -29,6 +37,8 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Role bootstrap (creates the restricted nlw_app role on fresh volume init).
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nlw -d nlw"]
       interval: 5s

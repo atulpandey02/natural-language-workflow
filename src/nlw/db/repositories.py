@@ -30,8 +30,10 @@ class UserRepository:
             .values(id=uuid.uuid4(), auth_provider_id=auth_provider_id, email=email)
             .on_conflict_do_update(index_elements=["auth_provider_id"], set_={"email": email})
         )
+        # No commit here: the caller's request transaction owns commit/rollback.
+        # The row is visible to later statements in the same transaction, and
+        # ON CONFLICT keeps it race-safe regardless of commit timing.
         await self.session.execute(stmt)
-        await self.session.commit()
         user = (
             await self.session.execute(
                 select(User).where(User.auth_provider_id == auth_provider_id)

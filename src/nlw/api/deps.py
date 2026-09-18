@@ -21,13 +21,17 @@ from nlw.auth.provider import AuthedIdentity, AuthProvider, InvalidTokenError
 from nlw.db.models import User
 from nlw.db.repositories import MembershipRepository, UserRepository
 from nlw.tenancy.context import Role, TenantContext, role_at_least
+from nlw.tenancy.session import set_current_tenant, set_current_user
 
 _bearer = HTTPBearer(auto_error=False)
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
+    # One transaction per request so that SET LOCAL app.* GUCs (set below) apply
+    # to every query and are discarded when the transaction ends — pooled
+    # connections never carry tenant context into a later request.
     sessionmaker = request.app.state.sessionmaker
-    async with sessionmaker() as session:
+    async with sessionmaker() as session, session.begin():
         yield session
 
 
@@ -50,7 +54,10 @@ async def get_current_user(
         )
     except InvalidTokenError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token") from exc
-    return await UserRepository(session).get_or_create(identity.sub, identity.email)
+    user = await UserRepository(session).get_or_create(identity.sub, identity.email)
+    # Identity is established: set app.user_id so RLS "own row" policies apply.
+    await set_current_user(session, user.id)
+    return user
 
 
 async def get_tenant_context(
@@ -65,10 +72,14 @@ async def get_tenant_context(
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "X-Workspace-Id must be a UUID") from exc
 
+    # Membership is confirmed via the "own row" policy (app.user_id), NOT by
+    # trusting the requested workspace. Only after confirmation do we activate
+    # the tenant GUC, so a non-member can never widen their access by asking.
     membership = await MembershipRepository(session).get(user.id, workspace_id)
     if membership is None:
         # Same response whether the workspace is foreign or nonexistent.
         raise HTTPException(status.HTTP_403_FORBIDDEN, "not a member of the workspace")
+    await set_current_tenant(session, workspace_id)
     return TenantContext(user_id=user.id, tenant_id=workspace_id, role=Role(membership.role))
 
 

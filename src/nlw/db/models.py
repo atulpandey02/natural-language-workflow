@@ -8,7 +8,7 @@ Row-Level Security policies and the restricted runtime role are added in M2b.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     CheckConstraint,
@@ -24,12 +24,24 @@ from sqlalchemy.orm import Mapped, mapped_column
 from nlw.db.base import Base
 
 
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
 class TimestampMixin:
+    # Python-side defaults so ORM inserts carry the values and do NOT emit
+    # RETURNING. Under RLS, INSERT ... RETURNING would re-check the row against
+    # the SELECT policy, which a just-created (not-yet-member-visible) workspace
+    # would fail. server_default remains as a fallback for non-ORM inserts.
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True), default=_now, server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        DateTime(timezone=True),
+        default=_now,
+        server_default=func.now(),
+        onupdate=_now,
+        nullable=False,
     )
 
 
