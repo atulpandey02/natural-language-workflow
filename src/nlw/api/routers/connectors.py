@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import nlw.tools.builtin  # noqa: F401  (populates registries)
-from nlw.api.deps import get_session, get_tenant_context
+from nlw.api.deps import get_app_settings, get_session, get_tenant_context, rate_limit
 from nlw.api.schemas import ConnectorCreate, ConnectorOut, ToolOut
 from nlw.connectors.base import (
     ConnectorConfigError,
@@ -19,6 +19,8 @@ from nlw.connectors.base import (
     get_connector_type,
     validate_connector_config,
 )
+from nlw.core.config import Settings
+from nlw.db.quota import QuotaExceededError, connectors_count_stmt, enforce_cap
 from nlw.db.repositories import ConnectorRepository
 from nlw.registry.registry import REGISTRY
 from nlw.secrets.store import InvalidSecretRefError, validate_secret_ref
@@ -39,11 +41,17 @@ def _to_out(connector: object) -> ConnectorOut:
     )
 
 
-@router.post("/connectors", response_model=ConnectorOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/connectors",
+    response_model=ConnectorOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("connectors", "write"))],
+)
 async def create_connector(
     body: ConnectorCreate,
     ctx: TenantContext = Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
 ) -> ConnectorOut:
     try:
         connector_type = get_connector_type(body.type)
@@ -61,6 +69,18 @@ async def create_connector(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             f"connector type '{body.type}' requires a secret_ref",
         )
+
+    # Concurrency-safe per-tenant connector cap (advisory-locked count+insert).
+    try:
+        await enforce_cap(
+            session,
+            resource="connectors",
+            tenant_id=ctx.tenant_id,
+            cap=settings.max_connectors_per_tenant,
+            count_stmt=connectors_count_stmt(ctx.tenant_id),
+        )
+    except QuotaExceededError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
     connector = await ConnectorRepository(session).create(
         ctx.tenant_id, body.type, body.name, config, body.secret_ref

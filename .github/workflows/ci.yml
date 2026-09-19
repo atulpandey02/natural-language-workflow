@@ -92,8 +92,12 @@ jobs:
           DATABASE_MIGRATION_URL: postgresql+psycopg://nlw:nlw@localhost:5432/nlw
         run: uv run alembic upgrade head
 
+  # NOTE (M9): third-party actions below should be pinned to immutable commit
+  # SHAs before staging go-live (ADR-018). They are left on major-version tags
+  # here so CI keeps working across environments; the deploy pipeline (staging
+  # workflow) is where SHA pinning is enforced.
   docker-build:
-    name: Docker image builds
+    name: Docker image builds + scan + compose validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -101,7 +105,27 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: nlw:ci
+      - name: Trivy image vulnerability scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: nlw:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL
+      - name: Validate dev compose config
+        run: docker compose -f docker-compose.yml config >/dev/null
+      - name: Validate production compose config
+        env:
+          NLW_IMAGE: nlw:ci
+          PUBLIC_HOSTNAME: staging.example.com
+          DATABASE_URL: postgresql+psycopg://nlw_app:x@postgres:5432/nlw
+          REDIS_URL: redis://redis:6379/0
+          SUPABASE_URL: https://proj.supabase.co
+          POSTGRES_PASSWORD: x
+        run: docker compose -f docker-compose.prod.yml config >/dev/null
 
   security:
     name: Secret scan + dependency audit

@@ -11,6 +11,7 @@ The raw prompt and raw provider response are never stored. Deterministic
 feasibility owns the final status — a parsed plan is not executable.
 """
 
+import time
 import uuid
 
 import structlog
@@ -18,15 +19,23 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import nlw.tools.builtin  # noqa: F401  (populates the tool + connector-type registries)
-from nlw.api.deps import get_app_settings, get_llm_provider, get_session, get_tenant_context
+from nlw.api.deps import (
+    get_app_settings,
+    get_llm_provider,
+    get_session,
+    get_tenant_context,
+    rate_limit,
+)
 from nlw.api.schemas import MaterializeOut, PlanProposalOut, PlanRequest
 from nlw.connectors.postgres import PostgresConnectorConfig
 from nlw.core.config import Settings
 from nlw.db.models import Connector, Workflow, WorkflowVersion
+from nlw.db.quota import QuotaExceededError, enforce_cap, workflows_count_stmt
 from nlw.db.repositories import ConnectorRepository, PlanProposalRepository
 from nlw.domain.workflow import WorkflowPlan
 from nlw.feasibility.engine import FeasibilityReport, FeasibilityStatus, check_plan
 from nlw.feasibility.limits import DEFAULT_LIMITS
+from nlw.observability import metrics
 from nlw.planner.capabilities import SafeConnector, build_capability_view
 from nlw.planner.planner import plan_and_check
 from nlw.planner.provider import (
@@ -76,7 +85,12 @@ def _feasibility_dict(report: FeasibilityReport) -> dict[str, object]:
     return report.model_dump(mode="json", exclude={"normalized_plan"})
 
 
-@router.post("/plans", response_model=PlanProposalOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/plans",
+    response_model=PlanProposalOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("plans", "plans"))],
+)
 async def create_plan(
     body: PlanRequest,
     ctx: TenantContext = Depends(get_tenant_context),
@@ -96,6 +110,7 @@ async def create_plan(
     connectors, all_tool_names = await _build_view_and_tools(session, ctx.tenant_id)
     view = build_capability_view(REGISTRY.all(), connectors)
 
+    planner_start = time.perf_counter()
     try:
         result = await plan_and_check(
             provider=provider,
@@ -108,6 +123,7 @@ async def create_plan(
         )
     except (LLMTimeoutError, LLMUnavailableError) as exc:
         # Infrastructure fault — NOT a feasibility REJECT; no proposal row.
+        metrics.record_error("planner_unavailable")
         log.warning(
             "planner.provider_error", error_class="unavailable", provider=settings.llm_provider
         )
@@ -115,10 +131,14 @@ async def create_plan(
             status.HTTP_503_SERVICE_UNAVAILABLE, "planner provider unavailable"
         ) from exc
     except LLMAuthError as exc:
+        metrics.record_error("planner_auth")
         log.error("planner.provider_error", error_class="auth", provider=settings.llm_provider)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "planner provider misconfigured") from exc
+    finally:
+        metrics.observe_planner(time.perf_counter() - planner_start)
 
     report = result.report
+    metrics.record_plan(report.status.value)
     proposed_plan = result.output.to_workflow_plan().model_dump() if result.output else None
     normalized_plan = (
         report.normalized_plan.model_dump() if report.normalized_plan is not None else None
@@ -183,11 +203,16 @@ async def get_plan(
     return PlanProposalOut.model_validate(proposal)
 
 
-@router.post("/plans/{proposal_id}/materialize", response_model=MaterializeOut)
+@router.post(
+    "/plans/{proposal_id}/materialize",
+    response_model=MaterializeOut,
+    dependencies=[Depends(rate_limit("materialize", "write"))],
+)
 async def materialize_plan(
     proposal_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
 ) -> MaterializeOut:
     repo = PlanProposalRepository(session)
     proposal = await repo.get_for_update(proposal_id, ctx.tenant_id)
@@ -228,6 +253,19 @@ async def materialize_plan(
             status.HTTP_409_CONFLICT,
             f"plan no longer materializable (revalidation: {report.status.value})",
         )
+
+    # Concurrency-safe per-tenant workflow cap (a materialized workflow is a
+    # durable resource); the advisory lock serializes concurrent materializes.
+    try:
+        await enforce_cap(
+            session,
+            resource="workflows",
+            tenant_id=ctx.tenant_id,
+            cap=settings.max_workflows_per_tenant,
+            count_stmt=workflows_count_stmt(ctx.tenant_id),
+        )
+    except QuotaExceededError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
     workflow = Workflow(tenant_id=ctx.tenant_id, name=proposal.workflow_name)
     session.add(workflow)

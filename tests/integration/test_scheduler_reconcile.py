@@ -142,7 +142,13 @@ def test_reconcile_eligibility_matrix(pg_stack: SimpleNamespace) -> None:
     failed = _run(o, t, ver, "FAILED", created=OLD, updated=OLD)  # no
 
     with _sched_sm(pg_stack)() as s, s.begin():
-        stuck = set(find_stuck_runs(s, NOW, pending_threshold_s=60, batch_limit=100))
+        # Large horizon so nothing is treated as beyond-horizon here.
+        stuck = {
+            r.run_id
+            for r in find_stuck_runs(
+                s, NOW, pending_threshold_s=60, batch_limit=100, recovery_horizon_s=10**9
+            )
+        }
 
     assert pending_old in stuck
     assert running_expired in stuck
@@ -166,3 +172,29 @@ def test_reconcile_once_reenqueues_orphan_pending(pg_stack: SimpleNamespace) -> 
     enq: list[uuid.UUID] = []
     reconcile_once(_sched_sm(pg_stack), pg_stack.scheduler_settings, enq.append, now=NOW)
     assert orphan in enq
+
+
+def test_reconcile_respects_recovery_horizon(pg_stack: SimpleNamespace) -> None:
+    """A PENDING run past the recovery horizon is flagged beyond-horizon and NOT
+    re-enqueued (poisoned-run guard, req 4); a recent one still is."""
+    m = pg_stack.seed_member()
+    ver = _seed_wf(pg_stack.owner_libpq, m.tenant_id)
+    o, t = pg_stack.owner_libpq, m.tenant_id
+
+    ancient = NOW - timedelta(days=30)  # far beyond a 1-day horizon
+    poisoned = _run(o, t, ver, "PENDING", created=ancient, updated=ancient)
+    recent = _run(o, t, ver, "PENDING", created=OLD, updated=OLD)
+
+    horizon_settings = pg_stack.scheduler_settings.model_copy(
+        update={"scheduler_recovery_horizon_s": 86_400}
+    )
+    enq: list[uuid.UUID] = []
+    reconcile_once(_sched_sm(pg_stack), horizon_settings, enq.append, now=NOW)
+
+    assert recent in enq
+    assert poisoned not in enq  # past horizon: surfaced via gauge/log, not re-driven
+
+    # The run's state is never mutated to FAILED by the reconciler.
+    with psycopg.connect(o) as c:
+        status = c.execute("SELECT status FROM workflow_runs WHERE id = %s", (poisoned,)).fetchone()
+    assert status is not None and status[0] == "PENDING"

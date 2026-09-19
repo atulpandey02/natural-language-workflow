@@ -19,6 +19,7 @@ import structlog
 from sqlalchemy.orm import Session, sessionmaker
 
 from nlw.core.config import Settings
+from nlw.observability import metrics
 from nlw.scheduler.due import CreatedRun, scan_due
 from nlw.scheduler.reconcile import find_stuck_runs
 
@@ -50,6 +51,7 @@ def due_scan_once(
     for c in created:  # AFTER commit
         enqueue(c.run_id)
     if created:
+        metrics.record_scheduler_created(len(created))
         log.info("scheduler.due_scan", created=len(created))
     return created
 
@@ -61,20 +63,42 @@ def reconcile_once(
     *,
     now: datetime | None = None,
 ) -> list[uuid.UUID]:
-    """Find stuck runs and re-enqueue them (idempotent; no state writes)."""
+    """Find stuck runs and re-enqueue them (idempotent; no state writes).
+
+    Runs past the recovery horizon (req 4) are NOT re-enqueued — they are counted
+    into a gauge and an aggregate operational warning is emitted (one line per
+    scan, not per run, so the same poisoned run does not spam a counter). Their
+    state is never mutated to FAILED; an operator resolves them via the runbook.
+    """
     at = now or _now()
     with session_factory() as session, session.begin():
-        run_ids = find_stuck_runs(
+        stuck = find_stuck_runs(
             session,
             at,
             pending_threshold_s=settings.scheduler_pending_threshold_s,
             batch_limit=settings.scheduler_batch_limit,
+            recovery_horizon_s=settings.scheduler_recovery_horizon_s,
         )
-    for run_id in run_ids:  # AFTER commit (read-only txn)
+    to_enqueue = [s.run_id for s in stuck if not s.beyond_horizon]
+    beyond = [s.run_id for s in stuck if s.beyond_horizon]
+
+    for run_id in to_enqueue:  # AFTER commit (read-only txn)
         enqueue(run_id)
-    if run_ids:
-        log.info("scheduler.reconcile", re_enqueued=len(run_ids))
-    return run_ids
+
+    # Current count of runs past the horizon (a gauge, not an ever-incrementing
+    # counter) so alerting reflects the present backlog, not cumulative scans.
+    metrics.set_runs_beyond_horizon(len(beyond))
+    if beyond:
+        log.warning(
+            "scheduler.runs_beyond_horizon",
+            count=len(beyond),
+            horizon_s=settings.scheduler_recovery_horizon_s,
+            sample=[str(r) for r in beyond[:10]],
+        )
+    if to_enqueue:
+        metrics.record_reconcile(len(to_enqueue))
+        log.info("scheduler.reconcile", re_enqueued=len(to_enqueue))
+    return to_enqueue
 
 
 def run(

@@ -1,7 +1,17 @@
 # Runbooks
 
-Operational procedures for on-call and recovery. One runbook per failure mode,
-added when the corresponding component ships. Planned: Redis unavailable,
-Postgres unavailable, worker not consuming jobs, scheduler stopped, provider
-returns 429, connector credentials expired, migration failed, workflow stuck
-RUNNING.
+Operational procedures for on-call and recovery — one per failure mode. All
+diagnosis uses the correlation keys (`run_id` end-to-end, `request_id` for the
+control plane) and the internal Prometheus metrics (ADR-016).
+
+- [postgres-unavailable.md](postgres-unavailable.md)
+- [redis-unavailable.md](redis-unavailable.md)
+- [worker-stuck.md](worker-stuck.md)
+- [scheduler-lagging.md](scheduler-lagging.md)
+- [runs-beyond-horizon.md](runs-beyond-horizon.md) — poisoned-run guard (req 4)
+- [failed-migration.md](failed-migration.md)
+- [restore-from-backup.md](restore-from-backup.md)
+- [rotate-secret.md](rotate-secret.md)
+- [disable-tenant-connector.md](disable-tenant-connector.md)
+- [rate-limit-tuning.md](rate-limit-tuning.md)
+- [inspect-failed-run.md](inspect-failed-run.md)

@@ -14,6 +14,7 @@ import structlog
 from nlw.core.config import get_settings
 from nlw.core.logging import configure_logging
 from nlw.db.session import create_sync_engine, create_sync_sessionmaker
+from nlw.observability.metrics import start_metrics_server
 from nlw.scheduler.service import run
 
 log = structlog.get_logger(__name__)
@@ -22,6 +23,7 @@ log = structlog.get_logger(__name__)
 def main() -> None:
     settings = get_settings()
     configure_logging(settings)
+    start_metrics_server(settings, role="scheduler")
 
     engine = create_sync_engine(settings)
     session_factory = create_sync_sessionmaker(engine)

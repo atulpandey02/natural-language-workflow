@@ -1,0 +1,162 @@
+# Production topology (M9, ADR-018): single-VPS Docker Compose.
+#
+# Public ingress is ONLY the Caddy reverse proxy (HTTPS). Everything else —
+# api, worker, scheduler, postgres, redis, and every metrics port — is reachable
+# only on the internal Docker network and is never published to the host.
+#
+# The application image is pinned to an immutable GHCR digest via NLW_IMAGE
+# (staging and production run the EXACT same digest). Migrations are run as a
+# one-off before switching traffic:
+#   docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head
+#
+# Required env (e.g. a git-ignored .env.prod):
+#   NLW_IMAGE               ghcr.io/<owner>/nlw@sha256:...
+#   PUBLIC_HOSTNAME         the DNS name Caddy serves (also the TrustedHost)
+#   DATABASE_URL / DATABASE_MIGRATION_URL / REDIS_URL
+#   SUPABASE_URL            (JWKS verification)
+#   NLW_LLM_API_KEY         (api only)
+#   POSTGRES_PASSWORD
+
+x-app-env: &app-env
+  APP_ENV: production
+  LOG_LEVEL: info
+  DATABASE_URL: ${DATABASE_URL}
+  REDIS_URL: ${REDIS_URL}
+  SUPABASE_URL: ${SUPABASE_URL}
+  # Lock the public host and trust ONLY the reverse proxy's fixed address for
+  # forwarded headers (never arbitrary X-Forwarded-*).
+  TRUSTED_HOSTS: '["${PUBLIC_HOSTNAME}"]'
+  TRUSTED_PROXY_IPS: '["172.28.0.2"]'
+
+x-app-hardening: &app-hardening
+  image: ${NLW_IMAGE:?set NLW_IMAGE to the GHCR image digest}
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+  mem_limit: 512m
+  cpus: 1.0
+  pids_limit: 256
+  networks:
+    - internal
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    # The ONLY publicly published service.
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+    depends_on:
+      - api
+    networks:
+      internal:
+        ipv4_address: 172.28.0.2
+
+  api:
+    <<: *app-hardening
+    environment:
+      <<: *app-env
+      NLW_LLM_API_KEY: ${NLW_LLM_API_KEY:-}
+    # No host port: reachable only by Caddy on the internal network.
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *app-hardening
+    command: ["dramatiq", "nlw.worker.actors", "--processes", "2", "--threads", "4"]
+    # Connector secrets are injected HERE only, via a git-ignored env_file.
+    env_file:
+      - path: docker/worker.secrets.env
+        required: false
+    environment:
+      <<: *app-env
+      DATABASE_URL: ${WORKER_DATABASE_URL:-${DATABASE_URL}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "nlw.ops.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  scheduler:
+    <<: *app-hardening
+    command: ["python", "-m", "nlw.scheduler"]
+    environment:
+      <<: *app-env
+      DATABASE_URL: ${SCHEDULER_DATABASE_URL:-${DATABASE_URL}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "nlw.ops.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nlw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: nlw
+    # Internal only — no published port.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nlw -d nlw"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    # Internal only — no published port.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

@@ -1,0 +1,92 @@
+# Immutable-image delivery (M9, ADR-018).
+#
+# One image is built and pushed to GHCR by DIGEST on merge to main; that exact
+# digest is deployed to staging, smoke-tested, and — only after a manual GitHub
+# Environment approval — promoted UNCHANGED to production. Rollback is redeploying
+# a previously-known-good, schema-compatible digest. Migrations are applied as a
+# one-off before switching traffic; image rollback NEVER auto-downgrades the DB.
+#
+# NOTE: third-party actions here should be pinned to immutable commit SHAs before
+# go-live. Server deploy steps are placeholders — wire them to your VPS (SSH +
+# `docker compose -f docker-compose.prod.yml up -d` with NLW_IMAGE=<digest>).
+
+name: Delivery
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: delivery-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    name: Build + push immutable image to GHCR
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+      - name: Scan pushed image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL
+
+  deploy-staging:
+    name: Deploy digest to staging + smoke test
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy the exact digest to staging
+        env:
+          NLW_IMAGE: ${{ needs.build-push.outputs.image }}@${{ needs.build-push.outputs.digest }}
+        run: |
+          echo "Deploy $NLW_IMAGE to staging."
+          echo "Run migrations first: docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head"
+          echo "Then: docker compose -f docker-compose.prod.yml up -d"
+          # TODO: wire to the staging host (SSH / compose). Placeholder for M9.
+      - name: Smoke test staging
+        run: |
+          echo "curl -fsS https://staging.example.com/health"
+          echo "curl -fsS https://staging.example.com/health/ready"
+          # TODO: real smoke checks against the staging endpoint.
+
+  promote-production:
+    name: Promote the SAME digest to production (manual approval)
+    needs: [build-push, deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production # requires a manual reviewer approval in GitHub
+    steps:
+      - name: Promote the identical digest
+        env:
+          NLW_IMAGE: ${{ needs.build-push.outputs.image }}@${{ needs.build-push.outputs.digest }}
+        run: |
+          echo "Promote $NLW_IMAGE (identical digest) to production."
+          echo "Apply migrations before traffic switch; image rollback does NOT downgrade the DB."
+          # TODO: wire to the production host (SSH / compose). Placeholder for M9.

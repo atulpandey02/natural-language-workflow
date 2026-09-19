@@ -1,0 +1,22 @@
+# Caddy reverse proxy (M9, ADR-018): the only public ingress.
+#
+# Terminates HTTPS (automatic certificates when {$PUBLIC_HOSTNAME} is a real,
+# publicly-resolvable domain) and proxies to the internal API. Internal
+# services (postgres, redis, worker, scheduler) and all metrics ports are NOT
+# proxied and are not reachable from outside the Docker network.
+#
+# /metrics is explicitly refused at the edge as defense in depth — metrics are
+# scraped in-cluster on each process's internal port, never through the proxy.
+
+{$PUBLIC_HOSTNAME} {
+	encode gzip
+
+	# Never expose metrics through the public edge.
+	@metrics path /metrics /metrics/*
+	respond @metrics 404
+
+	reverse_proxy api:8000 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

@@ -3,27 +3,39 @@
 Operational endpoints:
 
 - ``GET /health``        liveness  (process is up)
-- ``GET /health/ready``  readiness (Postgres + Redis reachable)
+- ``GET /health/ready``  readiness (Postgres + Redis + schema compatibility)
 - ``GET /version``       the running package version
 
 Identity/tenancy endpoints are mounted from ``nlw.api.routers``. The control
 plane never executes workflow steps; that is the worker's job.
+
+M9 hardening: safe error handlers, a streamed request-body cap, correlation ids
++ HTTP metrics + security headers, CORS/TrustedHost, and production docs gating.
+Prometheus metrics are served on a SEPARATE internal port (see
+``nlw.observability.metrics``), never on this public app.
 """
 
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 
+import redis.asyncio as aioredis
 import structlog
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 
 from nlw import __version__
+from nlw.api.errors import install_exception_handlers
+from nlw.api.middleware import BodySizeLimitMiddleware, ObservabilityMiddleware
 from nlw.api.routers import approvals, connectors, identity, plans, schedules
 from nlw.auth.supabase import build_auth_provider
 from nlw.core.config import Settings, get_settings
 from nlw.core.logging import configure_logging
+from nlw.db.schema import check_schema
 from nlw.db.session import check_connection, create_engine, create_sessionmaker
 from nlw.planner.provider import build_llm_provider
+from nlw.ratelimit.limiter import RateLimiter
 from nlw.worker.broker import check_redis
 
 log = structlog.get_logger(__name__)
@@ -40,19 +52,53 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Planner provider (M6). Built once; the platform LLM key (if any) lives only
     # in the API process env, never in worker/scheduler.
     app.state.llm_provider = build_llm_provider(settings)
+    # Rate-limiter Redis client (control state; distinct use from the queue).
+    app.state.redis = aioredis.from_url(settings.redis_url)
+    app.state.rate_limiter = RateLimiter(
+        app.state.redis,
+        window_s=settings.rate_limit_window_s,
+        fail_open=settings.rate_limit_fail_open,
+    )
     log.info("api.startup", app_env=settings.app_env, llm_provider=settings.llm_provider)
     try:
         yield
     finally:
         await app.state.engine.dispose()
+        await app.state.redis.aclose()
         log.info("api.shutdown")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Application factory. Pass explicit ``settings`` in tests."""
     settings = settings or get_settings()
-    app = FastAPI(title="NLW Control Plane", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="NLW Control Plane",
+        version=__version__,
+        lifespan=lifespan,
+        # Docs are disabled in production by default (req 6).
+        docs_url="/docs" if settings.docs_enabled else None,
+        redoc_url="/redoc" if settings.docs_enabled else None,
+        openapi_url="/openapi.json" if settings.docs_enabled else None,
+    )
     app.state.settings = settings
+
+    # Middleware order (outermost first): body cap -> observability/headers ->
+    # trusted host -> CORS. The body cap runs first so oversized requests are
+    # rejected before any routing work.
+    if settings.cors_allow_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_allow_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+    app.add_middleware(ObservabilityMiddleware, settings=settings)
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+
+    install_exception_handlers(app)
+
     app.include_router(identity.router)
     app.include_router(connectors.router)
     app.include_router(plans.router)
@@ -85,6 +131,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         await probe("postgres", check_connection(app.state.engine))
         await probe("redis", check_redis(settings_))
+        # Schema compatibility (req 10): expected head is cached in-process.
+        await probe("schema", check_schema(app.state.engine))
         return JSONResponse(
             status_code=200 if healthy else 503,
             content={"status": "ready" if healthy else "not_ready", "checks": checks},

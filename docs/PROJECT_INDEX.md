@@ -7,11 +7,22 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M8 — Scheduling + reconciliation + unattended recovery |
-| Current milestone | **M8 — Durable scheduler + reconciliation** (`feat/scheduling-reconciliation`, in review) |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 |
-| Next milestone | M9 — Hardening & expansion (tbd) |
-| Release status | pre-alpha, nothing deployed |
+| Current phase | M9 — Production hardening + operational readiness |
+| Current milestone | **M9 — Production hardening** (`feat/production-hardening`, in review) |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 |
+| Next milestone | M10 — tbd |
+| Release status | pre-alpha, staging-candidate after M9 |
+
+M9 makes the existing backend safe to run in staging on a small VPS (Docker
+Compose, no Kubernetes): correlation IDs + internal Prometheus metrics
+(ADR-016); an atomic Redis fixed-window rate limiter + concurrency-safe
+per-tenant caps (ADR-017); bounded DB pools/timeouts, safe API errors, a
+streamed request-body cap, CORS/TrustedHost/security headers, production docs
+gating, a schema-compat readiness check, a bounded reconciler recovery horizon
+(poisoned-run guard), non-root hardened containers, a Caddy-fronted production
+compose with GHCR immutable-digest delivery + Trivy, and backup/restore +
+runbooks (ADR-018). Non-forgeable DB context, a cloud secret manager, and
+OTel/Langfuse remain explicit pre-production items.
 
 M8 makes the scheduler a durable, restart-safe system of record for recurrence.
 Structured schedules (IANA timezone + hourly/daily/weekly, no cron) pin an
@@ -118,7 +129,7 @@ the components they protect — not deferred to the end.
 | M6 | Planner (LLM→Pydantic) + feasibility engine + LLMProvider (BYOK) | `feat/planner-feasibility` | ADR-004, ADR-005 |
 | M7 | Webhook + Slack action connectors + approvals | `feat/action-connectors-approvals` | ADR-013, ADR-014 |
 | M8 | Scheduler (explicit timezone, single-firing) + reconciliation | `feat/scheduling-reconciliation` | ADR-015 |
-| M9+ | Hardening & expansion (ClickHouse, Gmail, observability, rate limits) | tbd | tbd |
+| M9 | Production hardening + operational readiness (observability, rate/resource limits, container/HTTP/DB hardening, backups, runbooks, GHCR delivery) | `feat/production-hardening` | ADR-016, ADR-017, ADR-018 |
 | M10 | Frontend (Vite + React) | `feat/frontend` | — |
 | M11 | Staging + CD + load/failure testing | tbd | ADR-008 |
 | M12 | Production deployment | tbd | — |

@@ -8,15 +8,38 @@ without pulling in that global configuration.
 """
 
 import redis.asyncio as aioredis
+import structlog
 from dramatiq.brokers.redis import RedisBroker
+from dramatiq.middleware import Middleware
 
-from nlw.core.config import Settings
+from nlw.core.config import Settings, get_settings
+from nlw.observability.metrics import start_metrics_server
+
+log = structlog.get_logger(__name__)
+
+
+class MetricsMiddleware(Middleware):
+    """Start the internal Prometheus metrics server once the worker boots.
+
+    Using ``after_worker_boot`` (not import time) means the server binds only in a
+    real ``dramatiq`` worker process — never when the API/scheduler merely import
+    the actors module to enqueue, and never during tests that import the module.
+    """
+
+    def after_worker_boot(self, broker: object, worker: object) -> None:
+        try:
+            if start_metrics_server(get_settings(), role="worker"):
+                log.info("worker.metrics_started")
+        except Exception:  # metrics must never take down the worker
+            log.warning("worker.metrics_start_failed")
 
 
 def make_broker(settings: Settings) -> RedisBroker:
     """Build a Redis-backed Dramatiq broker for ``settings.redis_url``."""
     # dramatiq ships py.typed but leaves RedisBroker.__init__ unannotated.
-    return RedisBroker(url=settings.redis_url)  # type: ignore[no-untyped-call]
+    broker = RedisBroker(url=settings.redis_url)  # type: ignore[no-untyped-call]
+    broker.add_middleware(MetricsMiddleware())
+    return broker
 
 
 async def check_redis(settings: Settings) -> None:

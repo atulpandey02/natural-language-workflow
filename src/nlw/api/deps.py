@@ -11,6 +11,7 @@ and ``nlw.tenancy``. Status codes follow the M2a failure matrix:
 
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Literal
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -21,7 +22,9 @@ from nlw.auth.provider import AuthedIdentity, AuthProvider, InvalidTokenError
 from nlw.core.config import Settings
 from nlw.db.models import User
 from nlw.db.repositories import MembershipRepository, UserRepository
+from nlw.observability import metrics
 from nlw.planner.provider import LLMProvider
+from nlw.ratelimit.limiter import RateLimitBackendError, RateLimiter, RateLimitExceeded
 from nlw.tenancy.context import Role, TenantContext, role_at_least
 from nlw.tenancy.session import set_current_tenant, set_current_user
 
@@ -100,5 +103,48 @@ def require_role(minimum: Role) -> Callable[[TenantContext], Awaitable[TenantCon
         if not role_at_least(ctx.role, minimum):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "insufficient role")
         return ctx
+
+    return dependency
+
+
+RateLimitKind = Literal["plans", "write"]
+
+
+def rate_limit(
+    endpoint: str, kind: RateLimitKind
+) -> Callable[[Request, TenantContext], Awaitable[None]]:
+    """Per-tenant AND per-user fixed-window limit for a cost/mutating endpoint.
+
+    Cost-bearing endpoints fail CLOSED (503) if the limiter backend is down
+    (unless ``rate_limit_fail_open`` is set); over-limit callers get 429 with a
+    ``Retry-After`` header.
+    """
+
+    async def dependency(
+        request: Request, ctx: TenantContext = Depends(get_tenant_context)
+    ) -> None:
+        settings: Settings = request.app.state.settings
+        if not settings.rate_limit_enabled:
+            return
+        limiter: RateLimiter = request.app.state.rate_limiter
+        per_min = (
+            settings.rate_limit_plans_per_min
+            if kind == "plans"
+            else settings.rate_limit_writes_per_min
+        )
+        try:
+            await limiter.check(f"nlw:rl:{endpoint}:t:{ctx.tenant_id.hex}", per_min)
+            await limiter.check(f"nlw:rl:{endpoint}:u:{ctx.user_id.hex}", per_min)
+        except RateLimitExceeded as exc:
+            metrics.record_rate_limit_rejected(endpoint)
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "rate limit exceeded",
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from exc
+        except RateLimitBackendError as exc:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "rate limiter unavailable"
+            ) from exc
 
     return dependency
