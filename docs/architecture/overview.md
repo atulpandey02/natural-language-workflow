@@ -38,6 +38,14 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   worker-side only, never in the LLM path). Steps dispatch through the registry; a
   connector-backed step loads the tenant's connector, health-checks it, and resolves its
   secret before executing.
+- **PostgreSQL connector (read-only)** — [ADR-012](../adr/ADR-012-postgres-connector.md) +
+  [ADR-009](../adr/ADR-009-sql-safety.md): the `postgres.query` tool reaches a tenant's
+  external database with read-only guaranteed by three independent controls
+  (deterministic sqlglot validation against a schema/table allowlist, a
+  `default_transaction_read_only` session with statement/lock/idle timeouts, and a
+  SELECT-only external role). Results are row- and byte-capped; the JSON credential is a
+  repr-safe `SecretStr`; all driver errors are sanitized so credentials/raw text never
+  leak. The LLM does not generate SQL.
 - The LLM proposes; deterministic code enforces every invariant
   (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling).
 

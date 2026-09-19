@@ -14,7 +14,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
+import nlw.connectors.postgres  # noqa: F401  (registers the 'postgres' connector type)
 import nlw.connectors.static  # noqa: F401  (registers the 'static' connector type)
+import nlw.tools.postgres_tools  # noqa: F401  (registers 'postgres.query')
 from nlw.connectors.base import ConnectorContext
 from nlw.registry.registry import (
     REGISTRY,
