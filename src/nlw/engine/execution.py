@@ -1,17 +1,18 @@
-"""Durable single-step advancement.
+"""Durable single-step advancement (M3) + two-phase action execution (M7).
 
-One ``advance_run`` = one transaction: resolve tenant (via the worker-only
-SECURITY DEFINER resolver), set the tenant GUC, lock the run ``FOR UPDATE``,
-execute exactly one step, checkpoint, COMMIT. Enqueueing the next advancement is
-a separate, injectable step done AFTER commit (``process_advance``) so a crash
-between commit and enqueue is recovered by redelivery of the still-unacked
-message. Postgres is authoritative; the message carries only ``run_id``.
+Inline (read/processing) tools still run one-per-advancement inside a single
+``FOR UPDATE``-locked transaction (M3/M5). Side-effecting ACTION tools instead
+use the two-transaction, out-of-lock pattern (ADR-013): Txn1 claims the step and
+creates a durable, leased ``external_actions`` row with a stable idempotency key
+and COMMITs (releasing the lock); the side effect runs with no lock held; Txn2
+finalizes idempotently. Approval-gated actions park the run at WAITING_APPROVAL
+until a human decision arrives (the worker remains the sole run/step writer).
 """
 
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
@@ -29,23 +30,32 @@ from nlw.connectors.base import (
     MissingConnectorSelectorError,
     get_connector_type,
 )
-from nlw.db.models import StepRun, WorkflowRun, WorkflowVersion
+from nlw.db.models import Approval, ExternalAction, StepRun, WorkflowRun, WorkflowVersion
 from nlw.domain.workflow import (
     RunStatus,
     StepStatus,
     WorkflowPlan,
+    WorkflowStep,
     all_succeeded,
     any_failed,
     select_next_step,
+)
+from nlw.engine.actions import (
+    LEASE_DURATION_S,
+    WORKER_ID,
+    ActionExecResult,
+    ActionTask,
+    effective_attempt_cap,
+    finalize_action,
+    run_action,
 )
 from nlw.registry.registry import REGISTRY, ToolExecutionError, ToolSpec, UnknownToolError
 from nlw.secrets.store import SecretError, SecretStore, build_secret_store
 from nlw.tenancy.session import set_current_tenant_sync
 
-Result = Literal["advanced", "completed", "failed", "noop"]
+Result = Literal["advanced", "completed", "failed", "noop", "waiting", "retry", "deferred"]
 
 # Deterministic step-failure exceptions (business failures -> step/run FAILED).
-# Anything else (e.g. a DB error) propagates as an infra error -> Dramatiq retry.
 _STEP_FAILURES = (
     ToolExecutionError,
     UnknownToolError,
@@ -60,6 +70,8 @@ class AdvanceOutcome:
     result: Result
     enqueue_next: bool
     step_id: str | None = None
+    action_task: ActionTask | None = None
+    defer_seconds: float | None = None
 
 
 def _now() -> datetime:
@@ -67,8 +79,6 @@ def _now() -> datetime:
 
 
 def _resolve_tenant(session: Session, run_id: uuid.UUID) -> uuid.UUID | None:
-    """Worker-only bootstrap: run_id -> tenant_id via the SECURITY DEFINER
-    resolver. Returns no business data; NULL means the run does not exist."""
     result = session.execute(
         text("SELECT resolve_run_tenant(:rid)"), {"rid": str(run_id)}
     ).scalar_one_or_none()
@@ -76,7 +86,6 @@ def _resolve_tenant(session: Session, run_id: uuid.UUID) -> uuid.UUID | None:
 
 
 def _set_connector_status(session: Session, connector_id: uuid.UUID, status: str) -> None:
-    """Update ONLY status + updated_at (nlw_worker has column-level UPDATE)."""
     session.execute(
         text("UPDATE connectors SET status = :s, updated_at = now() WHERE id = :id"),
         {"s": status, "id": str(connector_id)},
@@ -90,11 +99,9 @@ def _resolve_connector(
     connector_name: str | None,
     secret_store: SecretStore,
 ) -> ConnectorContext:
-    """Load the tenant's connector (RLS-scoped), health-check it, and build the
-    execution context. Persists connector status as a side effect."""
+    """Inline-tool connector resolution: load (RLS-scoped), health-check, activate."""
     if connector_name is None:
         raise MissingConnectorSelectorError(connector_type)
-
     row = session.execute(
         text(
             "SELECT id, config, secret_ref, status FROM connectors "
@@ -104,11 +111,9 @@ def _resolve_connector(
     ).one_or_none()
     if row is None:
         raise ConnectorNotFoundError(f"{connector_type}:{connector_name}")
-
     connector_id, config, secret_ref, status = row
     if status == "disabled":
         raise ConnectorDisabledError(connector_name)
-
     spec = get_connector_type(connector_type)
     secret: str | None = None
     if spec.secret_required:
@@ -116,13 +121,10 @@ def _resolve_connector(
             _set_connector_status(session, connector_id, "error")
             raise ConnectorConfigError(f"{connector_name}: secret required but no secret_ref")
         try:
-            # Tenant-scoped: the authoritative worker tenant_id, never a
-            # user-provided field, namespaces the secret lookup.
             secret = secret_store.resolve(tenant_id, secret_ref)
         except SecretError:
             _set_connector_status(session, connector_id, "error")
             raise
-
     ctx = ConnectorContext(
         type=connector_type,
         name=connector_name,
@@ -130,26 +132,265 @@ def _resolve_connector(
         secret=secret,
         connector_id=connector_id,
     )
-
-    if status != "active":  # unchecked/error -> probe, then activate on success
+    if status != "active":
         if spec.health_check is not None:
             try:
                 spec.health_check(ctx)
             except Exception:
-                # A deterministic failure commits this 'error'; a retryable one
-                # (e.g. unavailable) rolls back with the whole advancement.
                 _set_connector_status(session, connector_id, "error")
                 raise
         _set_connector_status(session, connector_id, "active")
-
     return ctx
+
+
+def _load_action_connector(
+    session: Session,
+    tenant_id: uuid.UUID,
+    connector_type: str,
+    connector_name: str | None,
+    secret_store: SecretStore,
+) -> tuple[uuid.UUID, dict[str, Any], str | None]:
+    """Action connector load WITHOUT a network health probe (no I/O in the lock).
+
+    Delivery itself is the liveness proof (ADR-013). Returns (id, config, secret).
+    """
+    if connector_name is None:
+        raise MissingConnectorSelectorError(connector_type)
+    row = session.execute(
+        text(
+            "SELECT id, config, secret_ref, status FROM connectors "
+            "WHERE tenant_id = :t AND type = :ty AND name = :n"
+        ),
+        {"t": str(tenant_id), "ty": connector_type, "n": connector_name},
+    ).one_or_none()
+    if row is None:
+        raise ConnectorNotFoundError(f"{connector_type}:{connector_name}")
+    connector_id, config, secret_ref, status = row
+    if status == "disabled":
+        raise ConnectorDisabledError(connector_name)
+    secret: str | None = None
+    if secret_ref:
+        secret = secret_store.resolve(tenant_id, secret_ref)
+    return connector_id, dict(config), secret
 
 
 def execute_tool(
     spec: ToolSpec, args: BaseModel, connector: ConnectorContext | None
 ) -> dict[str, Any]:
-    """Dispatch to the tool's execute(). Patch seam for tests."""
+    """Dispatch an INLINE tool's execute(). Patch seam for tests."""
+    assert spec.execute is not None
     return spec.execute(args, connector)
+
+
+def _destination_summary(tool: str, config: dict[str, Any], step: WorkflowStep) -> str | None:
+    if tool == "webhook.send":
+        from nlw.connectors.http_guard import validate_url
+
+        try:
+            host, _ = validate_url(str(config.get("url", "")))
+            return host
+        except Exception:
+            return None
+    if tool == "slack.send_message":
+        ch = step.args.get("channel") if isinstance(step.args, dict) else None
+        return str(ch) if ch else str(config.get("default_channel", "") or "") or None
+    return None
+
+
+def _fail_run_step(
+    session: Session, run: WorkflowRun, step: StepRun, message: str
+) -> AdvanceOutcome:
+    now = _now()
+    step.status = StepStatus.FAILED
+    step.error = message
+    step.finished_at = now
+    run.status = RunStatus.FAILED
+    run.finished_at = now
+    return AdvanceOutcome("failed", enqueue_next=False, step_id=step.step_id)
+
+
+def _get_step(step_rows: list[StepRun], step_id: str) -> StepRun | None:
+    return next((s for s in step_rows if s.step_id == step_id), None)
+
+
+def _claim_action(
+    session: Session,
+    run: WorkflowRun,
+    tenant_id: uuid.UUID,
+    plan_step: WorkflowStep,
+    step: StepRun,
+    spec: ToolSpec,
+    secret_store: SecretStore,
+) -> AdvanceOutcome:
+    """Txn1 fresh claim: step -> RUNNING, create leased external_actions row."""
+    assert spec.connector_type is not None
+    connector_id, config, _secret = _load_action_connector(
+        session, tenant_id, spec.connector_type, plan_step.connector, secret_store
+    )
+    now = _now()
+    step.status = StepStatus.RUNNING
+    step.started_at = now
+    ea = ExternalAction(
+        tenant_id=tenant_id,
+        run_id=run.id,
+        step_id=plan_step.id,
+        connector_id=connector_id,
+        tool=spec.name,
+        external_action_key=uuid.uuid4(),
+        destination_summary=_destination_summary(spec.name, config, plan_step),
+        status="pending",
+        attempts=1,
+        last_attempt_at=now,
+        lease_token=uuid.uuid4(),
+        lease_owner=WORKER_ID,
+        lease_expires_at=now + timedelta(seconds=LEASE_DURATION_S),
+    )
+    session.add(ea)
+    session.flush()
+    return _build_action_task_outcome(session, tenant_id, run, plan_step, spec, ea, secret_store)
+
+
+def _build_action_task_outcome(
+    session: Session,
+    tenant_id: uuid.UUID,
+    run: WorkflowRun,
+    plan_step: WorkflowStep,
+    spec: ToolSpec,
+    ea: ExternalAction,
+    secret_store: SecretStore,
+) -> AdvanceOutcome:
+    assert spec.connector_type is not None
+    connector_id, config, secret = _load_action_connector(
+        session, tenant_id, spec.connector_type, plan_step.connector, secret_store
+    )
+    assert ea.lease_token is not None
+    task = ActionTask(
+        run_id=run.id,
+        tenant_id=tenant_id,
+        step_id=plan_step.id,
+        tool=spec.name,
+        connector_type=spec.connector_type,
+        connector_name=plan_step.connector or "",
+        connector_id=connector_id,
+        config=config,
+        secret=secret,
+        args=dict(plan_step.args),
+        external_action_id=ea.id,
+        external_action_key=ea.external_action_key,
+        attempt=ea.attempts,
+        lease_token=ea.lease_token,
+    )
+    return AdvanceOutcome("advanced", enqueue_next=False, step_id=plan_step.id, action_task=task)
+
+
+def _resume_action(
+    session: Session,
+    run: WorkflowRun,
+    plan: WorkflowPlan,
+    step: StepRun,
+    tenant_id: uuid.UUID,
+    secret_store: SecretStore,
+) -> AdvanceOutcome:
+    """Txn1 resume of a durably RUNNING action: CAS-acquire the lease or defer."""
+    plan_step = plan.step(step.step_id)
+    spec = REGISTRY.get(step.tool)
+    ea = session.execute(
+        select(ExternalAction)
+        .where(ExternalAction.run_id == run.id, ExternalAction.step_id == step.step_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if ea is None:
+        return _fail_run_step(session, run, step, "in-flight action missing its record")
+    now = _now()
+    if ea.status != "pending":
+        return AdvanceOutcome("noop", enqueue_next=False)
+    if ea.attempts >= effective_attempt_cap():
+        ea.status = "failed"
+        ea.error_class = ea.error_class or "attempt_cap"
+        ea.lease_token = None
+        ea.lease_expires_at = None
+        return _fail_run_step(session, run, step, "action retry cap reached")
+    if ea.next_attempt_at is not None and now < ea.next_attempt_at:
+        return AdvanceOutcome(
+            "deferred", enqueue_next=False, defer_seconds=(ea.next_attempt_at - now).total_seconds()
+        )
+    if ea.lease_token is not None and ea.lease_expires_at is not None and ea.lease_expires_at > now:
+        # A live foreign lease: defer until it expires; NEVER permanently ack.
+        return AdvanceOutcome(
+            "deferred",
+            enqueue_next=False,
+            defer_seconds=(ea.lease_expires_at - now).total_seconds(),
+        )
+    # Acquire the lease (CAS is serialized by the run FOR UPDATE lock we hold).
+    ea.lease_token = uuid.uuid4()
+    ea.lease_owner = WORKER_ID
+    ea.lease_expires_at = now + timedelta(seconds=LEASE_DURATION_S)
+    ea.attempts = ea.attempts + 1
+    ea.last_attempt_at = now
+    session.flush()
+    return _build_action_task_outcome(session, tenant_id, run, plan_step, spec, ea, secret_store)
+
+
+def _handle_waiting(
+    session: Session,
+    run: WorkflowRun,
+    plan: WorkflowPlan,
+    step: StepRun,
+    tenant_id: uuid.UUID,
+    secret_store: SecretStore,
+) -> AdvanceOutcome:
+    """A WAITING_APPROVAL step: act on the durable approval decision."""
+    approval = session.execute(
+        select(Approval).where(Approval.run_id == run.id, Approval.step_id == step.step_id)
+    ).scalar_one_or_none()
+    if approval is None or approval.status == "pending":
+        return AdvanceOutcome("waiting", enqueue_next=False, step_id=step.step_id)
+    if approval.status == "rejected":
+        return _fail_run_step(session, run, step, "action rejected by approver")
+    # approved -> claim and execute.
+    plan_step = plan.step(step.step_id)
+    spec = REGISTRY.get(step.tool)
+    if run.status == RunStatus.WAITING_APPROVAL:
+        run.status = RunStatus.RUNNING
+    try:
+        return _claim_action(session, run, tenant_id, plan_step, step, spec, secret_store)
+    except _STEP_FAILURES as exc:
+        return _fail_run_step(session, run, step, str(exc))
+
+
+def _park_for_approval(
+    session: Session,
+    run: WorkflowRun,
+    tenant_id: uuid.UUID,
+    plan_step: WorkflowStep,
+    step: StepRun,
+    spec: ToolSpec,
+    secret_store: SecretStore,
+) -> AdvanceOutcome:
+    """Create a PENDING approval and park run + step at WAITING_APPROVAL."""
+    assert spec.connector_type is not None
+    connector_id, _config, _secret = _load_action_connector(
+        session, tenant_id, spec.connector_type, plan_step.connector, secret_store
+    )
+    step.status = StepStatus.WAITING_APPROVAL
+    existing = session.execute(
+        select(Approval).where(Approval.run_id == run.id, Approval.step_id == plan_step.id)
+    ).scalar_one_or_none()
+    if existing is None:
+        session.add(
+            Approval(
+                tenant_id=tenant_id,
+                run_id=run.id,
+                step_id=plan_step.id,
+                connector_id=connector_id,
+                connector_name=plan_step.connector or "",
+                tool=spec.name,
+                status="pending",
+                requested_at=_now(),
+            )
+        )
+    run.status = RunStatus.WAITING_APPROVAL
+    return AdvanceOutcome("waiting", enqueue_next=False, step_id=plan_step.id)
 
 
 def execute_advancement(
@@ -157,7 +398,7 @@ def execute_advancement(
     run_id: uuid.UUID,
     secret_store: SecretStore | None = None,
 ) -> AdvanceOutcome:
-    """Advance a run by exactly one step inside a single locked transaction."""
+    """Txn1: advance a run by one step (or claim/resume/park an action)."""
     store = secret_store if secret_store is not None else build_secret_store()
     with session_factory() as session, session.begin():
         tenant_id = _resolve_tenant(session, run_id)
@@ -168,9 +409,7 @@ def execute_advancement(
         run = session.execute(
             select(WorkflowRun).where(WorkflowRun.id == run_id).with_for_update()
         ).scalar_one_or_none()
-        if run is None:
-            return AdvanceOutcome("noop", enqueue_next=False)
-        if run.status in (RunStatus.COMPLETED, RunStatus.FAILED):
+        if run is None or run.status in (RunStatus.COMPLETED, RunStatus.FAILED):
             return AdvanceOutcome("noop", enqueue_next=False)
 
         version = session.get(WorkflowVersion, run.workflow_version_id)
@@ -192,38 +431,58 @@ def execute_advancement(
             run.finished_at = _now()
             return AdvanceOutcome("failed", enqueue_next=False)
 
+        # 1) Resume a durably in-flight action (only actions persist RUNNING).
+        running = next((s for s in step_rows if s.status == StepStatus.RUNNING.value), None)
+        if running is not None:
+            try:
+                return _resume_action(session, run, plan, running, tenant_id, store)
+            except _STEP_FAILURES as exc:
+                return _fail_run_step(session, run, running, str(exc))
+
+        # 2) Act on an approval decision.
+        waiting = next(
+            (s for s in step_rows if s.status == StepStatus.WAITING_APPROVAL.value), None
+        )
+        if waiting is not None:
+            return _handle_waiting(session, run, plan, waiting, tenant_id, store)
+
+        # 3) Select the next runnable step.
         nxt = select_next_step(plan, states)
         if nxt is None:
             if all_succeeded(plan, states):
                 run.status = RunStatus.COMPLETED
                 run.finished_at = _now()
                 return AdvanceOutcome("completed", enqueue_next=False)
-            # Nothing runnable, nothing failed, not all done: invalid/stuck plan
-            # (feasibility validation in M6 prevents this). Do not loop forever.
             return AdvanceOutcome("noop", enqueue_next=False)
 
-        step = next((s for s in step_rows if s.step_id == nxt.id), None)
+        step = _get_step(step_rows, nxt.id)
         if step is None:
             step = StepRun(
                 tenant_id=tenant_id,
                 run_id=run_id,
                 step_id=nxt.id,
                 tool=nxt.tool,
-                status=StepStatus.RUNNING,
-                attempt=1,
+                status=StepStatus.PENDING,
+                attempt=0,
                 input=nxt.args,
-                started_at=_now(),
             )
             session.add(step)
-        else:
-            step.status = StepStatus.RUNNING
-            step.attempt = step.attempt + 1
-            step.started_at = _now()
 
         connector_ctx: ConnectorContext | None = None
         try:
             spec = REGISTRY.get(nxt.tool)
             args_model = spec.input_model.model_validate(nxt.args)
+
+            if spec.side_effecting:
+                if spec.requires_approval:
+                    return _park_for_approval(session, run, tenant_id, nxt, step, spec, store)
+                step.attempt = step.attempt + 1
+                return _claim_action(session, run, tenant_id, nxt, step, spec, store)
+
+            # Inline (M3/M5) path: execute in-lock.
+            step.status = StepStatus.RUNNING
+            step.attempt = step.attempt + 1
+            step.started_at = _now()
             connector_ctx = (
                 _resolve_connector(session, tenant_id, spec.connector_type, nxt.connector, store)
                 if spec.connector_type is not None
@@ -231,21 +490,13 @@ def execute_advancement(
             )
             output = execute_tool(spec, args_model, connector_ctx)
         except _STEP_FAILURES as exc:
-            # An already-active connector that fails an unhealthy-marked way
-            # (e.g. auth revoked mid-life) is flipped to 'error'. Resolution-time
-            # health failures are handled inside _resolve_connector.
             if (
                 connector_ctx is not None
                 and connector_ctx.connector_id is not None
                 and isinstance(exc, ConnectorUnhealthyError)
             ):
                 _set_connector_status(session, connector_ctx.connector_id, "error")
-            step.status = StepStatus.FAILED
-            step.error = str(exc)
-            step.finished_at = _now()
-            run.status = RunStatus.FAILED
-            run.finished_at = _now()
-            return AdvanceOutcome("failed", enqueue_next=False, step_id=nxt.id)
+            return _fail_run_step(session, run, step, str(exc))
 
         step.status = StepStatus.SUCCESS
         step.output = output
@@ -253,19 +504,44 @@ def execute_advancement(
         return AdvanceOutcome("advanced", enqueue_next=True, step_id=nxt.id)
 
 
+# Enqueue callback: (run_id, delay_seconds | None).
+EnqueueFn = Callable[[uuid.UUID, float | None], None]
+ActionRunner = Callable[[ActionTask], ActionExecResult]
+
+
 def process_advance(
     session_factory: sessionmaker[Session],
     run_id: uuid.UUID,
-    enqueue: Callable[[uuid.UUID], None],
+    enqueue: EnqueueFn,
     secret_store: SecretStore | None = None,
+    action_runner: ActionRunner | None = None,
 ) -> AdvanceOutcome:
-    """Run one advancement, then (only after commit) enqueue the next one.
+    """Run one advancement; for actions perform the side effect OUT of the lock,
+    then finalize. Enqueue (possibly delayed) the next advancement after commit."""
+    store = secret_store if secret_store is not None else build_secret_store()
+    outcome = execute_advancement(session_factory, run_id, store)
 
-    ``enqueue`` is injectable for testing. Any enqueue error PROPAGATES: the
-    invocation must fail (so the message is retried) rather than appear handled.
-    The step is already durably committed, so the retry skips it and continues.
-    """
-    outcome = execute_advancement(session_factory, run_id, secret_store)
+    if outcome.action_task is not None:
+        runner = action_runner if action_runner is not None else run_action
+        result = runner(outcome.action_task)
+        final = finalize_action(
+            session_factory, outcome.action_task, result, set_current_tenant_sync
+        )
+        if final.result == "advanced":
+            enqueue(run_id, None)
+        elif final.result == "retry":
+            enqueue(run_id, final.defer_seconds)
+        # 'failed'/'noop' -> nothing to enqueue.
+        return AdvanceOutcome(
+            final.result if final.result != "noop" else "noop",  # type: ignore[arg-type]
+            enqueue_next=final.result in ("advanced", "retry"),
+            step_id=outcome.step_id,
+        )
+
+    if outcome.result == "deferred" and outcome.defer_seconds is not None:
+        enqueue(run_id, outcome.defer_seconds)
+        return outcome
+
     if outcome.enqueue_next:
-        enqueue(run_id)
+        enqueue(run_id, None)
     return outcome

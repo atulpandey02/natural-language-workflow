@@ -1,0 +1,223 @@
+"""Two-transaction, out-of-lock action execution (M7, ADR-013).
+
+Side-effecting tools do NOT run inside the M3 run lock. Instead:
+
+    Txn1 (execution.py): claim the step (RUNNING) + create/lease a durable
+        external_actions row with a STABLE idempotency key -> COMMIT (lock freed)
+    run_action(): perform the external side effect with NO DB txn / run lock
+    finalize_action(): re-lock, finalize SUCCESS/FAILED/retry idempotently -> COMMIT
+
+The idempotency key is generated once per (run, step) and reused on every
+retry/resume. We do NOT claim exactly-once: an external success followed by a
+crash before finalize, or an ambiguous timeout after transmission, can duplicate
+a side effect against a non-idempotent receiver.
+"""
+
+import enum
+import os
+import random
+import socket
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import httpx
+from sqlalchemy.orm import Session, sessionmaker
+
+from nlw.db.models import ExternalAction, StepRun, WorkflowRun
+from nlw.domain.workflow import RunStatus, StepStatus
+from nlw.registry.registry import (
+    REGISTRY,
+    ActionAuthError,
+    ActionContext,
+    RetryableActionError,
+    ToolExecutionError,
+)
+
+# Lease must outlast the hard-max action network timeout (15s) + margin, so a
+# lease only expires on genuine worker death, not on a slow-but-alive send.
+LEASE_DURATION_S = 45
+# Retry budget (attempts count durable CLAIMS, not guaranteed network sends).
+MAX_ACTION_ATTEMPTS = 5  # default
+HARD_MAX_ACTION_ATTEMPTS = 10  # platform ceiling
+_BACKOFF_BASE_S = 2.0
+_BACKOFF_CAP_S = 300.0
+
+WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def effective_attempt_cap() -> int:
+    return min(MAX_ACTION_ATTEMPTS, HARD_MAX_ACTION_ATTEMPTS)
+
+
+class ActionKind(enum.StrEnum):
+    SUCCESS = "success"
+    FAILED_DETERMINISTIC = "failed_deterministic"
+    FAILED_AUTH = "failed_auth"
+    RETRY = "retry"
+
+
+@dataclass(frozen=True)
+class ActionTask:
+    """Everything needed to run + finalize one action attempt, out of the lock."""
+
+    run_id: uuid.UUID
+    tenant_id: uuid.UUID
+    step_id: str
+    tool: str
+    connector_type: str
+    connector_name: str
+    connector_id: uuid.UUID
+    config: dict[str, Any]
+    secret: str | None
+    args: dict[str, Any]
+    external_action_id: uuid.UUID
+    external_action_key: uuid.UUID
+    attempt: int
+    lease_token: uuid.UUID
+
+
+@dataclass(frozen=True)
+class ActionExecResult:
+    kind: ActionKind
+    output: dict[str, Any] | None = None
+    provider_request_id: str | None = None
+    http_status: int | None = None
+    error_class: str | None = None
+    retry_after_s: float | None = None
+
+
+def run_action(task: ActionTask, transport: httpx.BaseTransport | None = None) -> ActionExecResult:
+    """Perform the external side effect and classify the outcome. No DB here."""
+    from nlw.connectors.base import ConnectorContext
+
+    spec = REGISTRY.get(task.tool)
+    assert spec.execute_action is not None
+    args_model = spec.input_model.model_validate(task.args)
+    connector_ctx = ConnectorContext(
+        type=task.connector_type,
+        name=task.connector_name,
+        config=task.config,
+        secret=task.secret,
+        connector_id=task.connector_id,
+    )
+    action_ctx = ActionContext(
+        idempotency_key=task.external_action_key, attempt=task.attempt, transport=transport
+    )
+    try:
+        result = spec.execute_action(args_model, connector_ctx, action_ctx)
+    except ActionAuthError:
+        return ActionExecResult(kind=ActionKind.FAILED_AUTH, error_class="auth")
+    except RetryableActionError as exc:
+        return ActionExecResult(
+            kind=ActionKind.RETRY, error_class="retryable", retry_after_s=exc.retry_after_s
+        )
+    except ToolExecutionError:
+        return ActionExecResult(kind=ActionKind.FAILED_DETERMINISTIC, error_class="deterministic")
+    http_status = result.output.get("http_status") if isinstance(result.output, dict) else None
+    return ActionExecResult(
+        kind=ActionKind.SUCCESS,
+        output=result.output,
+        provider_request_id=result.provider_request_id,
+        http_status=http_status if isinstance(http_status, int) else None,
+    )
+
+
+def _backoff_seconds(attempt: int, retry_after_s: float | None) -> float:
+    if retry_after_s is not None:
+        return max(0.0, min(retry_after_s, _BACKOFF_CAP_S))
+    base: float = _BACKOFF_BASE_S * float(2 ** max(0, attempt - 1))
+    return float(min(base, _BACKOFF_CAP_S) + random.uniform(0, 1.0))
+
+
+@dataclass(frozen=True)
+class FinalizeOutcome:
+    result: str  # 'advanced' | 'failed' | 'retry' | 'noop'
+    enqueue_next: bool = False
+    defer_seconds: float | None = None
+
+
+def finalize_action(
+    session_factory: sessionmaker[Session],
+    task: ActionTask,
+    result: ActionExecResult,
+    set_tenant: Any,
+) -> FinalizeOutcome:
+    """Txn2: finalize the action idempotently, guarded by the lease token."""
+    from nlw.engine.execution import _resolve_tenant, _set_connector_status  # avoid cycle
+
+    with session_factory() as session, session.begin():
+        tenant_id = _resolve_tenant(session, task.run_id)
+        if tenant_id is None:
+            return FinalizeOutcome("noop")
+        set_tenant(session, tenant_id)
+
+        run = (
+            session.query(WorkflowRun).filter(WorkflowRun.id == task.run_id).with_for_update().one()
+        )
+        ea = (
+            session.query(ExternalAction)
+            .filter(ExternalAction.id == task.external_action_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        step = (
+            session.query(StepRun)
+            .filter(StepRun.run_id == task.run_id, StepRun.step_id == task.step_id)
+            .one_or_none()
+        )
+        if ea is None or step is None:
+            return FinalizeOutcome("noop")
+        # Lease guard: only the current leaseholder may finalize.
+        if ea.lease_token != task.lease_token:
+            return FinalizeOutcome("noop")
+        if ea.status != "pending":
+            return FinalizeOutcome("noop")
+
+        now = _now()
+        if result.kind == ActionKind.SUCCESS:
+            ea.status = "success"
+            ea.provider_request_id = result.provider_request_id
+            ea.http_status = result.http_status
+            ea.error_class = None
+            ea.lease_token = None
+            ea.lease_owner = None
+            ea.lease_expires_at = None
+            ea.next_attempt_at = None
+            step.status = StepStatus.SUCCESS
+            step.output = result.output
+            step.finished_at = now
+            return FinalizeOutcome("advanced", enqueue_next=True)
+
+        if result.kind == ActionKind.RETRY and task.attempt < effective_attempt_cap():
+            delay = _backoff_seconds(task.attempt, result.retry_after_s)
+            ea.error_class = result.error_class
+            ea.http_status = result.http_status
+            ea.last_attempt_at = now
+            ea.next_attempt_at = now + timedelta(seconds=delay)
+            ea.lease_token = None
+            ea.lease_owner = None
+            ea.lease_expires_at = None
+            # Step stays RUNNING; a delayed advance_run resumes it.
+            return FinalizeOutcome("retry", defer_seconds=delay)
+
+        # Deterministic / auth / retry-cap-exhausted -> terminal failure.
+        ea.status = "failed"
+        ea.error_class = result.error_class or "failed"
+        ea.http_status = result.http_status
+        ea.lease_token = None
+        ea.lease_owner = None
+        ea.lease_expires_at = None
+        step.status = StepStatus.FAILED
+        step.error = f"action failed: {result.error_class}"
+        step.finished_at = now
+        run.status = RunStatus.FAILED
+        run.finished_at = now
+        if result.kind == ActionKind.FAILED_AUTH:
+            _set_connector_status(session, task.connector_id, "error")
+        return FinalizeOutcome("failed")

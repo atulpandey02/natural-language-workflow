@@ -141,7 +141,7 @@ def test_enqueue_error_propagates_and_step_is_durable(
     m = pg_stack.seed_member()
     run_id = _seed(sms.app, m.user_id, m.tenant_id, _plan("a", "b"))
 
-    def boom(_rid: uuid.UUID) -> None:
+    def boom(_rid: uuid.UUID, _delay: float | None = None) -> None:
         raise RuntimeError("enqueue failed")
 
     # The enqueue failure must NOT be swallowed.
@@ -149,8 +149,12 @@ def test_enqueue_error_propagates_and_step_is_durable(
         process_advance(sms.worker, run_id, boom)
     # ...but the step it executed is durably committed.
     assert _steps(pg_stack.owner_libpq, run_id)["a"] == ("SUCCESS", 1)
+
     # A clean re-invocation resumes at the next step.
-    process_advance(sms.worker, run_id, lambda _rid: None)
+    def _noop(_rid: uuid.UUID, _delay: float | None = None) -> None:
+        return None
+
+    process_advance(sms.worker, run_id, _noop)
     assert _steps(pg_stack.owner_libpq, run_id)["b"][0] == "SUCCESS"
 
 

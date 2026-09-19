@@ -8,6 +8,7 @@ dependencies = [
     "anthropic>=1.7.0",
     "dramatiq[redis]>=2.2.1",
     "fastapi>=0.141.1",
+    "httpx>=0.28.1",
     "psycopg[binary]>=3.3.5",
     "pydantic-settings>=2.15.0",
     "pyjwt[crypto]>=2.14.0",

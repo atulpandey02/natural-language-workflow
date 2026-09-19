@@ -7,11 +7,27 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M6 — NL planner + deterministic feasibility |
-| Current milestone | **M6 — Planner (LLM→Pydantic) + feasibility engine + LLMProvider (BYOK)** (`feat/planner-feasibility`, in review) |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 |
-| Next milestone | M7 — Webhook → Slack action connectors + approvals (`feat/action-connectors`) |
+| Current phase | M7 — Action connectors + approvals + side-effect safety |
+| Current milestone | **M7 — Webhook + Slack action connectors + approval execution** (`feat/action-connectors-approvals`, in review) |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 |
+| Next milestone | M8 — Scheduler (explicit timezone, single-firing) (`feat/scheduler`) |
 | Release status | pre-alpha, nothing deployed |
+
+M7 adds the first real external ACTION tools — `webhook.send` and
+`slack.send_message` — with human approval and safe, bounded, idempotent
+delivery. Approval-gated actions park the run at **WAITING_APPROVAL** and create
+one durable approval; admin/owner decide via `POST /approvals/{id}/approve|reject`
+(gated by role **and** an RLS admin/owner + `decided_by = app.user_id` check),
+which is compare-and-set and recovery-safe (idempotent re-enqueue; enqueue
+failure → 503). Side effects run **outside** the M3 run lock via a two-transaction
+pattern (claim + durable stable idempotency key + atomic lease → COMMIT → external
+call → finalize), with lease-guarded finalize, bounded retry (`next_attempt_at`
+backoff, cap 5), and a secret-free `external_actions` audit. Outbound HTTP is
+HTTPS-only, redirect-disabled, and SSRF-guarded with connect-time IP validation +
+DNS-rebinding-safe pinning; the webhook URL comes only from the connector and
+credential headers only from the SecretStore. **We do not claim exactly-once**:
+non-idempotent receivers may see duplicates after a success-before-finalize crash
+or an ambiguous post-transmission timeout. See ADR-013 and ADR-014.
 
 M6 adds the natural-language planner and the deterministic feasibility engine.
 An **async `LLMProvider`** (BYOK-ready; official Anthropic SDK as the reference,
@@ -81,7 +97,7 @@ the components they protect — not deferred to the end.
 | M4 | Tool registry + connector framework + SecretStore | `feat/tool-registry` | ADR-006 |
 | M5 | Postgres source connector (read-only) + SQL safety | `feat/postgres-connector-sql-safety` | ADR-009, ADR-012 |
 | M6 | Planner (LLM→Pydantic) + feasibility engine + LLMProvider (BYOK) | `feat/planner-feasibility` | ADR-004, ADR-005 |
-| M7 | Webhook → Slack action connectors + approvals | `feat/action-connectors` | (as needed) |
+| M7 | Webhook + Slack action connectors + approvals | `feat/action-connectors-approvals` | ADR-013, ADR-014 |
 | M8 | Scheduler (explicit timezone, single-firing) | `feat/scheduler` | — |
 | M9+ | Hardening & expansion (ClickHouse, Gmail, observability, rate limits) | tbd | tbd |
 | M10 | Frontend (Vite + React) | `feat/frontend` | — |
@@ -114,6 +130,8 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-010 — Durable workflow execution (checkpointing, idempotency, concurrency)](adr/ADR-010-durable-execution.md)
 - [ADR-011 — SecretStore abstraction & secret references](adr/ADR-011-secret-store.md)
 - [ADR-012 — PostgreSQL connector (read-only query tool)](adr/ADR-012-postgres-connector.md)
+- [ADR-013 — Action side-effect execution, approvals & idempotency](adr/ADR-013-action-side-effect-safety.md)
+- [ADR-014 — Outbound HTTP / SSRF safety](adr/ADR-014-outbound-http-ssrf.md)
 
 Planned: ADR-008 Deployment strategy.
 

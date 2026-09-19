@@ -15,6 +15,12 @@ from nlw.registry.registry import (
 from nlw.tools.schemas import EchoArgs, NoArgs
 
 
+def _run(name: str, args: object, ctx: ConnectorContext | None) -> dict[str, object]:
+    spec = REGISTRY.get(name)
+    assert spec.execute is not None  # inline tool
+    return spec.execute(args, ctx)  # type: ignore[arg-type]
+
+
 def test_unknown_tool_raises() -> None:
     with pytest.raises(UnknownToolError):
         REGISTRY.get("does.not.exist")
@@ -36,22 +42,27 @@ def test_availability_filters_by_owned_connector_types() -> None:
 
 
 def test_fake_echo_executes() -> None:
-    spec = REGISTRY.get("fake.echo")
-    out = spec.execute(EchoArgs.model_validate({"x": 1}), None)
+    out = _run("fake.echo", EchoArgs.model_validate({"x": 1}), None)
     assert out == {"echo": {"x": 1}}
 
 
 def test_fake_fail_raises() -> None:
-    spec = REGISTRY.get("fake.fail")
     with pytest.raises(ToolExecutionError):
-        spec.execute(NoArgs(), None)
+        _run("fake.fail", NoArgs(), None)
 
 
 def test_static_secret_check_requires_secret() -> None:
-    spec = REGISTRY.get("static.secret_check")
     with pytest.raises(ToolExecutionError):
-        spec.execute(NoArgs(), ConnectorContext(type="static", name="c", config={}, secret=None))
-    ok = spec.execute(NoArgs(), ConnectorContext(type="static", name="c", config={}, secret="x"))
+        _run(
+            "static.secret_check",
+            NoArgs(),
+            ConnectorContext(type="static", name="c", config={}, secret=None),
+        )
+    ok = _run(
+        "static.secret_check",
+        NoArgs(),
+        ConnectorContext(type="static", name="c", config={}, secret="x"),
+    )
     assert ok == {"secret_available": True}
 
 

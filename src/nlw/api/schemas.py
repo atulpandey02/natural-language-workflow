@@ -81,3 +81,23 @@ class MaterializeOut(BaseModel):
     workflow_id: uuid.UUID
     workflow_version_id: uuid.UUID
     idempotent_hit: bool
+
+
+class ApprovalOut(BaseModel):
+    id: uuid.UUID
+    run_id: uuid.UUID
+    step_id: str
+    tool: str
+    connector_name: str
+    status: str
+    requested_at: str | None
+    decided_at: str | None
+    # Bounded, secret-free preview derived from the immutable plan step so a human
+    # can approve knowingly. Contains only workflow/user content, never secrets.
+    preview: dict[str, Any]
+
+
+class ApprovalDecisionOut(BaseModel):
+    id: uuid.UUID
+    status: str
+    resumed: bool

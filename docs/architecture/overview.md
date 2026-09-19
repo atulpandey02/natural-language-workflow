@@ -56,6 +56,16 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   response). `POST /plans/{id}/materialize` re-earns PASS against the current capability
   view (`FOR UPDATE`, idempotent) before creating a `workflow_version`. The platform LLM
   key lives in the API process only (never worker/scheduler, never in model context).
+- **Action connectors + approvals** — [ADR-013](../adr/ADR-013-action-side-effect-safety.md) +
+  [ADR-014](../adr/ADR-014-outbound-http-ssrf.md): `webhook.send` / `slack.send_message` are
+  approval-gated side-effecting tools. An approval-gated action parks the run at
+  `WAITING_APPROVAL`; admin/owner decide via `POST /approvals/{id}/approve|reject` (role +
+  RLS admin/owner + `decided_by = app.user_id`), CAS and recovery-safe. Side effects run
+  **outside** the run lock via a two-transaction pattern (claim + stable idempotency key +
+  atomic lease → COMMIT → external call → lease-guarded finalize), with bounded retry and a
+  secret-free `external_actions` audit. Outbound HTTP is HTTPS-only, redirect-disabled, and
+  SSRF-guarded with connect-time IP validation + DNS-rebinding-safe pinning; the destination
+  comes only from the connector. Delivery is **at-least-once** (no exactly-once claim).
 - The LLM proposes; deterministic code enforces every invariant
   (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling).
 
