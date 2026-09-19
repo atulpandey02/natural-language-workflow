@@ -81,6 +81,9 @@ def pg_stack() -> Iterator[SimpleNamespace]:
                 database_migration_url=owner_sa,
                 supabase_url=_SUPABASE_URL,
                 supabase_jwt_secret=_SECRET,
+                # Rate limiting needs Redis; the general API fixtures don't run one.
+                # Dedicated M9 tests build settings with it enabled + a real Redis.
+                rate_limit_enabled=False,
             )
 
         def seed_user() -> uuid.UUID:

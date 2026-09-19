@@ -49,8 +49,13 @@ _AUTH_MESSAGE_MARKERS = (
 )
 
 # --- Hard platform caps (enforced independently of tenant config) ---
-_STATEMENT_TIMEOUT_CAP_MS = 30_000
-_LOCK_TIMEOUT_CAP_MS = 30_000
+# M9 (req 8): the external query runs INSIDE the run's FOR UPDATE lock, so a slow
+# query holds that per-run lock for its whole duration. The hard cap is tightened
+# to 10s for staging to bound worst-case lock hold. Moving reads out-of-lock (the
+# M7 two-phase pattern) is the documented pre-production fast-follow if longer
+# query durations are ever required. Default per-connector timeout stays lower.
+_STATEMENT_TIMEOUT_CAP_MS = 10_000
+_LOCK_TIMEOUT_CAP_MS = 10_000
 _CONNECT_TIMEOUT_CAP_S = 15
 _MAX_ROWS_CAP = 10_000
 _MAX_RESULT_BYTES_CAP = 10_000_000

@@ -30,6 +30,9 @@ decision, numbered and never deleted (supersede instead of removing).
 | [013](ADR-013-action-side-effect-safety.md) | Action side-effect execution, approvals & idempotency | Accepted |
 | [014](ADR-014-outbound-http-ssrf.md) | Outbound HTTP / SSRF safety | Accepted |
 | [015](ADR-015-scheduling-reconciliation.md) | Durable scheduling & unattended reconciliation | Accepted |
+| [016](ADR-016-observability-and-correlation.md) | Observability: correlation IDs & Prometheus metrics | Accepted |
+| [017](ADR-017-rate-and-resource-limits.md) | Rate limiting & per-tenant resource limits | Accepted |
+| [018](ADR-018-production-topology-and-ops.md) | Production topology & operational readiness | Accepted |
 
 ## Template
 

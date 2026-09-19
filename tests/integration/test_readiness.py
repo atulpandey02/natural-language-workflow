@@ -1,12 +1,16 @@
-"""Readiness reflects the real state of Postgres and Redis.
+"""Readiness reflects Postgres + Redis + schema compatibility (M9, req 10).
 
-Readiness is 200 only when both dependencies are reachable, and 503 otherwise,
-with a per-dependency breakdown.
+Readiness is 200 only when all three checks pass. It uses the migrated pg_stack
+(so the schema is at the expected Alembic head) plus a real Redis, and a
+per-dependency breakdown is always returned.
 """
 
+from collections.abc import Iterator
+from types import SimpleNamespace
+
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
-from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.redis import RedisContainer
 
 from nlw.api.app import create_app
@@ -15,41 +19,46 @@ from nlw.core.config import Settings
 pytestmark = pytest.mark.integration
 
 
-def _pg_url(postgres: PostgresContainer) -> str:
-    return (
-        f"postgresql+psycopg://{postgres.username}:{postgres.password}"
-        f"@{postgres.get_container_host_ip()}:{postgres.get_exposed_port(5432)}"
-        f"/{postgres.dbname}"
-    )
+@pytest.fixture
+def redis_url() -> Iterator[str]:
+    with RedisContainer("redis:7") as c:
+        yield f"redis://{c.get_container_host_ip()}:{c.get_exposed_port(6379)}/0"
 
 
-def test_ready_when_both_dependencies_reachable() -> None:
-    with PostgresContainer("postgres:16") as postgres, RedisContainer("redis:7") as redis_c:
-        redis_url = f"redis://{redis_c.get_container_host_ip()}:{redis_c.get_exposed_port(6379)}/0"
-        settings = Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            database_url=_pg_url(postgres),
-            redis_url=redis_url,
-        )
-        with TestClient(create_app(settings)) as client:
-            resp = client.get("/health/ready")
+def _settings(pg_stack: SimpleNamespace, **over: object) -> Settings:
+    settings: Settings = pg_stack.settings.model_copy(update=over)
+    return settings
 
+
+def test_ready_when_all_dependencies_and_schema_ok(
+    pg_stack: SimpleNamespace, redis_url: str
+) -> None:
+    with TestClient(create_app(_settings(pg_stack, redis_url=redis_url))) as client:
+        resp = client.get("/health/ready")
     assert resp.status_code == 200
-    assert resp.json()["checks"] == {"postgres": "ok", "redis": "ok"}
+    assert resp.json()["checks"] == {"postgres": "ok", "redis": "ok", "schema": "ok"}
 
 
-def test_not_ready_when_redis_down() -> None:
-    with PostgresContainer("postgres:16") as postgres:
-        settings = Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            database_url=_pg_url(postgres),
-            redis_url="redis://127.0.0.1:1/0",  # unreachable port
-        )
-        with TestClient(create_app(settings)) as client:
-            resp = client.get("/health/ready")
-
+def test_not_ready_when_redis_down(pg_stack: SimpleNamespace) -> None:
+    with TestClient(create_app(_settings(pg_stack, redis_url="redis://127.0.0.1:1/0"))) as client:
+        resp = client.get("/health/ready")
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "not_ready"
     assert body["checks"]["postgres"] == "ok"
     assert body["checks"]["redis"] == "down"
+    assert body["checks"]["schema"] == "ok"
+
+
+def test_not_ready_when_schema_mismatch(pg_stack: SimpleNamespace, redis_url: str) -> None:
+    # Simulate "deployed new image before running migrations": corrupt the
+    # recorded revision so it no longer matches the expected head.
+    with psycopg.connect(pg_stack.owner_libpq, autocommit=True) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = 'not_the_head'")
+    with TestClient(create_app(_settings(pg_stack, redis_url=redis_url))) as client:
+        resp = client.get("/health/ready")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["checks"]["postgres"] == "ok"
+    assert body["checks"]["redis"] == "ok"
+    assert body["checks"]["schema"] == "down"

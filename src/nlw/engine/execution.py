@@ -9,6 +9,7 @@ finalizes idempotently. Approval-gated actions park the run at WAITING_APPROVAL
 until a human decision arrives (the worker remains the sole run/step writer).
 """
 
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ from nlw.engine.actions import (
     finalize_action,
     run_action,
 )
+from nlw.observability import metrics
 from nlw.registry.registry import REGISTRY, ToolExecutionError, ToolSpec, UnknownToolError
 from nlw.secrets.store import SecretError, SecretStore, build_secret_store
 from nlw.tenancy.session import set_current_tenant_sync
@@ -488,7 +490,9 @@ def execute_advancement(
                 if spec.connector_type is not None
                 else None
             )
+            inline_start = time.perf_counter()
             output = execute_tool(spec, args_model, connector_ctx)
+            metrics.observe_tool(spec.name, "success", time.perf_counter() - inline_start)
         except _STEP_FAILURES as exc:
             if (
                 connector_ctx is not None
@@ -523,10 +527,18 @@ def process_advance(
 
     if outcome.action_task is not None:
         runner = action_runner if action_runner is not None else run_action
+        action_start = time.perf_counter()
         result = runner(outcome.action_task)
         final = finalize_action(
             session_factory, outcome.action_task, result, set_current_tenant_sync
         )
+        _outcome_label = {"advanced": "success", "retry": "retry", "failed": "failed"}.get(
+            final.result, "noop"
+        )
+        metrics.observe_tool(
+            outcome.action_task.tool, _outcome_label, time.perf_counter() - action_start
+        )
+        metrics.record_action_attempt(outcome.action_task.tool, _outcome_label)
         if final.result == "advanced":
             enqueue(run_id, None)
         elif final.result == "retry":

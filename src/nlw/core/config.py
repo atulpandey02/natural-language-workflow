@@ -65,6 +65,85 @@ class Settings(BaseSettings):
     scheduler_catchup_window_s: int = 3600
     # A PENDING run older than this with no progress is considered un-enqueued.
     scheduler_pending_threshold_s: int = 60
+    # Recovery horizon (M9, req 4): after this age we STOP repeatedly re-enqueuing
+    # a recoverable PENDING/RUNNING run (a poisoned-run guard). The run is not
+    # mutated to FAILED; it is surfaced via a gauge + operational warning for a
+    # human to resolve. WAITING_APPROVAL is exempt (a human may take arbitrarily
+    # long to decide). Default 24h.
+    scheduler_recovery_horizon_s: int = 86_400
+
+    # --- Worker (M9) ---
+    # Bounded infrastructure retries for advance_run (Dramatiq default is 20).
+    # Business step failures never raise; only infra faults (e.g. a failed
+    # enqueue) retry. Exhaustion is safe: the reconciler re-drives from Postgres.
+    worker_max_retries: int = 5
+    worker_min_backoff_ms: int = 1_000
+    worker_max_backoff_ms: int = 60_000
+
+    # --- Database pool + timeouts (M9) ---
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    db_pool_timeout_s: int = 30  # wait for a pooled connection before erroring
+    db_pool_recycle_s: int = 1_800  # recycle connections older than this
+    db_statement_timeout_ms: int = 30_000  # server-side runaway-query cap
+    db_lock_timeout_ms: int = 10_000  # bound time spent waiting on a lock
+    db_idle_in_tx_timeout_ms: int = 60_000  # kill idle-in-transaction sessions
+
+    # --- Observability / metrics (M9) ---
+    # Each process (api / worker / scheduler) serves Prometheus metrics on its own
+    # INTERNAL port. This port is never published publicly (see docker-compose);
+    # only the reverse proxy / API HTTP route is public.
+    metrics_enabled: bool = True
+    metrics_host: str = "0.0.0.0"  # noqa: S104 - bound inside the container only
+    metrics_port: int = 9100
+
+    # --- HTTP hardening (M9) ---
+    # CORS is deny-by-default (empty => no cross-origin access granted).
+    cors_allow_origins: list[str] = Field(default_factory=list)
+    # TrustedHost allowlist; "*" disables the check (tighten in staging/prod).
+    trusted_hosts: list[str] = Field(default_factory=lambda: ["*"])
+    # Reverse-proxy IPs whose X-Forwarded-* headers we trust. Empty => trust none.
+    trusted_proxy_ips: list[str] = Field(default_factory=list)
+    # Hard cap on the actual streamed request body (bytes); enforced independently
+    # of any client-supplied Content-Length.
+    max_request_body_bytes: int = 1_000_000
+    request_id_header: str = "X-Request-Id"
+    # By default request IDs are server-generated. Only honor an inbound ID (still
+    # strictly validated/bounded) when this is enabled AND traffic is trusted.
+    trust_inbound_request_id: bool = False
+    # OpenAPI/docs: None => on outside production, off in production. Explicit
+    # bool overrides. HSTS: None => on in production only.
+    enable_docs: bool | None = None
+    hsts_enabled: bool | None = None
+
+    # --- Rate limiting (M9) ---
+    rate_limit_enabled: bool = True
+    # Cost-bearing / mutating endpoints fail CLOSED (503) if the limiter backend
+    # is unavailable — rate limits are non-durable control state, not business
+    # truth, so a Redis outage must not open an abuse window.
+    rate_limit_fail_open: bool = False
+    rate_limit_window_s: int = 60
+    rate_limit_plans_per_min: int = 20  # LLM-cost endpoint (tightest)
+    rate_limit_writes_per_min: int = 60  # connector/schedule/approval mutations
+
+    # --- Per-tenant durable-resource caps (M9) ---
+    max_connectors_per_tenant: int = 50
+    max_schedules_per_tenant: int = 100
+    max_workflows_per_tenant: int = 200
+
+    @property
+    def docs_enabled(self) -> bool:
+        """OpenAPI/docs served? Off in production by default; explicit override wins."""
+        if self.enable_docs is not None:
+            return self.enable_docs
+        return self.app_env != "production"
+
+    @property
+    def hsts_active(self) -> bool:
+        """Send HSTS? Production HTTPS only by default; explicit override wins."""
+        if self.hsts_enabled is not None:
+            return self.hsts_enabled
+        return self.app_env == "production"
 
     @property
     def effective_jwks_url(self) -> str | None:

@@ -19,7 +19,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nlw.api.deps import get_session, get_tenant_context, require_role
+from nlw.api.deps import get_session, get_tenant_context, rate_limit, require_role
 from nlw.api.schemas import ApprovalDecisionOut, ApprovalOut
 from nlw.db.models import Approval, WorkflowVersion
 from nlw.db.repositories import ApprovalRepository
@@ -136,7 +136,11 @@ async def _decide(
     return ApprovalDecisionOut(id=approval_id, status=target, resumed=True)
 
 
-@router.post("/approvals/{approval_id}/approve", response_model=ApprovalDecisionOut)
+@router.post(
+    "/approvals/{approval_id}/approve",
+    response_model=ApprovalDecisionOut,
+    dependencies=[Depends(rate_limit("approvals", "write"))],
+)
 async def approve(
     approval_id: uuid.UUID,
     request: Request,
@@ -145,7 +149,11 @@ async def approve(
     return await _decide(request, approval_id, ctx, "approved")
 
 
-@router.post("/approvals/{approval_id}/reject", response_model=ApprovalDecisionOut)
+@router.post(
+    "/approvals/{approval_id}/reject",
+    response_model=ApprovalDecisionOut,
+    dependencies=[Depends(rate_limit("approvals", "write"))],
+)
 async def reject(
     approval_id: uuid.UUID,
     request: Request,

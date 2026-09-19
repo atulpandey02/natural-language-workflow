@@ -29,6 +29,12 @@ COPY migrations ./migrations
 COPY alembic.ini ./
 RUN uv sync --frozen --no-dev
 
+# Run as a non-root user (M9 hardening). Create it after the build steps (which
+# need to write /app/.venv) and hand it ownership of the app tree.
+RUN useradd --system --create-home --uid 10001 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
 
 # Liveness without extra packages (slim image has no curl).

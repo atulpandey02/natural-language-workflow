@@ -46,8 +46,8 @@ def test_invalid_sslmode_rejected() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "cap"),
     [
-        ("statement_timeout_ms", 10_000_000, 30_000),
-        ("lock_timeout_ms", 10_000_000, 30_000),
+        ("statement_timeout_ms", 10_000_000, 10_000),
+        ("lock_timeout_ms", 10_000_000, 10_000),
         ("connect_timeout_s", 9999, 15),
         ("max_rows", 10_000_000, 10_000),
         ("max_result_bytes", 10**12, 10_000_000),

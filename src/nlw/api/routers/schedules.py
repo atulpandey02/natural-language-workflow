@@ -19,9 +19,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nlw.api.deps import get_session, get_tenant_context, require_role
+from nlw.api.deps import get_app_settings, get_session, get_tenant_context, rate_limit, require_role
 from nlw.api.schemas import ScheduleCreate, ScheduleOut, ScheduleUpdate
+from nlw.core.config import Settings
 from nlw.db.models import Schedule, Workflow
+from nlw.db.quota import QuotaExceededError, enforce_cap, schedules_count_stmt
 from nlw.db.repositories import ScheduleRepository
 from nlw.scheduler.recurrence import Frequency, Recurrence, RecurrenceError, next_occurrence
 from nlw.tenancy.context import Role, TenantContext
@@ -65,11 +67,17 @@ def _to_out(s: Schedule) -> ScheduleOut:
     )
 
 
-@router.post("/schedules", response_model=ScheduleOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/schedules",
+    response_model=ScheduleOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("schedules_create", "write"))],
+)
 async def create_schedule(
     body: ScheduleCreate,
     ctx: TenantContext = Depends(_require_admin),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
 ) -> ScheduleOut:
     workflow = (
         await session.execute(
@@ -84,6 +92,18 @@ async def create_schedule(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "workflow has no materialized version"
         )
+
+    # Concurrency-safe per-tenant schedule cap (advisory-locked count+insert).
+    try:
+        await enforce_cap(
+            session,
+            resource="schedules",
+            tenant_id=ctx.tenant_id,
+            cap=settings.max_schedules_per_tenant,
+            count_stmt=schedules_count_stmt(ctx.tenant_id),
+        )
+    except QuotaExceededError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
     rec = _recurrence(body.timezone, body.frequency, body.minute, body.hour, body.day_of_week)
     now = datetime.now(UTC)
@@ -125,7 +145,11 @@ async def get_schedule(
     return _to_out(s)
 
 
-@router.patch("/schedules/{schedule_id}", response_model=ScheduleOut)
+@router.patch(
+    "/schedules/{schedule_id}",
+    response_model=ScheduleOut,
+    dependencies=[Depends(rate_limit("schedules_update", "write"))],
+)
 async def update_schedule(
     schedule_id: uuid.UUID,
     body: ScheduleUpdate,

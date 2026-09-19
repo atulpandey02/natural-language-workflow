@@ -116,3 +116,24 @@ set `app.user_id` to an existing member of a target tenant). Achieving that
 stronger guarantee requires **non-forgeable / signed DB context** or a
 per-request DB identity model. This is recorded as a **pre-production
 security-hardening item** and is intentionally **not** implemented in M3.
+
+## M9 update — staging decision on the forgeable-GUC risk
+
+For M9 (staging), the GUC-based request context (`app.user_id` / `app.tenant_id`)
+is **kept as-is** and the residual risk above is **explicitly accepted for
+staging**, on the following honest basis:
+
+- **No untrusted-SQL path currently targets platform DB roles.** All platform
+  queries run through parameterized SQLAlchemy / bound-parameter `text()`; there
+  is no endpoint or tool that executes attacker-controlled SQL as
+  `nlw_app` / `nlw_worker` / `nlw_scheduler`. The `postgres.query` tool runs
+  against the **tenant's own external database** on a separate SELECT-only role —
+  never the platform database — so it cannot forge platform GUCs.
+- **Regression control, not a proof.** A guard test asserts repository/engine SQL
+  is not built by string interpolation. This is a *regression control* that keeps
+  the "no untrusted SQL" property true as code changes; it is **not** a proof that
+  SQL injection is impossible.
+- **Non-forgeable context remains required before public production.** Signed DB
+  context or a per-request DB identity model (options A/B) must be implemented and
+  reconsidered before public production. This stays a pre-production hardening item
+  (see ADR-018 §remaining risks). M9 does not implement it.

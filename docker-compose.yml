@@ -24,6 +24,24 @@ x-app-env: &app-env
   SUPABASE_URL: ${SUPABASE_URL:-}
   SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
 
+# Container hardening (M9) applied to the stateless application roles only.
+# NOT applied to postgres/redis, which need writable state volumes. The runtime
+# constraints below (mem_limit/cpus/pids_limit, read_only, cap_drop,
+# no-new-privileges) are honored by plain `docker compose up` (Compose v2), not
+# only Swarm. The image already runs as the non-root appuser.
+x-app-hardening: &app-hardening
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+  mem_limit: 512m
+  cpus: 1.0
+  pids_limit: 256
+
 services:
   postgres:
     image: postgres:16
@@ -57,6 +75,7 @@ services:
 
   api:
     build: .
+    <<: *app-hardening
     # The planner runs in the API only. The platform LLM key is injected HERE
     # exclusively — never in the shared app-env block, so worker/scheduler never
     # receive it. Defaults keep the keyless stub provider for local dev.
@@ -75,6 +94,7 @@ services:
 
   worker:
     build: .
+    <<: *app-hardening
     command: ["dramatiq", "nlw.worker.actors", "--processes", "1", "--threads", "4"]
     # The worker connects as nlw_worker (execution-only; may call the run->tenant
     # resolver). It never connects as nlw_app. Connector secrets are injected
@@ -91,15 +111,17 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Readiness beyond "process alive": DB + Redis reachable + metrics port up.
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f dramatiq > /dev/null || exit 1"]
+      test: ["CMD", "python", "-m", "nlw.ops.healthcheck"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 15s
 
   scheduler:
     build: .
+    <<: *app-hardening
     command: ["python", "-m", "nlw.scheduler"]
     # Connects as the least-privilege nlw_scheduler role. It receives NO
     # NLW_SECRET_* (worker-only), NO NLW_LLM_API_KEY (api-only), and NO connector
@@ -113,11 +135,11 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f nlw.scheduler > /dev/null || exit 1"]
+      test: ["CMD", "python", "-m", "nlw.ops.healthcheck"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 15s
 
 volumes:
   pgdata:
