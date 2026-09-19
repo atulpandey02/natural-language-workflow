@@ -104,7 +104,12 @@ def test_no_public_policies_on_tenant_tables(pg_stack: SimpleNamespace) -> None:
     assert rows, "expected policies to exist"
     for tablename, policyname, roles in rows:
         assert "public" not in roles, f"{tablename}.{policyname} applies to PUBLIC: {roles}"
-        assert set(roles) <= {"nlw_app", "nlw_worker"}, f"{tablename}.{policyname} roles={roles}"
+        # Trusted least-privilege runtime roles only (M8 adds nlw_scheduler).
+        assert set(roles) <= {
+            "nlw_app",
+            "nlw_worker",
+            "nlw_scheduler",
+        }, f"{tablename}.{policyname} roles={roles}"
 
 
 def test_bypass_role_is_read_only(pg_stack: SimpleNamespace) -> None:

@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -120,8 +121,12 @@ class WorkflowRun(TimestampMixin, Base):
     __tablename__ = "workflow_runs"
     __table_args__ = (
         UniqueConstraint("tenant_id", "idempotency_key", name="uq_run_tenant_idempotency"),
+        # Exactly-once per schedule occurrence. NULLs are distinct, so manual runs
+        # (schedule_id NULL) never collide (M8).
+        UniqueConstraint("schedule_id", "scheduled_for", name="uq_run_schedule_occurrence"),
         CheckConstraint(
-            "status in ('PENDING','RUNNING','COMPLETED','FAILED')", name="ck_run_status"
+            "status in ('PENDING','RUNNING','WAITING_APPROVAL','COMPLETED','FAILED')",
+            name="ck_run_status",
         ),
     )
 
@@ -136,6 +141,9 @@ class WorkflowRun(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="PENDING")
     trigger: Mapped[str] = mapped_column(String, nullable=False, default="manual")
     idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    # M8: scheduled runs pin the schedule + occurrence (exactly-once per occurrence).
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -146,7 +154,8 @@ class StepRun(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("run_id", "step_id", name="uq_step_run_run_step"),
         CheckConstraint(
-            "status in ('PENDING','RUNNING','SUCCESS','FAILED')", name="ck_step_status"
+            "status in ('PENDING','RUNNING','WAITING_APPROVAL','SUCCESS','FAILED')",
+            name="ck_step_status",
         ),
     )
 
@@ -282,3 +291,51 @@ class PlanProposal(TimestampMixin, Base):
     feasibility: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     clarification_questions: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+
+# --- Schedules (M8) ---
+# Durable, structured recurrence pinned to an IMMUTABLE workflow_version. The
+# scheduler creates one run per due occurrence; execution stays with the worker.
+
+
+class Schedule(TimestampMixin, Base):
+    __tablename__ = "schedules"
+    __table_args__ = (
+        CheckConstraint("frequency in ('hourly','daily','weekly')", name="ck_schedule_frequency"),
+        CheckConstraint("minute >= 0 and minute <= 59", name="ck_schedule_minute"),
+        CheckConstraint("hour is null or (hour >= 0 and hour <= 23)", name="ck_schedule_hour"),
+        CheckConstraint(
+            "day_of_week is null or (day_of_week >= 0 and day_of_week <= 6)",
+            name="ck_schedule_dow",
+        ),
+        CheckConstraint("frequency = 'hourly' or hour is not null", name="ck_schedule_hour_req"),
+        CheckConstraint(
+            "frequency <> 'weekly' or day_of_week is not null", name="ck_schedule_dow_req"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    # Pinned immutable version: scheduled runs always execute this exact plan.
+    workflow_version_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflow_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    timezone: Mapped[str] = mapped_column(String, nullable=False)
+    frequency: Mapped[str] = mapped_column(String, nullable=False)
+    minute: Mapped[int] = mapped_column(Integer, nullable=False)
+    hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    day_of_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    next_run_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    last_scheduled_for: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Server-owned: the authenticated admin/owner who created the schedule.
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )

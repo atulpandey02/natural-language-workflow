@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from nlw import __version__
-from nlw.api.routers import approvals, connectors, identity, plans
+from nlw.api.routers import approvals, connectors, identity, plans, schedules
 from nlw.auth.supabase import build_auth_provider
 from nlw.core.config import Settings, get_settings
 from nlw.core.logging import configure_logging
@@ -57,6 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(connectors.router)
     app.include_router(plans.router)
     app.include_router(approvals.router)
+    app.include_router(schedules.router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

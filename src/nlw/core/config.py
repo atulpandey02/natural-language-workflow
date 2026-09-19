@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     # before any provider call.
     llm_max_prompt_chars: int = 8000
 
+    # --- Scheduler (M8) ---
+    scheduler_scan_interval_s: float = 30.0  # due-schedule scan cadence
+    scheduler_reconcile_interval_s: float = 60.0  # stale-run reconciliation cadence
+    scheduler_batch_limit: int = 100  # max schedules / runs handled per tick
+    # Bounded catch-up: fire only the latest missed occurrence within this window.
+    scheduler_catchup_window_s: int = 3600
+    # A PENDING run older than this with no progress is considered un-enqueued.
+    scheduler_pending_threshold_s: int = 60
+
     @property
     def effective_jwks_url(self) -> str | None:
         if self.supabase_jwks_url:

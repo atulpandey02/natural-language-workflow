@@ -18,6 +18,13 @@ BEGIN
         CREATE ROLE nlw_worker LOGIN PASSWORD 'nlw_worker'
             NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
     END IF;
+    -- Scheduler runtime role (M8): finds due schedules, creates + enqueues runs,
+    -- reconciles stuck runs. Cross-tenant via role-specific RLS policies granted
+    -- in migrations. NEVER superuser, NEVER BYPASSRLS; no connector/secret access.
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'nlw_scheduler') THEN
+        CREATE ROLE nlw_scheduler LOGIN PASSWORD 'nlw_scheduler'
+            NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
+    END IF;
     -- Non-login role that owns the read-only SECURITY DEFINER authorization/
     -- routing helpers. BYPASSRLS applies only inside those functions; never a
     -- connection role.
@@ -35,6 +42,8 @@ GRANT CONNECT ON DATABASE nlw TO nlw_app;
 GRANT USAGE ON SCHEMA public TO nlw_app;
 GRANT CONNECT ON DATABASE nlw TO nlw_worker;
 GRANT USAGE ON SCHEMA public TO nlw_worker;
+GRANT CONNECT ON DATABASE nlw TO nlw_scheduler;
+GRANT USAGE ON SCHEMA public TO nlw_scheduler;
 -- Let the owner/migration role reassign the helper functions' ownership.
 GRANT nlw_rls_bypass TO nlw;
 GRANT nlw_workspace_bootstrap TO nlw;

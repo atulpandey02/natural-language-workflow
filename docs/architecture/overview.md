@@ -22,7 +22,7 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
 |------|----------------|
 | `api` | Authn/authz, input validation, writes intent to Postgres, enqueues work. Never executes workflow steps. |
 | `worker` | Dramatiq consumer. `advance_run(run_id)` loads durable state from Postgres and executes one step per advancement (M3). Connects as the execution-only `nlw_worker` role. |
-| `scheduler` | Heartbeat-only for now; reads due schedules and enqueues runs from M8. |
+| `scheduler` | Durable due-schedule scan + stale-run reconciliation (M8). Creates exactly one run row per occurrence and enqueues run ids; never executes steps. Connects as the least-privilege `nlw_scheduler` role. |
 
 ## Boundaries (ADRs)
 
@@ -66,6 +66,15 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   secret-free `external_actions` audit. Outbound HTTP is HTTPS-only, redirect-disabled, and
   SSRF-guarded with connect-time IP validation + DNS-rebinding-safe pinning; the destination
   comes only from the connector. Delivery is **at-least-once** (no exactly-once claim).
+- **Scheduling + reconciliation** — [ADR-015](../adr/ADR-015-scheduling-reconciliation.md):
+  structured schedules (IANA tz, no cron) pin an immutable `workflow_version`; a due-scan
+  claims with `FOR UPDATE SKIP LOCKED` and creates exactly one durable run row per occurrence
+  (across concurrency + restart, via `UNIQUE(schedule_id, scheduled_for)`; execution stays
+  idempotent), advancing `next_run_at` in the same txn and enqueuing after commit. A reconciler
+  re-enqueues stuck runs whose eligibility is reconstructed entirely from PostgreSQL (Redis only
+  transports the re-enqueued run_id), writing nothing (the worker's M7 resume logic stays
+  authoritative). The least-privilege
+  `nlw_scheduler` role (NOBYPASSRLS) never reads connectors/secrets/step I/O.
 - The LLM proposes; deterministic code enforces every invariant
   (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling).
 
@@ -94,7 +103,7 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   Redis), `/version`.
 - `nlw.worker` — Dramatiq Redis broker, Redis readiness probe, and a `ping`
   actor proving enqueue → Redis → worker execution.
-- `nlw.scheduler` — heartbeat loop (real scheduling in M8).
+- `nlw.scheduler` — durable due-scan + reconciliation loops (M8).
 - Alembic initialized with an empty baseline; migration applied in CI.
 - Docker image + compose with all five services (`api`, `worker`, `scheduler`,
   `postgres`, `redis`); CI pipeline.
