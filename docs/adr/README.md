@@ -19,8 +19,10 @@ decision, numbered and never deleted (supersede instead of removing).
 | [001](ADR-001-postgres-state-store.md) | PostgreSQL as the system of record | Accepted |
 | [002](ADR-002-redis-dramatiq-queue.md) | Redis + Dramatiq as the execution queue (transport only) | Accepted |
 | [003](ADR-003-multi-tenant-isolation.md) | Multi-tenant isolation strategy (RLS + restricted role) | Accepted |
+| [006](ADR-006-connector-tool-separation.md) | Connector/Tool separation + deterministic Tool Registry | Accepted |
 | [007](ADR-007-auth-provider.md) | Authentication provider (Supabase, identity only) | Accepted |
 | [010](ADR-010-durable-execution.md) | Durable workflow execution: checkpointing, idempotency, concurrency | Accepted |
+| [011](ADR-011-secret-store.md) | SecretStore abstraction & secret references | Accepted |
 
 ## Template
 

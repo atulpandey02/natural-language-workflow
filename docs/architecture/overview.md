@@ -32,6 +32,12 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
 - **Durable execution** — [ADR-010](../adr/ADR-010-durable-execution.md): one step per
   `advance_run`, `FOR UPDATE` serialization, commit-before-enqueue, idempotent replay;
   worker derives tenant via a worker-only SECURITY DEFINER resolver.
+- **Capability layer** — [ADR-006](../adr/ADR-006-connector-tool-separation.md) +
+  [ADR-011](../adr/ADR-011-secret-store.md): static Tool Registry (only registered tools
+  run), tenant-owned connectors (RLS), and a SecretStore (refs in DB; values resolved
+  worker-side only, never in the LLM path). Steps dispatch through the registry; a
+  connector-backed step loads the tenant's connector, health-checks it, and resolves its
+  secret before executing.
 - The LLM proposes; deterministic code enforces every invariant
   (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling).
 

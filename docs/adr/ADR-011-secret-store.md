@@ -1,0 +1,43 @@
+# ADR-011 — SecretStore abstraction & secret references
+
+- Status: Accepted
+- Date: 2026-09-19
+
+## Context
+
+Connectors need credentials, but secrets must never be stored as plaintext
+business data, never reach the LLM, and never leak into logs/outputs/API
+responses. The store must be swappable (dev env vars now; encrypted/Vault later).
+
+## Decision
+
+- **Only a `secret_ref` is persisted** on the connector row — a canonical name
+  matching `^[A-Z][A-Z0-9_]{0,63}$`. Never a secret value.
+- **`SecretStore.resolve(secret_ref) -> str`** resolves refs to values **only in
+  the worker, at execution time**. `EnvironmentSecretStore` maps
+  `STATIC_DEMO → env NLW_SECRET_STATIC_DEMO` for dev/self-hosted.
+- **Worker-only secret environment**: `NLW_SECRET_*` are injected into the
+  `worker` service only — never into `api`, `scheduler`, or the shared Compose
+  env. The API cannot resolve secrets and never calls `resolve`.
+- **Non-leak guarantees**: the resolved value is passed only to a tool's
+  `execute` via `ConnectorContext` (whose `secret` field is repr-suppressed),
+  and is never persisted, logged, returned, or placed in error strings. A
+  connector `type` may require a secret; the `static` type does, so creating a
+  `static` connector without a `secret_ref` is rejected. Errors carry only the
+  ref (which is not a secret).
+
+## Alternatives considered
+
+- **Secrets in the DB (plaintext)** — rejected outright.
+- **Encrypted-DB / Vault backend now** — deferred; the abstraction lets us add
+  it without touching call sites.
+- **A `secrets` metadata table** — deferred; `secret_ref` on the connector is
+  sufficient for M4.
+
+## Consequences
+
+- Secrets are out of the business dataset and the LLM path by construction.
+- The dev store depends on process environment; the worker-only split keeps
+  secrets off the API/scheduler surface.
+- Encrypted-at-rest storage, rotation, and per-secret metadata are future work
+  (pre-production hardening).

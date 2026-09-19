@@ -56,6 +56,8 @@ class WorkflowStep(BaseModel):
     tool: str
     args: dict[str, Any] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)
+    # Name of the tenant connector to use (required for connector-backed tools).
+    connector: str | None = None
 
 
 class WorkflowPlan(BaseModel):
