@@ -9,16 +9,20 @@ Row-Level Security policies and the restricted runtime role are added in M2b.
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Integer,
     String,
+    Text,
     UniqueConstraint,
     Uuid,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nlw.db.base import Base
@@ -82,3 +86,81 @@ class Membership(TimestampMixin, Base):
         Uuid, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     role: Mapped[str] = mapped_column(String, nullable=False)
+
+
+# --- Durable workflow execution (M3) ---
+# Every table carries tenant_id for RLS. workflow_versions is immutable.
+
+
+class Workflow(TimestampMixin, Base):
+    __tablename__ = "workflows"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    current_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+
+class WorkflowVersion(TimestampMixin, Base):
+    __tablename__ = "workflow_versions"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "version", name="uq_version_workflow_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class WorkflowRun(TimestampMixin, Base):
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_run_tenant_idempotency"),
+        CheckConstraint(
+            "status in ('PENDING','RUNNING','COMPLETED','FAILED')", name="ck_run_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    workflow_version_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflow_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False, default="PENDING")
+    trigger: Mapped[str] = mapped_column(String, nullable=False, default="manual")
+    idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StepRun(TimestampMixin, Base):
+    __tablename__ = "step_runs"
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_id", name="uq_step_run_run_step"),
+        CheckConstraint(
+            "status in ('PENDING','RUNNING','SUCCESS','FAILED')", name="ck_step_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_id: Mapped[str] = mapped_column(String, nullable=False)
+    tool: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="PENDING")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    input: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    output: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -13,6 +13,7 @@ import uuid
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 
 async def set_current_user(session: AsyncSession, user_id: uuid.UUID) -> None:
@@ -24,6 +25,14 @@ async def set_current_user(session: AsyncSession, user_id: uuid.UUID) -> None:
 
 async def set_current_tenant(session: AsyncSession, tenant_id: uuid.UUID) -> None:
     await session.execute(
+        text("SELECT set_config('app.tenant_id', :value, true)"),
+        {"value": str(tenant_id)},
+    )
+
+
+def set_current_tenant_sync(session: Session, tenant_id: uuid.UUID) -> None:
+    """Sync variant for the worker: set the transaction-local tenant GUC."""
+    session.execute(
         text("SELECT set_config('app.tenant_id', :value, true)"),
         {"value": str(tenant_id)},
     )
