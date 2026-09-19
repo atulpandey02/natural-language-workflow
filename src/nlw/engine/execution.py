@@ -115,7 +115,9 @@ def _resolve_connector(
             _set_connector_status(session, connector_id, "error")
             raise ConnectorConfigError(f"{connector_name}: secret required but no secret_ref")
         try:
-            secret = secret_store.resolve(secret_ref)
+            # Tenant-scoped: the authoritative worker tenant_id, never a
+            # user-provided field, namespaces the secret lookup.
+            secret = secret_store.resolve(tenant_id, secret_ref)
         except SecretError:
             _set_connector_status(session, connector_id, "error")
             raise

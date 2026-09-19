@@ -1,8 +1,8 @@
 """Connector-backed tool execution through the durable engine (M4).
 
-Proves ownership gating, worker-side health transitions, secret resolution, and
-that the secret never leaks. Seeds connectors as owner (bypassing RLS) and runs
-workflows as nlw_app (create) / nlw_worker (execute).
+Proves ownership gating, worker-side health transitions, tenant-scoped secret
+resolution, and that the secret never leaks. Seeds connectors as owner (bypassing
+RLS) and runs workflows as nlw_app (create) / nlw_worker (execute).
 """
 
 import json
@@ -19,13 +19,18 @@ from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.domain.workflow import WorkflowPlan
 from nlw.engine.execution import execute_advancement
 from nlw.engine.runs import create_run, create_workflow_with_version
-from nlw.secrets.store import EnvironmentSecretStore
+from nlw.secrets.store import EnvironmentSecretStore, env_key_for
 
 pytestmark = pytest.mark.integration
 
 SECRET = "topsecret-must-not-leak"
-STORE = EnvironmentSecretStore({"NLW_SECRET_STATIC_DEMO": SECRET})
 EMPTY_STORE = EnvironmentSecretStore({})
+
+
+def _store(
+    tenant_id: uuid.UUID, value: str = SECRET, ref: str = "STATIC_DEMO"
+) -> EnvironmentSecretStore:
+    return EnvironmentSecretStore({env_key_for(tenant_id, ref): value})
 
 
 def _seed_connector(
@@ -82,6 +87,12 @@ def _connector_status(owner_libpq: str, cid: uuid.UUID) -> str:
     return str(row[0])
 
 
+def _drain(sm: sessionmaker[Session], run_id: uuid.UUID, store: EnvironmentSecretStore) -> None:
+    for _ in range(6):
+        if execute_advancement(sm, run_id, store).result in ("completed", "failed", "noop"):
+            return
+
+
 def test_connector_backed_execution_and_health(pg_stack: SimpleNamespace) -> None:
     m = pg_stack.seed_member()
     cid = _seed_connector(pg_stack.owner_libpq, m.tenant_id)  # unchecked
@@ -102,9 +113,7 @@ def test_connector_backed_execution_and_health(pg_stack: SimpleNamespace) -> Non
     sm = _worker_sm(pg_stack)
 
     with structlog.testing.capture_logs() as logs:
-        for _ in range(4):
-            if execute_advancement(sm, run_id, STORE).result in ("completed", "failed", "noop"):
-                break
+        _drain(sm, run_id, _store(m.tenant_id))
 
     steps = _steps(pg_stack.owner_libpq, run_id)
     assert steps["a"][0] == "SUCCESS" and steps["a"][1] == {"echo": {"msg": "hi"}}
@@ -112,7 +121,7 @@ def test_connector_backed_execution_and_health(pg_stack: SimpleNamespace) -> Non
     assert _connector_status(pg_stack.owner_libpq, cid) == "active"  # unchecked -> active
 
     # Secret non-leak across every surface the worker touched.
-    blob = json.dumps(steps) + json.dumps(logs, default=str)
+    log_blob = json.dumps(logs, default=str)
     with psycopg.connect(pg_stack.owner_libpq) as c:
         conn_dump = str(c.execute("SELECT id, config, secret_ref FROM connectors").fetchall())
         plan_dump = str(c.execute("SELECT plan FROM workflow_versions").fetchall())
@@ -121,20 +130,16 @@ def test_connector_backed_execution_and_health(pg_stack: SimpleNamespace) -> Non
                 "SELECT input, output, error FROM step_runs WHERE run_id=%s", (run_id,)
             ).fetchall()
         )
-    assert SECRET not in blob
-    assert SECRET not in conn_dump
-    assert SECRET not in plan_dump
-    assert SECRET not in io_dump
+    for surface in (json.dumps(steps), log_blob, conn_dump, plan_dump, io_dump):
+        assert SECRET not in surface
 
 
 def test_missing_connector_selector_fails(pg_stack: SimpleNamespace) -> None:
     m = pg_stack.seed_member()
     _seed_connector(pg_stack.owner_libpq, m.tenant_id)
-    plan = WorkflowPlan.model_validate(
-        {"steps": [{"id": "a", "tool": "static.echo", "args": {}}]}  # no connector
-    )
+    plan = WorkflowPlan.model_validate({"steps": [{"id": "a", "tool": "static.echo", "args": {}}]})
     run_id = _seed_run(pg_stack, m.user_id, m.tenant_id, plan)
-    assert execute_advancement(_worker_sm(pg_stack), run_id, STORE).result == "failed"
+    assert execute_advancement(_worker_sm(pg_stack), run_id, _store(m.tenant_id)).result == "failed"
 
 
 def test_unowned_connector_fails(pg_stack: SimpleNamespace) -> None:
@@ -143,7 +148,7 @@ def test_unowned_connector_fails(pg_stack: SimpleNamespace) -> None:
         {"steps": [{"id": "a", "tool": "static.echo", "args": {}, "connector": "demo"}]}
     )
     run_id = _seed_run(pg_stack, m.user_id, m.tenant_id, plan)
-    assert execute_advancement(_worker_sm(pg_stack), run_id, STORE).result == "failed"
+    assert execute_advancement(_worker_sm(pg_stack), run_id, _store(m.tenant_id)).result == "failed"
 
 
 def test_disabled_connector_fails_and_stays_disabled(pg_stack: SimpleNamespace) -> None:
@@ -153,7 +158,7 @@ def test_disabled_connector_fails_and_stays_disabled(pg_stack: SimpleNamespace) 
         {"steps": [{"id": "a", "tool": "static.echo", "args": {}, "connector": "demo"}]}
     )
     run_id = _seed_run(pg_stack, m.user_id, m.tenant_id, plan)
-    assert execute_advancement(_worker_sm(pg_stack), run_id, STORE).result == "failed"
+    assert execute_advancement(_worker_sm(pg_stack), run_id, _store(m.tenant_id)).result == "failed"
     assert _connector_status(pg_stack.owner_libpq, cid) == "disabled"
 
 
@@ -163,14 +168,44 @@ def test_unresolved_secret_marks_error_then_recovers(pg_stack: SimpleNamespace) 
     plan = {"steps": [{"id": "a", "tool": "static.echo", "args": {}, "connector": "demo"}]}
     sm = _worker_sm(pg_stack)
 
-    # First run with an EMPTY store -> health fails -> status=error, step FAILED.
     run1 = _seed_run(pg_stack, m.user_id, m.tenant_id, WorkflowPlan.model_validate(plan))
     assert execute_advancement(sm, run1, EMPTY_STORE).result == "failed"
     assert _connector_status(pg_stack.owner_libpq, cid) == "error"
 
-    # error is recoverable: a later run with the secret available -> active + success.
     run2 = _seed_run(pg_stack, m.user_id, m.tenant_id, WorkflowPlan.model_validate(plan))
-    execute_advancement(sm, run2, STORE)
-    execute_advancement(sm, run2, STORE)  # completion
+    _drain(sm, run2, _store(m.tenant_id))
     assert _connector_status(pg_stack.owner_libpq, cid) == "active"
     assert _steps(pg_stack.owner_libpq, run2)["a"][0] == "SUCCESS"
+
+
+def test_cross_tenant_secret_ref_collision(pg_stack: SimpleNamespace) -> None:
+    """Same secret_ref alias in two tenants must not resolve the same value."""
+    a, b = pg_stack.seed_member(), pg_stack.seed_member()
+    _seed_connector(pg_stack.owner_libpq, a.tenant_id, secret_ref="SHARED_NAME")
+    _seed_connector(pg_stack.owner_libpq, b.tenant_id, secret_ref="SHARED_NAME")
+    plan = {"steps": [{"id": "a", "tool": "static.echo", "args": {}, "connector": "demo"}]}
+    sm = _worker_sm(pg_stack)
+
+    # Only tenant A's scoped secret exists.
+    store = EnvironmentSecretStore({env_key_for(a.tenant_id, "SHARED_NAME"): "A-only-secret"})
+
+    # B must FAIL and must never resolve A's value.
+    run_b = _seed_run(pg_stack, b.user_id, b.tenant_id, WorkflowPlan.model_validate(plan))
+    assert execute_advancement(sm, run_b, store).result == "failed"
+    assert "A-only-secret" not in str(_steps(pg_stack.owner_libpq, run_b))
+
+    # A succeeds with its own scoped secret.
+    run_a = _seed_run(pg_stack, a.user_id, a.tenant_id, WorkflowPlan.model_validate(plan))
+    _drain(sm, run_a, store)
+    assert _steps(pg_stack.owner_libpq, run_a)["a"][0] == "SUCCESS"
+
+    # Give B its own independent scoped secret -> B now succeeds.
+    store2 = EnvironmentSecretStore(
+        {
+            env_key_for(a.tenant_id, "SHARED_NAME"): "A-only-secret",
+            env_key_for(b.tenant_id, "SHARED_NAME"): "B-own-secret",
+        }
+    )
+    run_b2 = _seed_run(pg_stack, b.user_id, b.tenant_id, WorkflowPlan.model_validate(plan))
+    _drain(sm, run_b2, store2)
+    assert _steps(pg_stack.owner_libpq, run_b2)["a"][0] == "SUCCESS"

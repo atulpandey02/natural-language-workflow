@@ -13,12 +13,19 @@ responses. The store must be swappable (dev env vars now; encrypted/Vault later)
 
 - **Only a `secret_ref` is persisted** on the connector row — a canonical name
   matching `^[A-Z][A-Z0-9_]{0,63}$`. Never a secret value.
-- **`SecretStore.resolve(secret_ref) -> str`** resolves refs to values **only in
-  the worker, at execution time**. `EnvironmentSecretStore` maps
-  `STATIC_DEMO → env NLW_SECRET_STATIC_DEMO` for dev/self-hosted.
+- **Secret references are tenant-scoped namespaces.** A `secret_ref` names a
+  secret *within one tenant's namespace*; **identical aliases across tenants
+  never identify the same credential.** `SecretStore.resolve(tenant_id,
+  secret_ref) -> str` resolves refs **only in the worker, at execution time**,
+  using the **authoritative tenant from the M3 execution context** (never a
+  tenant id from workflow args, connector config, or any user-provided message).
+  `EnvironmentSecretStore` maps `(tenant, ref) → env
+  NLW_SECRET_<TENANT_UUID_HEX>_<SECRET_REF>` for dev/self-hosted. RLS namespaces
+  the connector row; this namespaces the external secret backend too.
 - **Worker-only secret environment**: `NLW_SECRET_*` are injected into the
-  `worker` service only — never into `api`, `scheduler`, or the shared Compose
-  env. The API cannot resolve secrets and never calls `resolve`.
+  `worker` service only (via a git-ignored `env_file`) — never into `api`,
+  `scheduler`, or the shared Compose env. The API cannot resolve secrets and
+  never calls `resolve`.
 - **Non-leak guarantees**: the resolved value is passed only to a tool's
   `execute` via `ConnectorContext` (whose `secret` field is repr-suppressed),
   and is never persisted, logged, returned, or placed in error strings. A

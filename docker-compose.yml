@@ -70,13 +70,15 @@ services:
     build: .
     command: ["dramatiq", "nlw.worker.actors", "--processes", "1", "--threads", "4"]
     # The worker connects as nlw_worker (execution-only; may call the run->tenant
-    # resolver). It never connects as nlw_app. Connector secrets (NLW_SECRET_*)
-    # are injected here ONLY — never in api/scheduler/shared env — and come from
-    # the host environment (never committed).
+    # resolver). It never connects as nlw_app. Connector secrets are injected
+    # here ONLY (never in api/scheduler/shared env) via a git-ignored env_file,
+    # as tenant-scoped names: NLW_SECRET_<TENANT_UUID_HEX>_<SECRET_REF>=value.
+    env_file:
+      - path: docker/worker.secrets.env
+        required: false
     environment:
       <<: *app-env
       DATABASE_URL: postgresql+psycopg://nlw_worker:nlw_worker@postgres:5432/nlw
-      NLW_SECRET_STATIC_DEMO: ${NLW_SECRET_STATIC_DEMO:-}
     depends_on:
       postgres:
         condition: service_healthy
