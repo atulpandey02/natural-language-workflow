@@ -101,3 +101,37 @@ class ApprovalDecisionOut(BaseModel):
     id: uuid.UUID
     status: str
     resumed: bool
+
+
+class ScheduleCreate(BaseModel):
+    workflow_id: uuid.UUID
+    timezone: str
+    frequency: str  # hourly | daily | weekly
+    minute: int
+    hour: int | None = None
+    day_of_week: int | None = None
+
+
+class ScheduleUpdate(BaseModel):
+    # Recurrence fields are optional; any provided ones are re-validated and
+    # next_run_at is recomputed. `enabled` toggles the schedule.
+    timezone: str | None = None
+    frequency: str | None = None
+    minute: int | None = None
+    hour: int | None = None
+    day_of_week: int | None = None
+    enabled: bool | None = None
+
+
+class ScheduleOut(BaseModel):
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    workflow_version_id: uuid.UUID
+    timezone: str
+    frequency: str
+    minute: int
+    hour: int | None
+    day_of_week: int | None
+    enabled: bool
+    next_run_at: str
+    last_scheduled_for: str | None

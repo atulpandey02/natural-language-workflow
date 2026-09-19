@@ -7,11 +7,30 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M7 — Action connectors + approvals + side-effect safety |
-| Current milestone | **M7 — Webhook + Slack action connectors + approval execution** (`feat/action-connectors-approvals`, in review) |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 |
-| Next milestone | M8 — Scheduler (explicit timezone, single-firing) (`feat/scheduler`) |
+| Current phase | M8 — Scheduling + reconciliation + unattended recovery |
+| Current milestone | **M8 — Durable scheduler + reconciliation** (`feat/scheduling-reconciliation`, in review) |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 |
+| Next milestone | M9 — Hardening & expansion (tbd) |
 | Release status | pre-alpha, nothing deployed |
+
+M8 makes the scheduler a durable, restart-safe system of record for recurrence.
+Structured schedules (IANA timezone + hourly/daily/weekly, no cron) pin an
+immutable `workflow_version`; a due-scan claims schedules with `FOR UPDATE SKIP
+LOCKED` and creates **exactly one durable `workflow_run` row per occurrence
+across scheduler concurrency and restart** (via `UNIQUE(schedule_id,
+scheduled_for)`), advances `next_run_at` in the same transaction, and enqueues
+after commit (queue delivery + execution stay idempotent/at-least-once, not
+exactly-once). DST is handled by wall-clock `zoneinfo` (spring-forward shifts by
+the gap; fall-back fires once, earlier); catch-up is bounded (latest missed
+within 1h). A reconciler loop reconstructs recovery eligibility **entirely from
+PostgreSQL** (Redis is only transport for the re-enqueued run_id) and re-enqueues
+stuck runs (orphan PENDING, stale RUNNING/expired lease, ordinary stale RUNNING,
+decided-but-parked WAITING_APPROVAL) — writing nothing, so the worker's M7
+lease/retry/approval logic stays authoritative. A
+least-privilege `nlw_scheduler` role (LOGIN, NOSUPERUSER, **NOBYPASSRLS**) reads
+only schedules/runs/actions/approvals and never sees connectors, secrets, or step
+I/O. Schedule mutation is admin/owner (role + RLS); `created_by` is server-owned.
+See ADR-015.
 
 M7 adds the first real external ACTION tools — `webhook.send` and
 `slack.send_message` — with human approval and safe, bounded, idempotent
@@ -98,7 +117,7 @@ the components they protect — not deferred to the end.
 | M5 | Postgres source connector (read-only) + SQL safety | `feat/postgres-connector-sql-safety` | ADR-009, ADR-012 |
 | M6 | Planner (LLM→Pydantic) + feasibility engine + LLMProvider (BYOK) | `feat/planner-feasibility` | ADR-004, ADR-005 |
 | M7 | Webhook + Slack action connectors + approvals | `feat/action-connectors-approvals` | ADR-013, ADR-014 |
-| M8 | Scheduler (explicit timezone, single-firing) | `feat/scheduler` | — |
+| M8 | Scheduler (explicit timezone, single-firing) + reconciliation | `feat/scheduling-reconciliation` | ADR-015 |
 | M9+ | Hardening & expansion (ClickHouse, Gmail, observability, rate limits) | tbd | tbd |
 | M10 | Frontend (Vite + React) | `feat/frontend` | — |
 | M11 | Staging + CD + load/failure testing | tbd | ADR-008 |
@@ -132,6 +151,7 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-012 — PostgreSQL connector (read-only query tool)](adr/ADR-012-postgres-connector.md)
 - [ADR-013 — Action side-effect execution, approvals & idempotency](adr/ADR-013-action-side-effect-safety.md)
 - [ADR-014 — Outbound HTTP / SSRF safety](adr/ADR-014-outbound-http-ssrf.md)
+- [ADR-015 — Durable scheduling & unattended reconciliation](adr/ADR-015-scheduling-reconciliation.md)
 
 Planned: ADR-008 Deployment strategy.
 

@@ -101,7 +101,17 @@ services:
   scheduler:
     build: .
     command: ["python", "-m", "nlw.scheduler"]
-    environment: *app-env
+    # Connects as the least-privilege nlw_scheduler role. It receives NO
+    # NLW_SECRET_* (worker-only), NO NLW_LLM_API_KEY (api-only), and NO connector
+    # credentials — it only creates + enqueues runs.
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgresql+psycopg://nlw_scheduler:nlw_scheduler@postgres:5432/nlw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f nlw.scheduler > /dev/null || exit 1"]
       interval: 10s

@@ -17,6 +17,7 @@ from nlw.db.models import (
     Connector,
     Membership,
     PlanProposal,
+    Schedule,
     User,
     Workspace,
 )
@@ -245,3 +246,30 @@ class ApprovalRepository:
         if fresh is not None and fresh.status == target:
             return "idempotent", fresh.run_id
         return "conflict", appr.run_id
+
+
+class ScheduleRepository:
+    """Tenant-scoped schedule access for the API (nlw_app; RLS admin-gated writes)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(self, schedule: "Schedule") -> "Schedule":
+        self.session.add(schedule)
+        await self.session.flush()
+        return schedule
+
+    async def get(self, schedule_id: uuid.UUID, tenant_id: uuid.UUID) -> "Schedule | None":
+        return (
+            await self.session.execute(
+                select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id)
+            )
+        ).scalar_one_or_none()
+
+    async def list_for_tenant(self, tenant_id: uuid.UUID) -> "list[Schedule]":
+        rows = await self.session.execute(
+            select(Schedule)
+            .where(Schedule.tenant_id == tenant_id)
+            .order_by(Schedule.created_at.desc())
+        )
+        return list(rows.scalars().all())

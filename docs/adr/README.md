@@ -29,6 +29,7 @@ decision, numbered and never deleted (supersede instead of removing).
 | [012](ADR-012-postgres-connector.md) | PostgreSQL connector (read-only query tool) | Accepted |
 | [013](ADR-013-action-side-effect-safety.md) | Action side-effect execution, approvals & idempotency | Accepted |
 | [014](ADR-014-outbound-http-ssrf.md) | Outbound HTTP / SSRF safety | Accepted |
+| [015](ADR-015-scheduling-reconciliation.md) | Durable scheduling & unattended reconciliation | Accepted |
 
 ## Template
 

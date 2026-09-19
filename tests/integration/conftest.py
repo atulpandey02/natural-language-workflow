@@ -40,6 +40,9 @@ def _bootstrap_roles(owner_libpq: str, db: str) -> None:
             "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_worker') THEN "
             "CREATE ROLE nlw_worker LOGIN PASSWORD 'nlw_worker' "
             "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; "
+            "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_scheduler') THEN "
+            "CREATE ROLE nlw_scheduler LOGIN PASSWORD 'nlw_scheduler' "
+            "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; "
             "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_rls_bypass') THEN "
             "CREATE ROLE nlw_rls_bypass NOLOGIN NOSUPERUSER BYPASSRLS "
             "NOCREATEDB NOCREATEROLE; END IF; "
@@ -47,7 +50,7 @@ def _bootstrap_roles(owner_libpq: str, db: str) -> None:
             "CREATE ROLE nlw_workspace_bootstrap NOLOGIN NOSUPERUSER BYPASSRLS "
             "NOCREATEDB NOCREATEROLE; END IF; END $$;"
         )
-        for role in ("nlw_app", "nlw_worker"):
+        for role in ("nlw_app", "nlw_worker", "nlw_scheduler"):
             conn.execute(f"GRANT CONNECT ON DATABASE {db} TO {role}")
             conn.execute(f"GRANT USAGE ON SCHEMA public TO {role}")
         conn.execute("GRANT nlw_rls_bypass TO CURRENT_USER")
@@ -63,6 +66,7 @@ def pg_stack() -> Iterator[SimpleNamespace]:
         owner_sa = _sqlalchemy(owner_user, owner_password, host, port, db)
         app_sa = _sqlalchemy("nlw_app", "nlw_app", host, port, db)
         worker_sa = _sqlalchemy("nlw_worker", "nlw_worker", host, port, db)
+        scheduler_sa = _sqlalchemy("nlw_scheduler", "nlw_scheduler", host, port, db)
 
         _bootstrap_roles(owner_libpq, db)
 
@@ -107,9 +111,11 @@ def pg_stack() -> Iterator[SimpleNamespace]:
         yield SimpleNamespace(
             settings=_settings(app_sa),
             worker_settings=_settings(worker_sa),
+            scheduler_settings=_settings(scheduler_sa),
             owner_libpq=owner_libpq,
             app_libpq=_libpq("nlw_app", "nlw_app", host, port, db),
             worker_libpq=_libpq("nlw_worker", "nlw_worker", host, port, db),
+            scheduler_libpq=_libpq("nlw_scheduler", "nlw_scheduler", host, port, db),
             seed_user=seed_user,
             seed_member=seed_member,
         )

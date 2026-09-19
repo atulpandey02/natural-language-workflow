@@ -79,7 +79,13 @@ warn_unused_ignores = true
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["nlw.domain.*", "nlw.feasibility.*", "nlw.engine.*", "nlw.planner.*"]
+module = [
+    "nlw.domain.*",
+    "nlw.feasibility.*",
+    "nlw.engine.*",
+    "nlw.planner.*",
+    "nlw.scheduler.*",
+]
 strict = true
 
 # ---------------------------------------------------------------------------
