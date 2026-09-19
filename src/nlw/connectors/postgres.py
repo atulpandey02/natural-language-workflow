@@ -17,7 +17,15 @@ from decimal import Decimal
 from typing import Any, NoReturn
 
 import psycopg
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from nlw.connectors.base import (
     ConnectorConfigError,
@@ -46,6 +54,48 @@ _LOCK_TIMEOUT_CAP_MS = 30_000
 _CONNECT_TIMEOUT_CAP_S = 15
 _MAX_ROWS_CAP = 10_000
 _MAX_RESULT_BYTES_CAP = 10_000_000
+
+# --- schema_hint bounds (M6): operator-declared, non-secret planner context ---
+_HINT_IDENT_RE = r"^[A-Za-z_][A-Za-z0-9_]*$"
+_HINT_IDENT_MAX = 64
+_HINT_TYPE_MAX = 32
+_HINT_MAX_TABLES = 50
+_HINT_MAX_COLUMNS_PER_TABLE = 100
+_HINT_MAX_SERIALIZED_CHARS = 20_000
+# Structural type tokens only (no free-form/instruction text).
+_HINT_ALLOWED_TYPES = frozenset(
+    {
+        "smallint",
+        "integer",
+        "int",
+        "bigint",
+        "serial",
+        "bigserial",
+        "numeric",
+        "decimal",
+        "real",
+        "double precision",
+        "money",
+        "boolean",
+        "bool",
+        "text",
+        "varchar",
+        "char",
+        "citext",
+        "uuid",
+        "date",
+        "time",
+        "timestamp",
+        "timestamptz",
+        "interval",
+        "json",
+        "jsonb",
+        "bytea",
+        "inet",
+        "cidr",
+        "array",
+    }
+)
 
 
 class SecretFormatError(SecretError):
@@ -76,6 +126,41 @@ class ResultUnsupportedTypeError(ToolExecutionError):
     """A column value has an unsupported type for JSON normalization."""
 
 
+class SchemaHintColumn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=_HINT_IDENT_MAX, pattern=_HINT_IDENT_RE)
+    type: str = Field(min_length=1, max_length=_HINT_TYPE_MAX)
+
+    @field_validator("type")
+    @classmethod
+    def _known_type(cls, v: str) -> str:
+        token = v.strip().lower()
+        if token not in _HINT_ALLOWED_TYPES:
+            raise ValueError(f"unsupported schema_hint type: {v}")
+        return token
+
+
+class SchemaHintTable(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    schema_name: str = Field(
+        alias="schema", min_length=1, max_length=_HINT_IDENT_MAX, pattern=_HINT_IDENT_RE
+    )
+    table: str = Field(min_length=1, max_length=_HINT_IDENT_MAX, pattern=_HINT_IDENT_RE)
+    columns: list[SchemaHintColumn] = Field(
+        default_factory=list, max_length=_HINT_MAX_COLUMNS_PER_TABLE
+    )
+
+
+class PostgresSchemaHint(BaseModel):
+    """Structural table/column/type metadata only (no descriptions/instructions)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tables: list[SchemaHintTable] = Field(default_factory=list, max_length=_HINT_MAX_TABLES)
+
+
 class PostgresConnectorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -90,6 +175,33 @@ class PostgresConnectorConfig(BaseModel):
     connect_timeout_s: int = 5
     max_rows: int = 1000
     max_result_bytes: int = 1_000_000
+    # Optional operator-declared planner context (non-secret). Not authoritative
+    # proof that a column currently exists; runtime SQL is still validated by M5.
+    schema_hint: PostgresSchemaHint | None = None
+
+    @model_validator(mode="after")
+    def _validate_schema_hint(self) -> "PostgresConnectorConfig":
+        hint = self.schema_hint
+        if hint is None:
+            return self
+        if len(hint.model_dump_json(by_alias=True)) > _HINT_MAX_SERIALIZED_CHARS:
+            raise ValueError("schema_hint exceeds maximum serialized size")
+        allowed_schema_set = {s.lower() for s in self.allowed_schemas}
+        allowed_table_set = (
+            {t.lower() for t in self.allowed_tables} if self.allowed_tables is not None else None
+        )
+        for t in hint.tables:
+            schema = t.schema_name.lower()
+            if schema not in allowed_schema_set:
+                raise ValueError(f"schema_hint schema '{t.schema_name}' not in allowed_schemas")
+            if (
+                allowed_table_set is not None
+                and f"{schema}.{t.table.lower()}" not in allowed_table_set
+            ):
+                raise ValueError(
+                    f"schema_hint table '{t.schema_name}.{t.table}' not in allowed_tables"
+                )
+        return self
 
     @field_validator("sslmode")
     @classmethod

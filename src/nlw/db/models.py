@@ -187,3 +187,37 @@ class Connector(TimestampMixin, Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     secret_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="unchecked")
+
+
+# --- Planner proposals (M6) ---
+# Immutable audit snapshot of a planning request + its deterministic verdict.
+# The raw user prompt and raw provider response are NEVER stored: only a length,
+# the parsed/validated proposed plan, the normalized plan, and the feasibility
+# report. The only post-insert mutation is linking a materialized version.
+
+
+class PlanProposal(TimestampMixin, Base):
+    __tablename__ = "plan_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('PASS','REJECT','NEEDS_CLARIFICATION','NEEDS_APPROVAL')",
+            name="ck_plan_proposal_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # No raw prompt: only its length (bounded by the platform cap).
+    prompt_len: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    workflow_name: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    # Parsed + schema-validated + feasibility-checked plan (not raw provider bytes).
+    proposed_plan: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Canonical plan (e.g. re-rendered SQL); present only when status != REJECT.
+    normalized_plan: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    feasibility: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    clarification_questions: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)

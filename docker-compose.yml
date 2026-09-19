@@ -57,7 +57,14 @@ services:
 
   api:
     build: .
-    environment: *app-env
+    # The planner runs in the API only. The platform LLM key is injected HERE
+    # exclusively — never in the shared app-env block, so worker/scheduler never
+    # receive it. Defaults keep the keyless stub provider for local dev.
+    environment:
+      <<: *app-env
+      NLW_LLM_PROVIDER: ${NLW_LLM_PROVIDER:-stub}
+      NLW_LLM_MODEL: ${NLW_LLM_MODEL:-claude-sonnet-5}
+      NLW_LLM_API_KEY: ${NLW_LLM_API_KEY:-}
     ports:
       - "8000:8000"
     depends_on:

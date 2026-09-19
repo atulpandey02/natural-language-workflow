@@ -7,11 +7,28 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M5 — PostgreSQL connector + SQL safety |
-| Current milestone | **M5 — PostgreSQL connector + SQL safety** (`feat/postgres-connector-sql-safety`, in review) |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 |
-| Next milestone | M6 — Planner (LLM→Pydantic) + feasibility engine + LLMProvider (BYOK) (`feat/workflow-planner`) |
+| Current phase | M6 — NL planner + deterministic feasibility |
+| Current milestone | **M6 — Planner (LLM→Pydantic) + feasibility engine + LLMProvider (BYOK)** (`feat/planner-feasibility`, in review) |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 |
+| Next milestone | M7 — Webhook → Slack action connectors + approvals (`feat/action-connectors`) |
 | Release status | pre-alpha, nothing deployed |
+
+M6 adds the natural-language planner and the deterministic feasibility engine.
+An **async `LLMProvider`** (BYOK-ready; official Anthropic SDK as the reference,
+a keyless stub for CI) turns a prompt into a strict `PlannerOutput`, which the
+pure `nlw.feasibility.engine` judges — assigning `PASS`/`REJECT`/
+`NEEDS_CLARIFICATION`/`NEEDS_APPROVAL` (precedence reject>clarify>approve>pass).
+The LLM proposes; **code decides** — a parsed plan is not executable. Feasibility
+checks tool availability (tenant-scoped registry projection), connector
+ownership/type/status (RLS inventory; `error` recoverable, `disabled` rejects),
+argument models, the M5 SQL validator (single source of truth), and the DAG
+(Kahn). `POST /plans` runs planning API-side and persists an immutable
+`plan_proposals` audit row that stores **no raw prompt** (only `prompt_len`) and
+**no raw provider response**. `POST /plans/{id}/materialize` re-earns PASS against
+the current capability view (`FOR UPDATE`, idempotent) before creating one
+`workflow_version`. The platform LLM key is API-process-only (never worker/
+scheduler, never in model context); safe planner schema context is an
+operator-declared, non-secret `schema_hint`. See ADR-004 and ADR-005.
 
 M5 ships the first **real** connector on the M4 capability layer: a `postgres`
 connector type and a single read-only `postgres.query` tool. Read-only is
@@ -63,7 +80,7 @@ the components they protect — not deferred to the end.
 | M3 | Durable workflow engine with a fake tool (state, checkpoint, resume, idempotency) | `feat/workflow-engine` | ADR-004 |
 | M4 | Tool registry + connector framework + SecretStore | `feat/tool-registry` | ADR-006 |
 | M5 | Postgres source connector (read-only) + SQL safety | `feat/postgres-connector-sql-safety` | ADR-009, ADR-012 |
-| M6 | Planner (LLM→Pydantic) + feasibility engine + LLMProvider (BYOK) | `feat/workflow-planner` | ADR-005 |
+| M6 | Planner (LLM→Pydantic) + feasibility engine + LLMProvider (BYOK) | `feat/planner-feasibility` | ADR-004, ADR-005 |
 | M7 | Webhook → Slack action connectors + approvals | `feat/action-connectors` | (as needed) |
 | M8 | Scheduler (explicit timezone, single-firing) | `feat/scheduler` | — |
 | M9+ | Hardening & expansion (ClickHouse, Gmail, observability, rate limits) | tbd | tbd |
@@ -89,6 +106,8 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-001 — PostgreSQL as the system of record](adr/ADR-001-postgres-state-store.md)
 - [ADR-002 — Redis + Dramatiq (transport only)](adr/ADR-002-redis-dramatiq-queue.md)
 - [ADR-003 — Multi-tenant isolation strategy (RLS + restricted role)](adr/ADR-003-multi-tenant-isolation.md)
+- [ADR-004 — Planner / feasibility separation (LLM proposes, code decides)](adr/ADR-004-planner-feasibility-separation.md)
+- [ADR-005 — LLMProvider abstraction & BYOK](adr/ADR-005-llm-provider-byok.md)
 - [ADR-006 — Connector/Tool separation + Tool Registry](adr/ADR-006-connector-tool-separation.md)
 - [ADR-007 — Authentication provider (Supabase, identity only)](adr/ADR-007-auth-provider.md)
 - [ADR-009 — Deterministic SQL safety for read-only database access](adr/ADR-009-sql-safety.md)
@@ -96,8 +115,7 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-011 — SecretStore abstraction & secret references](adr/ADR-011-secret-store.md)
 - [ADR-012 — PostgreSQL connector (read-only query tool)](adr/ADR-012-postgres-connector.md)
 
-Planned: ADR-004 Planner/executor separation · ADR-005 BYOK provider model ·
-ADR-008 Deployment strategy.
+Planned: ADR-008 Deployment strategy.
 
 ## Runbooks
 

@@ -46,6 +46,16 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   SELECT-only external role). Results are row- and byte-capped; the JSON credential is a
   repr-safe `SecretStr`; all driver errors are sanitized so credentials/raw text never
   leak. The LLM does not generate SQL.
+- **Planner + feasibility** — [ADR-004](../adr/ADR-004-planner-feasibility-separation.md) +
+  [ADR-005](../adr/ADR-005-llm-provider-byok.md): an async `LLMProvider` (BYOK; Anthropic
+  reference, keyless stub for CI) turns a prompt into a strict `PlannerOutput`; the pure
+  `nlw.feasibility.engine` assigns `PASS`/`REJECT`/`NEEDS_CLARIFICATION`/`NEEDS_APPROVAL`
+  from tool availability, connector ownership/type/status, argument models, the M5 SQL
+  validator, the DAG (Kahn), and platform limits. Planning runs API-side and persists an
+  immutable `plan_proposals` audit row (no raw prompt: only `prompt_len`; no raw provider
+  response). `POST /plans/{id}/materialize` re-earns PASS against the current capability
+  view (`FOR UPDATE`, idempotent) before creating a `workflow_version`. The platform LLM
+  key lives in the API process only (never worker/scheduler, never in model context).
 - The LLM proposes; deterministic code enforces every invariant
   (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling).
 
