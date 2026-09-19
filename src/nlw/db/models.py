@@ -164,3 +164,26 @@ class StepRun(TimestampMixin, Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --- Connectors (M4) ---
+# Tenant-owned integration instances. config is NON-secret; secret_ref is a
+# pointer into the SecretStore (never a secret value).
+
+
+class Connector(TimestampMixin, Base):
+    __tablename__ = "connectors"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_connector_tenant_name"),
+        CheckConstraint(
+            "status in ('unchecked','active','error','disabled')", name="ck_connector_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    type: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    secret_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="unchecked")

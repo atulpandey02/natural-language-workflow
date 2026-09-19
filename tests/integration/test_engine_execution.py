@@ -115,12 +115,13 @@ def test_commit_before_enqueue_crash_resume(
     counter: Counter[str] = Counter()
     lock = threading.Lock()
 
-    def counting(name: str, args: dict[str, object]) -> dict[str, object]:
+    def counting(spec: object, args: object, ctx: object) -> dict[str, object]:
+        dumped = args.model_dump()  # type: ignore[attr-defined]
         with lock:
-            counter[str(args.get("step", name))] += 1
-        return {"echo": args}
+            counter[str(dumped.get("step", "?"))] += 1
+        return {"echo": dumped}
 
-    monkeypatch.setattr(execmod, "run_tool", counting)
+    monkeypatch.setattr(execmod, "execute_tool", counting)
 
     m = pg_stack.seed_member()
     run_id = _seed(sms.app, m.user_id, m.tenant_id, _plan("a", "b", "c"))
@@ -159,12 +160,13 @@ def test_concurrent_advancement_executes_each_step_once(
     counter: Counter[str] = Counter()
     lock = threading.Lock()
 
-    def counting(name: str, args: dict[str, object]) -> dict[str, object]:
+    def counting(spec: object, args: object, ctx: object) -> dict[str, object]:
+        dumped = args.model_dump()  # type: ignore[attr-defined]
         with lock:
-            counter[str(args.get("step", name))] += 1
-        return {"echo": args}
+            counter[str(dumped.get("step", "?"))] += 1
+        return {"echo": dumped}
 
-    monkeypatch.setattr(execmod, "run_tool", counting)
+    monkeypatch.setattr(execmod, "execute_tool", counting)
 
     m = pg_stack.seed_member()
     run_id = _seed(sms.app, m.user_id, m.tenant_id, _plan("a"))

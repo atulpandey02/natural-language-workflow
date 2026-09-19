@@ -7,11 +7,18 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M3 — Durable workflow engine |
-| Current milestone | **M3 — Durable workflow engine** (`feat/durable-workflow-engine`, in review) |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b (M1, M2 complete) |
-| Next milestone | M4 — Tool registry + connector framework + SecretStore (`feat/tool-registry`) |
+| Current phase | M4 — Tool registry + connectors + secrets |
+| Current milestone | **M4 — Tool registry + connectors + SecretStore** (`feat/tool-registry-connectors`, in review) |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 |
+| Next milestone | M5 — PostgreSQL source connector + SQL safety (`feat/postgres-connector`) |
 | Release status | pre-alpha, nothing deployed |
+
+M4 adds the deterministic capability layer: a static **Tool Registry** (only
+registered tools run), tenant-owned **connectors** (RLS role-specific), a
+**SecretStore** (secret refs in DB; values resolved worker-side only, never in
+the LLM path), and tenant-aware tool availability. The minimal `static`
+connector + `static.echo`/`static.secret_check` prove the architecture end-to-end
+through the M3 engine. See ADR-006 and ADR-011.
 
 M3 makes execution durable: `advance_run(run_id)` (no state in the message) runs
 one step per advancement inside a `FOR UPDATE`-locked transaction, commits, then
@@ -67,11 +74,13 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-001 — PostgreSQL as the system of record](adr/ADR-001-postgres-state-store.md)
 - [ADR-002 — Redis + Dramatiq (transport only)](adr/ADR-002-redis-dramatiq-queue.md)
 - [ADR-003 — Multi-tenant isolation strategy (RLS + restricted role)](adr/ADR-003-multi-tenant-isolation.md)
+- [ADR-006 — Connector/Tool separation + Tool Registry](adr/ADR-006-connector-tool-separation.md)
 - [ADR-007 — Authentication provider (Supabase, identity only)](adr/ADR-007-auth-provider.md)
 - [ADR-010 — Durable workflow execution (checkpointing, idempotency, concurrency)](adr/ADR-010-durable-execution.md)
+- [ADR-011 — SecretStore abstraction & secret references](adr/ADR-011-secret-store.md)
 
 Planned: ADR-004 Planner/executor separation · ADR-005 BYOK provider model ·
-ADR-006 Connector/tool separation · ADR-008 Deployment strategy · ADR-009 SQL safety.
+ADR-008 Deployment strategy · ADR-009 SQL safety.
 
 ## Runbooks
 

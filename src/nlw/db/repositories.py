@@ -6,12 +6,13 @@ authorization is membership-based at the application layer.
 """
 
 import uuid
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nlw.db.models import Membership, User, Workspace
+from nlw.db.models import Connector, Membership, User, Workspace
 
 
 class UserRepository:
@@ -68,3 +69,43 @@ class MembershipRepository:
                 )
             )
         ).scalar_one_or_none()
+
+
+class ConnectorRepository:
+    """Tenant-scoped connector access for the API (nlw_app: SELECT + INSERT)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(
+        self,
+        tenant_id: uuid.UUID,
+        type_: str,
+        name: str,
+        config: dict[str, Any],
+        secret_ref: str | None,
+    ) -> Connector:
+        connector = Connector(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            type=type_,
+            name=name,
+            config=config,
+            secret_ref=secret_ref,
+            status="unchecked",
+        )
+        self.session.add(connector)
+        await self.session.flush()
+        return connector
+
+    async def list_for_tenant(self, tenant_id: uuid.UUID) -> list[Connector]:
+        rows = await self.session.execute(
+            select(Connector).where(Connector.tenant_id == tenant_id).order_by(Connector.created_at)
+        )
+        return list(rows.scalars().all())
+
+    async def owned_types(self, tenant_id: uuid.UUID) -> set[str]:
+        rows = await self.session.execute(
+            select(Connector.type).where(Connector.tenant_id == tenant_id).distinct()
+        )
+        return set(rows.scalars().all())
