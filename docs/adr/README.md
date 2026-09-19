@@ -21,8 +21,10 @@ decision, numbered and never deleted (supersede instead of removing).
 | [003](ADR-003-multi-tenant-isolation.md) | Multi-tenant isolation strategy (RLS + restricted role) | Accepted |
 | [006](ADR-006-connector-tool-separation.md) | Connector/Tool separation + deterministic Tool Registry | Accepted |
 | [007](ADR-007-auth-provider.md) | Authentication provider (Supabase, identity only) | Accepted |
+| [009](ADR-009-sql-safety.md) | Deterministic SQL safety for read-only database access | Accepted |
 | [010](ADR-010-durable-execution.md) | Durable workflow execution: checkpointing, idempotency, concurrency | Accepted |
 | [011](ADR-011-secret-store.md) | SecretStore abstraction & secret references | Accepted |
+| [012](ADR-012-postgres-connector.md) | PostgreSQL connector (read-only query tool) | Accepted |
 
 ## Template
 

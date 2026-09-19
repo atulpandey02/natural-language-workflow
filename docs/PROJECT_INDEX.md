@@ -7,11 +7,26 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M4 — Tool registry + connectors + secrets |
-| Current milestone | **M4 — Tool registry + connectors + SecretStore** (`feat/tool-registry-connectors`, in review) |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 |
-| Next milestone | M5 — PostgreSQL source connector + SQL safety (`feat/postgres-connector`) |
+| Current phase | M5 — PostgreSQL connector + SQL safety |
+| Current milestone | **M5 — PostgreSQL connector + SQL safety** (`feat/postgres-connector-sql-safety`, in review) |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 |
+| Next milestone | M6 — Planner (LLM→Pydantic) + feasibility engine + LLMProvider (BYOK) (`feat/workflow-planner`) |
 | Release status | pre-alpha, nothing deployed |
+
+M5 ships the first **real** connector on the M4 capability layer: a `postgres`
+connector type and a single read-only `postgres.query` tool. Read-only is
+guaranteed by three independent controls — deterministic sqlglot validation
+against a schema/table allowlist (layer 1), a `default_transaction_read_only`
+session with statement/lock/idle timeouts (layer 2), and a SELECT-only external
+role (layer 3). Results are row-capped (server-side, independent of any user
+`LIMIT`) and byte-capped; column values use an explicit JSON type contract
+(`bytea`/unknown rejected, not coerced). The JSON `{username,password}` credential
+is a repr-safe `SecretStr` resolved worker-side via the SecretStore; all psycopg
+errors are sanitized to typed errors so raw driver text and credentials never
+reach logs, `step_runs.error`, or output. Failures are classified as retryable
+(unavailable → Dramatiq retry) vs deterministic (→ step FAILED); an auth failure
+flips the connector to `error`. The LLM does **not** generate SQL in M5. See
+ADR-009 and ADR-012.
 
 M4 adds the deterministic capability layer: a static **Tool Registry** (only
 registered tools run), tenant-owned **connectors** (RLS role-specific), a
@@ -47,7 +62,7 @@ the components they protect — not deferred to the end.
 | M2 | Auth + tenant model + isolation (RLS, tenant-scoped repos) | `feat/tenant-model` | ADR-003, ADR-007 |
 | M3 | Durable workflow engine with a fake tool (state, checkpoint, resume, idempotency) | `feat/workflow-engine` | ADR-004 |
 | M4 | Tool registry + connector framework + SecretStore | `feat/tool-registry` | ADR-006 |
-| M5 | Postgres source connector (read-only) + SQL safety | `feat/postgres-connector` | ADR-009 |
+| M5 | Postgres source connector (read-only) + SQL safety | `feat/postgres-connector-sql-safety` | ADR-009, ADR-012 |
 | M6 | Planner (LLM→Pydantic) + feasibility engine + LLMProvider (BYOK) | `feat/workflow-planner` | ADR-005 |
 | M7 | Webhook → Slack action connectors + approvals | `feat/action-connectors` | (as needed) |
 | M8 | Scheduler (explicit timezone, single-firing) | `feat/scheduler` | — |
@@ -76,11 +91,13 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-003 — Multi-tenant isolation strategy (RLS + restricted role)](adr/ADR-003-multi-tenant-isolation.md)
 - [ADR-006 — Connector/Tool separation + Tool Registry](adr/ADR-006-connector-tool-separation.md)
 - [ADR-007 — Authentication provider (Supabase, identity only)](adr/ADR-007-auth-provider.md)
+- [ADR-009 — Deterministic SQL safety for read-only database access](adr/ADR-009-sql-safety.md)
 - [ADR-010 — Durable workflow execution (checkpointing, idempotency, concurrency)](adr/ADR-010-durable-execution.md)
 - [ADR-011 — SecretStore abstraction & secret references](adr/ADR-011-secret-store.md)
+- [ADR-012 — PostgreSQL connector (read-only query tool)](adr/ADR-012-postgres-connector.md)
 
 Planned: ADR-004 Planner/executor separation · ADR-005 BYOK provider model ·
-ADR-008 Deployment strategy · ADR-009 SQL safety.
+ADR-008 Deployment strategy.
 
 ## Runbooks
 

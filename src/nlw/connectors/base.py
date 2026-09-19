@@ -5,7 +5,8 @@ A connector is a tenant-owned integration instance (a DB row). Each connector
 secret is required. M4 ships only the deterministic ``static`` type (no I/O).
 """
 
-from collections.abc import Mapping
+import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +15,14 @@ from pydantic import BaseModel, ValidationError
 
 class ConnectorError(Exception):
     """Base for deterministic connector failures (never carries a secret value)."""
+
+
+class ConnectorUnhealthyError(Exception):
+    """Marker: a failure that should flip an active connector's status to 'error'.
+
+    Mixed into the specific error type raised (e.g. an auth failure), so the
+    engine can mark the connector unhealthy while still classifying the failure.
+    """
 
 
 class UnknownConnectorTypeError(ConnectorError):
@@ -44,6 +53,7 @@ class ConnectorContext:
     name: str
     config: dict[str, Any]
     secret: str | None = field(default=None, repr=False)
+    connector_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,9 @@ class ConnectorType:
     name: str
     config_model: type[BaseModel]
     secret_required: bool
+    # Optional richer health check (resolves secret + probes the external system).
+    # Called only for unchecked/error connectors; raises on failure.
+    health_check: Callable[[ConnectorContext], None] | None = None
 
 
 _CONNECTOR_TYPES: dict[str, ConnectorType] = {}

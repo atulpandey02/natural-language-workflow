@@ -25,6 +25,7 @@ from nlw.connectors.base import (
     ConnectorDisabledError,
     ConnectorError,
     ConnectorNotFoundError,
+    ConnectorUnhealthyError,
     MissingConnectorSelectorError,
     get_connector_type,
 )
@@ -122,12 +123,26 @@ def _resolve_connector(
             _set_connector_status(session, connector_id, "error")
             raise
 
-    if status != "active":  # unchecked/error -> active on a successful health check
+    ctx = ConnectorContext(
+        type=connector_type,
+        name=connector_name,
+        config=dict(config),
+        secret=secret,
+        connector_id=connector_id,
+    )
+
+    if status != "active":  # unchecked/error -> probe, then activate on success
+        if spec.health_check is not None:
+            try:
+                spec.health_check(ctx)
+            except Exception:
+                # A deterministic failure commits this 'error'; a retryable one
+                # (e.g. unavailable) rolls back with the whole advancement.
+                _set_connector_status(session, connector_id, "error")
+                raise
         _set_connector_status(session, connector_id, "active")
 
-    return ConnectorContext(
-        type=connector_type, name=connector_name, config=dict(config), secret=secret
-    )
+    return ctx
 
 
 def execute_tool(
@@ -205,6 +220,7 @@ def execute_advancement(
             step.attempt = step.attempt + 1
             step.started_at = _now()
 
+        connector_ctx: ConnectorContext | None = None
         try:
             spec = REGISTRY.get(nxt.tool)
             args_model = spec.input_model.model_validate(nxt.args)
@@ -215,6 +231,15 @@ def execute_advancement(
             )
             output = execute_tool(spec, args_model, connector_ctx)
         except _STEP_FAILURES as exc:
+            # An already-active connector that fails an unhealthy-marked way
+            # (e.g. auth revoked mid-life) is flipped to 'error'. Resolution-time
+            # health failures are handled inside _resolve_connector.
+            if (
+                connector_ctx is not None
+                and connector_ctx.connector_id is not None
+                and isinstance(exc, ConnectorUnhealthyError)
+            ):
+                _set_connector_status(session, connector_ctx.connector_id, "error")
             step.status = StepStatus.FAILED
             step.error = str(exc)
             step.finished_at = _now()
