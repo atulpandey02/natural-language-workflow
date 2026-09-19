@@ -6,6 +6,7 @@ init script / CI do, applies the real Alembic migrations as the owner, and hands
 back settings for both the API role (nlw_app) and the worker role (nlw_worker).
 """
 
+import uuid
 from collections.abc import Iterator
 from types import SimpleNamespace
 
@@ -41,12 +42,16 @@ def _bootstrap_roles(owner_libpq: str, db: str) -> None:
             "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; "
             "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_rls_bypass') THEN "
             "CREATE ROLE nlw_rls_bypass NOLOGIN NOSUPERUSER BYPASSRLS "
+            "NOCREATEDB NOCREATEROLE; END IF; "
+            "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_workspace_bootstrap') THEN "
+            "CREATE ROLE nlw_workspace_bootstrap NOLOGIN NOSUPERUSER BYPASSRLS "
             "NOCREATEDB NOCREATEROLE; END IF; END $$;"
         )
         for role in ("nlw_app", "nlw_worker"):
             conn.execute(f"GRANT CONNECT ON DATABASE {db} TO {role}")
             conn.execute(f"GRANT USAGE ON SCHEMA public TO {role}")
         conn.execute("GRANT nlw_rls_bypass TO CURRENT_USER")
+        conn.execute("GRANT nlw_workspace_bootstrap TO CURRENT_USER")
 
 
 @pytest.fixture
@@ -74,10 +79,37 @@ def pg_stack() -> Iterator[SimpleNamespace]:
                 supabase_jwt_secret=_SECRET,
             )
 
+        def seed_user() -> uuid.UUID:
+            """Insert a users row (as owner, bypassing RLS). Returns the user id."""
+            uid = uuid.uuid4()
+            with psycopg.connect(owner_libpq, autocommit=True) as conn:
+                conn.execute(
+                    "INSERT INTO users (id, auth_provider_id, email) VALUES (%s,%s,%s)",
+                    (uid, f"sub-{uid}", f"{uid}@example.com"),
+                )
+            return uid
+
+        def seed_member() -> SimpleNamespace:
+            """Create a user + workspace + owner membership (as owner)."""
+            uid, tid = seed_user(), uuid.uuid4()
+            with psycopg.connect(owner_libpq, autocommit=True) as conn:
+                conn.execute(
+                    "INSERT INTO workspaces (id, name, slug) VALUES (%s,%s,%s)",
+                    (tid, "ws", f"ws-{tid}"),
+                )
+                conn.execute(
+                    "INSERT INTO memberships (id, user_id, workspace_id, role) "
+                    "VALUES (%s,%s,%s,'owner')",
+                    (uuid.uuid4(), uid, tid),
+                )
+            return SimpleNamespace(user_id=uid, tenant_id=tid)
+
         yield SimpleNamespace(
             settings=_settings(app_sa),
             worker_settings=_settings(worker_sa),
             owner_libpq=owner_libpq,
             app_libpq=_libpq("nlw_app", "nlw_app", host, port, db),
             worker_libpq=_libpq("nlw_worker", "nlw_worker", host, port, db),
+            seed_user=seed_user,
+            seed_member=seed_member,
         )

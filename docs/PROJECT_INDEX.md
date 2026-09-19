@@ -85,6 +85,11 @@ provider 429, credentials expired, workflow stuck RUNNING, migration failed).
 
 ## Open risks
 
+- **Forgeable GUC context (pre-production hardening).** RLS enforces isolation
+  against mis-scoped app queries, but `app.user_id`/`app.tenant_id` are
+  forgeable by arbitrary SQL under the shared runtime role. A non-forgeable /
+  signed DB context (or per-request DB identity) is required for resistance to
+  full request-identity forgery. Evaluate before public production. See ADR-003.
 - Action connectors (M7) have an unavoidable at-least-once send window on a
   crash between "side effect sent" and "state written." Mitigated with
   idempotency keys and required approvals; documented as a known limitation.

@@ -18,10 +18,15 @@ BEGIN
         CREATE ROLE nlw_worker LOGIN PASSWORD 'nlw_worker'
             NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
     END IF;
-    -- Non-login role that owns the worker-only SECURITY DEFINER resolver.
-    -- BYPASSRLS applies only inside that function; it is never a connection role.
+    -- Non-login role that owns the read-only SECURITY DEFINER authorization/
+    -- routing helpers. BYPASSRLS applies only inside those functions; never a
+    -- connection role.
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'nlw_rls_bypass') THEN
         CREATE ROLE nlw_rls_bypass NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE;
+    END IF;
+    -- Non-login role that owns the workspace bootstrap write function only.
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'nlw_workspace_bootstrap') THEN
+        CREATE ROLE nlw_workspace_bootstrap NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE;
     END IF;
 END
 $$;
@@ -30,5 +35,6 @@ GRANT CONNECT ON DATABASE nlw TO nlw_app;
 GRANT USAGE ON SCHEMA public TO nlw_app;
 GRANT CONNECT ON DATABASE nlw TO nlw_worker;
 GRANT USAGE ON SCHEMA public TO nlw_worker;
--- Let the owner/migration role reassign the resolver's ownership to the bypass role.
+-- Let the owner/migration role reassign the helper functions' ownership.
 GRANT nlw_rls_bypass TO nlw;
+GRANT nlw_workspace_bootstrap TO nlw;

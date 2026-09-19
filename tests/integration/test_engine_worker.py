@@ -34,21 +34,27 @@ _PLAN = WorkflowPlan.model_validate(
 )
 
 
-def _seed(pg_stack: SimpleNamespace, tenant_id: uuid.UUID) -> uuid.UUID:
+def _seed(pg_stack: SimpleNamespace) -> uuid.UUID:
+    member = pg_stack.seed_member()
     engine = create_sync_engine(pg_stack.settings)
     try:
         sm = create_sync_sessionmaker(engine)
         with sm() as s, s.begin():
-            s.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(tenant_id)})
-            wf, ver = create_workflow_with_version(s, tenant_id, "wf", _PLAN)
-            run = create_run(s, tenant_id, wf.id, ver.id)
+            s.execute(
+                text("SELECT set_config('app.user_id', :u, true)"), {"u": str(member.user_id)}
+            )
+            s.execute(
+                text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(member.tenant_id)}
+            )
+            wf, ver = create_workflow_with_version(s, member.tenant_id, "wf", _PLAN)
+            run = create_run(s, member.tenant_id, wf.id, ver.id)
             return run.id
     finally:
         engine.dispose()
 
 
 def test_worker_subprocess_runs_to_completion(pg_stack: SimpleNamespace) -> None:
-    run_id = _seed(pg_stack, uuid.uuid4())
+    run_id = _seed(pg_stack)
 
     with RedisContainer("redis:7") as redis_c:
         redis_url = f"redis://{redis_c.get_container_host_ip()}:{redis_c.get_exposed_port(6379)}/0"

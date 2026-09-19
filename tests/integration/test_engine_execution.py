@@ -46,8 +46,13 @@ def sms(pg_stack: SimpleNamespace) -> object:
         worker_engine.dispose()
 
 
-def _seed(app_sm: object, tenant_id: uuid.UUID, plan: WorkflowPlan) -> uuid.UUID:
+def _seed(
+    app_sm: object, user_id: uuid.UUID, tenant_id: uuid.UUID, plan: WorkflowPlan
+) -> uuid.UUID:
+    # nlw_app creates workflow/version/run under membership-bound INSERT policies,
+    # so the caller must be a member of the tenant (app.user_id + app.tenant_id).
     with app_sm() as s, s.begin():  # type: ignore[operator]
+        s.execute(text("SELECT set_config('app.user_id', :u, true)"), {"u": str(user_id)})
         s.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(tenant_id)})
         wf, ver = create_workflow_with_version(s, tenant_id, "wf", plan)
         run = create_run(s, tenant_id, wf.id, ver.id)
@@ -70,7 +75,8 @@ def _run_status(owner_libpq: str, run_id: uuid.UUID) -> str:
 
 
 def test_happy_path_runs_to_completion(pg_stack: SimpleNamespace, sms: SimpleNamespace) -> None:
-    run_id = _seed(sms.app, uuid.uuid4(), _plan("a", "b", "c"))
+    m = pg_stack.seed_member()
+    run_id = _seed(sms.app, m.user_id, m.tenant_id, _plan("a", "b", "c"))
     results = []
     for _ in range(6):
         outcome = execute_advancement(sms.worker, run_id)
@@ -84,7 +90,8 @@ def test_happy_path_runs_to_completion(pg_stack: SimpleNamespace, sms: SimpleNam
 
 
 def test_duplicate_delivery_is_idempotent(pg_stack: SimpleNamespace, sms: SimpleNamespace) -> None:
-    run_id = _seed(sms.app, uuid.uuid4(), _plan("a"))
+    m = pg_stack.seed_member()
+    run_id = _seed(sms.app, m.user_id, m.tenant_id, _plan("a"))
     outcomes = [execute_advancement(sms.worker, run_id).result for _ in range(5)]
     # one advance, one completion, the rest no-ops; the step runs exactly once
     assert outcomes[0] == "advanced"
@@ -94,7 +101,8 @@ def test_duplicate_delivery_is_idempotent(pg_stack: SimpleNamespace, sms: Simple
 
 
 def test_failed_step_fails_run(pg_stack: SimpleNamespace, sms: SimpleNamespace) -> None:
-    run_id = _seed(sms.app, uuid.uuid4(), _plan("a", tool="fake.fail"))
+    m = pg_stack.seed_member()
+    run_id = _seed(sms.app, m.user_id, m.tenant_id, _plan("a", tool="fake.fail"))
     assert execute_advancement(sms.worker, run_id).result == "failed"
     assert execute_advancement(sms.worker, run_id).result == "noop"
     assert _steps(pg_stack.owner_libpq, run_id)["a"][0] == "FAILED"
@@ -114,7 +122,8 @@ def test_commit_before_enqueue_crash_resume(
 
     monkeypatch.setattr(execmod, "run_tool", counting)
 
-    run_id = _seed(sms.app, uuid.uuid4(), _plan("a", "b", "c"))
+    m = pg_stack.seed_member()
+    run_id = _seed(sms.app, m.user_id, m.tenant_id, _plan("a", "b", "c"))
     execute_advancement(sms.worker, run_id)  # a COMMITTED
     execute_advancement(sms.worker, run_id)  # b COMMITTED
     # simulate crash BEFORE advance_run.send(): we simply never enqueued.
@@ -128,7 +137,8 @@ def test_commit_before_enqueue_crash_resume(
 def test_enqueue_error_propagates_and_step_is_durable(
     pg_stack: SimpleNamespace, sms: SimpleNamespace
 ) -> None:
-    run_id = _seed(sms.app, uuid.uuid4(), _plan("a", "b"))
+    m = pg_stack.seed_member()
+    run_id = _seed(sms.app, m.user_id, m.tenant_id, _plan("a", "b"))
 
     def boom(_rid: uuid.UUID) -> None:
         raise RuntimeError("enqueue failed")
@@ -156,7 +166,8 @@ def test_concurrent_advancement_executes_each_step_once(
 
     monkeypatch.setattr(execmod, "run_tool", counting)
 
-    run_id = _seed(sms.app, uuid.uuid4(), _plan("a"))
+    m = pg_stack.seed_member()
+    run_id = _seed(sms.app, m.user_id, m.tenant_id, _plan("a"))
     barrier = threading.Barrier(2)
     errors: list[Exception] = []
 
@@ -179,8 +190,9 @@ def test_concurrent_advancement_executes_each_step_once(
 
 
 def test_tenant_isolation_in_worker(pg_stack: SimpleNamespace, sms: SimpleNamespace) -> None:
-    tenant_a = uuid.uuid4()
-    run_id = _seed(sms.app, tenant_a, _plan("a"))
+    m = pg_stack.seed_member()
+    tenant_a = m.tenant_id
+    run_id = _seed(sms.app, m.user_id, tenant_a, _plan("a"))
 
     # Worker gets only run_id, derives tenant A from Postgres, executes.
     assert execute_advancement(sms.worker, run_id).result == "advanced"
@@ -194,5 +206,32 @@ def test_tenant_isolation_in_worker(pg_stack: SimpleNamespace, sms: SimpleNamesp
         runs = c.execute("SELECT count(*) FROM workflow_runs WHERE id=%s", (run_id,)).fetchone()
         steps = c.execute("SELECT count(*) FROM step_runs WHERE run_id=%s", (run_id,)).fetchone()
         c.rollback()
+    assert runs is not None and runs[0] == 0
+    assert steps is not None and steps[0] == 0
+
+
+def test_nonmember_cannot_read_tenant_by_forging_gucs(
+    pg_stack: SimpleNamespace, sms: SimpleNamespace
+) -> None:
+    """The real regression: user A forging app.user_id=A + app.tenant_id=B (the
+    actual tenant B, of which A is not a member) must read ZERO rows."""
+    member = pg_stack.seed_member()  # userB, member of tenant B
+    run_id = _seed(sms.app, member.user_id, member.tenant_id, _plan("a", "b", "c"))
+    execute_advancement(sms.worker, run_id)  # create a step_run under B
+    attacker = pg_stack.seed_user()  # userA, NOT a member of B
+
+    with psycopg.connect(pg_stack.app_libpq) as c:
+        c.execute("SELECT set_config('app.user_id', %s, true)", (str(attacker),))
+        c.execute("SELECT set_config('app.tenant_id', %s, true)", (str(member.tenant_id),))
+        wf = c.execute(
+            "SELECT count(*) FROM workflows WHERE tenant_id=%s", (member.tenant_id,)
+        ).fetchone()
+        runs = c.execute(
+            "SELECT count(*) FROM workflow_runs WHERE tenant_id=%s", (member.tenant_id,)
+        ).fetchone()
+        steps = c.execute("SELECT count(*) FROM step_runs WHERE run_id=%s", (run_id,)).fetchone()
+        c.rollback()
+
+    assert wf is not None and wf[0] == 0
     assert runs is not None and runs[0] == 0
     assert steps is not None and steps[0] == 0

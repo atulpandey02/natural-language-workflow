@@ -12,7 +12,6 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nlw.db.models import Membership, User, Workspace
-from nlw.tenancy.context import Role
 
 
 class UserRepository:
@@ -46,12 +45,6 @@ class WorkspaceRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create(self, name: str, slug: str) -> Workspace:
-        workspace = Workspace(id=uuid.uuid4(), name=name, slug=slug)
-        self.session.add(workspace)
-        await self.session.flush()
-        return workspace
-
     async def list_for_user(self, user_id: uuid.UUID) -> list[tuple[Workspace, str]]:
         rows = await self.session.execute(
             select(Workspace, Membership.role)
@@ -75,14 +68,3 @@ class MembershipRepository:
                 )
             )
         ).scalar_one_or_none()
-
-    async def create(self, user_id: uuid.UUID, workspace_id: uuid.UUID, role: Role) -> Membership:
-        membership = Membership(
-            id=uuid.uuid4(),
-            user_id=user_id,
-            workspace_id=workspace_id,
-            role=role.value,
-        )
-        self.session.add(membership)
-        await self.session.flush()
-        return membership
