@@ -54,3 +54,30 @@ class ToolOut(BaseModel):
     read_only: bool
     requires_approval: bool
     timeout_seconds: int
+
+
+class PlanRequest(BaseModel):
+    # The raw prompt is used to plan and then discarded; it is never persisted.
+    prompt: str
+
+
+class PlanProposalOut(BaseModel):
+    # protected_namespaces=() so the ``model`` field name is allowed.
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+
+    id: uuid.UUID
+    status: str
+    workflow_name: str
+    provider: str
+    model: str
+    proposed_plan: dict[str, Any] | None
+    normalized_plan: dict[str, Any] | None
+    feasibility: dict[str, Any]
+    clarification_questions: list[str] | None
+    workflow_version_id: uuid.UUID | None
+
+
+class MaterializeOut(BaseModel):
+    workflow_id: uuid.UUID
+    workflow_version_id: uuid.UUID
+    idempotent_hit: bool

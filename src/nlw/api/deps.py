@@ -18,8 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from nlw.auth.provider import AuthedIdentity, AuthProvider, InvalidTokenError
+from nlw.core.config import Settings
 from nlw.db.models import User
 from nlw.db.repositories import MembershipRepository, UserRepository
+from nlw.planner.provider import LLMProvider
 from nlw.tenancy.context import Role, TenantContext, role_at_least
 from nlw.tenancy.session import set_current_tenant, set_current_user
 
@@ -37,6 +39,16 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 def get_auth_provider(request: Request) -> AuthProvider:
     provider: AuthProvider = request.app.state.auth_provider
+    return provider
+
+
+def get_app_settings(request: Request) -> Settings:
+    settings: Settings = request.app.state.settings
+    return settings
+
+
+def get_llm_provider(request: Request) -> LLMProvider:
+    provider: LLMProvider = request.app.state.llm_provider
     return provider
 
 

@@ -1,0 +1,256 @@
+"""Planner endpoints (M6).
+
+- ``POST /plans``                 propose a plan (LLM) + deterministic feasibility
+- ``GET  /plans``                 list the tenant's proposals (audit)
+- ``GET  /plans/{id}``            read one proposal
+- ``POST /plans/{id}/materialize`` PASS-only, revalidated, idempotent -> workflow_version
+
+Planning runs API-side. The LLM sees only the tenant capability view (Tool
+Registry + secret-free connectors); it never receives secrets or the LLM key.
+The raw prompt and raw provider response are never stored. Deterministic
+feasibility owns the final status — a parsed plan is not executable.
+"""
+
+import uuid
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+import nlw.tools.builtin  # noqa: F401  (populates the tool + connector-type registries)
+from nlw.api.deps import get_app_settings, get_llm_provider, get_session, get_tenant_context
+from nlw.api.schemas import MaterializeOut, PlanProposalOut, PlanRequest
+from nlw.connectors.postgres import PostgresConnectorConfig
+from nlw.core.config import Settings
+from nlw.db.models import Connector, Workflow, WorkflowVersion
+from nlw.db.repositories import ConnectorRepository, PlanProposalRepository
+from nlw.domain.workflow import WorkflowPlan
+from nlw.feasibility.engine import FeasibilityReport, FeasibilityStatus, check_plan
+from nlw.feasibility.limits import DEFAULT_LIMITS
+from nlw.planner.capabilities import SafeConnector, build_capability_view
+from nlw.planner.planner import plan_and_check
+from nlw.planner.provider import (
+    LLMAuthError,
+    LLMProvider,
+    LLMTimeoutError,
+    LLMUnavailableError,
+)
+from nlw.registry.registry import REGISTRY
+from nlw.tenancy.context import TenantContext
+
+router = APIRouter()
+log = structlog.get_logger(__name__)
+
+
+def _safe_connectors(connectors: list[Connector]) -> list[SafeConnector]:
+    """Project connector rows to a secret-free view for the planner + feasibility."""
+    result: list[SafeConnector] = []
+    for c in connectors:
+        if c.type == "postgres":
+            cfg = PostgresConnectorConfig.model_validate(c.config)
+            hint = cfg.schema_hint.model_dump(by_alias=True) if cfg.schema_hint else None
+            result.append(
+                SafeConnector(
+                    name=c.name,
+                    type=c.type,
+                    status=c.status,
+                    allowed_schemas=cfg.allowed_schemas,
+                    allowed_tables=cfg.allowed_tables,
+                    schema_hint=hint,
+                )
+            )
+        else:
+            result.append(SafeConnector(name=c.name, type=c.type, status=c.status))
+    return result
+
+
+async def _build_view_and_tools(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[list[SafeConnector], set[str]]:
+    connectors = await ConnectorRepository(session).list_for_tenant(tenant_id)
+    return _safe_connectors(connectors), {spec.name for spec in REGISTRY.all()}
+
+
+def _feasibility_dict(report: FeasibilityReport) -> dict[str, object]:
+    # Persist the report WITHOUT normalized_plan (stored in its own column).
+    return report.model_dump(mode="json", exclude={"normalized_plan"})
+
+
+@router.post("/plans", response_model=PlanProposalOut, status_code=status.HTTP_201_CREATED)
+async def create_plan(
+    body: PlanRequest,
+    ctx: TenantContext = Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+    provider: LLMProvider = Depends(get_llm_provider),
+    settings: Settings = Depends(get_app_settings),
+) -> PlanProposalOut:
+    prompt = body.prompt
+    if len(prompt) > settings.llm_max_prompt_chars:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"prompt exceeds maximum length of {settings.llm_max_prompt_chars} characters",
+        )
+    if not prompt.strip():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "prompt must not be empty")
+
+    connectors, all_tool_names = await _build_view_and_tools(session, ctx.tenant_id)
+    view = build_capability_view(REGISTRY.all(), connectors)
+
+    try:
+        result = await plan_and_check(
+            provider=provider,
+            view=view,
+            all_tool_names=all_tool_names,
+            limits=DEFAULT_LIMITS,
+            user_request=prompt,
+            max_output_tokens=settings.llm_max_output_tokens,
+            timeout_s=settings.llm_timeout_s,
+        )
+    except (LLMTimeoutError, LLMUnavailableError) as exc:
+        # Infrastructure fault — NOT a feasibility REJECT; no proposal row.
+        log.warning(
+            "planner.provider_error", error_class="unavailable", provider=settings.llm_provider
+        )
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "planner provider unavailable"
+        ) from exc
+    except LLMAuthError as exc:
+        log.error("planner.provider_error", error_class="auth", provider=settings.llm_provider)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "planner provider misconfigured") from exc
+
+    report = result.report
+    proposed_plan = result.output.to_workflow_plan().model_dump() if result.output else None
+    normalized_plan = (
+        report.normalized_plan.model_dump() if report.normalized_plan is not None else None
+    )
+
+    proposal = await PlanProposalRepository(session).create(
+        tenant_id=ctx.tenant_id,
+        created_by=ctx.user_id,
+        prompt_len=len(prompt),
+        provider=settings.llm_provider,
+        model=result.model,
+        workflow_name=result.workflow_name,
+        status=report.status.value,
+        proposed_plan=proposed_plan,
+        normalized_plan=normalized_plan,
+        feasibility=_feasibility_dict(report),
+        clarification_questions=report.clarification_questions,
+    )
+
+    # Observability: metadata only. Never the raw prompt (not even at DEBUG).
+    log.info(
+        "planner.request",
+        tenant_id=str(ctx.tenant_id),
+        proposal_id=str(proposal.id),
+        provider=settings.llm_provider,
+        model=result.model,
+        prompt_len=len(prompt),
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        step_count=len(result.output.steps) if result.output else 0,
+    )
+    log.info(
+        "feasibility.check",
+        tenant_id=str(ctx.tenant_id),
+        proposal_id=str(proposal.id),
+        status=report.status.value,
+        failure_codes=[f.code.value for f in report.findings if f.severity == "reject"],
+        approvals_required=report.approvals_required,
+        clarification_count=len(report.clarification_questions),
+    )
+    return PlanProposalOut.model_validate(proposal)
+
+
+@router.get("/plans", response_model=list[PlanProposalOut])
+async def list_plans(
+    ctx: TenantContext = Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> list[PlanProposalOut]:
+    proposals = await PlanProposalRepository(session).list_for_tenant(ctx.tenant_id)
+    return [PlanProposalOut.model_validate(p) for p in proposals]
+
+
+@router.get("/plans/{proposal_id}", response_model=PlanProposalOut)
+async def get_plan(
+    proposal_id: uuid.UUID,
+    ctx: TenantContext = Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> PlanProposalOut:
+    proposal = await PlanProposalRepository(session).get(proposal_id, ctx.tenant_id)
+    if proposal is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "proposal not found")
+    return PlanProposalOut.model_validate(proposal)
+
+
+@router.post("/plans/{proposal_id}/materialize", response_model=MaterializeOut)
+async def materialize_plan(
+    proposal_id: uuid.UUID,
+    ctx: TenantContext = Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> MaterializeOut:
+    repo = PlanProposalRepository(session)
+    proposal = await repo.get_for_update(proposal_id, ctx.tenant_id)
+    if proposal is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "proposal not found")
+
+    # Idempotent: already materialized -> return the existing version, no re-create.
+    if proposal.workflow_version_id is not None:
+        version = await session.get(WorkflowVersion, proposal.workflow_version_id)
+        assert version is not None
+        return MaterializeOut(
+            workflow_id=version.workflow_id,
+            workflow_version_id=version.id,
+            idempotent_hit=True,
+        )
+
+    if proposal.proposed_plan is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "proposal has no materializable plan")
+
+    # Never trust the stored PASS: re-validate against CURRENT tenant capabilities.
+    plan = WorkflowPlan.model_validate(proposal.proposed_plan)
+    connectors, all_tool_names = await _build_view_and_tools(session, ctx.tenant_id)
+    view = build_capability_view(REGISTRY.all(), connectors)
+    report = check_plan(plan, view, DEFAULT_LIMITS, all_tool_names)
+
+    if report.status != FeasibilityStatus.PASS or report.normalized_plan is None:
+        log.info(
+            "plan.materialize",
+            tenant_id=str(ctx.tenant_id),
+            proposal_id=str(proposal.id),
+            revalidation_status=report.status.value,
+            idempotent_hit=False,
+        )
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"plan no longer materializable (revalidation: {report.status.value})",
+        )
+
+    workflow = Workflow(tenant_id=ctx.tenant_id, name=proposal.workflow_name)
+    session.add(workflow)
+    await session.flush()
+    version = WorkflowVersion(
+        tenant_id=ctx.tenant_id,
+        workflow_id=workflow.id,
+        version=1,
+        plan=report.normalized_plan.model_dump(),
+    )
+    session.add(version)
+    await session.flush()
+    workflow.current_version_id = version.id
+    proposal.workflow_version_id = version.id
+    await session.flush()
+
+    log.info(
+        "plan.materialize",
+        tenant_id=str(ctx.tenant_id),
+        proposal_id=str(proposal.id),
+        revalidation_status="PASS",
+        workflow_version_id=str(version.id),
+        idempotent_hit=False,
+    )
+    return MaterializeOut(
+        workflow_id=workflow.id,
+        workflow_version_id=version.id,
+        idempotent_hit=False,
+    )

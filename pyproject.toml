@@ -5,6 +5,7 @@ description = "Natural Language Workflow Platform — production, self-hostable 
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.0",
+    "anthropic>=1.7.0",
     "dramatiq[redis]>=2.2.1",
     "fastapi>=0.141.1",
     "psycopg[binary]>=3.3.5",
@@ -77,7 +78,7 @@ warn_unused_ignores = true
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["nlw.domain.*", "nlw.feasibility.*", "nlw.engine.*"]
+module = ["nlw.domain.*", "nlw.feasibility.*", "nlw.engine.*", "nlw.planner.*"]
 strict = true
 
 # ---------------------------------------------------------------------------

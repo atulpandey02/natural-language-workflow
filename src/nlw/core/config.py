@@ -7,9 +7,11 @@ Secrets are never hard-coded; they arrive via the environment / ``.env``.
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "dev", "staging", "production"]
+LLMProviderName = Literal["stub", "anthropic"]
 
 
 class Settings(BaseSettings):
@@ -19,6 +21,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,  # allow construction by field name despite env aliases
     )
 
     app_env: Environment = "local"
@@ -40,6 +43,19 @@ class Settings(BaseSettings):
     supabase_jwt_aud: str = "authenticated"
     # LEGACY/dev only: symmetric HS256 verification. Not the production design.
     supabase_jwt_secret: str | None = None
+
+    # --- Natural-language planner (M6) ---
+    # The planner runs API-side. `llm_api_key` (env NLW_LLM_API_KEY) is PLATFORM
+    # config, NOT a tenant/connector secret; it is provided to the API process
+    # only and must never reach worker/scheduler or model context.
+    llm_provider: LLMProviderName = Field(default="stub", validation_alias="NLW_LLM_PROVIDER")
+    llm_model: str = Field(default="claude-sonnet-5", validation_alias="NLW_LLM_MODEL")
+    llm_api_key: str | None = Field(default=None, validation_alias="NLW_LLM_API_KEY")
+    llm_timeout_s: int = 30  # hard-capped in the planner
+    llm_max_output_tokens: int = 4096  # hard-capped in the planner
+    # Hard cap on accepted prompt size; the API rejects longer prompts (422)
+    # before any provider call.
+    llm_max_prompt_chars: int = 8000
 
     @property
     def effective_jwks_url(self) -> str | None:

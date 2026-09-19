@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nlw.db.models import Connector, Membership, User, Workspace
+from nlw.db.models import Connector, Membership, PlanProposal, User, Workspace
 
 
 class UserRepository:
@@ -109,3 +109,72 @@ class ConnectorRepository:
             select(Connector.type).where(Connector.tenant_id == tenant_id).distinct()
         )
         return set(rows.scalars().all())
+
+
+class PlanProposalRepository:
+    """Tenant-scoped planner-proposal access (nlw_app: SELECT/INSERT + narrow UPDATE)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        created_by: uuid.UUID,
+        prompt_len: int,
+        provider: str,
+        model: str,
+        workflow_name: str,
+        status: str,
+        proposed_plan: dict[str, Any] | None,
+        normalized_plan: dict[str, Any] | None,
+        feasibility: dict[str, Any],
+        clarification_questions: list[str] | None,
+    ) -> PlanProposal:
+        proposal = PlanProposal(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            created_by=created_by,
+            prompt_len=prompt_len,
+            provider=provider,
+            model=model,
+            workflow_name=workflow_name,
+            status=status,
+            proposed_plan=proposed_plan,
+            normalized_plan=normalized_plan,
+            feasibility=feasibility,
+            clarification_questions=clarification_questions,
+        )
+        self.session.add(proposal)
+        await self.session.flush()
+        return proposal
+
+    async def get(self, proposal_id: uuid.UUID, tenant_id: uuid.UUID) -> PlanProposal | None:
+        return (
+            await self.session.execute(
+                select(PlanProposal).where(
+                    PlanProposal.id == proposal_id, PlanProposal.tenant_id == tenant_id
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def get_for_update(
+        self, proposal_id: uuid.UUID, tenant_id: uuid.UUID
+    ) -> PlanProposal | None:
+        """Row-locked read for concurrency-safe, idempotent materialization."""
+        return (
+            await self.session.execute(
+                select(PlanProposal)
+                .where(PlanProposal.id == proposal_id, PlanProposal.tenant_id == tenant_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+
+    async def list_for_tenant(self, tenant_id: uuid.UUID) -> list[PlanProposal]:
+        rows = await self.session.execute(
+            select(PlanProposal)
+            .where(PlanProposal.tenant_id == tenant_id)
+            .order_by(PlanProposal.created_at.desc())
+        )
+        return list(rows.scalars().all())

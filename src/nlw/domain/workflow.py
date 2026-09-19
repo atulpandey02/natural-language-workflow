@@ -8,7 +8,11 @@ No database or I/O here (mypy strict).
 import enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+# Step ids are used as dependency references and as durable step keys, so keep
+# them short and to a safe identifier charset.
+STEP_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 
 
 class RunStatus(enum.StrEnum):
@@ -52,8 +56,12 @@ def can_transition_step(current: StepStatus, new: StepStatus) -> bool:
 
 
 class WorkflowStep(BaseModel):
-    id: str
-    tool: str
+    # Strict: unknown keys are a hard error so a plan cannot smuggle fields past
+    # deterministic validation. Existing M3/M5 plans use only the fields below.
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=STEP_ID_PATTERN)
+    tool: str = Field(min_length=1)
     args: dict[str, Any] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)
     # Name of the tenant connector to use (required for connector-backed tools).
@@ -61,6 +69,8 @@ class WorkflowStep(BaseModel):
 
 
 class WorkflowPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     steps: list[WorkflowStep]
 
     def step(self, step_id: str) -> WorkflowStep:

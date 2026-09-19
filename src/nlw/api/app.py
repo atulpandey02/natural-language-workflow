@@ -18,11 +18,12 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from nlw import __version__
-from nlw.api.routers import connectors, identity
+from nlw.api.routers import connectors, identity, plans
 from nlw.auth.supabase import build_auth_provider
 from nlw.core.config import Settings, get_settings
 from nlw.core.logging import configure_logging
 from nlw.db.session import check_connection, create_engine, create_sessionmaker
+from nlw.planner.provider import build_llm_provider
 from nlw.worker.broker import check_redis
 
 log = structlog.get_logger(__name__)
@@ -36,7 +37,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engine = create_engine(settings)
     app.state.sessionmaker = create_sessionmaker(app.state.engine)
     app.state.auth_provider = build_auth_provider(settings)
-    log.info("api.startup", app_env=settings.app_env)
+    # Planner provider (M6). Built once; the platform LLM key (if any) lives only
+    # in the API process env, never in worker/scheduler.
+    app.state.llm_provider = build_llm_provider(settings)
+    log.info("api.startup", app_env=settings.app_env, llm_provider=settings.llm_provider)
     try:
         yield
     finally:
@@ -51,6 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.include_router(identity.router)
     app.include_router(connectors.router)
+    app.include_router(plans.router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
