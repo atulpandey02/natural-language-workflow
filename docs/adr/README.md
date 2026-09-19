@@ -27,6 +27,8 @@ decision, numbered and never deleted (supersede instead of removing).
 | [010](ADR-010-durable-execution.md) | Durable workflow execution: checkpointing, idempotency, concurrency | Accepted |
 | [011](ADR-011-secret-store.md) | SecretStore abstraction & secret references | Accepted |
 | [012](ADR-012-postgres-connector.md) | PostgreSQL connector (read-only query tool) | Accepted |
+| [013](ADR-013-action-side-effect-safety.md) | Action side-effect execution, approvals & idempotency | Accepted |
+| [014](ADR-014-outbound-http-ssrf.md) | Outbound HTTP / SSRF safety | Accepted |
 
 ## Template
 

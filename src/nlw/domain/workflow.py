@@ -18,6 +18,8 @@ STEP_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 class RunStatus(enum.StrEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
+    # M7: parked while a requires_approval action step awaits a human decision.
+    WAITING_APPROVAL = "WAITING_APPROVAL"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
@@ -25,20 +27,27 @@ class RunStatus(enum.StrEnum):
 class StepStatus(enum.StrEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
+    # M7: an approval-gated action step awaiting a decision.
+    WAITING_APPROVAL = "WAITING_APPROVAL"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
 
 
 # M3 has no conditional execution, so SKIPPED is intentionally absent.
+# M7 adds WAITING_APPROVAL (run + step) for approval-gated actions.
 _RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     RunStatus.PENDING: frozenset({RunStatus.RUNNING}),
-    RunStatus.RUNNING: frozenset({RunStatus.COMPLETED, RunStatus.FAILED}),
+    RunStatus.RUNNING: frozenset(
+        {RunStatus.WAITING_APPROVAL, RunStatus.COMPLETED, RunStatus.FAILED}
+    ),
+    RunStatus.WAITING_APPROVAL: frozenset({RunStatus.RUNNING, RunStatus.FAILED}),
     RunStatus.COMPLETED: frozenset(),
     RunStatus.FAILED: frozenset(),
 }
 
 _STEP_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
-    StepStatus.PENDING: frozenset({StepStatus.RUNNING}),
+    StepStatus.PENDING: frozenset({StepStatus.RUNNING, StepStatus.WAITING_APPROVAL}),
+    StepStatus.WAITING_APPROVAL: frozenset({StepStatus.RUNNING, StepStatus.FAILED}),
     StepStatus.RUNNING: frozenset({StepStatus.SUCCESS, StepStatus.FAILED}),
     StepStatus.SUCCESS: frozenset(),
     StepStatus.FAILED: frozenset(),

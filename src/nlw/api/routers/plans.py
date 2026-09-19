@@ -213,7 +213,10 @@ async def materialize_plan(
     view = build_capability_view(REGISTRY.all(), connectors)
     report = check_plan(plan, view, DEFAULT_LIMITS, all_tool_names)
 
-    if report.status != FeasibilityStatus.PASS or report.normalized_plan is None:
+    # A structurally executable plan may contain runtime approval-gated (M7)
+    # steps -> NEEDS_APPROVAL is materializable; approval remains per run+step.
+    _MATERIALIZABLE = (FeasibilityStatus.PASS, FeasibilityStatus.NEEDS_APPROVAL)
+    if report.status not in _MATERIALIZABLE or report.normalized_plan is None:
         log.info(
             "plan.materialize",
             tenant_id=str(ctx.tenant_id),

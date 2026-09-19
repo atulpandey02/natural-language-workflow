@@ -6,13 +6,22 @@ authorization is membership-based at the application layer.
 """
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nlw.db.models import Connector, Membership, PlanProposal, User, Workspace
+from nlw.db.models import (
+    Approval,
+    Connector,
+    Membership,
+    PlanProposal,
+    User,
+    Workspace,
+)
+
+DecisionOutcome = Literal["transitioned", "idempotent", "conflict", "not_found"]
 
 
 class UserRepository:
@@ -178,3 +187,61 @@ class PlanProposalRepository:
             .order_by(PlanProposal.created_at.desc())
         )
         return list(rows.scalars().all())
+
+
+class ApprovalRepository:
+    """Tenant-scoped approval access. Decisions are compare-and-set; RLS also
+    enforces admin/owner + decided_by = app.user_id on the UPDATE."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def list_for_tenant(
+        self, tenant_id: uuid.UUID, *, pending_only: bool = True
+    ) -> list[Approval]:
+        stmt = select(Approval).where(Approval.tenant_id == tenant_id)
+        if pending_only:
+            stmt = stmt.where(Approval.status == "pending")
+        stmt = stmt.order_by(Approval.requested_at.desc())
+        return list((await self.session.execute(stmt)).scalars().all())
+
+    async def get(self, approval_id: uuid.UUID, tenant_id: uuid.UUID) -> Approval | None:
+        return (
+            await self.session.execute(
+                select(Approval).where(Approval.id == approval_id, Approval.tenant_id == tenant_id)
+            )
+        ).scalar_one_or_none()
+
+    async def decide(
+        self,
+        approval_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        target: Literal["approved", "rejected"],
+    ) -> tuple[DecisionOutcome, uuid.UUID | None]:
+        """Recovery-safe CAS. Returns (outcome, run_id). Repeating the same
+        decision is idempotent (so a lost enqueue can be re-driven); the opposite
+        decision on an already-decided approval conflicts."""
+        appr = await self.get(approval_id, tenant_id)
+        if appr is None:
+            return "not_found", None
+        if appr.status == target:
+            return "idempotent", appr.run_id
+        if appr.status != "pending":
+            return "conflict", appr.run_id
+        result = await self.session.execute(
+            update(Approval)
+            .where(
+                Approval.id == approval_id,
+                Approval.tenant_id == tenant_id,
+                Approval.status == "pending",
+            )
+            .values(status=target, decided_by=user_id, decided_at=func.now())
+        )
+        if result.rowcount == 1:  # type: ignore[attr-defined]
+            return "transitioned", appr.run_id
+        # Lost a race: re-read to classify.
+        fresh = await self.get(approval_id, tenant_id)
+        if fresh is not None and fresh.status == target:
+            return "idempotent", fresh.run_id
+        return "conflict", appr.run_id

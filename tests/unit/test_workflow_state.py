@@ -26,5 +26,22 @@ def test_step_transitions() -> None:
 
 
 def test_step_status_has_no_skipped() -> None:
+    # No conditional execution (no SKIPPED). M7 adds WAITING_APPROVAL.
     assert not hasattr(StepStatus, "SKIPPED")
-    assert {s.value for s in StepStatus} == {"PENDING", "RUNNING", "SUCCESS", "FAILED"}
+    assert {s.value for s in StepStatus} == {
+        "PENDING",
+        "RUNNING",
+        "WAITING_APPROVAL",
+        "SUCCESS",
+        "FAILED",
+    }
+
+
+def test_m7_waiting_approval_transitions() -> None:
+    assert can_transition_step(StepStatus.PENDING, StepStatus.WAITING_APPROVAL)
+    assert can_transition_step(StepStatus.WAITING_APPROVAL, StepStatus.RUNNING)
+    assert can_transition_step(StepStatus.WAITING_APPROVAL, StepStatus.FAILED)
+    assert not can_transition_step(StepStatus.WAITING_APPROVAL, StepStatus.SUCCESS)
+    assert can_transition_run(RunStatus.RUNNING, RunStatus.WAITING_APPROVAL)
+    assert can_transition_run(RunStatus.WAITING_APPROVAL, RunStatus.RUNNING)
+    assert can_transition_run(RunStatus.WAITING_APPROVAL, RunStatus.FAILED)

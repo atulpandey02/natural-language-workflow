@@ -189,6 +189,67 @@ class Connector(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="unchecked")
 
 
+# --- Approvals + external actions (M7) ---
+# An action step with requires_approval=True parks the run at WAITING_APPROVAL and
+# creates one Approval. External side effects are audited (secret-free) in
+# ExternalAction, which also carries the durable idempotency key + lease.
+
+
+class Approval(TimestampMixin, Base):
+    __tablename__ = "approvals"
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_id", name="uq_approval_run_step"),
+        CheckConstraint("status in ('pending','approved','rejected')", name="ck_approval_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    step_id: Mapped[str] = mapped_column(String, nullable=False)
+    connector_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    connector_name: Mapped[str] = mapped_column(String, nullable=False)
+    tool: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+
+class ExternalAction(TimestampMixin, Base):
+    __tablename__ = "external_actions"
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_id", name="uq_external_action_run_step"),
+        CheckConstraint(
+            "status in ('pending','success','failed')", name="ck_external_action_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    step_id: Mapped[str] = mapped_column(String, nullable=False)
+    connector_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    tool: Mapped[str] = mapped_column(String, nullable=False)
+    # Stable idempotency key: generated once, reused on every retry/resume.
+    external_action_key: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # Non-secret summary only (webhook host / slack channel id).
+    destination_summary: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_class: Mapped[str | None] = mapped_column(String, nullable=True)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider_request_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 # --- Planner proposals (M6) ---
 # Immutable audit snapshot of a planning request + its deterministic verdict.
 # The raw user prompt and raw provider response are NEVER stored: only a length,

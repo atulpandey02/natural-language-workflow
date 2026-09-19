@@ -61,8 +61,13 @@ def advance_run(run_id: str) -> None:
     message is retried rather than silently dropped.
     """
 
-    def _enqueue(rid: uuid.UUID) -> None:
-        advance_run.send(str(rid))
+    def _enqueue(rid: uuid.UUID, delay_seconds: float | None = None) -> None:
+        if delay_seconds is not None and delay_seconds > 0:
+            # Dramatiq delayed delivery (ms); used for action retry backoff and
+            # for deferring while another worker holds a live action lease.
+            advance_run.send_with_options(args=(str(rid),), delay=int(delay_seconds * 1000))
+        else:
+            advance_run.send(str(rid))
 
     outcome = process_advance(_get_sessionmaker(), uuid.UUID(run_id), _enqueue)
     log.info("worker.advance_run", run_id=run_id, result=outcome.result, step_id=outcome.step_id)
