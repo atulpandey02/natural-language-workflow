@@ -1,7 +1,7 @@
 # ADR-003 — Multi-tenant isolation strategy
 
 - Status: Accepted
-- Date: 2026-09-18
+- Date: 2026-09-18 (revised 2026-09-19 — role-specific, membership-bound policies; see “Update (M3 / migration 0005)”)
 
 ## Context
 
@@ -63,4 +63,56 @@ Defense in depth, enforced below the application:
 - A small operational contract: the runtime role must exist (bootstrap) before
   migrations grant to it; the app must set the GUCs each request (centralized in
   the session/deps layer).
-- Future business tables adopt the `tenant_id = app.tenant_id` policy uniformly.
+- Future business tables adopt the tenant policies uniformly.
+
+## Update (M3 / migration 0005) — role-specific, membership-bound policies
+
+The original `0003` tenant-only SELECT policies (`id = app.tenant_id` /
+`workspace_id = app.tenant_id`) were **forgeable**: because any connectable role
+can `SET LOCAL app.tenant_id`, `nlw_app` could read another tenant's rows by
+setting the GUC. A raw-SQL reproduction confirmed this. Additionally,
+`memberships` INSERT `WITH CHECK (user_id = app.user_id)` allowed a user to
+insert **themselves** (as `owner`) into an **existing** workspace — a direct
+privilege-escalation into any tenant.
+
+Hardened design (M3 tables in `0004`; M2 tables in `0005`):
+
+- **Role-specific policies, no PUBLIC.** Every policy is `TO nlw_app` or
+  `TO nlw_worker`.
+- **`nlw_app` visibility is membership-bound** via a read-only SECURITY DEFINER
+  helper `is_current_user_member(tenant_id)` (owner `nlw_rls_bypass`, minimal
+  `search_path`, returns boolean only, executable only by `nlw_app`). A row is
+  visible only when the current user is a member of that tenant — not merely
+  because `app.tenant_id` was set.
+- **`nlw_worker` policies are tenant-only** (`tenant_id = app.tenant_id`); the
+  worker obtains the tenant from the worker-only `resolve_run_tenant` bootstrap
+  (see ADR-010) and has no user identity.
+- **No direct membership/workspace writes for `nlw_app`.** Those grants are
+  revoked. A workspace and its **single** owner membership are created only by
+  the narrow, atomic `create_workspace_for_current_user(name, slug)` — a
+  SECURITY DEFINER function owned by the write-only, non-login
+  `nlw_workspace_bootstrap` role. It always creates a **new** workspace, so it
+  cannot add the caller to an existing one, and exposes no general membership
+  mutation.
+- `nlw_rls_bypass` stays **read-only** (authorization/routing helpers only);
+  `nlw_workspace_bootstrap` holds the only membership-write capability, confined
+  to that one function.
+
+## Threat model (accurate guarantee)
+
+**Guarantee.** With `FORCE` RLS, role-specific membership-bound policies, and the
+SECURITY DEFINER helpers, the database enforces tenant isolation against
+**missing or mis-scoped application queries once the authenticated request
+context is correctly established**: an `nlw_app` row is visible only when the
+current user is a member of that tenant, and `nlw_app` cannot self-escalate into
+a tenant (no membership-write path, and workspace creation cannot target an
+existing workspace).
+
+**Non-guarantee.** `app.user_id` and `app.tenant_id` are transaction-local GUCs
+and are **forgeable by arbitrary SQL executing under the shared runtime role**.
+This design does **not** claim resistance to an attacker who can run arbitrary
+SQL as `nlw_app`/`nlw_worker` and forge the full request identity/context (e.g.,
+set `app.user_id` to an existing member of a target tenant). Achieving that
+stronger guarantee requires **non-forgeable / signed DB context** or a
+per-request DB identity model. This is recorded as a **pre-production
+security-hardening item** and is intentionally **not** implemented in M3.

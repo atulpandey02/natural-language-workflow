@@ -21,7 +21,7 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
 | Role | Responsibility |
 |------|----------------|
 | `api` | Authn/authz, input validation, writes intent to Postgres, enqueues work. Never executes workflow steps. |
-| `worker` | Dramatiq consumer. Runs actors (M1b: a `ping` actor); loads durable run state and executes steps from M3. |
+| `worker` | Dramatiq consumer. `advance_run(run_id)` loads durable state from Postgres and executes one step per advancement (M3). Connects as the execution-only `nlw_worker` role. |
 | `scheduler` | Heartbeat-only for now; reads due schedules and enqueues runs from M8. |
 
 ## Boundaries (ADRs)
@@ -29,6 +29,9 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
 - **Postgres is the system of record** — [ADR-001](../adr/ADR-001-postgres-state-store.md).
   Losing Redis loses no workflow state.
 - **Redis/Dramatiq is transport only** — [ADR-002](../adr/ADR-002-redis-dramatiq-queue.md).
+- **Durable execution** — [ADR-010](../adr/ADR-010-durable-execution.md): one step per
+  `advance_run`, `FOR UPDATE` serialization, commit-before-enqueue, idempotent replay;
+  worker derives tenant via a worker-only SECURITY DEFINER resolver.
 - The LLM proposes; deterministic code enforces every invariant
   (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling).
 

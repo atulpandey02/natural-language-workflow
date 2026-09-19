@@ -9,11 +9,16 @@ signal; it is **not** workflow state. The real actor in later milestones will be
 ``advance_run(run_id)`` and will load authoritative state from Postgres.
 """
 
+import uuid
+
 import dramatiq
 import redis
 import structlog
+from sqlalchemy.orm import Session, sessionmaker
 
 from nlw.core.config import get_settings
+from nlw.db.session import create_sync_engine, create_sync_sessionmaker
+from nlw.engine.execution import process_advance
 from nlw.worker.broker import make_broker
 
 log = structlog.get_logger(__name__)
@@ -25,6 +30,17 @@ dramatiq.set_broker(make_broker(get_settings()))
 # Marker TTL: the demonstration signal is ephemeral by design.
 _PING_MARKER_TTL_SECONDS = 60
 
+# Lazily-created synchronous session factory for the worker (connects as the
+# nlw_worker role; Dramatiq actors are synchronous).
+_sessionmaker: sessionmaker[Session] | None = None
+
+
+def _get_sessionmaker() -> sessionmaker[Session]:
+    global _sessionmaker
+    if _sessionmaker is None:
+        _sessionmaker = create_sync_sessionmaker(create_sync_engine(get_settings()))
+    return _sessionmaker
+
 
 @dramatiq.actor
 def ping(token: str) -> None:
@@ -35,3 +51,18 @@ def ping(token: str) -> None:
         client.set(f"nlw:ping:{token}", "ok", ex=_PING_MARKER_TTL_SECONDS)
     finally:
         client.close()
+
+
+@dramatiq.actor
+def advance_run(run_id: str) -> None:
+    """Advance a durable run by one step, then enqueue the next advancement.
+
+    Enqueue happens only after the step commit, and its failure propagates so the
+    message is retried rather than silently dropped.
+    """
+
+    def _enqueue(rid: uuid.UUID) -> None:
+        advance_run.send(str(rid))
+
+    outcome = process_advance(_get_sessionmaker(), uuid.UUID(run_id), _enqueue)
+    log.info("worker.advance_run", run_id=run_id, result=outcome.result, step_id=outcome.step_id)

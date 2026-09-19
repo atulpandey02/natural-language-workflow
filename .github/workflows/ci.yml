@@ -56,7 +56,7 @@ jobs:
         with:
           version: "0.12"
       - run: uv sync --frozen
-      - name: Bootstrap restricted runtime role (bootstrap, not a migration)
+      - name: Bootstrap runtime roles (bootstrap, not a migration)
         env:
           OWNER_URL: postgresql://nlw:nlw@localhost:5432/nlw
         run: |
@@ -64,12 +64,25 @@ jobs:
           import os, psycopg
           with psycopg.connect(os.environ["OWNER_URL"], autocommit=True) as conn:
               conn.execute(
-                  "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_app') "
-                  "THEN CREATE ROLE nlw_app LOGIN PASSWORD 'nlw_app' "
-                  "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; END $$;"
+                  "DO $$ BEGIN "
+                  "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_app') THEN "
+                  "CREATE ROLE nlw_app LOGIN PASSWORD 'nlw_app' "
+                  "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; "
+                  "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_worker') THEN "
+                  "CREATE ROLE nlw_worker LOGIN PASSWORD 'nlw_worker' "
+                  "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; "
+                  "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_rls_bypass') THEN "
+                  "CREATE ROLE nlw_rls_bypass NOLOGIN NOSUPERUSER BYPASSRLS "
+                  "NOCREATEDB NOCREATEROLE; END IF; "
+                  "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_workspace_bootstrap') THEN "
+                  "CREATE ROLE nlw_workspace_bootstrap NOLOGIN NOSUPERUSER BYPASSRLS "
+                  "NOCREATEDB NOCREATEROLE; END IF; END $$;"
               )
-              conn.execute("GRANT CONNECT ON DATABASE nlw TO nlw_app")
-              conn.execute("GRANT USAGE ON SCHEMA public TO nlw_app")
+              for role in ("nlw_app", "nlw_worker"):
+                  conn.execute(f"GRANT CONNECT ON DATABASE nlw TO {role}")
+                  conn.execute(f"GRANT USAGE ON SCHEMA public TO {role}")
+              conn.execute("GRANT nlw_rls_bypass TO nlw")
+              conn.execute("GRANT nlw_workspace_bootstrap TO nlw")
           PY
       - name: Apply migrations (as owner)
         env:

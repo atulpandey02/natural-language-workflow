@@ -9,12 +9,13 @@
 import uuid
 
 from fastapi import APIRouter, Depends, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nlw.api.deps import get_current_user, get_session, get_tenant_context
 from nlw.api.schemas import TenantContextOut, UserOut, WorkspaceCreate, WorkspaceOut
 from nlw.db.models import User
-from nlw.db.repositories import MembershipRepository, WorkspaceRepository
+from nlw.db.repositories import WorkspaceRepository
 from nlw.tenancy.context import Role, TenantContext
 
 router = APIRouter()
@@ -45,13 +46,17 @@ async def create_workspace(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> WorkspaceOut:
-    # INSERT policies allow creating a workspace and one's own owner membership;
-    # the request transaction commits at teardown.
-    workspace = await WorkspaceRepository(session).create(body.name, _slugify(body.name))
-    await MembershipRepository(session).create(user.id, workspace.id, Role.OWNER)
-    return WorkspaceOut(
-        id=workspace.id, name=workspace.name, slug=workspace.slug, role=Role.OWNER.value
+    # Creation goes through the narrow SECURITY DEFINER bootstrap: it creates a
+    # NEW workspace plus exactly the creator's owner membership, atomically.
+    # nlw_app has no direct workspaces/memberships write privilege, so it cannot
+    # add itself to an existing workspace.
+    slug = _slugify(body.name)
+    result = await session.execute(
+        text("SELECT create_workspace_for_current_user(:name, :slug)"),
+        {"name": body.name, "slug": slug},
     )
+    workspace_id: uuid.UUID = result.scalar_one()
+    return WorkspaceOut(id=workspace_id, name=body.name, slug=slug, role=Role.OWNER.value)
 
 
 @router.get("/workspaces/current", response_model=TenantContextOut)
