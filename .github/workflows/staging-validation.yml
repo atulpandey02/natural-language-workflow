@@ -72,13 +72,24 @@ jobs:
 
       - name: Configure prod-shaped staging env
         run: |
+          # Synthetic CI-ONLY strong role passwords (URL-safe). These exercise the
+          # exact new bootstrap path (00-roles.sh) and prove NO weak default is
+          # used; each per-role URL embeds its OWN role's password (no fallback).
+          OWNER_PW="ci_owner_$(openssl rand -hex 16)"
+          APP_PW="ci_app_$(openssl rand -hex 16)"
+          WORKER_PW="ci_worker_$(openssl rand -hex 16)"
+          SCHED_PW="ci_scheduler_$(openssl rand -hex 16)"
+          for v in "$OWNER_PW" "$APP_PW" "$WORKER_PW" "$SCHED_PW"; do echo "::add-mask::$v"; done
           {
             echo "COMPOSE=docker compose -f docker-compose.prod.yml -f docker-compose.e2e.yml -f docker-compose.staging.yml"
-            echo "POSTGRES_PASSWORD=nlw"
-            echo "DATABASE_URL=postgresql+psycopg://nlw_app:nlw_app@postgres:5432/nlw"
-            echo "DATABASE_MIGRATION_URL=postgresql+psycopg://nlw:nlw@postgres:5432/nlw"
-            echo "WORKER_DATABASE_URL=postgresql+psycopg://nlw_worker:nlw_worker@postgres:5432/nlw"
-            echo "SCHEDULER_DATABASE_URL=postgresql+psycopg://nlw_scheduler:nlw_scheduler@postgres:5432/nlw"
+            echo "POSTGRES_PASSWORD=${OWNER_PW}"
+            echo "NLW_APP_DB_PASSWORD=${APP_PW}"
+            echo "NLW_WORKER_DB_PASSWORD=${WORKER_PW}"
+            echo "NLW_SCHEDULER_DB_PASSWORD=${SCHED_PW}"
+            echo "DATABASE_URL=postgresql+psycopg://nlw_app:${APP_PW}@postgres:5432/nlw"
+            echo "DATABASE_MIGRATION_URL=postgresql+psycopg://nlw:${OWNER_PW}@postgres:5432/nlw"
+            echo "WORKER_DATABASE_URL=postgresql+psycopg://nlw_worker:${WORKER_PW}@postgres:5432/nlw"
+            echo "SCHEDULER_DATABASE_URL=postgresql+psycopg://nlw_scheduler:${SCHED_PW}@postgres:5432/nlw"
             echo "REDIS_URL=redis://redis:6379/0"
             echo "PUBLIC_HOSTNAME=localhost"
             # Runtime public config for the web container (browser-safe). The web
