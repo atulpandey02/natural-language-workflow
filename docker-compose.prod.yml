@@ -23,10 +23,12 @@ x-app-env: &app-env
   DATABASE_URL: ${DATABASE_URL}
   REDIS_URL: ${REDIS_URL}
   SUPABASE_URL: ${SUPABASE_URL}
-  # Lock the public host and trust ONLY the reverse proxy's fixed address for
-  # forwarded headers (never arbitrary X-Forwarded-*).
-  TRUSTED_HOSTS: '["${PUBLIC_HOSTNAME}"]'
-  TRUSTED_PROXY_IPS: '["172.28.0.2"]'
+  # The API is internal-only (M10): the browser never calls it — the frontend's
+  # BFF does, over the internal network with Host "api". So the TrustedHost
+  # allowlist is the internal service name + loopback (used by the healthcheck).
+  # No public forwarded headers are trusted.
+  TRUSTED_HOSTS: '["api","localhost","127.0.0.1"]'
+  TRUSTED_PROXY_IPS: "[]"
 
 x-app-hardening: &app-hardening
   image: ${NLW_IMAGE:?set NLW_IMAGE to the GHCR image digest}
@@ -48,7 +50,8 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
-    # The ONLY publicly published service.
+    # The ONLY publicly published service. Proxies to the frontend; the API,
+    # worker, scheduler, Postgres, Redis and all metrics ports stay internal.
     ports:
       - "80:80"
       - "443:443"
@@ -59,17 +62,38 @@ services:
     environment:
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
     depends_on:
+      - web
+    networks:
+      - internal
+
+  web:
+    image: ${NLW_WEB_IMAGE:?set NLW_WEB_IMAGE to the frontend GHCR image digest}
+    restart: unless-stopped
+    # Internal only — reachable by Caddy on the internal network.
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: production
+      NLW_API_URL: http://api:8000
+      NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      WORKSPACE_COOKIE_SECRET: ${WORKSPACE_COOKIE_SECRET}
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    depends_on:
       - api
     networks:
-      internal:
-        ipv4_address: 172.28.0.2
+      - internal
 
   api:
     <<: *app-hardening
     environment:
       <<: *app-env
       NLW_LLM_API_KEY: ${NLW_LLM_API_KEY:-}
-    # No host port: reachable only by Caddy on the internal network.
+    # No host port: reachable only by the frontend BFF on the internal network.
     expose:
       - "8000"
     depends_on:

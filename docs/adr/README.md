@@ -33,6 +33,7 @@ decision, numbered and never deleted (supersede instead of removing).
 | [016](ADR-016-observability-and-correlation.md) | Observability: correlation IDs & Prometheus metrics | Accepted |
 | [017](ADR-017-rate-and-resource-limits.md) | Rate limiting & per-tenant resource limits | Accepted |
 | [018](ADR-018-production-topology-and-ops.md) | Production topology & operational readiness | Accepted |
+| [019](ADR-019-frontend-architecture.md) | Frontend architecture (Next.js App Router + BFF) | Accepted |
 
 ## Template
 

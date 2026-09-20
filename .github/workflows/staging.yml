@@ -32,6 +32,8 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       image: ghcr.io/${{ github.repository }}
+      web_digest: ${{ steps.build_web.outputs.digest }}
+      web_image: ghcr.io/${{ github.repository }}/web
     steps:
       - uses: actions/checkout@v4
       - name: Log in to GHCR
@@ -40,13 +42,23 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push by digest
+      - name: Build and push backend by digest
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+      - name: Build and push frontend by digest
+        id: build_web
+        uses: docker/build-push-action@v6
+        with:
+          context: ./web
+          push: true
+          tags: ghcr.io/${{ github.repository }}/web:sha-${{ github.sha }}
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
       - name: Scan pushed image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -66,6 +78,7 @@ jobs:
       - name: Deploy the exact digest to staging
         env:
           NLW_IMAGE: ${{ needs.build-push.outputs.image }}@${{ needs.build-push.outputs.digest }}
+          NLW_WEB_IMAGE: ${{ needs.build-push.outputs.web_image }}@${{ needs.build-push.outputs.web_digest }}
         run: |
           echo "Deploy $NLW_IMAGE to staging."
           echo "Run migrations first: docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head"
@@ -86,6 +99,7 @@ jobs:
       - name: Promote the identical digest
         env:
           NLW_IMAGE: ${{ needs.build-push.outputs.image }}@${{ needs.build-push.outputs.digest }}
+          NLW_WEB_IMAGE: ${{ needs.build-push.outputs.web_image }}@${{ needs.build-push.outputs.web_digest }}
         run: |
           echo "Promote $NLW_IMAGE (identical digest) to production."
           echo "Apply migrations before traffic switch; image rollback does NOT downgrade the DB."

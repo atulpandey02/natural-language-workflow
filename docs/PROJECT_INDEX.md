@@ -7,11 +7,23 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M9 — Production hardening + operational readiness |
-| Current milestone | **M9 — Production hardening** (`feat/production-hardening`, in review) |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 |
-| Next milestone | M10 — tbd |
-| Release status | pre-alpha, staging-candidate after M9 |
+| Current phase | M10 — Frontend / Product UX |
+| Current milestone | **M10 — Frontend / Product UX** (`feat/frontend-product-ux`, in review) |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 |
+| Next milestone | M11 — tbd |
+| Release status | pre-alpha, staging-candidate |
+
+M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
+so a user can operate the platform end-to-end without curl/SQL: Supabase
+cookie auth, workspace selection, dashboard, connector management, natural-language
+planning + feasibility + materialization, workflow/run/step/action views,
+approvals, and scheduling. The browser talks only to a same-origin BFF that
+injects the bearer token + `X-Workspace-Id` server-side (tokens never in
+`localStorage`); the API stays internal behind Caddy. Bounded polling (no
+WebSockets), role-aware UI (backend authoritative), CSRF + CSP, and no secret
+values ever reach the browser. Read-only backend support endpoints for
+workflows/versions/runs/steps/actions plus an idempotent manual-run trigger were
+added (no new grants/migration). See ADR-019.
 
 M9 makes the existing backend safe to run in staging on a small VPS (Docker
 Compose, no Kubernetes): correlation IDs + internal Prometheus metrics
@@ -130,7 +142,7 @@ the components they protect — not deferred to the end.
 | M7 | Webhook + Slack action connectors + approvals | `feat/action-connectors-approvals` | ADR-013, ADR-014 |
 | M8 | Scheduler (explicit timezone, single-firing) + reconciliation | `feat/scheduling-reconciliation` | ADR-015 |
 | M9 | Production hardening + operational readiness (observability, rate/resource limits, container/HTTP/DB hardening, backups, runbooks, GHCR delivery) | `feat/production-hardening` | ADR-016, ADR-017, ADR-018 |
-| M10 | Frontend (Vite + React) | `feat/frontend` | — |
+| M10 | Frontend / Product UX (Next.js App Router + BFF; read-only support endpoints + idempotent manual run) | `feat/frontend-product-ux` | ADR-019 |
 | M11 | Staging + CD + load/failure testing | tbd | ADR-008 |
 | M12 | Production deployment | tbd | — |
 
