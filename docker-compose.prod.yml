@@ -127,7 +127,9 @@ services:
         required: false
     environment:
       <<: *app-env
-      DATABASE_URL: ${WORKER_DATABASE_URL:-${DATABASE_URL}}
+      # Required: the worker connects as its OWN least-privilege role. No silent
+      # fallback to the app role — a missing value fails the prod render/start.
+      DATABASE_URL: ${WORKER_DATABASE_URL:?WORKER_DATABASE_URL is required (nlw_worker)}
     depends_on:
       postgres:
         condition: service_healthy
@@ -145,7 +147,9 @@ services:
     command: ["python", "-m", "nlw.scheduler"]
     environment:
       <<: *app-env
-      DATABASE_URL: ${SCHEDULER_DATABASE_URL:-${DATABASE_URL}}
+      # Required: the scheduler connects as its OWN least-privilege role. No
+      # silent fallback to the app role — missing value fails the render/start.
+      DATABASE_URL: ${SCHEDULER_DATABASE_URL:?SCHEDULER_DATABASE_URL is required (nlw_scheduler)}
     depends_on:
       postgres:
         condition: service_healthy
@@ -163,8 +167,16 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: nlw
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Required: production must never start with a weak/empty owner password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: nlw
+      # Required strong passwords for the restricted runtime roles, consumed by
+      # docker/postgres/initdb/00-roles.sh on FRESH-volume init only. A prod
+      # render/start FAILS if any are absent (no weak fallback). Rotating these
+      # later does NOT change an existing role's password (ALTER ROLE runbook).
+      NLW_APP_DB_PASSWORD: ${NLW_APP_DB_PASSWORD:?NLW_APP_DB_PASSWORD is required}
+      NLW_WORKER_DB_PASSWORD: ${NLW_WORKER_DB_PASSWORD:?NLW_WORKER_DB_PASSWORD is required}
+      NLW_SCHEDULER_DB_PASSWORD: ${NLW_SCHEDULER_DB_PASSWORD:?NLW_SCHEDULER_DB_PASSWORD is required}
     # Internal only — no published port.
     volumes:
       - pgdata:/var/lib/postgresql/data

@@ -78,3 +78,113 @@ def test_worker_scheduler_healthchecks_check_dependencies() -> None:
     for svc in ("worker", "scheduler"):
         test_cmd = compose["services"][svc]["healthcheck"]["test"]
         assert "nlw.ops.healthcheck" in " ".join(test_cmd), svc
+
+
+# --- PR2: hardened role bootstrap ------------------------------------------
+
+_INITDB = ROOT / "docker" / "postgres" / "initdb"
+# Weak-password literals that must NEVER appear in a production bootstrap source.
+_WEAK_LITERALS = (
+    "PASSWORD 'nlw_app'",
+    "PASSWORD 'nlw_worker'",
+    "PASSWORD 'nlw_scheduler'",
+    "nlw_app:nlw_app",
+    "nlw_worker:nlw_worker",
+    "nlw_scheduler:nlw_scheduler",
+)
+
+
+def test_role_bootstrap_is_executable_env_driven_script() -> None:
+    # The static weak-password SQL is gone; the executable bootstrap replaces it.
+    assert not (_INITDB / "00-roles.sql").exists(), "static 00-roles.sql must be removed"
+    script = _INITDB / "00-roles.sh"
+    assert script.exists(), "00-roles.sh bootstrap missing"
+    text = script.read_text()
+    getenv = "\\getenv"  # literal backslash-getenv marker (psql meta-command)
+    # Requires the three role passwords (fail-fast) and imports each via \getenv
+    # (no shell-string interpolation of secrets).
+    for var in ("NLW_APP_DB_PASSWORD", "NLW_WORKER_DB_PASSWORD", "NLW_SCHEDULER_DB_PASSWORD"):
+        assert f'"${{{var}:?' in text, f"{var} must be a required fail-fast guard"
+        assert f"{getenv} " in text and var in text, f"{var} must be imported via \\getenv"
+    assert text.count(f"{getenv} ") >= 3, "each role password must be imported via \\getenv"
+    # Never enable password-echoing modes (ignore mentions inside comments).
+    commands = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    assert "set -x" not in commands
+    assert "psql -a" not in commands and "psql -e" not in commands
+    # Login roles keep their security properties; helper roles stay NOLOGIN.
+    for role in ("nlw_app", "nlw_worker", "nlw_scheduler"):
+        assert f"CREATE ROLE {role} LOGIN" in text, role
+    for prop in ("NOSUPERUSER", "NOBYPASSRLS", "NOCREATEDB", "NOCREATEROLE", "NOINHERIT"):
+        assert prop in text, prop
+    for helper in ("nlw_rls_bypass", "nlw_workspace_bootstrap"):
+        assert f"CREATE ROLE {helper} NOLOGIN" in text, helper
+
+
+def test_no_weak_password_literals_in_prod_bootstrap_sources() -> None:
+    sources = [
+        _INITDB / "00-roles.sh",
+        ROOT / "docker-compose.prod.yml",
+        ROOT / ".env.prod.example",
+    ]
+    for src in sources:
+        text = src.read_text()
+        for literal in _WEAK_LITERALS:
+            assert literal not in text, f"{src.name} contains weak literal: {literal}"
+
+
+def test_prod_postgres_requires_role_passwords_fail_fast() -> None:
+    text = (ROOT / "docker-compose.prod.yml").read_text()
+    for var in (
+        "POSTGRES_PASSWORD",
+        "NLW_APP_DB_PASSWORD",
+        "NLW_WORKER_DB_PASSWORD",
+        "NLW_SCHEDULER_DB_PASSWORD",
+    ):
+        assert f"${{{var}:?" in text, f"{var} must be required (:?) in prod compose"
+
+
+def test_prod_worker_scheduler_have_no_app_role_fallback() -> None:
+    compose = _load("docker-compose.prod.yml")
+    text = (ROOT / "docker-compose.prod.yml").read_text()
+    # No silent fallback to the app role for worker/scheduler.
+    assert "WORKER_DATABASE_URL:-" not in text
+    assert "SCHEDULER_DATABASE_URL:-" not in text
+    assert "${WORKER_DATABASE_URL:?" in text
+    assert "${SCHEDULER_DATABASE_URL:?" in text
+    # Sanity: worker/scheduler read their own per-role URL var.
+    assert "WORKER_DATABASE_URL" in compose["services"]["worker"]["environment"]["DATABASE_URL"]
+    assert (
+        "SCHEDULER_DATABASE_URL" in compose["services"]["scheduler"]["environment"]["DATABASE_URL"]
+    )
+
+
+def test_dev_compose_supplies_role_password_defaults() -> None:
+    # Dev keeps local defaults so a fresh dev volume initializes without a secret
+    # file; these match the dev DATABASE_URLs.
+    env = _load("docker-compose.yml")["services"]["postgres"]["environment"]
+    for var, default in (
+        ("NLW_APP_DB_PASSWORD", "nlw_app"),
+        ("NLW_WORKER_DB_PASSWORD", "nlw_worker"),
+        ("NLW_SCHEDULER_DB_PASSWORD", "nlw_scheduler"),
+    ):
+        assert env[var] == f"${{{var}:-{default}}}", var
+
+
+def test_env_prod_example_documents_required_vars() -> None:
+    text = (ROOT / ".env.prod.example").read_text()
+    for var in (
+        "POSTGRES_PASSWORD=",
+        "NLW_APP_DB_PASSWORD=",
+        "NLW_WORKER_DB_PASSWORD=",
+        "NLW_SCHEDULER_DB_PASSWORD=",
+        "DATABASE_URL=",
+        "DATABASE_MIGRATION_URL=",
+        "WORKER_DATABASE_URL=",
+        "SCHEDULER_DATABASE_URL=",
+    ):
+        assert var in text, var
+    # Must document restrictive perms + explicit --env-file usage.
+    assert "chmod 600 .env.prod" in text
+    assert "chmod 600 docker/worker.secrets.env" in text
+    assert "--env-file .env.prod" in text
+    assert "openssl rand -hex 32" in text

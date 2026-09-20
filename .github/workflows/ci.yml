@@ -137,17 +137,45 @@ jobs:
           SUPABASE_URL: https://proj.supabase.co
           SUPABASE_ANON_KEY: ci-anon
         run: docker compose -f docker-compose.yml config >/dev/null
-      - name: Validate production compose config
+      - name: Production compose FAILS without role passwords (negative)
         env:
           NLW_IMAGE: nlw:ci
           NLW_WEB_IMAGE: nlw-web:ci
           PUBLIC_HOSTNAME: staging.example.com
           DATABASE_URL: postgresql+psycopg://nlw_app:x@postgres:5432/nlw
+          WORKER_DATABASE_URL: postgresql+psycopg://nlw_worker:x@postgres:5432/nlw
+          SCHEDULER_DATABASE_URL: postgresql+psycopg://nlw_scheduler:x@postgres:5432/nlw
+          DATABASE_MIGRATION_URL: postgresql+psycopg://nlw:x@postgres:5432/nlw
           REDIS_URL: redis://redis:6379/0
           SUPABASE_URL: https://proj.supabase.co
           SUPABASE_ANON_KEY: ci-anon
           WORKSPACE_COOKIE_SECRET: ci-secret
           POSTGRES_PASSWORD: x
+          # NLW_APP/WORKER/SCHEDULER_DB_PASSWORD intentionally UNSET.
+        run: |
+          if docker compose -f docker-compose.prod.yml config >/dev/null 2>err.txt; then
+            echo "FAIL: prod compose rendered without role passwords"; cat err.txt; exit 1
+          fi
+          grep -q "NLW_APP_DB_PASSWORD is required" err.txt \
+            || { echo "FAIL: missing-secret error not surfaced"; cat err.txt; exit 1; }
+          echo "OK: prod compose fails fast without role passwords"
+      - name: Validate production compose config (complete env)
+        env:
+          NLW_IMAGE: nlw:ci
+          NLW_WEB_IMAGE: nlw-web:ci
+          PUBLIC_HOSTNAME: staging.example.com
+          POSTGRES_PASSWORD: ci-owner-pw
+          NLW_APP_DB_PASSWORD: ci-app-pw
+          NLW_WORKER_DB_PASSWORD: ci-worker-pw
+          NLW_SCHEDULER_DB_PASSWORD: ci-scheduler-pw
+          DATABASE_URL: postgresql+psycopg://nlw_app:ci-app-pw@postgres:5432/nlw
+          WORKER_DATABASE_URL: postgresql+psycopg://nlw_worker:ci-worker-pw@postgres:5432/nlw
+          SCHEDULER_DATABASE_URL: postgresql+psycopg://nlw_scheduler:ci-scheduler-pw@postgres:5432/nlw
+          DATABASE_MIGRATION_URL: postgresql+psycopg://nlw:ci-owner-pw@postgres:5432/nlw
+          REDIS_URL: redis://redis:6379/0
+          SUPABASE_URL: https://proj.supabase.co
+          SUPABASE_ANON_KEY: ci-anon
+          WORKSPACE_COOKIE_SECRET: ci-secret
         run: docker compose -f docker-compose.prod.yml config >/dev/null
 
   web:

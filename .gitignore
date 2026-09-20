@@ -10,6 +10,7 @@ dist/
 .env
 .env.*
 !.env.example
+!.env.prod.example
 
 # Tooling caches
 .mypy_cache/

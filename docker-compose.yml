@@ -49,13 +49,20 @@ services:
       POSTGRES_USER: nlw
       POSTGRES_PASSWORD: nlw
       POSTGRES_DB: nlw
+      # LOCAL-DEV ONLY defaults so a fresh dev volume initializes without a secret
+      # file. These match the dev DATABASE_URLs below. Production requires strong
+      # values (docker-compose.prod.yml fails without them); never weaken prod.
+      NLW_APP_DB_PASSWORD: ${NLW_APP_DB_PASSWORD:-nlw_app}
+      NLW_WORKER_DB_PASSWORD: ${NLW_WORKER_DB_PASSWORD:-nlw_worker}
+      NLW_SCHEDULER_DB_PASSWORD: ${NLW_SCHEDULER_DB_PASSWORD:-nlw_scheduler}
     # Published on 5433 to avoid colliding with a native Postgres on 5432.
     # In-cluster services still reach it at postgres:5432.
     ports:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Role bootstrap (creates the restricted nlw_app role on fresh volume init).
+      # Role bootstrap: creates the restricted runtime roles (nlw_app/nlw_worker/
+      # nlw_scheduler) with the passwords above on fresh volume init.
       - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nlw -d nlw"]
