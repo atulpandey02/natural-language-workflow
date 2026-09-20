@@ -57,8 +57,11 @@ jobs:
       #    tables before they exist).
       - name: Build + start stack
         env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ env.SUPABASE_API_URL }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.SUPABASE_ANON_KEY }}
+          # Runtime public config for the web container (browser-safe). The image
+          # is env-agnostic; the e2e overlay sets SUPABASE_SERVER_URL for the
+          # container's own network path to the same local Supabase.
+          SUPABASE_URL: ${{ env.SUPABASE_API_URL }}
+          SUPABASE_ANON_KEY: ${{ env.SUPABASE_ANON_KEY }}
           # JWKS-first verification (asymmetric); HS256 secret kept as fallback.
           SUPABASE_JWT_SECRET: ${{ env.SUPABASE_JWT_SECRET }}
           SUPABASE_JWKS_URL: ${{ env.SUPABASE_JWKS_URL }}

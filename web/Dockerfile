@@ -10,11 +10,9 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# Public env is baked at build time; server-only env is provided at runtime.
-ARG NEXT_PUBLIC_SUPABASE_URL
-ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
-ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \
-    NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+# No public config is baked at build time: the browser-safe Supabase URL + anon
+# key are supplied at RUNTIME (server-injected into the document) so one immutable
+# image targets any environment. Server-only env is likewise provided at runtime.
 RUN npm run build
 
 FROM node:22-slim AS runner

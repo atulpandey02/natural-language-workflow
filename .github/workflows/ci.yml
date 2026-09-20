@@ -122,9 +122,8 @@ jobs:
           push: false
           load: true
           tags: nlw-web:ci
-          build-args: |
-            NEXT_PUBLIC_SUPABASE_URL=https://proj.supabase.co
-            NEXT_PUBLIC_SUPABASE_ANON_KEY=ci-anon
+          # No Supabase build-args: the image is environment-agnostic (public
+          # config is supplied at runtime, server-injected into the document).
       - name: Trivy scan (frontend image)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -135,8 +134,8 @@ jobs:
           severity: CRITICAL
       - name: Validate dev compose config
         env:
-          NEXT_PUBLIC_SUPABASE_URL: https://proj.supabase.co
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-anon
+          SUPABASE_URL: https://proj.supabase.co
+          SUPABASE_ANON_KEY: ci-anon
         run: docker compose -f docker-compose.yml config >/dev/null
       - name: Validate production compose config
         env:
@@ -172,8 +171,10 @@ jobs:
       - name: Production build
         run: npm run build
         env:
-          NEXT_PUBLIC_SUPABASE_URL: https://proj.supabase.co
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-anon
+          # Runtime env (not baked). Provided so any server evaluation during the
+          # build has valid values; the browser bundle contains no NEXT_PUBLIC_*.
+          SUPABASE_URL: https://proj.supabase.co
+          SUPABASE_ANON_KEY: ci-anon
 
   security:
     name: Secret scan + dependency audit

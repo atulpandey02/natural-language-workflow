@@ -3,9 +3,9 @@
 #   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
 #
 # The browser (Playwright, on the runner) reaches Supabase at the PUBLIC URL
-# baked into the web build (NEXT_PUBLIC_SUPABASE_URL, e.g. http://127.0.0.1:54321).
-# The web CONTAINER reaches the same Supabase via the host gateway
-# (SUPABASE_SERVER_URL) for server-side session resolution.
+# supplied at RUNTIME (SUPABASE_URL, e.g. http://127.0.0.1:54321 — server-injected
+# into the document, not baked into the build). The web CONTAINER reaches the same
+# Supabase via the host gateway (SUPABASE_SERVER_URL) for server-side resolution.
 
 services:
   api:
@@ -24,6 +24,10 @@ services:
 
   web:
     environment:
+      # Public/browser config (runtime): the PUBLIC URL + anon key. Server-side
+      # requests reach the SAME project via the host gateway.
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
       SUPABASE_SERVER_URL: http://host.docker.internal:54321
     extra_hosts:
       - "host.docker.internal:host-gateway"

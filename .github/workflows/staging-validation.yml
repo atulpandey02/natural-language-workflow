@@ -60,17 +60,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Build application + web images once (tag by commit)
-        env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ env.SUPABASE_API_URL }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.SUPABASE_ANON_KEY }}
         run: |
           APP="nlw-staging:${GITHUB_SHA}"
           WEB="nlw-web-staging:${GITHUB_SHA}"
           docker build -t "$APP" .
-          docker build \
-            --build-arg NEXT_PUBLIC_SUPABASE_URL="$NEXT_PUBLIC_SUPABASE_URL" \
-            --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="$NEXT_PUBLIC_SUPABASE_ANON_KEY" \
-            -t "$WEB" web
+          # No Supabase build-args: the web image is environment-agnostic and takes
+          # its public config at RUNTIME (server-injected). Same digest for any env.
+          docker build -t "$WEB" web
           echo "NLW_IMAGE=$APP" >> "$GITHUB_ENV"
           echo "NLW_WEB_IMAGE=$WEB" >> "$GITHUB_ENV"
 
@@ -85,10 +81,12 @@ jobs:
             echo "SCHEDULER_DATABASE_URL=postgresql+psycopg://nlw_scheduler:nlw_scheduler@postgres:5432/nlw"
             echo "REDIS_URL=redis://redis:6379/0"
             echo "PUBLIC_HOSTNAME=localhost"
+            # Runtime public config for the web container (browser-safe). The web
+            # image is env-agnostic; the browser reaches Supabase at this PUBLIC
+            # URL while the e2e overlay sets SUPABASE_SERVER_URL for the container.
             echo "SUPABASE_URL=${SUPABASE_API_URL}"
+            echo "SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
             echo "WORKSPACE_COOKIE_SECRET=staging-validation-cookie-secret"
-            echo "NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_API_URL}"
-            echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
             # Capacity phase: raise limits so k6 measures the knee, not 429s.
             echo "RATE_LIMIT_PLANS_PER_MIN=100000"
             echo "RATE_LIMIT_WRITES_PER_MIN=100000"
