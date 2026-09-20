@@ -7,7 +7,7 @@
 #                 -f docker-compose.staging.yml" tests/drills/run_drills.sh
 set -euo pipefail
 COMPOSE="${COMPOSE:-docker compose -f docker-compose.prod.yml -f docker-compose.e2e.yml -f docker-compose.staging.yml}"
-API="${API:-http://127.0.0.1:8080}"   # via Caddy edge
+API="${API:-http://127.0.0.1:8000}"  # API readiness endpoint (loopback)
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1" >&2; exit 1; }

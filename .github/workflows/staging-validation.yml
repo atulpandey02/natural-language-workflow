@@ -150,7 +150,8 @@ jobs:
       - name: Failure drills (A/B/C/D)  # GATING
         env:
           COMPOSE: ${{ env.COMPOSE }}
-          API: http://127.0.0.1:8080
+          # readiness is an API endpoint (loopback :8000), not the web edge (:8080).
+          API: http://127.0.0.1:8000
         run: tests/drills/run_drills.sh
 
       - name: k6 capacity — safe target (GATING thresholds)
@@ -203,7 +204,8 @@ jobs:
       - name: Schema-incompatibility / readiness drill (GATING)
         env:
           COMPOSE: ${{ env.COMPOSE }}
-          API: http://127.0.0.1:8080
+          # readiness (schema check) is an API endpoint on loopback :8000.
+          API: http://127.0.0.1:8000
         run: bash tests/drills/migration_drill.sh
 
       - name: Collect artifacts

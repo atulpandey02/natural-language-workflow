@@ -20,4 +20,4 @@ for real providers (Slack/webhook/LLM/Supabase), by the real-VPS checklist.
 Run:
 
     COMPOSE="docker compose -f docker-compose.prod.yml -f docker-compose.e2e.yml -f docker-compose.staging.yml" \
-      API=http://127.0.0.1:8080 tests/drills/run_drills.sh
+      API=http://127.0.0.1:8000 tests/drills/run_drills.sh
