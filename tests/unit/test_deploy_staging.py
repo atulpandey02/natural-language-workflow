@@ -148,6 +148,68 @@ def test_resume_validates_pins() -> None:
 
 
 # --- Phase-aware reporting + source guard -----------------------------------
+# --- Role-attribute verifier (verify-staging-deployment.sh) ------------------
+_ROLES_OK = "\n".join(
+    [
+        "nlw_app:tff",
+        "nlw_rls_bypass:fft",
+        "nlw_scheduler:tff",
+        "nlw_worker:tff",
+        "nlw_workspace_bootstrap:fft",
+    ]
+)
+_EXPECTED_ROLE_LINES = [
+    "nlw_app:tff",
+    "nlw_worker:tff",
+    "nlw_scheduler:tff",
+    "nlw_rls_bypass:fft",
+    "nlw_workspace_bootstrap:fft",
+]
+
+
+def _assert_role(expected: str, block: str) -> int:
+    return subprocess.run(
+        ["bash", "-c", f'source "{VERIFY}"; assert_role "$1" "$2"', "_", expected, block],
+        capture_output=True,
+        text=True,
+    ).returncode
+
+
+def test_verifier_uses_case_not_boolean_concat() -> None:
+    # Root-cause fix: boolean || text yields 'true'/'false', so CASE renders t/f.
+    t = VERIFY.read_text()
+    assert "CASE WHEN rolcanlogin THEN 't' ELSE 'f' END" in t
+    assert "rolname||':'||rolcanlogin||rolsuper||rolbypassrls" not in t
+
+
+def test_all_five_expected_roles_match() -> None:
+    for role in _EXPECTED_ROLE_LINES:
+        assert _assert_role(role, _ROLES_OK) == 0, role
+
+
+def test_expected_roles_array_is_exactly_the_five() -> None:
+    out = subprocess.run(
+        ["bash", "-c", f'source "{VERIFY}"; printf "%s\\n" "${{EXPECTED_ROLES[@]}}"'],
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert sorted(out) == sorted(_EXPECTED_ROLE_LINES)
+
+
+def test_wrong_attribute_combination_fails() -> None:
+    # nlw_app with bypassrls set (tft) or superuser (ttf) must NOT satisfy :tff.
+    for wrong in ("nlw_app:tft", "nlw_app:ttf", "nlw_app:ttt", "nlw_app:fff"):
+        block = _ROLES_OK.replace("nlw_app:tff", wrong)
+        assert _assert_role("nlw_app:tff", block) != 0, wrong
+    # A login helper role (should be NOLOGIN) must fail.
+    bad = _ROLES_OK.replace("nlw_rls_bypass:fft", "nlw_rls_bypass:tft")
+    assert _assert_role("nlw_rls_bypass:fft", bad) != 0
+
+
+def test_verify_script_source_guarded() -> None:
+    assert 'if [ "${BASH_SOURCE[0]}" != "${0}" ]; then' in VERIFY.read_text()
+
+
 def test_phase_tracking_and_source_guard() -> None:
     text = DEPLOY.read_text()
     for ph in (

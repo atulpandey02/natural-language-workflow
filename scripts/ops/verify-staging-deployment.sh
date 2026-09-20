@@ -30,6 +30,20 @@ info() { printf '  \033[1;34m[info]\033[0m %s\n' "$*"; }
 section() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 rsh() { ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
 
+# Expected role model — name:<canlogin><super><bypassrls> as t/f. Pure + testable.
+EXPECTED_ROLES=(
+  "nlw_app:tff"
+  "nlw_worker:tff"
+  "nlw_scheduler:tff"
+  "nlw_rls_bypass:fft"
+  "nlw_workspace_bootstrap:fft"
+)
+# True iff the normalized roles block contains a line EXACTLY equal to $1.
+assert_role() { printf '%s\n' "$2" | grep -qx "$1"; }
+
+# When sourced (e.g. by tests), define helpers only — do NOT run the live checks.
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then return 0 2>/dev/null || true; fi
+
 rsh 'true' || { echo "cannot SSH to $TARGET"; exit 2; }
 rsh 'docker info >/dev/null 2>&1' || { echo "docker not usable as nlwops (fresh login needed?)"; exit 2; }
 
@@ -79,10 +93,12 @@ info "${rd:-<no response>}"
 grep -q '"status":"ready"' <<<"$rd" && ok "host-local /health/ready is ready" || flag "host-local readiness not ready"
 
 section "Database roles + schema"
-roles="$(rsh "$DC exec -T postgres psql -U nlw -d nlw -tAc \"SELECT rolname||':'||rolcanlogin||rolsuper||rolbypassrls FROM pg_roles WHERE rolname LIKE 'nlw\\_%' ORDER BY rolname\" 2>/dev/null" | tr -d '\r')"
+# Deterministic t/f normalization: boolean||text yields 'true'/'false', NOT
+# 't'/'f', so CASE expressions render each flag explicitly as t/f.
+roles="$(rsh "$DC exec -T postgres psql -U nlw -d nlw -tAc \"SELECT rolname||':'||CASE WHEN rolcanlogin THEN 't' ELSE 'f' END||CASE WHEN rolsuper THEN 't' ELSE 'f' END||CASE WHEN rolbypassrls THEN 't' ELSE 'f' END FROM pg_roles WHERE rolname LIKE 'nlw\\_%' ORDER BY rolname\"" 2>/dev/null | tr -d '\r')"
 printf '%s\n' "$roles" | sed 's/^/    /'
-for r in "nlw_app:tff" "nlw_worker:tff" "nlw_scheduler:tff" "nlw_rls_bypass:fft" "nlw_workspace_bootstrap:fft"; do
-  grep -qx "$r" <<<"$roles" && ok "role ${r%%:*} attributes correct" || flag "role ${r%%:*} missing/attrs wrong (want ${r#*:} = canlogin/super/bypassrls)"
+for r in "${EXPECTED_ROLES[@]}"; do
+  if assert_role "$r" "$roles"; then ok "role ${r%%:*} attributes correct (${r#*:})"; else flag "role ${r%%:*} missing/attrs wrong (want ${r#*:} = canlogin/super/bypassrls)"; fi
 done
 # Deterministic (NOT a hex-only grep): head derived in-image via Alembic
 # ScriptDirectory; current read as a scalar. Works with named revisions like
