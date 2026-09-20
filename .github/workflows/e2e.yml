@@ -68,10 +68,31 @@ jobs:
           $COMPOSE run --rm api alembic upgrade head
           # d) now start the runtime processes
           $COMPOSE up -d --build api worker scheduler web caddy
-          # e) wait for application readiness through the Caddy edge
+          # e) wait for FastAPI readiness (Postgres + Redis + schema) BEFORE seeding.
+          #    Use the loopback IPv4 literal to avoid ::1/localhost ambiguity in CI.
+          ok=""
           for i in $(seq 1 60); do
-            curl -fsS http://localhost:8080/login >/dev/null 2>&1 && break; sleep 2;
+            if curl -fsS http://127.0.0.1:8000/health/ready >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
           done
+          if [ -z "$ok" ]; then
+            echo "::error::FastAPI did not become ready in time"
+            $COMPOSE ps
+            $COMPOSE logs api --tail=200
+            exit 1
+          fi
+          # f) independently wait for the public frontend edge (Caddy -> Next).
+          ok=""
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/login >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::Frontend edge did not become ready in time"
+            $COMPOSE ps
+            $COMPOSE logs caddy web --tail=200
+            exit 1
+          fi
 
       # 3) Seed: two Supabase users, two workspaces, a member membership, and the
       #    tenant-scoped worker secret required by the connector.
@@ -81,7 +102,8 @@ jobs:
           SUPABASE_API_URL: ${{ env.SUPABASE_API_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ANON_KEY: ${{ env.SUPABASE_ANON_KEY }}
-          NLW_API_BASE: http://localhost:8000
+          # Loopback IPv4 literal (not localhost) to avoid ::1/IPv6 ambiguity.
+          NLW_API_BASE: http://127.0.0.1:8000
         # Write the synthetic E2E credentials to $GITHUB_ENV WITHOUT echoing them
         # to the workflow logs.
         run: node web/e2e/seed.mjs >> "$GITHUB_ENV"
