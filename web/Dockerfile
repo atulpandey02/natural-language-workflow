@@ -23,6 +23,12 @@ ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
     HOSTNAME=0.0.0.0
+# The standalone runtime only runs `node server.js` — it never uses npm/npx/
+# corepack. Remove them so the base image's bundled npm toolchain (which ships a
+# vulnerable `tar`) is not present in the runtime attack surface.
+RUN rm -rf /usr/local/lib/node_modules/npm \
+           /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 # Non-root runtime user.
 RUN useradd --system --uid 10001 --create-home appuser
 COPY --from=build --chown=appuser:appuser /app/.next/standalone ./

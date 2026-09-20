@@ -44,7 +44,9 @@ jobs:
             echo "SUPABASE_JWT_SECRET=$(grep ^JWT_SECRET supabase.env | cut -d= -f2- | tr -d '\"')"
           } >> "$GITHUB_ENV"
 
-      # 2) Bring up the application stack pointed at local Supabase.
+      # 2) Bring up the stack in production migration order: datastores first,
+      #    schema migrated, THEN runtime processes (so the scheduler never queries
+      #    tables before they exist).
       - name: Build + start stack
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.SUPABASE_API_URL }}
@@ -55,12 +57,21 @@ jobs:
           # Pre-provisioned tenant-scoped worker secret is injected via the
           # seed-provisioned worker.secrets.env (see seed step output).
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
-          # Wait for the API to be reachable, then apply migrations.
+          COMPOSE="docker compose -f docker-compose.yml -f docker-compose.e2e.yml"
+          # a) datastores only
+          $COMPOSE up -d postgres redis
+          # b) wait for Postgres readiness
           for i in $(seq 1 60); do
-            docker compose exec -T postgres pg_isready -U nlw -d nlw && break; sleep 2;
+            $COMPOSE exec -T postgres pg_isready -U nlw -d nlw && break; sleep 2;
           done
-          docker compose -f docker-compose.yml -f docker-compose.e2e.yml run --rm api alembic upgrade head
+          # c) schema first — migrate before any runtime process starts
+          $COMPOSE run --rm api alembic upgrade head
+          # d) now start the runtime processes
+          $COMPOSE up -d --build api worker scheduler web caddy
+          # e) wait for application readiness through the Caddy edge
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:8080/login >/dev/null 2>&1 && break; sleep 2;
+          done
 
       # 3) Seed: two Supabase users, two workspaces, a member membership, and the
       #    tenant-scoped worker secret required by the connector.
@@ -71,7 +82,9 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ANON_KEY: ${{ env.SUPABASE_ANON_KEY }}
           NLW_API_BASE: http://localhost:8000
-        run: node web/e2e/seed.mjs | tee -a "$GITHUB_ENV"
+        # Write the synthetic E2E credentials to $GITHUB_ENV WITHOUT echoing them
+        # to the workflow logs.
+        run: node web/e2e/seed.mjs >> "$GITHUB_ENV"
 
       # 4) Run the required E2E suite through the public Caddy edge.
       - name: Install Playwright browsers
@@ -81,13 +94,12 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Run required E2E
         working-directory: web
+        # The seeded E2E_* credentials are inherited from $GITHUB_ENV (written by
+        # the seed step); do NOT re-map them here — an empty ${{ env.* }} at parse
+        # time would overwrite the seeded values with blanks.
         env:
           E2E_REQUIRED: "1"
           E2E_BASE_URL: http://localhost:8080
-          E2E_ADMIN_EMAIL: ${{ env.E2E_ADMIN_EMAIL }}
-          E2E_ADMIN_PASSWORD: ${{ env.E2E_ADMIN_PASSWORD }}
-          E2E_MEMBER_EMAIL: ${{ env.E2E_MEMBER_EMAIL }}
-          E2E_MEMBER_PASSWORD: ${{ env.E2E_MEMBER_PASSWORD }}
         run: npx playwright test
 
       - name: Stack logs on failure
