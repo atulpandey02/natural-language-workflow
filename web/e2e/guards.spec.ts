@@ -30,16 +30,58 @@ test.describe("access + safety guards", () => {
     await expect(page.getByRole("button", { name: /^approve$/i })).toHaveCount(0);
   });
 
-  test("double-click Run now creates exactly one durable run", async ({ page }) => {
+  test("Run now (single click) navigates to the created run", async ({ page }) => {
     requireEnv(liveStackConfigured, "requires a seeded live stack + a materialized workflow");
     await signIn(page, env.adminEmail, env.adminPassword);
     await page.goto("/workflows");
     await page.getByRole("link", { name: "E2E Seeded Workflow" }).click();
-    const runNow = page.getByRole("button", { name: /run now/i });
-    // Fire two clicks in the same tick (double-click): the shared idempotency key
-    // guarantees the backend returns one durable run.
-    await Promise.all([runNow.click(), runNow.click().catch(() => {})]);
+    // A single deterministic click must navigate to the created run.
+    await page.getByRole("button", { name: /run now/i }).click();
     await expect(page).toHaveURL(/\/runs\/[0-9a-f-]{36}$/);
+  });
+
+  test("two concurrent Run-now POSTs sharing one Idempotency-Key create exactly one durable run", async ({
+    page,
+  }) => {
+    requireEnv(liveStackConfigured, "requires a seeded live stack + a materialized workflow");
+    await signIn(page, env.adminEmail, env.adminPassword);
+
+    // Determine the seeded workflow's id from its detail URL.
+    await page.goto("/workflows");
+    await page.getByRole("link", { name: "E2E Seeded Workflow" }).click();
+    await expect(page).toHaveURL(/\/workflows\/[0-9a-f-]{36}$/);
+    const workflowId = page.url().split("/workflows/")[1];
+    expect(workflowId).toMatch(/^[0-9a-f-]{36}$/);
+
+    // Issue TWO concurrent POSTs from the AUTHENTICATED page context, both with
+    // the SAME Idempotency-Key. This exercises the real cookies + same-origin
+    // BFF (CSRF + bearer + X-Workspace-Id injection) + FastAPI + Postgres. No
+    // arbitrary sleeps — the two requests race deterministically in one tick.
+    const { a, b } = await page.evaluate(async (id: string) => {
+      const key = crypto.randomUUID(); // ONE key for the single logical action
+      const once = async () => {
+        const res = await fetch(`/api/nlw/workflows/${id}/runs`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Idempotency-Key": key, Accept: "application/json" },
+        });
+        const data = (await res.json()) as { run_id?: string };
+        return { ok: res.ok, status: res.status, runId: data.run_id };
+      };
+      const [first, second] = await Promise.all([once(), once()]);
+      return { a: first, b: second };
+    }, workflowId);
+
+    // Both requests succeed per the endpoint contract …
+    expect(a.ok, `first POST failed (status ${a.status})`).toBeTruthy();
+    expect(b.ok, `second POST failed (status ${b.status})`).toBeTruthy();
+    expect(a.runId).toMatch(/^[0-9a-f-]{36}$/);
+    // … and BOTH resolve to the SAME durable run (exactly one for the action).
+    expect(b.runId).toBe(a.runId);
+
+    // The single durable run is real and fetchable.
+    await page.goto(`/runs/${a.runId}`);
+    await expect(page).toHaveURL(new RegExp(`/runs/${a.runId}$`));
   });
 
   test("switching workspace does not show stale previous-tenant data", async ({ page }) => {
