@@ -151,14 +151,21 @@ jobs:
           SUPABASE_ANON_KEY: ci-anon
           WORKSPACE_COOKIE_SECRET: ci-secret
           POSTGRES_PASSWORD: x
-          # NLW_APP/WORKER/SCHEDULER_DB_PASSWORD intentionally UNSET.
+          # All three role passwords are provided; the loop below removes exactly
+          # ONE at a time, so compose can only fail on THAT variable (deterministic,
+          # order-independent — unlike leaving all three unset at once).
+          NLW_APP_DB_PASSWORD: ci-app-pw
+          NLW_WORKER_DB_PASSWORD: ci-worker-pw
+          NLW_SCHEDULER_DB_PASSWORD: ci-scheduler-pw
         run: |
-          if docker compose -f docker-compose.prod.yml config >/dev/null 2>err.txt; then
-            echo "FAIL: prod compose rendered without role passwords"; cat err.txt; exit 1
-          fi
-          grep -q "NLW_APP_DB_PASSWORD is required" err.txt \
-            || { echo "FAIL: missing-secret error not surfaced"; cat err.txt; exit 1; }
-          echo "OK: prod compose fails fast without role passwords"
+          for var in NLW_APP_DB_PASSWORD NLW_WORKER_DB_PASSWORD NLW_SCHEDULER_DB_PASSWORD; do
+            if env -u "$var" docker compose -f docker-compose.prod.yml config >/dev/null 2>err.txt; then
+              echo "FAIL: prod compose rendered without $var"; cat err.txt; exit 1
+            fi
+            grep -q "$var is required" err.txt \
+              || { echo "FAIL: expected missing-$var error"; cat err.txt; exit 1; }
+            echo "OK: prod compose fails fast without $var"
+          done
       - name: Validate production compose config (complete env)
         env:
           NLW_IMAGE: nlw:ci
