@@ -21,14 +21,25 @@ x-app-env: &app-env
   APP_ENV: production
   LOG_LEVEL: info
   DATABASE_URL: ${DATABASE_URL}
+  # Alembic (owner) connection, used only by `alembic upgrade head`.
+  DATABASE_MIGRATION_URL: ${DATABASE_MIGRATION_URL}
   REDIS_URL: ${REDIS_URL}
   SUPABASE_URL: ${SUPABASE_URL}
+  # Asymmetric (JWKS) verification is the production/target auth path. Passed
+  # through explicitly so the token issuer (host-side) and the JWKS endpoint
+  # (which may be an internal host) are configured independently.
+  SUPABASE_JWKS_URL: ${SUPABASE_JWKS_URL:-}
+  SUPABASE_JWT_ISSUER: ${SUPABASE_JWT_ISSUER:-}
   # The API is internal-only (M10): the browser never calls it — the frontend's
   # BFF does, over the internal network with Host "api". So the TrustedHost
   # allowlist is the internal service name + loopback (used by the healthcheck).
   # No public forwarded headers are trusted.
   TRUSTED_HOSTS: '["api","localhost","127.0.0.1"]'
   TRUSTED_PROXY_IPS: "[]"
+  # Rate limits are config-driven so a capacity phase can raise them and a
+  # rate-limit phase can restore normal values.
+  RATE_LIMIT_PLANS_PER_MIN: ${RATE_LIMIT_PLANS_PER_MIN:-20}
+  RATE_LIMIT_WRITES_PER_MIN: ${RATE_LIMIT_WRITES_PER_MIN:-60}
 
 x-app-hardening: &app-hardening
   image: ${NLW_IMAGE:?set NLW_IMAGE to the GHCR image digest}

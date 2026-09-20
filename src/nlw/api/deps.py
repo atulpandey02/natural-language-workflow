@@ -9,6 +9,7 @@ and ``nlw.tenancy``. Status codes follow the M2a failure matrix:
   non-existent workspace, to avoid cross-tenant enumeration.
 """
 
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
@@ -36,8 +37,14 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     # to every query and are discarded when the transaction ends — pooled
     # connections never carry tenant context into a later request.
     sessionmaker = request.app.state.sessionmaker
-    async with sessionmaker() as session, session.begin():
-        yield session
+    session = sessionmaker()
+    async with session:
+        # session.begin() acquires a pooled connection; timing it captures pool
+        # checkout wait (rises under saturation, ~0 with headroom) — M11 capacity.
+        start = time.perf_counter()
+        async with session.begin():
+            metrics.observe_db_checkout_wait(time.perf_counter() - start)
+            yield session
 
 
 def get_auth_provider(request: Request) -> AuthProvider:

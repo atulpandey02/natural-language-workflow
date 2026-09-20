@@ -31,3 +31,14 @@ each script header.
 
 An automated fidelity check of the dump→restore round-trip runs in the
 integration suite (`tests/integration/test_backup_restore.py`).
+
+## Audit / disk-growth monitoring (M11, risk E)
+
+Audit tables (`plan_proposals`, `step_runs`, `external_actions`, `workflow_runs`)
+grow unbounded in the limited launch (no retention/GC yet — accepted risk E).
+Operational monitoring is therefore REQUIRED:
+
+- Alert when the Postgres data volume exceeds **75%** usage.
+- Track table growth (e.g. `pg_total_relation_size`) for the audit tables weekly.
+- Action on threshold: provision more disk and/or introduce a retention/GC policy
+  (deferred feature) before growth threatens availability.

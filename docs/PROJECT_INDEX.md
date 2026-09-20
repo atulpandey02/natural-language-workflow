@@ -7,10 +7,10 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M10 — Frontend / Product UX |
-| Current milestone | **M10 — Frontend / Product UX** (`feat/frontend-product-ux`, in review) |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 |
-| Next milestone | M11 — tbd |
+| Current phase | M11 — Staging validation + failure drills + capacity |
+| Current milestone | **M11 — Staging validation** (`feat/staging-validation`, in review) |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 |
+| Next milestone | M12 — limited production launch (blocked; see ADR-020) |
 | Release status | pre-alpha, staging-candidate |
 
 M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
