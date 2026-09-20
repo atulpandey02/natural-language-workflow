@@ -27,21 +27,29 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      # 1) Local Supabase (GoTrue + Postgres) for real cookie auth.
+      # 1) Local Supabase (GoTrue + Postgres) for real cookie auth. The CLI is
+      #    PINNED for reproducible local-auth behavior (recent versions sign local
+      #    user tokens asymmetrically — which is the production-target JWKS path).
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.117.0
       - name: Start Supabase
         run: |
+          supabase --version
           supabase init --force >/dev/null 2>&1 || true
           supabase start
           supabase status -o env | tee supabase.env
+          API_URL="$(grep ^API_URL supabase.env | cut -d= -f2- | tr -d '\"')"
           # Export the values the stack + seed need.
           {
-            echo "SUPABASE_API_URL=$(grep ^API_URL supabase.env | cut -d= -f2- | tr -d '\"')"
+            echo "SUPABASE_API_URL=${API_URL}"
             echo "SUPABASE_ANON_KEY=$(grep ^ANON_KEY supabase.env | cut -d= -f2- | tr -d '\"')"
             echo "SUPABASE_SERVICE_ROLE_KEY=$(grep ^SERVICE_ROLE_KEY supabase.env | cut -d= -f2- | tr -d '\"')"
             echo "SUPABASE_JWT_SECRET=$(grep ^JWT_SECRET supabase.env | cut -d= -f2- | tr -d '\"')"
+            # Token `iss` is the host-side URL; JWKS must be fetched from the API
+            # container via the host gateway (different host, same port).
+            echo "SUPABASE_JWT_ISSUER=${API_URL}/auth/v1"
+            echo "SUPABASE_JWKS_URL=http://host.docker.internal:54321/auth/v1/.well-known/jwks.json"
           } >> "$GITHUB_ENV"
 
       # 2) Bring up the stack in production migration order: datastores first,
@@ -51,8 +59,10 @@ jobs:
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.SUPABASE_API_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.SUPABASE_ANON_KEY }}
-          # Backend verifies Supabase-issued HS256 tokens with this shared secret.
+          # JWKS-first verification (asymmetric); HS256 secret kept as fallback.
           SUPABASE_JWT_SECRET: ${{ env.SUPABASE_JWT_SECRET }}
+          SUPABASE_JWKS_URL: ${{ env.SUPABASE_JWKS_URL }}
+          SUPABASE_JWT_ISSUER: ${{ env.SUPABASE_JWT_ISSUER }}
           WORKSPACE_COOKIE_SECRET: e2e-workspace-cookie-secret-please-change
           # Pre-provisioned tenant-scoped worker secret is injected via the
           # seed-provisioned worker.secrets.env (see seed step output).
@@ -93,6 +103,20 @@ jobs:
             $COMPOSE logs caddy web --tail=200
             exit 1
           fi
+
+      # 2b) Prove the API container can reach the Supabase JWKS endpoint BEFORE
+      #     seeding — surfaces asymmetric-verification connectivity problems here
+      #     rather than as an opaque 401 from /me.
+      - name: JWKS preflight (from API container)
+        run: |
+          COMPOSE="docker compose -f docker-compose.yml -f docker-compose.e2e.yml"
+          if ! $COMPOSE exec -T api python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://host.docker.internal:54321/auth/v1/.well-known/jwks.json', timeout=5).status==200 else 1)"; then
+            echo "::error::API container cannot reach the Supabase JWKS endpoint"
+            $COMPOSE exec -T api python -c "import socket; print('host.docker.internal ->', socket.gethostbyname('host.docker.internal'))" || true
+            $COMPOSE logs api --tail=100
+            exit 1
+          fi
+          echo "JWKS reachable from the API container."
 
       # 3) Seed: two Supabase users, two workspaces, a member membership, and the
       #    tenant-scoped worker secret required by the connector.

@@ -57,6 +57,14 @@ async function createWorkspace(token, name) {
   return (await res.json()).id;
 }
 
+// Decode JWT metadata WITHOUT logging the token/sub/email (M10 E2E diagnostic).
+function jwtMeta(token) {
+  const [h, p] = token.split(".");
+  const header = JSON.parse(Buffer.from(h, "base64url").toString("utf8"));
+  const payload = JSON.parse(Buffer.from(p, "base64url").toString("utf8"));
+  return { alg: header.alg, kidPresent: Boolean(header.kid), iss: payload.iss, aud: payload.aud };
+}
+
 function psql(sql) {
   const cmd = `docker compose exec -T postgres psql -U nlw -d nlw -tAc ${JSON.stringify(sql)}`;
   return execSync(cmd, { encoding: "utf8" }).trim();
@@ -67,6 +75,23 @@ async function main() {
   await createUser(MEMBER);
 
   const adminToken = await signIn(ADMIN);
+
+  // Evidence-first: log ONLY token metadata (never the token/sub/email) to stderr
+  // so it does not pollute $GITHUB_ENV. Confirms which verification path the API
+  // must use for the seeded user's access token.
+  const meta = jwtMeta(adminToken);
+  console.error(
+    `[seed] admin token metadata: alg=${meta.alg} kid_present=${meta.kidPresent} ` +
+      `iss=${meta.iss} aud=${JSON.stringify(meta.aud)}`,
+  );
+  if (meta.alg === "HS256") {
+    console.error(
+      "[seed] token is HS256 — expected asymmetric (ES256/RS256) for local Supabase. " +
+        "The JWKS root cause does not apply; investigate the CLI signing mode. Stopping.",
+    );
+    process.exit(3);
+  }
+
   await apiGet("/me", adminToken); // provision the admin app-user row
   const ws1 = await createWorkspace(adminToken, "E2E Primary");
   await createWorkspace(adminToken, "E2E Secondary"); // 2nd workspace for the switch test

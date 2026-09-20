@@ -10,8 +10,17 @@
 services:
   api:
     environment:
-      # Verify Supabase-issued HS256 tokens with the local project's JWT secret.
+      # Recent Supabase CLI versions sign local user tokens ASYMMETRICALLY, so the
+      # primary verification path is JWKS. The JWKS endpoint is reached from the
+      # API container via the host gateway, while the token's `iss` remains the
+      # host-side URL (127.0.0.1) — hence issuer is set explicitly, NOT derived
+      # from the container-reachable URL. HS256 secret is kept only as a legacy
+      # fallback.
       SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
+      SUPABASE_JWKS_URL: ${SUPABASE_JWKS_URL:-}
+      SUPABASE_JWT_ISSUER: ${SUPABASE_JWT_ISSUER:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   web:
     environment:
