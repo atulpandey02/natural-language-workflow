@@ -49,7 +49,28 @@ describe("getServerSupabaseUrl", () => {
     expect(getServerSupabaseUrl()).toBe("https://proj.supabase.co");
   });
 
-  it("prefers SUPABASE_SERVER_URL (server network path to the SAME project)", async () => {
+  it("undefined SUPABASE_SERVER_URL falls back to the public URL", async () => {
+    process.env.SUPABASE_URL = "https://proj.supabase.co";
+    delete process.env.SUPABASE_SERVER_URL;
+    const { getServerSupabaseUrl } = await loadServer();
+    expect(getServerSupabaseUrl()).toBe("https://proj.supabase.co");
+  });
+
+  it('empty SUPABASE_SERVER_URL ("") falls back to the public URL', async () => {
+    process.env.SUPABASE_URL = "https://proj.supabase.co";
+    process.env.SUPABASE_SERVER_URL = "";
+    const { getServerSupabaseUrl } = await loadServer();
+    expect(getServerSupabaseUrl()).toBe("https://proj.supabase.co");
+  });
+
+  it("whitespace-only SUPABASE_SERVER_URL falls back to the public URL", async () => {
+    process.env.SUPABASE_URL = "https://proj.supabase.co";
+    process.env.SUPABASE_SERVER_URL = "   ";
+    const { getServerSupabaseUrl } = await loadServer();
+    expect(getServerSupabaseUrl()).toBe("https://proj.supabase.co");
+  });
+
+  it("prefers a real SUPABASE_SERVER_URL override (server path to the SAME project)", async () => {
     process.env.SUPABASE_URL = "http://127.0.0.1:54321";
     process.env.SUPABASE_SERVER_URL = "http://host.docker.internal:54321";
     const { getServerSupabaseUrl } = await loadServer();
