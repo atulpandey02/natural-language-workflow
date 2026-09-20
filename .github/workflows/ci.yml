@@ -115,17 +115,65 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./web
+          push: false
+          load: true
+          tags: nlw-web:ci
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=https://proj.supabase.co
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=ci-anon
+      - name: Trivy scan (frontend image)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: nlw-web:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL
       - name: Validate dev compose config
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://proj.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-anon
         run: docker compose -f docker-compose.yml config >/dev/null
       - name: Validate production compose config
         env:
           NLW_IMAGE: nlw:ci
+          NLW_WEB_IMAGE: nlw-web:ci
           PUBLIC_HOSTNAME: staging.example.com
           DATABASE_URL: postgresql+psycopg://nlw_app:x@postgres:5432/nlw
           REDIS_URL: redis://redis:6379/0
           SUPABASE_URL: https://proj.supabase.co
+          SUPABASE_ANON_KEY: ci-anon
+          WORKSPACE_COOKIE_SECRET: ci-secret
           POSTGRES_PASSWORD: x
         run: docker compose -f docker-compose.prod.yml config >/dev/null
+
+  web:
+    name: Frontend (format, lint, typecheck, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - name: Production build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://proj.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-anon
 
   security:
     name: Secret scan + dependency audit

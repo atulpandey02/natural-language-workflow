@@ -15,10 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nlw.db.models import (
     Approval,
     Connector,
+    ExternalAction,
     Membership,
     PlanProposal,
     Schedule,
+    StepRun,
     User,
+    Workflow,
+    WorkflowRun,
+    WorkflowVersion,
     Workspace,
 )
 
@@ -246,6 +251,133 @@ class ApprovalRepository:
         if fresh is not None and fresh.status == target:
             return "idempotent", fresh.run_id
         return "conflict", appr.run_id
+
+
+class WorkflowRepository:
+    """Tenant-scoped read access to workflows + versions (nlw_app; RLS-scoped)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def list_for_tenant(
+        self, tenant_id: uuid.UUID, *, limit: int, offset: int
+    ) -> list[Workflow]:
+        rows = await self.session.execute(
+            select(Workflow)
+            .where(Workflow.tenant_id == tenant_id)
+            .order_by(Workflow.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(rows.scalars().all())
+
+    async def get(self, workflow_id: uuid.UUID, tenant_id: uuid.UUID) -> Workflow | None:
+        return (
+            await self.session.execute(
+                select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == tenant_id)
+            )
+        ).scalar_one_or_none()
+
+    async def get_version(
+        self, version_id: uuid.UUID, tenant_id: uuid.UUID
+    ) -> WorkflowVersion | None:
+        return (
+            await self.session.execute(
+                select(WorkflowVersion).where(
+                    WorkflowVersion.id == version_id, WorkflowVersion.tenant_id == tenant_id
+                )
+            )
+        ).scalar_one_or_none()
+
+
+class RunRepository:
+    """Tenant-scoped run/step/action read access + idempotent manual run creation."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def list_for_tenant(
+        self,
+        tenant_id: uuid.UUID,
+        *,
+        limit: int,
+        offset: int,
+        workflow_id: uuid.UUID | None = None,
+        status: str | None = None,
+    ) -> list[WorkflowRun]:
+        stmt = select(WorkflowRun).where(WorkflowRun.tenant_id == tenant_id)
+        if workflow_id is not None:
+            stmt = stmt.where(WorkflowRun.workflow_id == workflow_id)
+        if status is not None:
+            stmt = stmt.where(WorkflowRun.status == status)
+        stmt = stmt.order_by(WorkflowRun.created_at.desc()).limit(limit).offset(offset)
+        return list((await self.session.execute(stmt)).scalars().all())
+
+    async def get(self, run_id: uuid.UUID, tenant_id: uuid.UUID) -> WorkflowRun | None:
+        return (
+            await self.session.execute(
+                select(WorkflowRun).where(
+                    WorkflowRun.id == run_id, WorkflowRun.tenant_id == tenant_id
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def steps(self, run_id: uuid.UUID, tenant_id: uuid.UUID) -> list[StepRun]:
+        rows = await self.session.execute(
+            select(StepRun)
+            .where(StepRun.run_id == run_id, StepRun.tenant_id == tenant_id)
+            .order_by(StepRun.started_at.asc().nulls_last(), StepRun.step_id.asc())
+        )
+        return list(rows.scalars().all())
+
+    async def actions(self, run_id: uuid.UUID, tenant_id: uuid.UUID) -> list[ExternalAction]:
+        rows = await self.session.execute(
+            select(ExternalAction)
+            .where(ExternalAction.run_id == run_id, ExternalAction.tenant_id == tenant_id)
+            .order_by(ExternalAction.step_id.asc())
+        )
+        return list(rows.scalars().all())
+
+    async def create_manual(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        workflow_id: uuid.UUID,
+        workflow_version_id: uuid.UUID,
+        idempotency_key: str,
+    ) -> tuple[WorkflowRun, bool]:
+        """Idempotent PENDING manual run. Returns (run, created).
+
+        A repeat with the same (tenant_id, idempotency_key) returns the existing
+        run without creating a duplicate — this is what makes retries/double-clicks
+        safe. Race-safe via ``INSERT ... ON CONFLICT DO NOTHING``.
+        """
+        run_id = uuid.uuid4()
+        stmt = (
+            pg_insert(WorkflowRun)
+            .values(
+                id=run_id,
+                tenant_id=tenant_id,
+                workflow_id=workflow_id,
+                workflow_version_id=workflow_version_id,
+                status="PENDING",
+                trigger="manual",
+                idempotency_key=idempotency_key,
+            )
+            .on_conflict_do_nothing(constraint="uq_run_tenant_idempotency")
+            .returning(WorkflowRun.id)
+        )
+        inserted_id = (await self.session.execute(stmt)).scalar_one_or_none()
+        created = inserted_id is not None
+        run = (
+            await self.session.execute(
+                select(WorkflowRun).where(
+                    WorkflowRun.tenant_id == tenant_id,
+                    WorkflowRun.idempotency_key == idempotency_key,
+                )
+            )
+        ).scalar_one()
+        return run, created
 
 
 class ScheduleRepository:

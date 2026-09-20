@@ -1,0 +1,10 @@
+node_modules
+.next
+out
+build
+playwright-report
+test-results
+.git
+npm-debug.log
+Dockerfile
+.dockerignore

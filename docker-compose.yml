@@ -141,5 +141,26 @@ services:
       retries: 5
       start_period: 15s
 
+  # Next.js frontend + BFF (M10). The browser talks only to this service; its
+  # server-side BFF injects the bearer token + X-Workspace-Id and calls the API
+  # internally. Published on 3000 for local dev.
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}
+    environment:
+      NODE_ENV: production
+      NLW_API_URL: http://api:8000
+      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}
+      WORKSPACE_COOKIE_SECRET: ${WORKSPACE_COOKIE_SECRET:-dev-insecure-workspace-cookie-secret}
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      - api
+
 volumes:
   pgdata:

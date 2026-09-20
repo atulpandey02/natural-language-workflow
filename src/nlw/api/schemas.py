@@ -135,3 +135,78 @@ class ScheduleOut(BaseModel):
     enabled: bool
     next_run_at: str
     last_scheduled_for: str | None
+
+
+# --- M10 read models (workflows / versions / runs) ---
+
+
+class WorkflowOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    current_version_id: uuid.UUID | None
+    created_at: str
+
+
+class WorkflowVersionOut(BaseModel):
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    version: int
+    # The normalized, immutable plan (steps/tools/connectors/dependencies). This
+    # is workflow definition content only — it never contains secrets.
+    plan: dict[str, Any]
+
+
+class WorkflowDetailOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    current_version_id: uuid.UUID | None
+    created_at: str
+    current_version: WorkflowVersionOut | None
+
+
+class RunOut(BaseModel):
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    workflow_version_id: uuid.UUID
+    status: str
+    trigger: str
+    schedule_id: uuid.UUID | None
+    scheduled_for: str | None
+    error: str | None
+    started_at: str | None
+    finished_at: str | None
+    created_at: str
+
+
+class StepRunOut(BaseModel):
+    step_id: str
+    tool: str
+    status: str
+    attempt: int
+    error: str | None
+    started_at: str | None
+    finished_at: str | None
+    # Bounded, size-capped preview of the step output (tenant business data,
+    # never secrets). Raw/unrestricted output is never returned (M10 D3).
+    output_preview: dict[str, Any] | None
+    output_truncated: bool
+
+
+class ExternalActionOut(BaseModel):
+    # Secret-free by construction: destination_summary is a host/channel only;
+    # raw request/response bodies, auth headers, and secrets are never stored here.
+    step_id: str
+    tool: str
+    destination_summary: str | None
+    status: str
+    attempts: int
+    error_class: str | None
+    http_status: int | None
+    last_attempt_at: str | None
+    next_attempt_at: str | None
+
+
+class RunCreateOut(BaseModel):
+    run_id: uuid.UUID
+    status: str
+    idempotent_hit: bool
