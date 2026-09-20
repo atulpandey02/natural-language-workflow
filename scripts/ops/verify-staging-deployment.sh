@@ -84,10 +84,13 @@ printf '%s\n' "$roles" | sed 's/^/    /'
 for r in "nlw_app:tff" "nlw_worker:tff" "nlw_scheduler:tff" "nlw_rls_bypass:fft" "nlw_workspace_bootstrap:fft"; do
   grep -qx "$r" <<<"$roles" && ok "role ${r%%:*} attributes correct" || flag "role ${r%%:*} missing/attrs wrong (want ${r#*:} = canlogin/super/bypassrls)"
 done
-alv="$(rsh "$DC exec -T postgres psql -U nlw -d nlw -tAc 'SELECT version_num FROM alembic_version' 2>/dev/null" | tr -d '\r')"
-alhead="$(rsh "$DC run --rm api alembic heads 2>/dev/null" | grep -oE '[0-9a-f]{12,}' | head -1 || true)"
-info "alembic_version=$alv ; head=$alhead"
-[ -n "$alv" ] && [ "$alv" = "$alhead" ] && ok "schema at head" || flag "schema not at head (current='$alv' head='$alhead')"
+# Deterministic (NOT a hex-only grep): head derived in-image via Alembic
+# ScriptDirectory; current read as a scalar. Works with named revisions like
+# 0010_readiness_schema_grant. Empty values are failures.
+alv="$(rsh "$DC exec -T postgres psql -U nlw -d nlw -tAc 'SELECT version_num FROM alembic_version'" 2>/dev/null | tr -d '[:space:]')"
+alhead="$(rsh "$DC run --rm -T api python -c 'from alembic.config import Config; from alembic.script import ScriptDirectory; h=ScriptDirectory.from_config(Config(\"alembic.ini\")).get_current_head(); assert h; print(\"HEAD=%s\" % h)' 2>/dev/null" | sed -n 's/^HEAD=//p' | head -1 | tr -d '[:space:]')"
+info "alembic_version='$alv' ; head='$alhead'"
+if [ -n "$alv" ] && [ -n "$alhead" ] && [ "$alv" = "$alhead" ]; then ok "schema at head ($alv)"; else flag "schema not at head (current='$alv' head='$alhead')"; fi
 
 section "Public edge (from this Mac; TLS validated)"
 code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "https://${STAGING_HOST}/login" 2>/dev/null || true)"
