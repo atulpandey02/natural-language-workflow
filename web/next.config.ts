@@ -1,21 +1,12 @@
 import type { NextConfig } from "next";
+import { buildContentSecurityPolicy } from "./src/lib/csp";
 
 // Standalone output so the production image is a small self-contained server.
-// A strict Content-Security-Policy is applied to all routes (M10 change #10);
-// 'unsafe-inline' style is permitted only for minimal inline styling. No inline
-// scripts are allowed.
-const csp = [
-  "default-src 'self'",
-  "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
-  "connect-src 'self'",
-  "font-src 'self'",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "form-action 'self'",
-  "frame-ancestors 'none'",
-].join("; ");
+// A strict Content-Security-Policy is applied to all routes (M10 change #10).
+// connect-src allows the browser to reach the configured Supabase Auth origin
+// (derived from NEXT_PUBLIC_SUPABASE_URL at build time) and nothing else — no
+// wildcards, no inline scripts.
+const csp = buildContentSecurityPolicy(process.env.NEXT_PUBLIC_SUPABASE_URL);
 
 const nextConfig: NextConfig = {
   output: "standalone",
