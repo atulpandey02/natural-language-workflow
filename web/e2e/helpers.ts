@@ -56,5 +56,18 @@ export async function signIn(page: Page, email: string, password: string): Promi
         `auth banner: ${banner || "(none)"}. console errors: ${errors || "(none)"}`,
     );
   }
-  await expect(page).toHaveURL(/\/(select-workspace)?$/);
+
+  // Ensure a workspace is active so tenant pages don't bounce to
+  // /select-workspace. Opens the first workspace, or creates one if none exist.
+  if (page.url().includes("/select-workspace")) {
+    const open = page.getByRole("button", { name: /^open$/i }).first();
+    if (await open.count()) {
+      await open.click();
+    } else {
+      await page.getByLabel(/workspace name/i).fill("E2E Workspace");
+      await page.getByRole("button", { name: /create \+ open/i }).click();
+    }
+    await page.waitForURL(/\/$/, { timeout: 15000 });
+  }
+  await expect(page).toHaveURL(/\/$/);
 }

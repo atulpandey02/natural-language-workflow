@@ -8,13 +8,16 @@ test.describe("access + safety guards", () => {
     await expect(page).toHaveURL(/\/login/);
   });
 
-  test("REJECT plans cannot be materialized", async ({ page }) => {
+  test("non-materializable plans (REJECT / NEEDS_CLARIFICATION) cannot be materialized", async ({
+    page,
+  }) => {
     requireEnv(liveStackConfigured, "requires a seeded live stack");
     await signIn(page, env.adminEmail, env.adminPassword);
     await page.goto("/workflows/new");
     await page.getByLabel(/what should this workflow do/i).fill("do something impossible xyzzy");
     await page.getByRole("button", { name: /^plan$/i }).click();
-    // A REJECT/NEEDS_CLARIFICATION plan shows the blocked notice, not a button.
+    // The stub CI planner returns NEEDS_CLARIFICATION → the blocked notice shows
+    // and no materialize button is offered (same gating as REJECT).
     await expect(page.getByTestId("materialize-blocked")).toBeVisible();
     await expect(page.getByRole("button", { name: /materialize/i })).toHaveCount(0);
   });
@@ -31,7 +34,7 @@ test.describe("access + safety guards", () => {
     requireEnv(liveStackConfigured, "requires a seeded live stack + a materialized workflow");
     await signIn(page, env.adminEmail, env.adminPassword);
     await page.goto("/workflows");
-    await page.getByRole("link").first().click();
+    await page.getByRole("link", { name: "E2E Seeded Workflow" }).click();
     const runNow = page.getByRole("button", { name: /run now/i });
     // Fire two clicks in the same tick (double-click): the shared idempotency key
     // guarantees the backend returns one durable run.
@@ -43,11 +46,17 @@ test.describe("access + safety guards", () => {
     requireEnv(liveStackConfigured, "requires two seeded workspaces");
     await signIn(page, env.adminEmail, env.adminPassword);
     await page.goto("/workflows");
+    // The primary workspace has the seeded workflow visible.
+    await expect(page.getByRole("link", { name: "E2E Seeded Workflow" })).toBeVisible();
+
     const switcher = page.getByLabel(/select workspace/i);
     const options = await switcher.locator("option").all();
     requireEnv(options.length >= 2, "needs at least two workspaces");
     await switcher.selectOption({ index: 1 });
-    // Query cache is cleared on switch: the list reloads for the new tenant.
+
+    // Switching clears tenant-scoped caches: the previous tenant's workflow must
+    // NOT still be shown for the (empty) secondary workspace.
     await expect(page.getByRole("heading", { name: "Workflows" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "E2E Seeded Workflow" })).toHaveCount(0);
   });
 });

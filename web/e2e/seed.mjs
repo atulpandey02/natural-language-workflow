@@ -5,6 +5,7 @@
 // Dependency-free: uses GoTrue REST + the compose Postgres via `psql`.
 
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 const SUPABASE = process.env.SUPABASE_API_URL;
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -95,6 +96,22 @@ async function main() {
   await apiGet("/me", adminToken); // provision the admin app-user row
   const ws1 = await createWorkspace(adminToken, "E2E Primary");
   await createWorkspace(adminToken, "E2E Secondary"); // 2nd workspace for the switch test
+
+  // Seed a materialized fake.echo workflow in the primary workspace so the UI has
+  // a runnable target for Run-now / observe / double-click. The CI planner is the
+  // keyless stub (always NEEDS_CLARIFICATION), so a materializable workflow cannot
+  // be produced through the planner in CI — seed one directly as the DB owner.
+  const wf = randomUUID();
+  const ver = randomUUID();
+  const plan = JSON.stringify({ steps: [{ id: "a", tool: "fake.echo", args: {} }] });
+  psql(
+    `INSERT INTO workflows (id, tenant_id, name) VALUES ('${wf}','${ws1}','E2E Seeded Workflow')`,
+  );
+  psql(
+    `INSERT INTO workflow_versions (id, tenant_id, workflow_id, version, plan) ` +
+      `VALUES ('${ver}','${ws1}','${wf}',1,'${plan}'::jsonb)`,
+  );
+  psql(`UPDATE workflows SET current_version_id='${ver}' WHERE id='${wf}'`);
 
   const memberToken = await signIn(MEMBER);
   await apiGet("/me", memberToken); // provision the member app-user row
