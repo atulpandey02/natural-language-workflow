@@ -1,25 +1,27 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { useCurrentWorkspace, useWorkspaces } from "@/lib/api/hooks";
+import { hardReload, postWorkspaceSelection } from "@/lib/workspace-client";
 
 export function WorkspaceSwitcher() {
-  const router = useRouter();
-  const qc = useQueryClient();
   const workspaces = useWorkspaces();
   const current = useCurrentWorkspace();
+  const [error, setError] = useState<string | null>(null);
 
   async function select(workspaceId: string) {
     if (!workspaceId || workspaceId === current.data?.tenant_id) return;
-    await fetch("/api/workspace", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspace_id: workspaceId }),
-    });
-    // Switching tenants must not show stale previous-tenant data (M10 change #5).
-    qc.clear();
-    router.refresh();
+    setError(null);
+    try {
+      await postWorkspaceSelection(workspaceId);
+    } catch {
+      // Do not reload on failure; surface safe feedback.
+      setError("Could not switch workspace.");
+      return;
+    }
+    // Tenant change is a hard boundary: full reload resets all client state
+    // (router/RSC cache + TanStack Query) so no stale previous-tenant data shows.
+    hardReload();
   }
 
   if (workspaces.isLoading) return <span className="muted">workspace…</span>;
@@ -43,6 +45,11 @@ export function WorkspaceSwitcher() {
           </option>
         ))}
       </select>
+      {error ? (
+        <span className="muted" role="alert" style={{ marginLeft: 8, color: "var(--danger)" }}>
+          {error}
+        </span>
+      ) : null}
     </label>
   );
 }

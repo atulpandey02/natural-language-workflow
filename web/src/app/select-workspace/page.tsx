@@ -1,24 +1,27 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { useCreateWorkspace, useWorkspaces } from "@/lib/api/hooks";
+import { hardNavigate, postWorkspaceSelection } from "@/lib/workspace-client";
 import { ErrorBanner, Loading } from "@/components/ui";
 
 export default function SelectWorkspacePage() {
-  const router = useRouter();
   const workspaces = useWorkspaces();
   const createWorkspace = useCreateWorkspace();
   const [name, setName] = useState("");
+  const [selectError, setSelectError] = useState<unknown>(null);
 
   async function select(workspaceId: string) {
-    await fetch("/api/workspace", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspace_id: workspaceId }),
-    });
-    router.push("/");
-    router.refresh();
+    setSelectError(null);
+    try {
+      await postWorkspaceSelection(workspaceId);
+    } catch (e) {
+      // Do NOT navigate on failure; surface a safe error.
+      setSelectError(e);
+      return;
+    }
+    // Tenant change → full navigation resets router/RSC + TanStack + client state.
+    hardNavigate("/");
   }
 
   async function create(e: React.FormEvent) {
@@ -27,26 +30,33 @@ export default function SelectWorkspacePage() {
     await select(ws.id);
   }
 
+  const ready = !workspaces.isLoading && !workspaces.error;
+
   return (
     <main className="container" style={{ maxWidth: 480, paddingTop: 48 }}>
       <h1>Select a workspace</h1>
       {workspaces.isLoading ? <Loading /> : null}
       {workspaces.error ? <ErrorBanner error={workspaces.error} /> : null}
+      <ErrorBanner error={selectError} />
 
-      {workspaces.data && workspaces.data.length > 0 ? (
-        <div className="card">
-          {workspaces.data.map((w) => (
-            <div key={w.id} className="row" style={{ justifyContent: "space-between" }}>
-              <span>
-                {w.name} <span className="muted">({w.role})</span>
-              </span>
-              <button onClick={() => select(w.id)}>Open</button>
+      {ready ? (
+        <div data-testid="workspace-ready">
+          {workspaces.data && workspaces.data.length > 0 ? (
+            <div className="card">
+              {workspaces.data.map((w) => (
+                <div key={w.id} className="row" style={{ justifyContent: "space-between" }}>
+                  <span>
+                    {w.name} <span className="muted">({w.role})</span>
+                  </span>
+                  <button onClick={() => select(w.id)}>Open</button>
+                </div>
+              ))}
             </div>
-          ))}
+          ) : (
+            <p className="muted">You have no workspaces yet. Create one to start.</p>
+          )}
         </div>
-      ) : (
-        workspaces.data && <p className="muted">You have no workspaces yet. Create one to start.</p>
-      )}
+      ) : null}
 
       <form onSubmit={create} className="card" noValidate>
         <h2 style={{ marginTop: 0, fontSize: 16 }}>Create a workspace</h2>

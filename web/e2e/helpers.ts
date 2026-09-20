@@ -58,35 +58,46 @@ export async function signIn(page: Page, email: string, password: string): Promi
   }
 
   // Ensure a workspace is active so tenant pages don't bounce to
-  // /select-workspace. Opens the first workspace, or creates one if none exist.
+  // /select-workspace.
   if (page.url().includes("/select-workspace")) {
-    // Capture the BFF/workspace API statuses for a secret-safe diagnostic.
-    const apiStatuses: string[] = [];
-    page.on("response", (r) => {
-      const u = r.url();
-      if (u.includes("/api/")) apiStatuses.push(`${new URL(u).pathname} ${r.status()}`);
-    });
+    // Wait for the workspaces query to finish rendering BEFORE inspecting the
+    // list — do not use the presence of an Open button as the readiness signal.
+    await expect(page.getByTestId("workspace-ready")).toBeVisible({ timeout: 15000 });
 
-    const open = page.getByRole("button", { name: /^open$/i }).first();
+    const open = page.getByRole("button", { name: /^open$/i });
     const openCount = await open.count();
-    if (openCount) {
-      await open.click();
-    } else {
+
+    const isWorkspacePost = (r: { url: () => string; request: () => { method: () => string } }) =>
+      r.url().includes("/api/workspace") && r.request().method() === "POST";
+
+    if (openCount === 0) {
+      // Required seeded CI guarantees a workspace — a missing one is a real
+      // failure, NOT something to paper over by creating a new (wrong) tenant.
+      if (E2E_REQUIRED) {
+        throw new Error("seeded workspace missing on /select-workspace (0 Open buttons)");
+      }
+      // Local/non-required convenience only: create one.
       await page.getByLabel(/workspace name/i).fill("E2E Workspace");
-      await page.getByRole("button", { name: /create \+ open/i }).click();
+      const [res] = await Promise.all([
+        page.waitForResponse(isWorkspacePost),
+        page.getByRole("button", { name: /create \+ open/i }).click(),
+      ]);
+      expect(res.ok()).toBeTruthy();
+    } else {
+      // Require a successful workspace write before expecting navigation.
+      const [res] = await Promise.all([
+        page.waitForResponse(isWorkspacePost),
+        open.first().click(),
+      ]);
+      expect(res.ok()).toBeTruthy();
     }
-    try {
-      await page.waitForURL(/\/$/, { timeout: 15000 });
-    } catch {
-      let banner = "";
-      const alert = page.getByRole("alert");
-      if (await alert.count()) banner = (await alert.first().innerText()).trim();
-      throw new Error(
-        `workspace selection did not reach '/'. url=${page.url()} openButtons=${openCount} ` +
-          `banner=${banner || "(none)"} api=[${apiStatuses.slice(-8).join(", ") || "none"}] ` +
-          `console=[${consoleErrors.slice(0, 5).join(" | ") || "none"}]`,
-      );
-    }
+
+    // Diagnostic (never log the value): the signed selection cookie must exist.
+    const cookies = await page.context().cookies();
+    expect(cookies.some((c) => c.name === "nlw_ws")).toBeTruthy();
+
+    // Production hard-navigates after the cookie write, so this is deterministic.
+    await page.waitForURL(/\/$/, { timeout: 15000 });
   }
   await expect(page).toHaveURL(/\/$/);
 }
