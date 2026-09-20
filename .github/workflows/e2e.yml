@@ -19,9 +19,9 @@ jobs:
     name: Required Playwright E2E (seeded stack)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -30,7 +30,7 @@ jobs:
       # 1) Local Supabase (GoTrue + Postgres) for real cookie auth. The CLI is
       #    PINNED for reproducible local-auth behavior (recent versions sign local
       #    user tokens asymmetrically — which is the production-target JWKS path).
-      - uses: supabase/setup-cli@v1
+      - uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1 # v1.7.1
         with:
           version: 2.117.0
       - name: Start Supabase

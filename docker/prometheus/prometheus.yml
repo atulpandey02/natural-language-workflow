@@ -1,0 +1,19 @@
+# M11 staging observability: scrape each process's INTERNAL metrics port.
+# All three roles bind metrics on :9100 in their own container (nlw.observability).
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: nlw-api
+    static_configs:
+      - targets: ["api:9100"]
+        labels: { role: api }
+  - job_name: nlw-worker
+    static_configs:
+      - targets: ["worker:9100"]
+        labels: { role: worker }
+  - job_name: nlw-scheduler
+    static_configs:
+      - targets: ["scheduler:9100"]
+        labels: { role: scheduler }

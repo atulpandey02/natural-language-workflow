@@ -12,3 +12,13 @@ See [../ops/backup-restore.md](../ops/backup-restore.md) for policy + RPO/RTO.
 4. Cut over (point `DATABASE_URL` at the restored DB, or rename) during a
    maintenance window. Roles come from bootstrap/IaC, not the dump.
 5. Record the incident, the backup used, and the measured RTO.
+
+## Scope: application state only (M11)
+
+This restores **NLW application PostgreSQL state** (users, workspaces, connectors,
+workflows, versions, runs, schedules, approvals, external-action audit). It does
+**NOT** restore the external **Supabase Auth** identity provider (accounts,
+passwords, sessions/JWT signing keys). Supabase Auth DR is a **separate dependency
+and responsibility** — full-platform recovery requires both this restore AND the
+identity provider's own backup/restore. Do not claim full-platform DR from the
+NLW `pg_dump` restore alone.

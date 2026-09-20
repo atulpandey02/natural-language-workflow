@@ -16,9 +16,11 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 import structlog
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from nlw.core.config import Settings
+from nlw.db.models import Schedule
 from nlw.observability import metrics
 from nlw.scheduler.due import CreatedRun, scan_due
 from nlw.scheduler.reconcile import find_stuck_runs
@@ -30,6 +32,17 @@ EnqueueFn = Callable[[uuid.UUID], None]
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _emit_scheduler_lag(session: Session, at: datetime) -> None:
+    """Set the lag gauge = seconds behind the earliest OVERDUE enabled occurrence."""
+    earliest_overdue = session.execute(
+        select(func.min(Schedule.next_run_at)).where(
+            Schedule.enabled.is_(True), Schedule.next_run_at <= at
+        )
+    ).scalar_one_or_none()
+    lag = (at - earliest_overdue).total_seconds() if earliest_overdue is not None else 0.0
+    metrics.set_scheduler_lag(max(0.0, lag))
 
 
 def due_scan_once(
@@ -48,6 +61,7 @@ def due_scan_once(
             catchup_window_s=settings.scheduler_catchup_window_s,
             batch_limit=settings.scheduler_batch_limit,
         )
+        _emit_scheduler_lag(session, at)
     for c in created:  # AFTER commit
         enqueue(c.run_id)
     if created:

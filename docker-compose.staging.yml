@@ -1,0 +1,41 @@
+# M11 staging profile (overlay on docker-compose.prod.yml).
+#
+# Ephemeral/CI usage (HTTP edge, no public domain, deterministic):
+#   docker compose -f docker-compose.prod.yml -f docker-compose.e2e.yml \
+#     -f docker-compose.staging.yml up -d
+#
+# This overlay:
+#   - sets APP_ENV=staging on the app services (docs off, prod-shaped),
+#   - adds an internal Prometheus that scrapes each role's metrics port.
+#
+# Real-VPS staging uses docker-compose.prod.yml directly with a real
+# PUBLIC_HOSTNAME + Caddy ACME TLS + APP_ENV=staging (see
+# docs/staging/real-vps-checklist.md). CI (ephemeral) and VPS evidence are kept
+# separate (D3).
+
+services:
+  api:
+    environment:
+      APP_ENV: staging
+  worker:
+    environment:
+      APP_ENV: staging
+  scheduler:
+    environment:
+      APP_ENV: staging
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # Internal only — not published; queried from the drill/load tooling on the
+    # internal network. (Publish 9090 locally only for manual inspection.)
+    expose:
+      - "9090"
+    networks:
+      - internal
+    depends_on:
+      - api
+      - worker
+      - scheduler

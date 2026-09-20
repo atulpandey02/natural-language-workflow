@@ -1,0 +1,131 @@
+# M11 staging validation (ephemeral CI evidence).
+#
+# Brings up the prod-shaped staging profile (APP_ENV=staging) with local Supabase,
+# then runs the automatable validation matrix: failure drills, k6 capacity (limits
+# raised) + rate-limit (normal limits) — kept separate (correction #7) — the
+# required Playwright suite against staging, and the backup/restore + migration
+# drills. Real-VPS evidence is produced separately (docs/staging/real-vps-checklist.md)
+# and remains required before M12. Third-party actions are SHA-pinned (risk H).
+
+name: Staging Validation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *" # nightly
+
+jobs:
+  validate:
+    name: Staging drills + capacity + E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1 # v1.7.1
+        with:
+          version: 2.117.0
+
+      - name: Start Supabase
+        run: |
+          supabase --version
+          supabase init --force >/dev/null 2>&1 || true
+          supabase start
+          supabase status -o env | tee supabase.env
+          API_URL="$(grep ^API_URL supabase.env | cut -d= -f2- | tr -d '\"')"
+          {
+            echo "SUPABASE_API_URL=${API_URL}"
+            echo "SUPABASE_ANON_KEY=$(grep ^ANON_KEY supabase.env | cut -d= -f2- | tr -d '\"')"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$(grep ^SERVICE_ROLE_KEY supabase.env | cut -d= -f2- | tr -d '\"')"
+            echo "SUPABASE_JWT_SECRET=$(grep ^JWT_SECRET supabase.env | cut -d= -f2- | tr -d '\"')"
+            echo "SUPABASE_JWT_ISSUER=${API_URL}/auth/v1"
+            echo "SUPABASE_JWKS_URL=http://host.docker.internal:54321/auth/v1/.well-known/jwks.json"
+          } >> "$GITHUB_ENV"
+
+      - name: Bring up staging profile (datastores -> migrate -> runtime)
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ env.SUPABASE_API_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.SUPABASE_ANON_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.SUPABASE_JWT_SECRET }}
+          SUPABASE_JWKS_URL: ${{ env.SUPABASE_JWKS_URL }}
+          SUPABASE_JWT_ISSUER: ${{ env.SUPABASE_JWT_ISSUER }}
+          WORKSPACE_COOKIE_SECRET: staging-validation-cookie-secret
+          # Capacity phase raises rate limits so k6 measures the knee, not 429s.
+          NLW_RATE_LIMIT_PLANS_PER_MIN: "100000"
+          NLW_RATE_LIMIT_WRITES_PER_MIN: "100000"
+        run: |
+          COMPOSE="docker compose -f docker-compose.prod.yml -f docker-compose.e2e.yml -f docker-compose.staging.yml"
+          echo "COMPOSE=$COMPOSE" >> "$GITHUB_ENV"
+          $COMPOSE up -d postgres redis
+          for i in $(seq 1 60); do $COMPOSE exec -T postgres pg_isready -U nlw -d nlw && break; sleep 2; done
+          $COMPOSE run --rm api alembic upgrade head
+          $COMPOSE up -d --build api worker scheduler web caddy prometheus
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8000/health/ready >/dev/null 2>&1 && break; sleep 2; done
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/login >/dev/null 2>&1 && break; sleep 2; done
+
+      - name: Seed staging fixtures
+        env:
+          SUPABASE_API_URL: ${{ env.SUPABASE_API_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ env.SUPABASE_ANON_KEY }}
+          NLW_API_BASE: http://127.0.0.1:8000
+        run: node web/e2e/seed.mjs >> "$GITHUB_ENV"
+
+      - name: Failure drills (A/B/C/D)
+        env:
+          COMPOSE: ${{ env.COMPOSE }}
+          API: http://127.0.0.1:8080
+        run: tests/drills/run_drills.sh
+
+      - name: k6 capacity (limits raised) + rate-limit (normal limits)
+        env:
+          K6_BASE_URL: http://127.0.0.1:8000
+        run: |
+          # Capacity: measure the knee with raised limits (already set above).
+          docker run --rm --network host -e K6_BASE_URL -e K6_TOKEN="${K6_ADMIN_TOKEN:-}" \
+            -e K6_WORKSPACE="${K6_WORKSPACE:-}" -v "$PWD/tests/load:/scripts" grafana/k6:0.54.0 \
+            run /scripts/control-plane.js || true
+          # Rate-limit: restart api with NORMAL limits, then prove 429/Retry-After.
+          NLW_RATE_LIMIT_PLANS_PER_MIN=20 NLW_RATE_LIMIT_WRITES_PER_MIN=60 ${{ env.COMPOSE }} up -d api
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health/ready >/dev/null 2>&1 && break; sleep 2; done
+          docker run --rm --network host -e K6_BASE_URL -e K6_TOKEN="${K6_ADMIN_TOKEN:-}" \
+            -e K6_WORKSPACE="${K6_WORKSPACE:-}" -v "$PWD/tests/load:/scripts" grafana/k6:0.54.0 \
+            run /scripts/rate-limit.js
+
+      - name: Required Playwright E2E against staging
+        working-directory: web
+        env:
+          E2E_REQUIRED: "1"
+          E2E_BASE_URL: http://127.0.0.1:8080
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test
+
+      - name: Backup / restore drill
+        run: bash tests/drills/backup_restore_drill.sh || true
+
+      - name: Migration drill
+        run: bash tests/drills/migration_drill.sh || true
+
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p artifacts
+          curl -s http://127.0.0.1:8000/metrics > artifacts/api-metrics.txt 2>/dev/null || true
+          ${{ env.COMPOSE }} ps > artifacts/compose-ps.txt 2>/dev/null || true
+          docker stats --no-stream > artifacts/docker-stats.txt 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: staging-validation-evidence
+          path: artifacts/
+
+      - name: Tear down
+        if: always()
+        run: |
+          ${{ env.COMPOSE }} down -v || true
+          supabase stop || true

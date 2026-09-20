@@ -67,6 +67,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         window_s=settings.rate_limit_window_s,
         fail_open=settings.rate_limit_fail_open,
     )
+    # Capacity metrics (M11): expose the API DB pool at scrape time.
+    from nlw.observability import metrics as _metrics
+
+    pool = app.state.engine.sync_engine.pool
+    _metrics.register_pool_provider(lambda: (pool.checkedout(), pool.overflow()))
+    _metrics.register_capacity_collector()
     log.info("api.startup", app_env=settings.app_env, llm_provider=settings.llm_provider)
     try:
         yield

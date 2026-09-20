@@ -30,6 +30,11 @@ class MetricsMiddleware(Middleware):
         try:
             if start_metrics_server(get_settings(), role="worker"):
                 log.info("worker.metrics_started")
+            # Register capacity providers (DB pool + Redis queue depth) once the
+            # worker process is up (M11 capacity metrics).
+            from nlw.worker.actors import register_worker_capacity_metrics
+
+            register_worker_capacity_metrics()
         except Exception:  # metrics must never take down the worker
             log.warning("worker.metrics_start_failed")
 

@@ -13,7 +13,9 @@ never touch the prometheus objects directly, which keeps the strict-typed engine
 and scheduler modules clean.
 """
 
+import contextlib
 import threading
+from collections.abc import Callable, Iterable
 
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -24,6 +26,8 @@ from prometheus_client import (
     generate_latest,
     start_http_server,
 )
+from prometheus_client.core import GaugeMetricFamily
+from prometheus_client.registry import Collector
 
 from nlw.core.config import Settings
 
@@ -98,6 +102,86 @@ _RATE_LIMIT_REJECTED = Counter(
     "Requests rejected by the rate limiter.",
     labelnames=("endpoint",),
 )
+
+# --- Capacity metrics (M11, D2) ---
+# DB connection-pool checkout wait (time to acquire a pooled connection). Under
+# pool saturation this rises; ~0 when there is headroom.
+_DB_CHECKOUT_WAIT = Histogram(
+    "nlw_db_pool_checkout_wait_seconds",
+    "Time spent acquiring a pooled DB connection (seconds).",
+)
+# Total wall-clock time of a run, observed ONCE at the actual terminal transition
+# (never on a replay that merely observes an already-terminal run).
+_RUN_COMPLETION = Histogram(
+    "nlw_run_completion_seconds",
+    "Run wall-clock time from creation to terminal state (seconds).",
+    labelnames=("result",),
+)
+# Scheduler lag: how far behind the earliest overdue occurrence the scheduler is.
+_SCHEDULER_LAG = Gauge(
+    "nlw_scheduler_lag_seconds",
+    "Seconds by which the scheduler is behind the earliest overdue occurrence.",
+)
+
+
+# Scrape-time providers for pool/queue gauges. These read live values at collect()
+# time so the numbers are current on every scrape. Providers are registered by the
+# owning process (worker/api) and default to None (metric absent) otherwise.
+_pool_provider: Callable[[], tuple[int, int]] | None = None  # (checked_out, overflow)
+_queue_provider: Callable[[], int] | None = None  # ready messages in Redis transport
+
+
+def register_pool_provider(fn: Callable[[], tuple[int, int]]) -> None:
+    global _pool_provider
+    _pool_provider = fn
+
+
+def register_queue_provider(fn: Callable[[], int]) -> None:
+    global _queue_provider
+    _queue_provider = fn
+
+
+class _CapacityCollector(Collector):
+    """Yields current DB-pool and Redis queue-depth gauges at scrape time."""
+
+    def collect(self) -> Iterable[GaugeMetricFamily]:
+        checked_out = GaugeMetricFamily(
+            "nlw_db_pool_checked_out", "DB connections currently checked out of the pool."
+        )
+        overflow = GaugeMetricFamily(
+            "nlw_db_pool_overflow", "DB pool overflow connections currently in use."
+        )
+        if _pool_provider is not None:
+            with contextlib.suppress(Exception):  # a metrics scrape must never raise
+                co, ov = _pool_provider()
+                checked_out.add_metric([], co)
+                overflow.add_metric([], ov)
+        yield checked_out
+        yield overflow
+
+        # queue_ready_depth = runnable messages currently waiting in the Redis
+        # transport. NOT authoritative outstanding workflow state (durable state
+        # lives in Postgres); a best-effort transport gauge only.
+        queue = GaugeMetricFamily(
+            "nlw_queue_ready_depth", "Runnable messages waiting in the Redis transport."
+        )
+        if _queue_provider is not None:
+            with contextlib.suppress(Exception):
+                queue.add_metric([], _queue_provider())
+        yield queue
+
+
+_capacity_registered = False
+
+
+def register_capacity_collector() -> None:
+    """Register the scrape-time capacity collector once."""
+    global _capacity_registered
+    if _capacity_registered:
+        return
+    REGISTRY.register(_CapacityCollector())
+    _capacity_registered = True
+
 
 _server_started = False
 _server_lock = threading.Lock()
@@ -174,3 +258,16 @@ def set_runs_beyond_horizon(n: int) -> None:
 
 def record_rate_limit_rejected(endpoint: str) -> None:
     _RATE_LIMIT_REJECTED.labels(endpoint=endpoint).inc()
+
+
+def observe_db_checkout_wait(seconds: float) -> None:
+    _DB_CHECKOUT_WAIT.observe(seconds)
+
+
+def observe_run_completion(result: str, seconds: float) -> None:
+    """Observe total run time at the ACTUAL terminal transition only (M11 D2)."""
+    _RUN_COMPLETION.labels(result=result).observe(seconds)
+
+
+def set_scheduler_lag(seconds: float) -> None:
+    _SCHEDULER_LAG.set(seconds)

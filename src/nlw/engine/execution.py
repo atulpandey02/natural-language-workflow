@@ -208,6 +208,7 @@ def _fail_run_step(
     step.finished_at = now
     run.status = RunStatus.FAILED
     run.finished_at = now
+    metrics.observe_run_completion("failed", (now - run.created_at).total_seconds())
     return AdvanceOutcome("failed", enqueue_next=False, step_id=step.step_id)
 
 
@@ -431,6 +432,9 @@ def execute_advancement(
         if any_failed(states):
             run.status = RunStatus.FAILED
             run.finished_at = _now()
+            metrics.observe_run_completion(
+                "failed", (run.finished_at - run.created_at).total_seconds()
+            )
             return AdvanceOutcome("failed", enqueue_next=False)
 
         # 1) Resume a durably in-flight action (only actions persist RUNNING).
@@ -454,6 +458,9 @@ def execute_advancement(
             if all_succeeded(plan, states):
                 run.status = RunStatus.COMPLETED
                 run.finished_at = _now()
+                metrics.observe_run_completion(
+                    "completed", (run.finished_at - run.created_at).total_seconds()
+                )
                 return AdvanceOutcome("completed", enqueue_next=False)
             return AdvanceOutcome("noop", enqueue_next=False)
 

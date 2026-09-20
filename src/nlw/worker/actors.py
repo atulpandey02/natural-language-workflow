@@ -15,7 +15,9 @@ import uuid
 import dramatiq
 import redis
 import structlog
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from nlw.core.config import get_settings
 from nlw.db.session import create_sync_engine, create_sync_sessionmaker
@@ -37,14 +39,41 @@ _PING_MARKER_TTL_SECONDS = 60
 
 # Lazily-created synchronous session factory for the worker (connects as the
 # nlw_worker role; Dramatiq actors are synchronous).
+_engine: Engine | None = None
 _sessionmaker: sessionmaker[Session] | None = None
 
 
 def _get_sessionmaker() -> sessionmaker[Session]:
-    global _sessionmaker
+    global _engine, _sessionmaker
     if _sessionmaker is None:
-        _sessionmaker = create_sync_sessionmaker(create_sync_engine(get_settings()))
+        _engine = create_sync_engine(get_settings())
+        _sessionmaker = create_sync_sessionmaker(_engine)
     return _sessionmaker
+
+
+def register_worker_capacity_metrics() -> None:
+    """Register scrape-time DB-pool + Redis queue-depth providers (M11, D2).
+
+    Called once from the worker boot hook so the numbers reflect the worker's own
+    engine + the shared Redis transport.
+    """
+    _get_sessionmaker()  # ensure the engine exists
+    pool = _engine.pool if _engine is not None else None
+    if isinstance(pool, QueuePool):
+        metrics.register_pool_provider(lambda: (pool.checkedout(), pool.overflow()))
+
+    depth_client = redis.from_url(get_settings().redis_url)
+
+    def _queue_ready_depth() -> int:
+        # Best-effort transport depth (Dramatiq default queue list). NOT
+        # authoritative outstanding workflow state — durable state is in Postgres.
+        try:
+            return int(depth_client.llen("dramatiq:default"))
+        except Exception:
+            return 0
+
+    metrics.register_queue_provider(_queue_ready_depth)
+    metrics.register_capacity_collector()
 
 
 @dramatiq.actor
