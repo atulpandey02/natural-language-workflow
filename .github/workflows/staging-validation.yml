@@ -13,11 +13,24 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * *" # nightly
+  # PR-triggered but LABEL-GATED: the expensive Tier-2 job runs on a PR only when
+  # it carries the "staging-validation" label (so M11 Tier-2 can run before merge).
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+concurrency:
+  group: staging-validation-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
     name: Staging drills + capacity + E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # schedule/workflow_dispatch always run; PRs only with the gate label.
+    if: >
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'staging-validation')
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
