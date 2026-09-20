@@ -56,6 +56,25 @@ def test_secret_isolation_worker_only() -> None:
         assert "NLW_LLM_API_KEY" not in services["scheduler"].get("environment", {}), name
 
 
+def test_prod_llm_config_api_only() -> None:
+    services = _load("docker-compose.prod.yml")["services"]
+    api_env = services["api"]["environment"]
+    # API receives provider + model + key.
+    assert api_env["NLW_LLM_PROVIDER"] == "${NLW_LLM_PROVIDER:-stub}"
+    assert api_env["NLW_LLM_MODEL"] == "${NLW_LLM_MODEL:-claude-haiku-4-5-20251001}"
+    assert api_env["NLW_LLM_API_KEY"] == "${NLW_LLM_API_KEY:-}"
+    # The LLM API key must NOT reach worker, scheduler, or web.
+    for svc in ("worker", "scheduler", "web"):
+        env = services[svc].get("environment", {})
+        assert "NLW_LLM_API_KEY" not in env, svc
+    # And the key must NOT be in the shared x-app-env (which worker/scheduler use):
+    raw = (ROOT / "docker-compose.prod.yml").read_text()
+    xapp = raw.split("x-app-env:", 1)[1].split("x-app-hardening:", 1)[0]
+    assert "NLW_LLM_API_KEY" not in xapp
+    assert "NLW_LLM_PROVIDER" not in xapp
+    assert "NLW_LLM_MODEL" not in xapp
+
+
 def test_prod_only_reverse_proxy_is_published() -> None:
     compose = _load("docker-compose.prod.yml")
     services = compose["services"]

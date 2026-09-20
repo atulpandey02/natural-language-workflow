@@ -67,6 +67,17 @@ assert_revisions() {
     || { echo "assert_revisions: MISMATCH current='$current' head='$expected'" >&2; return 1; }
   return 0
 }
+# Supabase PUBLISHABLE key must be non-empty, start with sb_publishable_, and
+# have at least one char after the prefix. (Never prints the key.)
+valid_supabase_anon_key() {
+  case "${1:-}" in sb_publishable_?*) return 0 ;; *) return 1 ;; esac
+}
+# The LLM key is required ONLY when the provider is anthropic. (Never prints it.)
+require_llm_key_ok() {
+  local provider="${1:-}" key="${2:-}"
+  [ "$provider" = "anthropic" ] || return 0
+  [ -n "$key" ]
+}
 
 # ── Phase tracking + accurate failure report ────────────────────────────────
 PHASE="init"
@@ -174,6 +185,8 @@ create_env_first() {
     printf '\n' >/dev/tty
   fi
   [ -n "${anon:-}" ] || die "no Supabase publishable key provided."
+  valid_supabase_anon_key "$anon" \
+    || die "SUPABASE_ANON_KEY is invalid — must start with 'sb_publishable_' and include a suffix. (Key not printed.)"
 
   local mk
   IFS= read -r -d '' mk <<EOF || true
@@ -251,6 +264,21 @@ verify_env_resume() {
   grep -qx "NLW_WEB_IMAGE=$WEB_IMAGE"      <<<"$envp" || die "resume: NLW_WEB_IMAGE != pinned web digest."
   grep -qx "PUBLIC_HOSTNAME=$STAGING_HOST" <<<"$envp" || die "resume: PUBLIC_HOSTNAME != $STAGING_HOST."
   mark env_verified
+}
+
+verify_secrets_config() {
+  # Validate secrets that already live in .env.prod WITHOUT bringing values to the
+  # Mac or printing them: anon-key format, and LLM key iff provider=anthropic.
+  log "Validating .env.prod secrets (format only; values never printed) …"
+  rsh "cd '$REMOTE_APP'
+    v=\$(grep -m1 '^SUPABASE_ANON_KEY=' .env.prod | cut -d= -f2-)
+    case \"\$v\" in sb_publishable_?*) ;; *) echo 'STOP: SUPABASE_ANON_KEY must start with sb_publishable_ and have a suffix.' >&2; exit 4;; esac
+    provider=\$(grep -m1 '^NLW_LLM_PROVIDER=' .env.prod | cut -d= -f2- | tr -d '[:space:]'); provider=\${provider:-stub}
+    if [ \"\$provider\" = anthropic ]; then
+      grep -qE '^NLW_LLM_API_KEY=.+' .env.prod || { echo 'STOP: NLW_LLM_PROVIDER=anthropic but NLW_LLM_API_KEY is empty/missing. Add the key on the host (never commit it), then re-run --resume.' >&2; exit 4; }
+    fi
+  " || die "secrets validation failed (see STOP message above)."
+  mark secrets_verified
 }
 
 render_config() {
@@ -355,6 +383,7 @@ main() {
   else
     verify_env_resume
   fi
+  verify_secrets_config
   render_config
   pull_images
   start_datastores

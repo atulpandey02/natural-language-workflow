@@ -37,5 +37,9 @@ export function getServerPublicConfig(): PublicConfig {
  * path (e.g. a private DNS name or host gateway), not which project is used.
  */
 export function getServerSupabaseUrl(): string {
-  return process.env.SUPABASE_SERVER_URL ?? required("SUPABASE_URL");
+  // Compose passes SUPABASE_SERVER_URL="" when unset, so nullish-coalescing would
+  // wrongly treat "" (and whitespace) as a real override. Only a non-blank value
+  // overrides; otherwise fall back to the public URL.
+  const override = process.env.SUPABASE_SERVER_URL?.trim();
+  return override || required("SUPABASE_URL");
 }

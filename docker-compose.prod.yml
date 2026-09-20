@@ -108,6 +108,10 @@ services:
     <<: *app-hardening
     environment:
       <<: *app-env
+      # Planner runs API-side ONLY. The LLM provider/model/key live here (never in
+      # x-app-env), so worker/scheduler/web never receive the platform LLM key.
+      NLW_LLM_PROVIDER: ${NLW_LLM_PROVIDER:-stub}
+      NLW_LLM_MODEL: ${NLW_LLM_MODEL:-claude-haiku-4-5-20251001}
       NLW_LLM_API_KEY: ${NLW_LLM_API_KEY:-}
     # No host port: reachable only by the frontend BFF on the internal network.
     expose:

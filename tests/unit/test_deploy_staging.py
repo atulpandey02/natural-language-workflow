@@ -112,7 +112,7 @@ def test_first_deploy_rejects_existing_env() -> None:
 def test_resume_requires_existing_env_600() -> None:
     body = _func_body(DEPLOY.read_text(), "verify_env_resume")
     assert "does not exist" in body
-    assert '"$mode" = "600"' in body or "= \"600\"" in body
+    assert '"$mode" = "600"' in body or '= "600"' in body
 
 
 # --- 9. --resume never regenerates secrets ----------------------------------
@@ -142,12 +142,46 @@ def test_resume_validates_pins() -> None:
     # Git SHA is enforced by pin_config (runs in BOTH modes).
     assert "!= pinned $DEPLOY_SHA" in _func_body(text, "pin_config")
     resume = _func_body(text, "verify_env_resume")
-    assert 'NLW_IMAGE=$BACKEND_IMAGE' in resume
-    assert 'NLW_WEB_IMAGE=$WEB_IMAGE' in resume
-    assert 'PUBLIC_HOSTNAME=$STAGING_HOST' in resume
+    assert "NLW_IMAGE=$BACKEND_IMAGE" in resume
+    assert "NLW_WEB_IMAGE=$WEB_IMAGE" in resume
+    assert "PUBLIC_HOSTNAME=$STAGING_HOST" in resume
 
 
 # --- Phase-aware reporting + source guard -----------------------------------
+# --- Deploy-time secret validation (pure helpers) ---------------------------
+def test_valid_supabase_anon_key_accepts_publishable() -> None:
+    assert _sh('valid_supabase_anon_key "sb_publishable_abc123"').returncode == 0
+
+
+def test_valid_supabase_anon_key_rejects_bad_keys() -> None:
+    for bad in ("", "sb_publishable_", "sb_secret_abc", "eyJhbGciOi", "publishable_x"):
+        assert _sh(f'valid_supabase_anon_key "{bad}"').returncode != 0, bad
+
+
+def test_llm_key_required_only_for_anthropic() -> None:
+    # anthropic + empty key => fail; anthropic + key => ok
+    assert _sh('require_llm_key_ok "anthropic" ""').returncode != 0
+    assert _sh('require_llm_key_ok "anthropic" "sk-ant-xxx"').returncode == 0
+    # stub (or anything else) never requires a key
+    assert _sh('require_llm_key_ok "stub" ""').returncode == 0
+    assert _sh('require_llm_key_ok "" ""').returncode == 0
+
+
+def test_deploy_validates_anon_key_before_writing() -> None:
+    body = _func_body(DEPLOY.read_text(), "create_env_first")
+    assert 'valid_supabase_anon_key "$anon"' in body  # validated before the builder runs
+    assert 'echo "$anon"' not in body  # never echoed
+
+
+def test_deploy_verify_secrets_config_present() -> None:
+    text = DEPLOY.read_text()
+    assert "verify_secrets_config" in _func_body(text, "main")
+    body = _func_body(text, "verify_secrets_config")
+    assert "sb_publishable_?*" in body
+    assert "= anthropic" in body
+    assert "NLW_LLM_API_KEY=.+" in body
+
+
 # --- Role-attribute verifier (verify-staging-deployment.sh) ------------------
 _ROLES_OK = "\n".join(
     [
@@ -224,5 +258,7 @@ def test_phase_tracking_and_source_guard() -> None:
         "tls_verified",
     ):
         assert ph in text, f"phase {ph} not tracked"
-    assert 'migrations_applied && warn' in text or "migrations_applied" in _func_body(text, "fail_report")
+    assert "migrations_applied && warn" in text or "migrations_applied" in _func_body(
+        text, "fail_report"
+    )
     assert 'if [ "${BASH_SOURCE[0]}" = "${0}" ]; then' in text
