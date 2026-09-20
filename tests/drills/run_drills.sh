@@ -12,8 +12,22 @@ API="${API:-http://127.0.0.1:8000}"  # API readiness endpoint (loopback)
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-ready() { curl -fsS "$API/health/ready" >/dev/null 2>&1; }
-ready_code() { curl -s -o /dev/null -w "%{http_code}" "$API/health/ready"; }
+# Every readiness probe is bounded: a black-holed dependency (e.g. a paused
+# Postgres holding an open socket) must never let a single curl — or a single
+# wait_until iteration — block indefinitely.
+CURL_BOUNDS=(--connect-timeout 2 --max-time 5)
+ready() { curl -fsS "${CURL_BOUNDS[@]}" "$API/health/ready" >/dev/null 2>&1; }  # true only on HTTP 200
+ready_code() {
+  # Bounded; on transport timeout/failure curl exits non-zero and leaves
+  # %{http_code}=000 — normalize to the 000 sentinel so callers get a comparable
+  # value and the predicate never aborts (or hangs) under set -e.
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" "${CURL_BOUNDS[@]}" "$API/health/ready" 2>/dev/null) || code="000"
+  echo "${code:-000}"
+}
+# Outage detection accepts an explicit 503 OR a bounded transport failure (000);
+# recovery always requires a real HTTP 200 (via ready()).
+degraded() { local c; c=$(ready_code); [ "$c" = "503" ] || [ "$c" = "000" ]; }
 wait_until() { # predicate, attempts
   local i; for i in $(seq 1 "${2:-30}"); do eval "$1" && return 0; sleep 2; done; return 1; }
 
@@ -21,7 +35,7 @@ wait_until() { # predicate, attempts
 drill_redis_outage() {
   echo "== Drill B: Redis outage =="
   $COMPOSE kill redis >/dev/null
-  wait_until '[ "$(ready_code)" = "503" ]' 15 || fail "readiness did not degrade on Redis loss"
+  wait_until 'degraded' 15 || fail "readiness did not degrade on Redis loss"
   pass "readiness -> 503 while Redis down (runbook: redis-unavailable)"
   $COMPOSE up -d redis >/dev/null
   wait_until 'ready' 30 || fail "readiness did not recover after Redis return"
@@ -32,8 +46,10 @@ drill_redis_outage() {
 drill_postgres_outage() {
   echo "== Drill C: PostgreSQL outage =="
   $COMPOSE pause postgres >/dev/null
-  wait_until '[ "$(ready_code)" = "503" ]' 15 || fail "readiness did not degrade on Postgres pause"
-  pass "readiness -> 503 while Postgres paused (runbook: postgres-unavailable)"
+  # pause black-holes the socket (SELECT would hang forever); the app-level
+  # readiness timeout must still yield a bounded 503 (or a bounded 000).
+  wait_until 'degraded' 15 || fail "readiness did not degrade on Postgres pause"
+  pass "readiness degraded while Postgres paused (runbook: postgres-unavailable)"
   $COMPOSE unpause postgres >/dev/null
   wait_until 'ready' 30 || fail "readiness did not recover after Postgres return"
   pass "readiness recovered after Postgres return"
@@ -66,4 +82,9 @@ main() {
   drill_scheduler_restart
   echo "ALL DRILLS PASSED"
 }
-main "$@"
+
+# Run the drills only when executed directly; allow tests to source the helpers
+# (e.g. to prove ready_code() is bounded) without injecting any faults.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi

@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     db_lock_timeout_ms: int = 10_000  # bound time spent waiting on a lock
     db_idle_in_tx_timeout_ms: int = 60_000  # kill idle-in-transaction sessions
 
+    # --- Readiness probes (M11) ---
+    # Application-level bound on EACH readiness dependency check. Server-side
+    # statement_timeout cannot fire when a dependency is black-holed (e.g. a
+    # paused Postgres holding an open socket), so /health/ready wraps every probe
+    # in this timeout and reports the dependency "down" (503) rather than hanging.
+    readiness_probe_timeout_s: float = 3.0
+
     # --- Observability / metrics (M9) ---
     # Each process (api / worker / scheduler) serves Prometheus metrics on its own
     # INTERNAL port. This port is never published publicly (see docker-compose);

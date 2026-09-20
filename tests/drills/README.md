@@ -17,6 +17,22 @@ are covered by the integration suite (test_crash_windows.py, test_action_executi
 test_engine_execution.py, test_scheduler_reconcile.py, test_workflows_api.py) and,
 for real providers (Slack/webhook/LLM/Supabase), by the real-VPS checklist.
 
+## Bounded probes
+
+Every readiness probe (drill client and application) is bounded, so a
+black-holed dependency can never hang a drill or the endpoint:
+
+- Drill C uses `docker compose pause postgres` — a **black-hole/stalled-socket**
+  outage: the TCP connection stays open but `SELECT` never returns. Server-side
+  `statement_timeout` cannot fire (Postgres is frozen), so `/health/ready` relies
+  on an application-level timeout (`readiness_probe_timeout_s`, default 3s) to
+  return a bounded `503`. Drill B (`kill redis`) is a **connection-refused**
+  outage by contrast.
+- The drill's `ready_code`/`degraded` helpers use `curl --connect-timeout 2
+  --max-time 5` and normalize a transport timeout to the `000` sentinel. Outage
+  detection accepts `503` **or** a bounded `000`; recovery always requires a real
+  `200`.
+
 Run:
 
     COMPOSE="docker compose -f docker-compose.prod.yml -f docker-compose.e2e.yml -f docker-compose.staging.yml" \

@@ -5,7 +5,12 @@
 set -euo pipefail
 COMPOSE="${COMPOSE:-docker compose -f docker-compose.prod.yml -f docker-compose.e2e.yml -f docker-compose.staging.yml}"
 API="${API:-http://127.0.0.1:8000}"  # API readiness endpoint (loopback)
-ready_code() { curl -s -o /dev/null -w "%{http_code}" "$API/health/ready"; }
+# Bounded probe (never hangs); 000 sentinel on transport timeout/failure.
+ready_code() {
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 2 --max-time 5 "$API/health/ready" 2>/dev/null) || code="000"
+  echo "${code:-000}"
+}
 
 echo "== Schema-incompatibility / readiness drill =="
 

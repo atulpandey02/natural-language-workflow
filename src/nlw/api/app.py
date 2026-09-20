@@ -15,6 +15,7 @@ Prometheus metrics are served on a SEPARATE internal port (see
 ``nlw.observability.metrics``), never on this public app.
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 
@@ -132,23 +133,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/ready")
     async def ready() -> JSONResponse:
         settings_: Settings = app.state.settings
+        timeout_s = settings_.readiness_probe_timeout_s
         checks: dict[str, str] = {}
         healthy = True
 
-        async def probe(name: str, coro: Awaitable[None]) -> None:
+        async def probe(name: str, coro: Awaitable[None]) -> bool:
+            """Run a dependency check under an application-level timeout.
+
+            A frozen dependency (e.g. a black-holed/paused Postgres) cannot be
+            bounded by server-side timeouts, so each probe is wrapped here; on
+            timeout or failure the dependency is reported "down" (never raised,
+            never leaking connection internals to the client).
+            """
             nonlocal healthy
             try:
-                await coro
+                async with asyncio.timeout(timeout_s):
+                    await coro
                 checks[name] = "ok"
+                return True
+            except TimeoutError:
+                checks[name] = "down"
+                healthy = False
+                log.warning("readiness.check_timeout", dependency=name, timeout_s=timeout_s)
+                return False
             except Exception as exc:  # readiness must never raise; report it
                 checks[name] = "down"
                 healthy = False
                 log.warning("readiness.check_failed", dependency=name, error=str(exc))
+                return False
 
-        await probe("postgres", check_connection(app.state.engine))
+        postgres_ok = await probe("postgres", check_connection(app.state.engine))
         await probe("redis", check_redis(settings_))
-        # Schema compatibility (req 10): expected head is cached in-process.
-        await probe("schema", check_schema(app.state.engine))
+        # Schema compatibility (req 10) also depends on Postgres. If the Postgres
+        # probe already failed/timed out, mark schema down WITHOUT a second
+        # blocking DB round-trip — otherwise a black-holed DB would incur a
+        # second full probe timeout. The expected head is cached in-process.
+        if postgres_ok:
+            await probe("schema", check_schema(app.state.engine))
+        else:
+            checks["schema"] = "down"
+            healthy = False
         return JSONResponse(
             status_code=200 if healthy else 503,
             content={"status": "ready" if healthy else "not_ready", "checks": checks},
