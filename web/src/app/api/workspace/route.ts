@@ -27,12 +27,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 422 },
     );
   }
+  // Mark the cookie Secure only when the request is actually HTTPS (per the
+  // reverse proxy's X-Forwarded-Proto), NOT by NODE_ENV — otherwise a
+  // production build served over plain HTTP (e.g. the E2E edge) would set a
+  // Secure cookie the browser refuses to send back, breaking workspace selection.
+  const proto = req.headers.get("x-forwarded-proto") ?? new URL(req.url).protocol.replace(":", "");
   const res = NextResponse.json({ ok: true });
   const cookie = serializeWorkspaceCookie(workspaceId);
   res.cookies.set(cookie.name, cookie.value, {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: proto === "https",
     path: "/",
     maxAge: 60 * 60 * 24 * 30,
   });
