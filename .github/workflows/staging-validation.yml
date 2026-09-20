@@ -1,11 +1,12 @@
 # M11 staging validation (ephemeral CI evidence).
 #
-# Brings up the prod-shaped staging profile (APP_ENV=staging) with local Supabase,
-# then runs the automatable validation matrix: failure drills, k6 capacity (limits
-# raised) + rate-limit (normal limits) — kept separate (correction #7) — the
-# required Playwright suite against staging, and the backup/restore + migration
-# drills. Real-VPS evidence is produced separately (docs/staging/real-vps-checklist.md)
-# and remains required before M12. Third-party actions are SHA-pinned (risk H).
+# Prod-shaped topology (D3): the application + web IMAGES are built once and tagged
+# for this commit, then docker-compose.prod.yml (+ e2e/staging overlays) runs those
+# exact images with NO --build. Real VPS/production uses immutable GHCR digests;
+# the commit-SHA tags are the ephemeral-CI equivalent. Required gates (drills, k6
+# safe-target, backup/restore, schema/readiness drill) FAIL the job if they fail.
+# Ephemeral-CI and real-VPS evidence are kept separate; a real-VPS pass remains
+# required before M12. Third-party actions are SHA-pinned (risk H).
 
 name: Staging Validation
 
@@ -58,28 +59,52 @@ jobs:
             echo "SUPABASE_JWKS_URL=http://host.docker.internal:54321/auth/v1/.well-known/jwks.json"
           } >> "$GITHUB_ENV"
 
-      - name: Bring up staging profile (datastores -> migrate -> runtime)
+      - name: Build application + web images once (tag by commit)
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.SUPABASE_API_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.SUPABASE_ANON_KEY }}
-          SUPABASE_JWT_SECRET: ${{ env.SUPABASE_JWT_SECRET }}
-          SUPABASE_JWKS_URL: ${{ env.SUPABASE_JWKS_URL }}
-          SUPABASE_JWT_ISSUER: ${{ env.SUPABASE_JWT_ISSUER }}
-          WORKSPACE_COOKIE_SECRET: staging-validation-cookie-secret
-          # Capacity phase raises rate limits so k6 measures the knee, not 429s.
-          NLW_RATE_LIMIT_PLANS_PER_MIN: "100000"
-          NLW_RATE_LIMIT_WRITES_PER_MIN: "100000"
         run: |
-          COMPOSE="docker compose -f docker-compose.prod.yml -f docker-compose.e2e.yml -f docker-compose.staging.yml"
-          echo "COMPOSE=$COMPOSE" >> "$GITHUB_ENV"
+          APP="nlw-staging:${GITHUB_SHA}"
+          WEB="nlw-web-staging:${GITHUB_SHA}"
+          docker build -t "$APP" .
+          docker build \
+            --build-arg NEXT_PUBLIC_SUPABASE_URL="$NEXT_PUBLIC_SUPABASE_URL" \
+            --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="$NEXT_PUBLIC_SUPABASE_ANON_KEY" \
+            -t "$WEB" web
+          echo "NLW_IMAGE=$APP" >> "$GITHUB_ENV"
+          echo "NLW_WEB_IMAGE=$WEB" >> "$GITHUB_ENV"
+
+      - name: Configure prod-shaped staging env
+        run: |
+          {
+            echo "COMPOSE=docker compose -f docker-compose.prod.yml -f docker-compose.e2e.yml -f docker-compose.staging.yml"
+            echo "POSTGRES_PASSWORD=nlw"
+            echo "DATABASE_URL=postgresql+psycopg://nlw_app:nlw_app@postgres:5432/nlw"
+            echo "DATABASE_MIGRATION_URL=postgresql+psycopg://nlw:nlw@postgres:5432/nlw"
+            echo "WORKER_DATABASE_URL=postgresql+psycopg://nlw_worker:nlw_worker@postgres:5432/nlw"
+            echo "SCHEDULER_DATABASE_URL=postgresql+psycopg://nlw_scheduler:nlw_scheduler@postgres:5432/nlw"
+            echo "REDIS_URL=redis://redis:6379/0"
+            echo "PUBLIC_HOSTNAME=localhost"
+            echo "SUPABASE_URL=${SUPABASE_API_URL}"
+            echo "WORKSPACE_COOKIE_SECRET=staging-validation-cookie-secret"
+            echo "NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_API_URL}"
+            echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
+            # Capacity phase: raise limits so k6 measures the knee, not 429s.
+            echo "RATE_LIMIT_PLANS_PER_MIN=100000"
+            echo "RATE_LIMIT_WRITES_PER_MIN=100000"
+          } >> "$GITHUB_ENV"
+
+      - name: Bring up staging profile (datastores -> migrate -> runtime; NO --build)
+        run: |
           $COMPOSE up -d postgres redis
           for i in $(seq 1 60); do $COMPOSE exec -T postgres pg_isready -U nlw -d nlw && break; sleep 2; done
           $COMPOSE run --rm api alembic upgrade head
-          $COMPOSE up -d --build api worker scheduler web caddy prometheus
+          $COMPOSE up -d api worker scheduler web caddy prometheus
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8000/health/ready >/dev/null 2>&1 && break; sleep 2; done
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/login >/dev/null 2>&1 && break; sleep 2; done
+          curl -fsS http://127.0.0.1:8000/health/ready
 
-      - name: Seed staging fixtures
+      - name: Seed fixtures (users, workspaces, membership, workflow)
         env:
           SUPABASE_API_URL: ${{ env.SUPABASE_API_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SUPABASE_SERVICE_ROLE_KEY }}
@@ -87,26 +112,78 @@ jobs:
           NLW_API_BASE: http://127.0.0.1:8000
         run: node web/e2e/seed.mjs >> "$GITHUB_ENV"
 
-      - name: Failure drills (A/B/C/D)
+      - name: Seed load credentials (K6 token/workspace, tenant A/B)
+        env:
+          SUPABASE_API_URL: ${{ env.SUPABASE_API_URL }}
+          SUPABASE_ANON_KEY: ${{ env.SUPABASE_ANON_KEY }}
+          NLW_API_BASE: http://127.0.0.1:8000
+        run: node tests/load/seed_staging.mjs
+
+      - name: Verify credentials + DB roles (api/worker/scheduler)
+        run: |
+          test -n "$K6_ADMIN_TOKEN" || { echo "K6_ADMIN_TOKEN empty"; exit 1; }
+          test -n "$K6_WORKSPACE" || { echo "K6_WORKSPACE empty"; exit 1; }
+          # Trigger a run so the worker actually connects, then inspect roles.
+          curl -fsS -X POST "http://127.0.0.1:8000/workflows/${TENANT_A_WORKFLOW_ID}/runs" \
+            -H "Authorization: Bearer $K6_ADMIN_TOKEN" -H "X-Workspace-Id: $K6_WORKSPACE" \
+            -H "Idempotency-Key: role-check-1" -H "Content-Type: application/json" >/dev/null || true
+          sleep 5
+          roles=$($COMPOSE exec -T postgres psql -U nlw -d nlw -tAc \
+            "SELECT string_agg(DISTINCT usename, ',') FROM pg_stat_activity WHERE usename LIKE 'nlw%'")
+          echo "active DB roles: $roles"
+          for r in nlw_app nlw_worker nlw_scheduler; do
+            echo "$roles" | grep -q "$r" || { echo "FAIL: role $r not observed"; exit 1; }
+          done
+
+      - name: Assert rate limits RAISED (capacity phase)
+        run: |
+          got429=0
+          for i in $(seq 1 30); do
+            c=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:8000/plans \
+              -H "Authorization: Bearer $K6_ADMIN_TOKEN" -H "X-Workspace-Id: $K6_WORKSPACE" \
+              -H "Content-Type: application/json" -d '{"prompt":"limit probe"}')
+            [ "$c" = "429" ] && got429=1
+          done
+          [ "$got429" = "0" ] || { echo "FAIL: got 429 while limits should be raised"; exit 1; }
+          echo "confirmed: no 429 with raised limits"
+
+      - name: Failure drills (A/B/C/D)  # GATING
         env:
           COMPOSE: ${{ env.COMPOSE }}
           API: http://127.0.0.1:8080
         run: tests/drills/run_drills.sh
 
-      - name: k6 capacity (limits raised) + rate-limit (normal limits)
-        env:
-          K6_BASE_URL: http://127.0.0.1:8000
+      - name: k6 capacity — safe target (GATING thresholds)
         run: |
-          # Capacity: measure the knee with raised limits (already set above).
-          docker run --rm --network host -e K6_BASE_URL -e K6_TOKEN="${K6_ADMIN_TOKEN:-}" \
-            -e K6_WORKSPACE="${K6_WORKSPACE:-}" -v "$PWD/tests/load:/scripts" grafana/k6:0.54.0 \
-            run /scripts/control-plane.js || true
-          # Rate-limit: restart api with NORMAL limits, then prove 429/Retry-After.
-          NLW_RATE_LIMIT_PLANS_PER_MIN=20 NLW_RATE_LIMIT_WRITES_PER_MIN=60 ${{ env.COMPOSE }} up -d api
+          docker run --rm --network host \
+            -e K6_BASE_URL=http://127.0.0.1:8000 -e K6_TOKEN="$K6_ADMIN_TOKEN" \
+            -e K6_WORKSPACE="$K6_WORKSPACE" -v "$PWD/tests/load:/scripts" \
+            grafana/k6:0.54.0 run /scripts/control-plane.js
+
+      - name: Restore NORMAL rate limits + recreate API
+        run: |
+          RATE_LIMIT_PLANS_PER_MIN=20 RATE_LIMIT_WRITES_PER_MIN=60 \
+            $COMPOSE up -d --force-recreate api
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health/ready >/dev/null 2>&1 && break; sleep 2; done
-          docker run --rm --network host -e K6_BASE_URL -e K6_TOKEN="${K6_ADMIN_TOKEN:-}" \
-            -e K6_WORKSPACE="${K6_WORKSPACE:-}" -v "$PWD/tests/load:/scripts" grafana/k6:0.54.0 \
-            run /scripts/rate-limit.js
+
+      - name: Assert rate limits NORMAL (config actually changed)
+        run: |
+          got429=0
+          for i in $(seq 1 40); do
+            c=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:8000/plans \
+              -H "Authorization: Bearer $K6_ADMIN_TOKEN" -H "X-Workspace-Id: $K6_WORKSPACE" \
+              -H "Content-Type: application/json" -d '{"prompt":"limit probe"}')
+            [ "$c" = "429" ] && got429=1
+          done
+          [ "$got429" = "1" ] || { echo "FAIL: expected 429 under normal limits"; exit 1; }
+          echo "confirmed: 429 observed under normal limits (phase changed)"
+
+      - name: k6 rate-limit (normal limits; GATING)
+        run: |
+          docker run --rm --network host \
+            -e K6_BASE_URL=http://127.0.0.1:8000 -e K6_TOKEN="$K6_ADMIN_TOKEN" \
+            -e K6_WORKSPACE="$K6_WORKSPACE" -v "$PWD/tests/load:/scripts" \
+            grafana/k6:0.54.0 run /scripts/rate-limit.js
 
       - name: Required Playwright E2E against staging
         working-directory: web
@@ -118,18 +195,23 @@ jobs:
           npx playwright install --with-deps chromium
           npx playwright test
 
-      - name: Backup / restore drill
-        run: bash tests/drills/backup_restore_drill.sh || true
+      - name: Backup / restore drill (GATING)
+        env:
+          COMPOSE: ${{ env.COMPOSE }}
+        run: bash tests/drills/backup_restore_drill.sh
 
-      - name: Migration drill
-        run: bash tests/drills/migration_drill.sh || true
+      - name: Schema-incompatibility / readiness drill (GATING)
+        env:
+          COMPOSE: ${{ env.COMPOSE }}
+          API: http://127.0.0.1:8080
+        run: bash tests/drills/migration_drill.sh
 
       - name: Collect artifacts
         if: always()
         run: |
           mkdir -p artifacts
           curl -s http://127.0.0.1:8000/metrics > artifacts/api-metrics.txt 2>/dev/null || true
-          ${{ env.COMPOSE }} ps > artifacts/compose-ps.txt 2>/dev/null || true
+          $COMPOSE ps > artifacts/compose-ps.txt 2>/dev/null || true
           docker stats --no-stream > artifacts/docker-stats.txt 2>/dev/null || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -140,5 +222,5 @@ jobs:
       - name: Tear down
         if: always()
         run: |
-          ${{ env.COMPOSE }} down -v || true
+          $COMPOSE down -v || true
           supabase stop || true

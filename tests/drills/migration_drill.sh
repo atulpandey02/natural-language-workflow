@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# M11 migration drill. Invariant: an incompatible/partially-migrated DB must
-# NEVER be reported ready. No automatic DB downgrade on image rollback.
+# M11 schema-incompatibility / readiness drill (NOT a live process-kill migration
+# interruption — that is a real-VPS checklist item). Invariant: an incompatible
+# schema must NEVER be reported ready. No automatic DB downgrade on image rollback.
 set -euo pipefail
 COMPOSE="${COMPOSE:-docker compose -f docker-compose.prod.yml -f docker-compose.e2e.yml -f docker-compose.staging.yml}"
 API="${API:-http://127.0.0.1:8080}"
 ready_code() { curl -s -o /dev/null -w "%{http_code}" "$API/health/ready"; }
 
-echo "== Migration drill =="
+echo "== Schema-incompatibility / readiness drill =="
 
 # 1) Fresh DB -> head (idempotent re-run).
 $COMPOSE run --rm api alembic upgrade head
@@ -23,4 +24,4 @@ $COMPOSE exec -T postgres sh -lc "PGPASSWORD=\$POSTGRES_PASSWORD psql -U nlw -d 
 $COMPOSE run --rm api alembic stamp head
 for i in $(seq 1 30); do [ "$(ready_code)" = "200" ] && break; sleep 2; done
 [ "$(ready_code)" = "200" ] || { echo "FAIL: readiness did not recover"; exit 1; }
-echo "MIGRATION DRILL COMPLETE (incompatible schema never reported ready)"
+echo "SCHEMA/READINESS DRILL COMPLETE (incompatible schema never reported ready)"

@@ -17,6 +17,11 @@ services:
   api:
     environment:
       APP_ENV: staging
+    # CI test-harness seam ONLY: expose the API on loopback so the host-side
+    # seed / k6 / readiness checks can reach it. Production stays Caddy-only
+    # public (this binding is 127.0.0.1 and lives only in the staging overlay).
+    ports:
+      - "127.0.0.1:8000:8000"
   worker:
     environment:
       APP_ENV: staging

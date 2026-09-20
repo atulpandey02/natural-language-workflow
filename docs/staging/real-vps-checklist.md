@@ -24,3 +24,11 @@ Run + record evidence for:
 8. Observability diagnosis walkthroughs; confirm no secret/token exposure.
 9. Executed runbooks with corrections.
 10. Trivy on both images (0 HIGH/CRITICAL fixable).
+
+## Note: true migration-interruption (real-VPS only)
+
+CI runs a schema-incompatibility / readiness drill (mismatched alembic_version ->
+readiness 503 -> repair). The TRUE live-interruption test — SIGKILL the process
+mid-`alembic upgrade`, then observe transaction rollback / partial state /
+alembic_version and confirm readiness stays 503 until repaired — is performed
+here on the real host (not in ephemeral CI).
