@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { WORKSPACE_COOKIE_NAME } from "@/lib/workspace";
 import { buildContentSecurityPolicy } from "@/lib/csp";
+import { SUPABASE_COOKIE_NAME } from "@/lib/supabase/shared";
 
 // Next.js 16 proxy (formerly middleware): refreshes the Supabase session on
 // every request, enforces the route-protection boundary, and sets a per-request
@@ -28,6 +29,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     process.env.SUPABASE_SERVER_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      cookieOptions: { name: SUPABASE_COOKIE_NAME },
       cookies: {
         getAll() {
           return request.cookies.getAll();

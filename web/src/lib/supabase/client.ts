@@ -2,6 +2,7 @@
 
 import { createBrowserClient } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { SUPABASE_COOKIE_NAME } from "./shared";
 
 let _client: SupabaseClient | null = null;
 
@@ -15,6 +16,7 @@ export function getSupabaseBrowserClient(): SupabaseClient {
   _client = createBrowserClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { cookieOptions: { name: SUPABASE_COOKIE_NAME } },
   );
   return _client;
 }

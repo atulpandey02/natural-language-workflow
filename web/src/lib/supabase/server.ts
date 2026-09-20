@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { SUPABASE_COOKIE_NAME } from "./shared";
 
 /**
  * Server-side Supabase client bound to the request cookies. The session lives in
@@ -16,6 +17,7 @@ export async function getSupabaseServerClient(): Promise<SupabaseClient> {
     process.env.SUPABASE_SERVER_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      cookieOptions: { name: SUPABASE_COOKIE_NAME },
       cookies: {
         getAll() {
           return cookieStore.getAll();
