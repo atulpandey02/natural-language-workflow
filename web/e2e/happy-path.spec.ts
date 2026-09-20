@@ -1,15 +1,14 @@
 import { test, expect } from "@playwright/test";
-import { env, liveStackConfigured, signIn } from "./helpers";
+import { env, liveStackConfigured, requireEnv, signIn } from "./helpers";
 
 // Full MVP journey (M10 change #13). Requires a seeded stack: a Supabase user
 // with admin/owner role and a tenant-scoped worker secret (e.g. PG_MAIN)
 // pre-provisioned before the connector is created.
 test.describe("MVP happy path", () => {
-  test.skip(!liveStackConfigured, "requires a seeded live stack (set E2E_* env)");
-
   test("sign in → connector → plan → materialize → run now → observe → history", async ({
     page,
   }) => {
+    requireEnv(liveStackConfigured, "requires a seeded live stack (set E2E_* env)");
     await signIn(page, env.adminEmail, env.adminPassword);
 
     // Workspace: select an existing one or create if none.

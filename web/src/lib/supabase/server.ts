@@ -9,8 +9,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  */
 export async function getSupabaseServerClient(): Promise<SupabaseClient> {
   const cookieStore = await cookies();
+  // Server-side calls may need a different (internal) Supabase URL than the
+  // browser — e.g. a private DNS name or host gateway — so prefer
+  // SUPABASE_SERVER_URL when set, falling back to the public URL.
   return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVER_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {

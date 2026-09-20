@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api/client";
 import type {
@@ -149,6 +150,37 @@ export function useCreateRun(workflowId: string) {
       api.post<RunCreateOut>(`/workflows/${workflowId}/runs`, undefined, idempotencyKey),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["runs"] }),
   });
+}
+
+/**
+ * "Run now" with a stable Idempotency-Key per logical user action (M10 change #3):
+ * one key is minted per action and REUSED across double-clicks and retries of an
+ * ambiguous/failed attempt, so the backend creates exactly one durable run. The
+ * key rotates ONLY after a confirmed success — never merely because a request was
+ * retried.
+ */
+export function useRunNow(workflowId: string): {
+  trigger: () => Promise<RunCreateOut>;
+  currentKey: () => string;
+  isPending: boolean;
+  error: unknown;
+} {
+  const create = useCreateRun(workflowId);
+  const keyRef = useRef<string>(crypto.randomUUID());
+
+  const trigger = useCallback(async () => {
+    const key = keyRef.current; // reused on retry of the same logical action
+    const result = await create.mutateAsync(key); // throws on failure -> no rotation
+    keyRef.current = crypto.randomUUID(); // rotate only after success
+    return result;
+  }, [create]);
+
+  return {
+    trigger,
+    currentKey: () => keyRef.current,
+    isPending: create.isPending,
+    error: create.error,
+  };
 }
 
 export function useApprovals() {

@@ -1,14 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { use, useRef, useState } from "react";
+import { use, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { ScheduleForm } from "@/components/ScheduleForm";
 import { ErrorBanner, Empty, Loading, RoleGate, StatusBadge } from "@/components/ui";
 import {
-  useCreateRun,
   useCurrentWorkspace,
+  useRunNow,
   useRuns,
   useSchedules,
   useWorkflow,
@@ -21,19 +21,16 @@ export default function WorkflowDetailPage({ params }: { params: Promise<{ id: s
   const runs = useRuns(id);
   const schedules = useSchedules();
   const current = useCurrentWorkspace();
-  const createRun = useCreateRun(id);
-
-  // One idempotency key per "run intent": rapid double-clicks reuse it, so the
-  // backend creates exactly one durable run (M10 change #13). Rotated on success.
-  const runKey = useRef<string>(crypto.randomUUID());
+  // Stable idempotency key per logical "Run now" action; reused on double-click /
+  // retry, rotated only on success (M10 change #3).
+  const run = useRunNow(id);
 
   const [runError, setRunError] = useState<unknown>(null);
 
   async function runNow() {
     setRunError(null);
     try {
-      const result = await createRun.mutateAsync(runKey.current);
-      runKey.current = crypto.randomUUID();
+      const result = await run.trigger();
       router.push(`/runs/${result.run_id}`);
     } catch (e) {
       setRunError(e);
@@ -56,8 +53,8 @@ export default function WorkflowDetailPage({ params }: { params: Promise<{ id: s
         <>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <h1>{workflow.data.name}</h1>
-            <button onClick={runNow} disabled={createRun.isPending || !version}>
-              {createRun.isPending ? "Starting…" : "Run now"}
+            <button onClick={runNow} disabled={run.isPending || !version}>
+              {run.isPending ? "Starting…" : "Run now"}
             </button>
           </div>
           {!version ? <p className="muted">No materialized version to run.</p> : null}

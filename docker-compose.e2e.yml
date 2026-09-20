@@ -1,0 +1,30 @@
+# E2E overlay (M10): layers a Caddy public edge + Supabase auth wiring onto the
+# dev stack for the required Playwright suite. Used as:
+#   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
+#
+# The browser (Playwright, on the runner) reaches Supabase at the PUBLIC URL
+# baked into the web build (NEXT_PUBLIC_SUPABASE_URL, e.g. http://127.0.0.1:54321).
+# The web CONTAINER reaches the same Supabase via the host gateway
+# (SUPABASE_SERVER_URL) for server-side session resolution.
+
+services:
+  api:
+    environment:
+      # Verify Supabase-issued HS256 tokens with the local project's JWT secret.
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
+
+  web:
+    environment:
+      SUPABASE_SERVER_URL: http://host.docker.internal:54321
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  caddy:
+    image: caddy:2
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile"]
+    ports:
+      - "8080:80"
+    volumes:
+      - ./docker/caddy/Caddyfile.e2e:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - web

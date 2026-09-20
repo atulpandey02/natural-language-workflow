@@ -1,4 +1,4 @@
-import { type Page, expect } from "@playwright/test";
+import { type Page, test, expect } from "@playwright/test";
 
 // Shared E2E helpers. Credentials + base URL come from the environment so the
 // same specs run against local, CI, or staging with a seeded Supabase project.
@@ -10,7 +10,24 @@ export const env = {
   adminPassword: process.env.E2E_ADMIN_PASSWORD ?? "",
 };
 
+// Required mode (M10 gate): when E2E_REQUIRED=1 the suite must NOT silently
+// skip — missing configuration fails the job instead.
+export const E2E_REQUIRED = process.env.E2E_REQUIRED === "1";
+
 export const liveStackConfigured = Boolean(env.baseURL && env.adminEmail && env.adminPassword);
+
+/**
+ * Gate a test on a precondition. In required mode a missing precondition FAILS
+ * the test (throws); otherwise it skips (ordinary local dev). Never silently
+ * skips in required mode.
+ */
+export function requireEnv(condition: boolean, reason: string): void {
+  if (condition) return;
+  if (E2E_REQUIRED) {
+    throw new Error(`E2E_REQUIRED=1 but ${reason}. Configure the seeded stack env.`);
+  }
+  test.skip(true, reason);
+}
 
 export async function signIn(page: Page, email: string, password: string): Promise<void> {
   await page.goto("/login");
