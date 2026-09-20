@@ -31,6 +31,16 @@ degraded() { local c; c=$(ready_code); [ "$c" = "503" ] || [ "$c" = "000" ]; }
 wait_until() { # predicate, attempts
   local i; for i in $(seq 1 "${2:-30}"); do eval "$1" && return 0; sleep 2; done; return 1; }
 
+# Docker container healthcheck status (not app readiness). After an unpause the
+# container healthcheck lags app readiness by up to one interval, so downstream
+# `up -d` steps that gate on depends_on(condition: service_healthy) must wait for
+# it to flip back to "healthy" rather than the stale "unhealthy" left by the pause.
+container_health() {
+  local cid; cid=$($COMPOSE ps -q "$1" 2>/dev/null)
+  [ -n "$cid" ] || { echo "unknown"; return 0; }
+  docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo "unknown"
+}
+
 # B. Redis outage -> readiness degrades, no state loss, recovery on return.
 drill_redis_outage() {
   echo "== Drill B: Redis outage =="
@@ -52,6 +62,10 @@ drill_postgres_outage() {
   pass "readiness degraded while Postgres paused (runbook: postgres-unavailable)"
   $COMPOSE unpause postgres >/dev/null
   wait_until 'ready' 30 || fail "readiness did not recover after Postgres return"
+  # Also wait for the postgres container healthcheck to clear the stale "unhealthy"
+  # from the pause, so later depends_on(service_healthy) `up -d` steps don't fail.
+  wait_until '[ "$(container_health postgres)" = "healthy" ]' 30 \
+    || fail "postgres container did not report healthy after unpause"
   pass "readiness recovered after Postgres return"
 }
 
@@ -60,7 +74,10 @@ drill_worker_crash() {
   echo "== Drill A: Worker crash =="
   $COMPOSE kill -s SIGKILL worker >/dev/null
   pass "worker killed mid-flight (runbook: worker-stuck)"
-  $COMPOSE up -d worker >/dev/null
+  # Restart only this process: the datastores are already up, so --no-deps avoids
+  # re-gating on depends_on(service_healthy) (which can briefly lag, e.g. right
+  # after the Drill C unpause).
+  $COMPOSE up -d --no-deps worker >/dev/null
   wait_until '$COMPOSE ps worker | grep -qi "healthy\|running"' 30 || fail "worker did not return"
   pass "worker returned; reconciler + resume re-drive pending work"
 }
@@ -69,7 +86,8 @@ drill_worker_crash() {
 drill_scheduler_restart() {
   echo "== Drill D: Scheduler restart =="
   $COMPOSE kill -s SIGKILL scheduler >/dev/null
-  $COMPOSE up -d scheduler >/dev/null
+  # Restart only this process (see Drill A): --no-deps skips dependency re-gating.
+  $COMPOSE up -d --no-deps scheduler >/dev/null
   wait_until '$COMPOSE ps scheduler | grep -qi "healthy\|running"' 30 || fail "scheduler did not return"
   pass "scheduler restarted; UNIQUE(schedule_id, scheduled_for) preserves occurrence uniqueness"
 }
