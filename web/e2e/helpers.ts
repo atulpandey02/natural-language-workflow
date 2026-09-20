@@ -60,14 +60,33 @@ export async function signIn(page: Page, email: string, password: string): Promi
   // Ensure a workspace is active so tenant pages don't bounce to
   // /select-workspace. Opens the first workspace, or creates one if none exist.
   if (page.url().includes("/select-workspace")) {
+    // Capture the BFF/workspace API statuses for a secret-safe diagnostic.
+    const apiStatuses: string[] = [];
+    page.on("response", (r) => {
+      const u = r.url();
+      if (u.includes("/api/")) apiStatuses.push(`${new URL(u).pathname} ${r.status()}`);
+    });
+
     const open = page.getByRole("button", { name: /^open$/i }).first();
-    if (await open.count()) {
+    const openCount = await open.count();
+    if (openCount) {
       await open.click();
     } else {
       await page.getByLabel(/workspace name/i).fill("E2E Workspace");
       await page.getByRole("button", { name: /create \+ open/i }).click();
     }
-    await page.waitForURL(/\/$/, { timeout: 15000 });
+    try {
+      await page.waitForURL(/\/$/, { timeout: 15000 });
+    } catch {
+      let banner = "";
+      const alert = page.getByRole("alert");
+      if (await alert.count()) banner = (await alert.first().innerText()).trim();
+      throw new Error(
+        `workspace selection did not reach '/'. url=${page.url()} openButtons=${openCount} ` +
+          `banner=${banner || "(none)"} api=[${apiStatuses.slice(-8).join(", ") || "none"}] ` +
+          `console=[${consoleErrors.slice(0, 5).join(" | ") || "none"}]`,
+      );
+    }
   }
   await expect(page).toHaveURL(/\/$/);
 }
