@@ -1,13 +1,8 @@
 import type { NextConfig } from "next";
-import { buildContentSecurityPolicy } from "./src/lib/csp";
 
 // Standalone output so the production image is a small self-contained server.
-// A strict Content-Security-Policy is applied to all routes (M10 change #10).
-// connect-src allows the browser to reach the configured Supabase Auth origin
-// (derived from NEXT_PUBLIC_SUPABASE_URL at build time) and nothing else — no
-// wildcards, no inline scripts.
-const csp = buildContentSecurityPolicy(process.env.NEXT_PUBLIC_SUPABASE_URL);
-
+// The Content-Security-Policy is set per-request in proxy.ts (it needs a
+// per-request script nonce); the static, non-nonce security headers live here.
 const nextConfig: NextConfig = {
   output: "standalone",
   reactStrictMode: true,
@@ -16,7 +11,6 @@ const nextConfig: NextConfig = {
       {
         source: "/:path*",
         headers: [
-          { key: "Content-Security-Policy", value: csp },
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "X-Frame-Options", value: "DENY" },
           { key: "Referrer-Policy", value: "no-referrer" },

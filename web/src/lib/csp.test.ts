@@ -37,4 +37,17 @@ describe("buildContentSecurityPolicy", () => {
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("base-uri 'self'");
   });
+
+  it("uses a nonce + strict-dynamic (never unsafe-inline) for scripts when given a nonce", () => {
+    const csp = buildContentSecurityPolicy("http://127.0.0.1:54321", "abc123");
+    expect(csp).toContain("script-src 'self' 'nonce-abc123' 'strict-dynamic'");
+    // scripts never use unsafe-inline (style-src may, which is fine).
+    expect(csp).not.toContain("script-src 'self' 'unsafe-inline'");
+    // connect-src still restricted to self + the Supabase origin.
+    expect(csp).toContain("connect-src 'self' http://127.0.0.1:54321");
+  });
+
+  it("falls back to script-src 'self' when no nonce is provided", () => {
+    expect(buildContentSecurityPolicy("http://127.0.0.1:54321")).toContain("script-src 'self';");
+  });
 });

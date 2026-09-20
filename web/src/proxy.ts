@@ -1,15 +1,28 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { WORKSPACE_COOKIE_NAME } from "@/lib/workspace";
+import { buildContentSecurityPolicy } from "@/lib/csp";
 
 // Next.js 16 proxy (formerly middleware): refreshes the Supabase session on
-// every request and enforces the route-protection boundary. API routes handle
-// their own auth (returning JSON 401), so they are skipped here.
+// every request, enforces the route-protection boundary, and sets a per-request
+// nonce-based Content-Security-Policy. API routes handle their own auth
+// (returning JSON 401), so they are skipped here.
 
 const PUBLIC_PATHS = ["/login"];
 
 export async function proxy(request: NextRequest): Promise<NextResponse> {
-  const response = NextResponse.next({ request });
+  // Per-request script nonce so Next.js's inline bootstrap/hydration scripts
+  // execute under a strict CSP without 'unsafe-inline'. Next reads the nonce from
+  // the request's Content-Security-Policy header and applies it to its scripts.
+  const nonce = btoa(crypto.randomUUID());
+  const csp = buildContentSecurityPolicy(process.env.NEXT_PUBLIC_SUPABASE_URL, nonce);
+
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-nonce", nonce);
+  requestHeaders.set("content-security-policy", csp);
+
+  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  response.headers.set("content-security-policy", csp);
 
   const supabase = createServerClient(
     process.env.SUPABASE_SERVER_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL!,
