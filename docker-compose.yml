@@ -147,14 +147,14 @@ services:
   web:
     build:
       context: ./web
-      args:
-        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-}
-        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}
     environment:
       NODE_ENV: production
       NLW_API_URL: http://api:8000
-      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-}
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}
+      # Runtime public config (browser-safe; server-injected into the document).
+      # No NEXT_PUBLIC_* is baked into the build — one image serves any project.
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+      SUPABASE_SERVER_URL: ${SUPABASE_SERVER_URL:-}
       WORKSPACE_COOKIE_SECRET: ${WORKSPACE_COOKIE_SECRET:-dev-insecure-workspace-cookie-secret}
     ports:
       - "3000:3000"

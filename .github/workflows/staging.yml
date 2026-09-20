@@ -56,9 +56,10 @@ jobs:
           context: ./web
           push: true
           tags: ghcr.io/${{ github.repository }}/web:sha-${{ github.sha }}
-          build-args: |
-            NEXT_PUBLIC_SUPABASE_URL=${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
-            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          # No public Supabase build-args: the browser-safe URL + anon key are
+          # supplied at RUNTIME (server-injected), so this ONE digest is promoted
+          # unchanged from staging to production and targets each environment's
+          # Supabase project via runtime env.
       - name: Scan pushed image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

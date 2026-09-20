@@ -86,8 +86,13 @@ services:
     environment:
       NODE_ENV: production
       NLW_API_URL: http://api:8000
-      NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL}
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      # Runtime public config (browser-safe; injected into the document by the
+      # Next server). Supplied at runtime so this ONE immutable image serves any
+      # Supabase project. SUPABASE_SERVER_URL optionally overrides only the
+      # server-side network path to the SAME project.
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVER_URL: ${SUPABASE_SERVER_URL:-}
       WORKSPACE_COOKIE_SECRET: ${WORKSPACE_COOKIE_SECRET}
     security_opt:
       - no-new-privileges:true

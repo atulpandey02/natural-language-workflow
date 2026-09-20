@@ -1,0 +1,34 @@
+# Artifact-invariance proof for the web image (PR1 acceptance criterion).
+#
+# Builds the web image ONCE and proves the SAME image renders env-specific public
+# Supabase config + CSP purely from RUNTIME env, with no environment-specific URL
+# baked into the static bundle. See web/scripts/prove-runtime-config-invariance.sh.
+
+name: Web Runtime Config Invariance
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "web/**"
+      - "docker-compose.prod.yml"
+      - "docker-compose.e2e.yml"
+      - ".github/workflows/web-runtime-config-invariance.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: web-invariance-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prove:
+    name: Prove one artifact + runtime config
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build once + prove runtime-config invariance
+        run: bash web/scripts/prove-runtime-config-invariance.sh

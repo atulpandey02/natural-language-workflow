@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { WORKSPACE_COOKIE_NAME } from "@/lib/workspace";
 import { buildContentSecurityPolicy } from "@/lib/csp";
+import { getServerPublicConfig, getServerSupabaseUrl } from "@/lib/public-config";
 import { SUPABASE_COOKIE_NAME } from "@/lib/supabase/shared";
 
 // Next.js 16 proxy (formerly middleware): refreshes the Supabase session on
@@ -16,7 +17,10 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   // execute under a strict CSP without 'unsafe-inline'. Next reads the nonce from
   // the request's Content-Security-Policy header and applies it to its scripts.
   const nonce = btoa(crypto.randomUUID());
-  const csp = buildContentSecurityPolicy(process.env.NEXT_PUBLIC_SUPABASE_URL, nonce);
+  // CSP connect-src must allow the browser to reach the RUNTIME public Supabase
+  // origin (the same URL injected into the document), never a build-time value.
+  const { supabaseUrl, supabaseAnonKey } = getServerPublicConfig();
+  const csp = buildContentSecurityPolicy(supabaseUrl, nonce);
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
@@ -25,21 +29,17 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set("content-security-policy", csp);
 
-  const supabase = createServerClient(
-    process.env.SUPABASE_SERVER_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookieOptions: { name: SUPABASE_COOKIE_NAME },
-      cookies: {
-        getAll() {
-          return request.cookies.getAll();
-        },
-        setAll(toSet) {
-          toSet.forEach(({ name, value, options }) => response.cookies.set(name, value, options));
-        },
+  const supabase = createServerClient(getServerSupabaseUrl(), supabaseAnonKey, {
+    cookieOptions: { name: SUPABASE_COOKIE_NAME },
+    cookies: {
+      getAll() {
+        return request.cookies.getAll();
+      },
+      setAll(toSet) {
+        toSet.forEach(({ name, value, options }) => response.cookies.set(name, value, options));
       },
     },
-  );
+  });
 
   const {
     data: { user },
