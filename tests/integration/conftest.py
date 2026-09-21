@@ -96,8 +96,8 @@ def pg_stack() -> Iterator[SimpleNamespace]:
                 )
             return uid
 
-        def seed_member() -> SimpleNamespace:
-            """Create a user + workspace + owner membership (as owner)."""
+        def seed_member(role: str = "owner") -> SimpleNamespace:
+            """Create a user + workspace + one membership with ``role`` (as owner)."""
             uid, tid = seed_user(), uuid.uuid4()
             with psycopg.connect(owner_libpq, autocommit=True) as conn:
                 conn.execute(
@@ -106,19 +106,36 @@ def pg_stack() -> Iterator[SimpleNamespace]:
                 )
                 conn.execute(
                     "INSERT INTO memberships (id, user_id, workspace_id, role) "
-                    "VALUES (%s,%s,%s,'owner')",
-                    (uuid.uuid4(), uid, tid),
+                    "VALUES (%s,%s,%s,%s)",
+                    (uuid.uuid4(), uid, tid, role),
                 )
             return SimpleNamespace(user_id=uid, tenant_id=tid)
+
+        def add_membership(tenant_id: uuid.UUID, role: str) -> uuid.UUID:
+            """Add a fresh user to an existing workspace with ``role`` (as owner).
+
+            Returns the new user id. Lets a test have distinct member/admin/owner
+            principals in the same tenant.
+            """
+            uid = seed_user()
+            with psycopg.connect(owner_libpq, autocommit=True) as conn:
+                conn.execute(
+                    "INSERT INTO memberships (id, user_id, workspace_id, role) "
+                    "VALUES (%s,%s,%s,%s)",
+                    (uuid.uuid4(), uid, tenant_id, role),
+                )
+            return uid
 
         yield SimpleNamespace(
             settings=_settings(app_sa),
             worker_settings=_settings(worker_sa),
             scheduler_settings=_settings(scheduler_sa),
             owner_libpq=owner_libpq,
+            owner_sa=owner_sa,
             app_libpq=_libpq("nlw_app", "nlw_app", host, port, db),
             worker_libpq=_libpq("nlw_worker", "nlw_worker", host, port, db),
             scheduler_libpq=_libpq("nlw_scheduler", "nlw_scheduler", host, port, db),
             seed_user=seed_user,
             seed_member=seed_member,
+            add_membership=add_membership,
         )

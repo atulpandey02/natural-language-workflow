@@ -137,3 +137,30 @@ staging**, on the following honest basis:
   context or a per-request DB identity model (options A/B) must be implemented and
   reconsidered before public production. This stays a pre-production hardening item
   (see ADR-018 §remaining risks). M9 does not implement it.
+
+## Update (M11.5 P1A / migration 0011) — `users` identity RLS + bootstrap
+
+The M3 note above stated *"`users`: global identity, no tenant RLS."* Two
+independent pre-launch reviews flagged that this left `nlw_app` with broad
+`SELECT/INSERT/UPDATE` on `users` and no RLS, so a runtime-role compromise (or a
+future unscoped query path) could **enumerate every identity and rewrite
+unrelated identity mappings — including the stable `auth_provider_id`**. P1A
+closes that:
+
+- `users` now has **RLS `ENABLE` + `FORCE`**. `nlw_app` keeps only a self-scoped
+  `SELECT` policy (`USING (id = app.user_id)`); it holds **no** direct
+  `INSERT/UPDATE/DELETE` grant, so identity writes fail at the privilege level
+  even before RLS. `nlw_worker`/`nlw_scheduler` get **no** access to `users`.
+- First login cannot rely on a self-scoped policy (the row does not exist yet and
+  `app.user_id` is not established at `get_or_create` time — the resolution runs
+  *before* `set_current_user`). Resolution/provisioning therefore moves into one
+  narrow `SECURITY DEFINER` function, **`resolve_or_create_user(text, text)`**,
+  owned by the existing write-only `BYPASSRLS` non-login role
+  `nlw_workspace_bootstrap`, `SET search_path = pg_catalog`, all objects
+  schema-qualified, `REVOKE ALL … FROM PUBLIC`, `EXECUTE` granted to `nlw_app`
+  only (never worker/scheduler/PUBLIC). It resolves-or-creates by
+  `auth_provider_id`, converges concurrent first-login races via
+  `UNIQUE(auth_provider_id)`, syncs `email` only when the verified provider email
+  changed (no write/lock otherwise), and **never** reassigns `auth_provider_id`.
+- This does **not** provide signed/non-forgeable DB request context; the
+  forgeable-GUC residual risk above is unchanged and still deferred.

@@ -50,3 +50,25 @@ seam between *what we authenticate to* and *what capability runs*.
   filters, not by the model.
 - Real connectors (Postgres M5, Slack/Gmail/Webhook M7) and hard timeout
   enforcement plug into this seam later without changing the model.
+
+## Update (M11.5 P1A / migration 0011) — connector mutation authority
+
+Originally, creating a connector required only workspace **membership**, so any
+member could create a connector and attach a credential alias (`secret_ref`).
+A secret alias identifies a secret; it must never, by itself, confer authority to
+attach it. P1A makes connector creation + credential attachment **admin/owner
+only**, enforced in two layers that agree:
+
+- **API:** `POST /connectors` now depends on `require_role(Role.ADMIN)` (admits
+  admin and owner), mirroring `schedules`/`approvals`. `GET /connectors` and
+  `GET /tools` stay member-level (read-only, secret-free).
+- **PostgreSQL:** the `connectors_app_insert` RLS policy's `WITH CHECK` now
+  requires `is_current_user_admin_or_owner(tenant_id)` instead of
+  `is_current_user_member(tenant_id)`. A direct member request that bypasses the
+  API still fails at the database.
+
+`nlw_app` continues to hold **no** `UPDATE`/`DELETE` on `connectors` (there is no
+connector update/disable/delete endpoint; the worker retains its
+`UPDATE(status, updated_at)` for health transitions). Connector config/destination
+mutation and hard delete as first-class admin operations, and binding a connector
+to a durable credential entity, are deferred to later self-service-secret work.

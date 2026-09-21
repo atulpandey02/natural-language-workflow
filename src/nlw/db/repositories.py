@@ -8,7 +8,7 @@ authorization is membership-based at the application layer.
 import uuid
 from typing import Any, Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,26 +35,32 @@ class UserRepository:
         self.session = session
 
     async def get_or_create(self, auth_provider_id: str, email: str) -> User:
-        """Idempotent, race-safe first-sight provisioning.
+        """Idempotent, race-safe first-sight identity resolution/provisioning.
 
-        Relies on ``UNIQUE(auth_provider_id)``: concurrent callers converge on a
-        single row via ``INSERT ... ON CONFLICT``.
+        Delegates to the ``resolve_or_create_user`` SECURITY DEFINER bootstrap
+        function (M11.5 P1A). This is required because at first login the row does
+        not exist yet and ``app.user_id`` is not established, so a self-scoped RLS
+        policy cannot admit the write; ``nlw_app`` holds no direct INSERT/UPDATE on
+        ``users``. The function:
+
+        - returns the existing row unchanged when the verified identity is
+          established and its email has not changed (no write, no row lock);
+        - inserts exactly one row on first login, converging concurrent races via
+          ``UNIQUE(auth_provider_id)``;
+        - syncs ``email`` only when the verified provider email actually changed;
+        - never reassigns the stable ``auth_provider_id``.
+
+        No commit here: the caller's request transaction owns commit/rollback.
         """
-        stmt = (
-            pg_insert(User)
-            .values(id=uuid.uuid4(), auth_provider_id=auth_provider_id, email=email)
-            .on_conflict_do_update(index_elements=["auth_provider_id"], set_={"email": email})
-        )
-        # No commit here: the caller's request transaction owns commit/rollback.
-        # The row is visible to later statements in the same transaction, and
-        # ON CONFLICT keeps it race-safe regardless of commit timing.
-        await self.session.execute(stmt)
-        user = (
+        row = (
             await self.session.execute(
-                select(User).where(User.auth_provider_id == auth_provider_id)
+                text(
+                    "SELECT id, auth_provider_id, email FROM resolve_or_create_user(:sub, :email)"
+                ),
+                {"sub": auth_provider_id, "email": email},
             )
-        ).scalar_one()
-        return user
+        ).one()
+        return User(id=row.id, auth_provider_id=row.auth_provider_id, email=row.email)
 
 
 class WorkspaceRepository:
