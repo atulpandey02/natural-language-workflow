@@ -33,13 +33,25 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now nlw-backup.timer
 ```
 
-## Why overlap can never corrupt the repository
+## Why two backups cannot overlap
 
-Three independent guards:
-1. `Type=oneshot` — systemd runs a single instance of the unit.
-2. The timer waits for the service to finish before the next fire.
-3. **restic locks the repository** — even if two runs somehow overlapped, the
-   second writer cannot corrupt the repo; it fails and exits non-zero.
+The primary guard is an **explicit host/process-level `flock`** the backup job
+takes around its ENTIRE lifecycle (config → dump → manifest → restic backup →
+verify → retention → metrics), on a shared runtime volume (`backup_run` →
+`/run/nlw/backup.lock`). A second invocation — a manual run, a duplicate timer, an
+orchestration slip — fails fast (exit code **3**, "already running") and runs **no**
+`pg_dump`, upload, prune, or metrics write. The lock is released on success,
+failure, signal, and process death (the OS drops an advisory lock when the fd
+closes), so a leftover lock *file* never permanently blocks a later run when no
+process holds it.
+
+> restic's repository lock is **not** sufficient proof of single execution: it
+> guards only the repository during restic's own operation — not the plaintext
+> dump, the manifest, or a second `pg_dump`. The `flock` covers the whole
+> lifecycle. `Type=oneshot` and the timer-waits-for-completion behavior add
+> defense in depth, and restic's lock still prevents repository corruption in the
+> worst case. The manual `docker compose run backup` and the systemd unit use the
+> SAME lock path (both run the same container against the same `backup_run` volume).
 
 A failed run exits non-zero, so the unit shows `failed` in journald and the
 freshness metric (`nlw_backup_last_success_timestamp_seconds`) is **not** advanced

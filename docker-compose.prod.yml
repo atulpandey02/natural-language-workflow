@@ -282,6 +282,12 @@ services:
       NLW_BACKUP_RETENTION_WEEKLY: ${NLW_BACKUP_RETENTION_WEEKLY:-8}
       NLW_BACKUP_RETENTION_MONTHLY: ${NLW_BACKUP_RETENTION_MONTHLY:-6}
       NLW_BACKUP_MAX_AGE_HOURS: ${NLW_BACKUP_MAX_AGE_HOURS:-26}
+      # Retention mode: "simple" (job prunes) | "immutable" (job NEVER prunes; a
+      # separate admin process does). See docs/ops/backup-providers.md.
+      NLW_BACKUP_RETENTION_MODE: ${NLW_BACKUP_RETENTION_MODE:-simple}
+      # (A) single-execution lock on a SHARED runtime volume so two backup CONTAINERS
+      # (manual + timer) contend for the same flock — not just two threads.
+      NLW_BACKUP_LOCK_FILE: /run/nlw/backup.lock
     read_only: true
     tmpfs:
       - /tmp
@@ -297,6 +303,8 @@ services:
     volumes:
       # Host-readable node_exporter textfile directory (see G / systemd guide).
       - backup_textfile:/textfile
+      # Shared, writable lock dir (rootfs is read-only) — the cross-container flock.
+      - backup_run:/run/nlw
     depends_on:
       postgres:
         condition: service_healthy
@@ -323,6 +331,14 @@ services:
       NLW_RESTORE_TARGET_ID: ${NLW_RESTORE_TARGET_ID:?NLW_RESTORE_TARGET_ID is required (restore)}
       NLW_RESTORE_CONFIRM: ${NLW_RESTORE_CONFIRM:-}
       REDIS_URL: ${RESTORE_REDIS_URL:-}
+      # (B) runtime-state guard, scoped to THIS exact Compose project. Required in
+      # production. The container needs docker access (mount the socket read-only) to
+      # run the compose probe, OR run the host preflight in dr-fresh-host-restore.md.
+      NLW_RESTORE_COMPOSE_PROJECT: ${NLW_RESTORE_COMPOSE_PROJECT:?NLW_RESTORE_COMPOSE_PROJECT is required (restore)}
+      NLW_RESTORE_RUNTIME_GUARD: ${NLW_RESTORE_RUNTIME_GUARD:-compose}
+      # (C) restore-ready gate written atomically after quiescence+validation, onto a
+      # shared volume the recovered runtime reads via `nlw.backup gate-check`.
+      NLW_RESTORE_GATE_FILE: /var/lib/nlw/restore-ready.json
     read_only: true
     tmpfs:
       - /tmp
@@ -334,13 +350,24 @@ services:
     mem_limit: 512m
     pids_limit: 256
     networks:
+      # Network isolation from the runtime is achieved by running restore in a
+      # SEPARATE Compose project on a FRESH host (see dr-fresh-host-restore.md),
+      # where api/worker/scheduler/web are not defined and cannot attach — not by a
+      # sub-network here (the restore target shares this project's postgres).
       - internal
+    volumes:
+      - restore_gate:/var/lib/nlw
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   pgdata:
   caddy_data:
   caddy_config:
   backup_textfile:
+  backup_run:
+  restore_gate:
 
 networks:
   internal:

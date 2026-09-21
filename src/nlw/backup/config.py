@@ -10,6 +10,7 @@ Secrets are ``SecretStr`` so they are masked in logs/reprs; nothing here is ever
 printed. Required-in-production values fail CLOSED via an explicit validator.
 """
 
+import contextlib
 import os
 from pathlib import Path
 from typing import Literal
@@ -72,12 +73,35 @@ class BackupSettings(BaseSettings):
     # Validated temp dir for the transient plaintext dump (restrictive perms, wiped).
     work_dir: str = Field(default="/tmp/nlw-backup", alias="NLW_BACKUP_WORK_DIR")
 
+    # Host/process-level single-execution lock (flock). Lives on a shared, writable
+    # runtime volume so two backup CONTAINERS (not just two threads) contend for it.
+    lock_file: str = Field(default="/run/nlw/backup.lock", alias="NLW_BACKUP_LOCK_FILE")
+
+    # Retention operating mode (see docs/ops/backup-providers.md, "retention modes"):
+    #   simple    - the backup job runs `restic forget --prune` after a verified backup.
+    #   immutable - the backup writer has NO delete rights; the job NEVER prunes;
+    #               pruning is a separate, human-gated admin process off the VPS.
+    retention_mode: Literal["simple", "immutable"] = Field(
+        default="simple", alias="NLW_BACKUP_RETENTION_MODE"
+    )
+    # Escape hatch that, combined with immutable mode, is a CONTRADICTION we reject.
+    force_local_prune: bool = Field(default=False, alias="NLW_BACKUP_FORCE_LOCAL_PRUNE")
+
     @model_validator(mode="after")
     def _fail_closed(self) -> "BackupSettings":
         if self.retention_daily < 1 or self.retention_weekly < 1 or self.retention_monthly < 1:
             raise ValueError("backup retention values must each be >= 1")
         if self.max_age_hours < 1:
             raise ValueError("NLW_BACKUP_MAX_AGE_HOURS must be >= 1")
+        # Contradiction: immutable writer mode + a local automatic prune. A non-delete
+        # writer cannot prune, and asking it to would either fail or require unsafe
+        # delete-capable credentials on the VPS. Fail closed rather than guess.
+        if self.retention_mode == "immutable" and self.force_local_prune:
+            raise ValueError(
+                "contradictory backup config: NLW_BACKUP_RETENTION_MODE=immutable with "
+                "NLW_BACKUP_FORCE_LOCAL_PRUNE=true. Immutable mode never prunes from the "
+                "VPS; run retention as a separate admin process (see backup-providers.md)."
+            )
         if self.app_env in ("staging", "production"):
             missing = [
                 name
@@ -141,6 +165,36 @@ class RestoreSettings(BaseSettings):
     confirm: str = Field(default="", alias="NLW_RESTORE_CONFIRM")
     work_dir: str = Field(default="/tmp/nlw-restore", alias="NLW_RESTORE_WORK_DIR")
 
+    # The exact Compose project the restore runs inside; the runtime-state guard is
+    # scoped to THIS project (never a global container scan). Its running services
+    # are inspected and api/worker/scheduler/web must be down.
+    compose_project: str = Field(default="", alias="NLW_RESTORE_COMPOSE_PROJECT")
+    # "compose" = probe Compose runtime state (fail closed if undeterminable);
+    # "off" = rely on structural isolation + the DB-session guard only (local drills
+    # where the probe runs on the host instead). Production requires "compose".
+    runtime_guard: Literal["compose", "off"] = Field(
+        default="compose", alias="NLW_RESTORE_RUNTIME_GUARD"
+    )
+    # Restore-ready gate artifact written atomically ONLY after quiescence+validation.
+    gate_file: str = Field(default="/var/lib/nlw/restore-ready.json", alias="NLW_RESTORE_GATE_FILE")
+
+    @model_validator(mode="after")
+    def _fail_closed(self) -> "RestoreSettings":
+        # In staging/production the runtime-state guard must be enforceable: a scoped
+        # Compose project is required so the check cannot silently no-op.
+        if self.app_env in ("staging", "production"):
+            if self.runtime_guard != "compose":
+                raise ValueError(
+                    "restore misconfigured: NLW_RESTORE_RUNTIME_GUARD must be 'compose' "
+                    f"in {self.app_env} (refusing to disable the runtime-state guard)"
+                )
+            if not self.compose_project:
+                raise ValueError(
+                    "restore misconfigured: NLW_RESTORE_COMPOSE_PROJECT is required in "
+                    f"{self.app_env} to scope the runtime-state guard"
+                )
+        return self
+
     def restic_env(self) -> dict[str, str]:
         env = {
             "RESTIC_REPOSITORY": self.restic_repository,
@@ -197,4 +251,24 @@ def validated_work_dir(path: str) -> Path:
         raise ValueError(f"unsafe work dir: {p}")
     p.mkdir(parents=True, exist_ok=True)
     p.chmod(0o700)
+    return p
+
+
+def validated_runtime_file(path: str, *, what: str) -> Path:
+    """Resolve a lock/gate file path and ensure its parent dir exists (0700).
+
+    Refuses a path that IS a forbidden directory (root/home/cwd) or resolves to an
+    empty/`/` string, so the lock/gate location can never be chosen through an
+    unsafe unresolved variable. Returns the resolved file path (not created here —
+    the flock opener / atomic writer create it).
+    """
+    if not path or path in ("", "/"):
+        raise ValueError(f"unsafe {what} path: {path!r}")
+    p = Path(path).resolve()
+    forbidden = {Path("/"), Path.home().resolve(), Path.cwd().resolve()}
+    if p in forbidden:
+        raise ValueError(f"unsafe {what} path: {p}")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        p.parent.chmod(0o700)  # a shared/mounted runtime dir may not be chmod-able
     return p

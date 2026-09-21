@@ -4,11 +4,13 @@
 # docs/ops/backup-systemd.md and docs/runbooks/backup-operations.md. Do NOT enable
 # on a developer machine.
 #
-# Overlap is prevented three ways: Type=oneshot (systemd runs one instance), the
-# timer waits for completion before the next fire, and restic locks the repository
-# (a second writer cannot corrupt it). The job exits non-zero on any failure, so a
-# failed unit is visible to journald/alerting and the freshness metric is not
-# advanced.
+# Single execution is enforced by an explicit flock the job takes around its whole
+# lifecycle (shared backup_run volume -> /run/nlw/backup.lock); a second invocation
+# exits 3 ("already running") having run no dump/upload/prune/metrics. Type=oneshot,
+# the timer waiting for completion, and restic's repository lock are defense in
+# depth (restic's lock alone does NOT prove single execution). The job exits
+# non-zero on any failure, so a failed unit is visible to journald/alerting and the
+# freshness metric is not advanced.
 [Unit]
 Description=NLW encrypted off-host database backup (one-shot)
 Documentation=file:/opt/nlw/docs/runbooks/backup-operations.md

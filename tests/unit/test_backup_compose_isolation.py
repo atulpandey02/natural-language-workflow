@@ -66,8 +66,42 @@ def test_restore_service_is_oneshot_profiled_hardened_and_confirmation_gated() -
     assert "no-new-privileges:true" in r["security_opt"]
     assert "ports" not in r
     keys = _env_keys(r)
-    for required in ("NLW_RESTORE_DATABASE_URL", "NLW_RESTORE_TARGET_ID", "NLW_RESTORE_CONFIRM"):
+    for required in (
+        "NLW_RESTORE_DATABASE_URL",
+        "NLW_RESTORE_TARGET_ID",
+        "NLW_RESTORE_CONFIRM",
+        # (B) scoped runtime-state guard + (C) restore-ready gate.
+        "NLW_RESTORE_COMPOSE_PROJECT",
+        "NLW_RESTORE_GATE_FILE",
+    ):
         assert required in keys, required
+
+
+def test_restore_run_does_not_pull_up_runtime_services() -> None:
+    # `docker compose run restore` starts only restore + its depends_on chain. If a
+    # runtime service were a restore dependency it would start alongside — assert none
+    # are, so the restore invocation cannot bring api/worker/scheduler/web up.
+    r = _load("docker-compose.prod.yml")["services"]["restore"]
+    deps = r.get("depends_on", {})
+    dep_names = set(deps.keys()) if isinstance(deps, dict) else set(deps)
+    assert not (dep_names & {"api", "worker", "scheduler", "web"}), dep_names
+
+
+def test_runtime_services_do_not_require_a_dr_gate_by_default() -> None:
+    # (C) Normal (non-restore) deployments must be operable without a DR gate: no
+    # runtime service sets NLW_RESTORE_MODE. (Also covered structurally by the
+    # no-NLW_RESTORE_* credential test.)
+    compose = _load("docker-compose.prod.yml")
+    for svc in ("api", "worker", "scheduler", "web"):
+        assert "NLW_RESTORE_MODE" not in _env_keys(compose["services"][svc])
+
+
+def test_backup_service_has_single_execution_lock_on_a_shared_volume() -> None:
+    # (A) the lock lives on a shared runtime volume so two CONTAINERS contend.
+    b = _load("docker-compose.prod.yml")["services"]["backup"]
+    assert "NLW_BACKUP_LOCK_FILE" in _env_keys(b)
+    mounts = b.get("volumes", [])
+    assert any("/run/nlw" in m for m in mounts), mounts
 
 
 def test_backup_and_restore_use_separate_object_storage_env_vars() -> None:

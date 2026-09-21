@@ -54,7 +54,17 @@ is a decision aid, not automation.
 - [ ] Record snapshot id/age, measured RTO, quiescence counts, and validation
       result. File a postmortem in `docs/incidents/`.
 
-## 7. After go-live
+## 7. Enable the runtime (separate, explicit)
+
+- [ ] Restore finished with all validation `[ok]` and wrote the **restore-ready
+      gate**. Runtime start is a **separate operator action**: verify the gate
+      (`nlw.backup gate-check`, exit 4 if not bound to this DB) and bring up
+      api/worker/scheduler in restore mode. See
+      [dr-fresh-host-restore](dr-fresh-host-restore.md) step 6.
+- [ ] Starting the runtime does **not** replay restored work (quiescence handled
+      it); confirm no duplicate side effects.
+
+## 8. After go-live
 
 - [ ] Confirm a **new backup** succeeds and verifies against the recovered host.
 - [ ] Confirm the dead-man metric is fresh and alerts are green.

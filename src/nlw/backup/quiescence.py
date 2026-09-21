@@ -67,6 +67,9 @@ _INSERT_EVENT = text(
 )
 
 
+_LATEST_EVENT = text("SELECT id FROM dr_restore_events ORDER BY restored_at DESC LIMIT 1")
+
+
 @dataclass(frozen=True)
 class QuiescenceResult:
     cutoff: datetime
@@ -75,6 +78,10 @@ class QuiescenceResult:
     actions_unknowned: int
     schedules_recomputed: int
     event_recorded: bool
+    # The dr_restore_events row identifying THIS restore generation (the newly
+    # inserted event, or the prevailing latest one on an idempotent re-run). Used to
+    # bind the restore-ready gate to this generation.
+    event_id: str | None
 
 
 def quiesce(
@@ -117,23 +124,29 @@ def quiesce(
         changed = bool(runs or steps or actions or recomputed)
         prior = int(conn.execute(_PRIOR_EVENTS).scalar_one())
         event_recorded = changed or prior == 0
+        event_id: str | None
         if event_recorded:
-            conn.execute(
-                _INSERT_EVENT,
-                {
-                    "cutoff": cutoff,
-                    "manifest_format": manifest.get("format"),
-                    "snapshot_id": manifest.get("snapshot_id"),
-                    "alembic_revision": manifest.get("alembic_revision"),
-                    "app_version": manifest.get("app_version"),
-                    "pg_version": manifest.get("pg_version"),
-                    "runs": runs,
-                    "steps": steps,
-                    "actions": actions,
-                    "schedules": recomputed,
-                    "note": note,
-                },
+            event_id = str(
+                conn.execute(
+                    _INSERT_EVENT,
+                    {
+                        "cutoff": cutoff,
+                        "manifest_format": manifest.get("format"),
+                        "snapshot_id": manifest.get("snapshot_id"),
+                        "alembic_revision": manifest.get("alembic_revision"),
+                        "app_version": manifest.get("app_version"),
+                        "pg_version": manifest.get("pg_version"),
+                        "runs": runs,
+                        "steps": steps,
+                        "actions": actions,
+                        "schedules": recomputed,
+                        "note": note,
+                    },
+                ).scalar_one()
             )
+        else:
+            ev_row = conn.execute(_LATEST_EVENT).first()
+            event_id = str(ev_row[0]) if ev_row else None
 
     return QuiescenceResult(
         cutoff=cutoff,
@@ -142,4 +155,5 @@ def quiesce(
         actions_unknowned=actions,
         schedules_recomputed=recomputed,
         event_recorded=event_recorded,
+        event_id=event_id,
     )

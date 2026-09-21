@@ -143,7 +143,19 @@ pgBackRest is future work); ransomware resistance requires operator-configured
 object-lock/isolated-credentials; **Supabase Auth is a separate DR dependency**.
 Docs: runbooks/backup-operations, dr-fresh-host-restore, post-restore-quiescence,
 backup-failure-troubleshooting, disaster-declaration-checklist, dr-real-vps-checklist;
-ops/backup-systemd, backup-providers, rpo-rto, pitr-boundary.
+ops/backup-systemd, backup-providers, rpo-rto, pitr-boundary. An
+operational-safety addendum adds: an explicit `flock` single-execution lock around
+the whole backup lifecycle (a second run exits 3, doing no work — restic's repo
+lock is not relied on for this); a runtime-service guard that inspects Compose
+state scoped to the exact restore project and fails closed (defence beyond the
+DB-session check, rechecked pre-restore for TOCTOU); an enforceable restore-ready
+**gate** written atomically only after quiescence+validation and bound to the
+restore generation + DB `system_identifier` (verified by `nlw.backup gate-check`;
+stale/cross-DB/tampered gates rejected; normal deploys need no gate); explicit
+`simple`/`immutable` retention modes (immutable never prunes from the VPS —
+a separate `nlw.backup prune` does; contradictory config fails closed); and an
+extended drill proving startup is blocked pre-gate, a new post-restore run runs to
+COMPLETED, no restored work is replayed, and the gate cannot be reused.
 
 M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
 so a user can operate the platform end-to-end without curl/SQL: Supabase

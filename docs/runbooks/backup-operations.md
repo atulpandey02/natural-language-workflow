@@ -52,14 +52,30 @@ Written atomically to `NLW_BACKUP_METRICS_FILE`
 
 Alerts: [`docker/prometheus/alerts/backup.rules.yml`](../../docker/prometheus/alerts/backup.rules.yml).
 
+## Single execution
+
+The job takes an explicit `flock` around its whole lifecycle (shared
+`backup_run` volume → `/run/nlw/backup.lock`), so a second invocation — a manual
+run racing the timer, a duplicate timer — exits **3** ("already running") having
+run no dump/upload/prune/metrics. This does not rely on restic's repo lock (which
+only guards the repo during its own operation). Exit codes: `0` ok, `1` step
+failed, `2` usage/unexpected, `3` already running, `4` gate-check failed.
+
 ## Retention
 
-`restic forget --prune` runs each backup using
-`NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` (pilot defaults 14/8/6). restic
-snapshots are deduplicated, so retained history is cheap. If provider
-object-lock/immutability is enabled for ransomware resistance, automated pruning
-cannot reclaim locked objects — run pruning as a separate human-gated step and
-size the bucket accordingly (see [backup-providers](../ops/backup-providers.md)).
+Retention has two modes (`NLW_BACKUP_RETENTION_MODE`, see
+[backup-providers](../ops/backup-providers.md)):
+
+- **simple** (default): `restic forget --prune` runs each backup using
+  `NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` (defaults 14/8/6). restic snapshots
+  are deduplicated, so retained history is cheap.
+- **immutable**: the backup job **never** prunes; run retention as a separate,
+  human-gated admin step off the VPS with delete-capable credentials:
+  ```bash
+  NLW_BACKUP_ALLOW_PRUNE=1 python -m nlw.backup prune
+  ```
+  Selecting immutable mode with `NLW_BACKUP_FORCE_LOCAL_PRUNE=true` is a
+  contradiction and fails closed.
 
 ## Verify recoverability (do not skip)
 

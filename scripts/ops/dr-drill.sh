@@ -32,8 +32,10 @@ BAK_IMG="nlw-backup:drill"
 # All resource names begin with ${PROJ}- so cleanup can never match anything else.
 cleanup() {
   echo "--- cleanup (${PROJ}) ---"
-  docker rm -f "${PROJ}-minio" "${PROJ}-srcdb" "${PROJ}-destdb" "${PROJ}-redis" >/dev/null 2>&1 || true
-  docker volume rm "${PROJ}-srcdata" "${PROJ}-destdata" "${PROJ}-miniodata" >/dev/null 2>&1 || true
+  docker rm -f "${PROJ}-minio" "${PROJ}-srcdb" "${PROJ}-destdb" "${PROJ}-destdb2" \
+    "${PROJ}-redis" >/dev/null 2>&1 || true
+  docker volume rm "${PROJ}-srcdata" "${PROJ}-destdata" "${PROJ}-destdata2" \
+    "${PROJ}-miniodata" "${PROJ}-gate" >/dev/null 2>&1 || true
   docker network rm "${NET}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -105,25 +107,69 @@ echo "  [ok] source db + volume destroyed"
 echo "=== DEST db: fresh empty target (worker/scheduler stay DOWN) ==="
 _run_owner_db "${PROJ}-destdb" "${PROJ}-destdata"; _wait_db "${PROJ}-destdb"
 docker run -d --name "${PROJ}-redis" --network "${NET}" redis:7 >/dev/null
+DEST_URL="postgresql://nlw:nlw@${PROJ}-destdb:5432/nlw"
+GATE_VOL="${PROJ}-gate"
+_gate_env=(-e "NLW_RESTORE_DATABASE_URL=${DEST_URL}" \
+  -e "NLW_RESTORE_GATE_FILE=/var/lib/nlw/restore-ready.json" \
+  -e "NLW_RESTORE_COMPOSE_PROJECT=${PROJ}" -v "${GATE_VOL}:/var/lib/nlw")
 
-echo "=== RESTORE (guarded) + quiesce + validate ==="
+echo "=== (B) runtime-state guard, host-scoped to this drill's containers ==="
+# The drill uses `docker run` (not compose); demonstrate the SCOPED runtime check on
+# the host by name prefix. In production the in-process compose probe does this.
+running_rt=$(docker ps --format '{{.Names}}' \
+  | grep -E "^${PROJ}-(api|worker|scheduler|web)$" || true)
+[ -z "${running_rt}" ] && echo "  [ok] no runtime service running for ${PROJ} (scoped check)"
+
+echo "=== (C) startup gate BLOCKS before a valid restore gate ==="
+# api/worker/scheduler startup must fail before quiescence+validation produce a gate.
+set +e
+docker run --rm --network "${NET}" "${_gate_env[@]}" -e APP_ENV=local \
+  "${BAK_IMG}" gate-check
+gc_rc=$?
+set -e
+[ "${gc_rc}" -eq 4 ] && echo "  [ok] gate-check refused startup (exit 4) with no valid gate" \
+  || { echo "FAIL: gate-check should have exited 4, got ${gc_rc}" >&2; exit 1; }
+
+echo "=== RESTORE (guarded) + quiesce + validate + gate ==="
 t0=$(date +%s)
-docker run --rm --network "${NET}" "${_restic_env[@]}" -e APP_ENV=local \
-  -e "NLW_RESTORE_DATABASE_URL=postgresql://nlw:nlw@${PROJ}-destdb:5432/nlw" \
-  -e "NLW_RESTORE_TARGET_ID=${PROJ}-destdb" -e "NLW_RESTORE_CONFIRM=${PROJ}-destdb" \
+docker run --rm --network "${NET}" "${_restic_env[@]}" "${_gate_env[@]}" -e APP_ENV=local \
+  -e "NLW_RESTORE_TARGET_ID=${PROJ}" -e "NLW_RESTORE_CONFIRM=${PROJ}" \
+  -e "NLW_RESTORE_RUNTIME_GUARD=off" \
   -e "NLW_RESTORE_SNAPSHOT=latest" -e "REDIS_URL=redis://${PROJ}-redis:6379/0" \
   "${BAK_IMG}" restore
 RESTORE_S=$(( $(date +%s) - t0 ))
-echo "  restore_duration_seconds=${RESTORE_S} (includes decrypt + pg_restore + quiesce + validate)"
+echo "  restore_duration_seconds=${RESTORE_S} (includes decrypt + pg_restore + quiesce + validate + gate)"
 
-echo "=== post-restore invariant assertions ==="
+echo "=== post-restore invariant assertions (no replay) ==="
 docker run --rm --network "${NET}" -v "${REPO}/scripts:/scripts:ro" "${APP_IMG}" \
-  python /scripts/ops/dr_drill_seed.py verify --url "postgresql://nlw:nlw@${PROJ}-destdb:5432/nlw"
+  python /scripts/ops/dr_drill_seed.py verify --url "${DEST_URL}"
+
+echo "=== (C) operator ENABLE: gate-check now PASSES ==="
+docker run --rm --network "${NET}" "${_gate_env[@]}" -e APP_ENV=local "${BAK_IMG}" gate-check \
+  && echo "  [ok] valid restore-ready gate accepted (runtime may now start)"
+
+echo "=== (E) start runtime: a BRAND-NEW post-restore run executes to COMPLETED ==="
+docker run --rm --network "${NET}" -v "${REPO}/scripts:/scripts:ro" "${APP_IMG}" \
+  python /scripts/ops/dr_drill_seed.py newrun --url "${DEST_URL}"
+
+echo "=== (C/E) gate CANNOT be reused for a second empty destination ==="
+_run_owner_db "${PROJ}-destdb2" "${PROJ}-destdata2"; _wait_db "${PROJ}-destdb2"
+set +e
+docker run --rm --network "${NET}" -v "${GATE_VOL}:/var/lib/nlw" -e APP_ENV=local \
+  -e "NLW_RESTORE_DATABASE_URL=postgresql://nlw:nlw@${PROJ}-destdb2:5432/nlw" \
+  -e "NLW_RESTORE_GATE_FILE=/var/lib/nlw/restore-ready.json" \
+  -e "NLW_RESTORE_COMPOSE_PROJECT=${PROJ}" \
+  "${BAK_IMG}" gate-check
+reuse_rc=$?
+set -e
+[ "${reuse_rc}" -eq 4 ] && echo "  [ok] gate rejected on a different destination (exit 4)" \
+  || { echo "FAIL: reused gate should have exited 4, got ${reuse_rc}" >&2; exit 1; }
 
 echo ""
 echo "=== DR DRILL RESULT (MinIO / local Docker — NOT a real provider) ==="
 echo "  backup_duration_seconds   = ${BACKUP_S}"
 echo "  restore_duration_seconds  = ${RESTORE_S}  (observed local RTO component)"
 echo "  observed_snapshot_age     = ~0s (backup taken immediately before restore; RPO in prod = backup interval)"
-echo "  worker/scheduler          = NOT started (runtime-start gate satisfied only after validation)"
+echo "  runtime-start gate        = blocked before validation; enabled only after; not reusable"
+echo "  new post-restore run      = executed to COMPLETED; no restored work replayed"
 echo "ALL DR DRILL CHECKS PASSED"

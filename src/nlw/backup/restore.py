@@ -14,8 +14,10 @@ verify manifest+hashes -> pg_restore (NO auto-migrations) -> flush ephemeral Red
 import json
 import os
 import subprocess
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +26,22 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from nlw.backup.backup import DB_DUMP_NAME, GLOBALS_NAME
-from nlw.backup.config import RestoreSettings, sa_engine_url, validated_work_dir
+from nlw.backup.config import (
+    RestoreSettings,
+    sa_engine_url,
+    validated_runtime_file,
+    validated_work_dir,
+)
+from nlw.backup.gate import build_gate, db_system_identifier, write_gate
 from nlw.backup.manifest import MANIFEST_NAME, verify_manifest
 from nlw.backup.quiescence import quiesce
 from nlw.backup.restic import Restic
+from nlw.backup.runtime_guard import (
+    ComposeRuntimeProbe,
+    NullRuntimeProbe,
+    RuntimeProbe,
+    assert_runtime_stopped,
+)
 from nlw.backup.validate import human_summary, validate_restore
 
 log = structlog.get_logger("nlw.restore")
@@ -41,6 +55,15 @@ class RestoreResult:
     snapshot: str
     validation: dict[str, Any]
     runs_quiesced: int
+    gate_path: str | None = None
+    restore_generation: str | None = None
+    restore_event_id: str | None = None
+
+
+def _build_runtime_probe(settings: RestoreSettings) -> RuntimeProbe:
+    if settings.runtime_guard == "off":
+        return NullRuntimeProbe()
+    return ComposeRuntimeProbe(project=settings.compose_project)
 
 
 def assert_no_runtime_connections(engine: Engine) -> None:
@@ -111,6 +134,7 @@ def run_restore(
     restic: Restic | None = None,
     pg_restore_fn: PgRestoreFn = _default_pg_restore,
     redis_url: str | None = None,
+    runtime_probe: RuntimeProbe | None = None,
 ) -> RestoreResult:
     # (H1) explicit destructive confirmation matching the exact target identity.
     settings.require_confirmation()
@@ -120,9 +144,13 @@ def run_restore(
     # psycopg-v3 dialect for the engine; pg_restore keeps the raw libpq db_url.
     engine = create_engine(sa_engine_url(db_url))
     restic = restic or Restic(settings.restic_env())
+    probe = runtime_probe if runtime_probe is not None else _build_runtime_probe(settings)
     work = validated_work_dir(settings.work_dir)
 
-    # (H) fail if runtime active; never overwrite a non-empty DB.
+    # (B) runtime services must be DOWN — Compose state scoped to the exact project,
+    # fail closed if undeterminable. (H) plus the DB-session check as defense in
+    # depth; (H) never overwrite a non-empty DB.
+    assert_runtime_stopped(probe)
     assert_no_runtime_connections(engine)
     assert_target_empty(engine)
 
@@ -139,12 +167,20 @@ def run_restore(
     verify_manifest(manifest, files)
     log.info("restore.manifest_verified", revision=manifest.get("alembic_revision"))
 
+    # (B, TOCTOU) recheck runtime state IMMEDIATELY before the destructive restore —
+    # a service that started after the first guard is caught here.
+    assert_runtime_stopped(probe)
+    assert_no_runtime_connections(engine)
+
     # restore schema/data (NO automatic migrations — restore at the recorded rev).
     pg_restore_fn(files[DB_DUMP_NAME], db_url)
 
     # clear ephemeral Redis (never restore stale queue state).
     if redis_url or os.environ.get("REDIS_URL"):
         _flush_redis(redis_url or os.environ["REDIS_URL"])
+
+    # (B) recheck before quiescence/validation (these can be run as separate commands).
+    assert_runtime_stopped(probe)
 
     # MANDATORY quiescence BEFORE any runtime service could start.
     qr = quiesce(engine, manifest=manifest, note="restore")
@@ -162,11 +198,31 @@ def run_restore(
     if not report["ok"]:
         raise RuntimeError("restore validation FAILED:\n" + human_summary(report))
 
+    # (C) restore-ready gate — written atomically ONLY now (quiescence + validation
+    # both succeeded), bound to THIS restore generation and THIS DB cluster.
+    generation = str(uuid.uuid4())
+    gate = build_gate(
+        restore_event_id=qr.event_id or "",
+        restore_generation=generation,
+        target_project=settings.compose_project or settings.target_id,
+        snapshot=settings.snapshot,
+        db_system_identifier=db_system_identifier(engine),
+        database_name=str(manifest.get("database") or ""),
+        quiescence_cutoff=qr.cutoff,
+        validation_completed_at=datetime.now(UTC),
+    )
+    gate_path = validated_runtime_file(settings.gate_file, what="restore gate")
+    write_gate(gate, gate_path)
+    log.info("restore.gate_written", generation=generation, path=str(gate_path))
+
     return RestoreResult(
         ok=True,
         snapshot=settings.snapshot,
         validation=report,
         runs_quiesced=qr.runs_quiesced,
+        gate_path=str(gate_path),
+        restore_generation=generation,
+        restore_event_id=qr.event_id,
     )
 
 

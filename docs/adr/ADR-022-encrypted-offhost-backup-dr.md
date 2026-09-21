@@ -40,10 +40,11 @@ custom cryptography, not multi-region replication.
 
 - **restic** is the backup engine: client-side-encrypted (AES-256 + Poly1305,
   repository-key model — we do **not** implement cryptography), content-addressed
-  dedup, snapshotting, `check` verification, `forget --prune` retention, and repo
-  locking that prevents overlapping runs. Backend is any **S3-compatible** object
-  store (AWS S3, Backblaze B2, MinIO for drills) via the `s3:` repository URL —
-  the platform is **provider-neutral**.
+  dedup, snapshotting, `check` verification, and `forget --prune` retention.
+  Backend is any **S3-compatible** object store (AWS S3, Backblaze B2, MinIO for
+  drills) via the `s3:` repository URL — the platform is **provider-neutral**.
+  (restic's repository lock guards the repo during its own operation; it is **not**
+  relied on as proof of single execution — see the flock below.)
 - **What is backed up:** a `pg_dump` **custom format** (`-F c`, owner/superuser
   connection so the dump is complete under FORCE RLS) plus
   `pg_dumpall --roles-only --no-role-passwords` (role *names* only — never
@@ -173,3 +174,41 @@ after the recovery cutoff, and a read-only verification query.
   own backup/restore.
 - Adds an operational surface (a second image, a timer, provider credentials) but
   no new runtime dependency and no architectural boundary change.
+
+## Operational-safety addendum (M11.5 P2)
+
+Five operational-safety hardenings on top of the accepted architecture; no schema
+change (migration `0014` unchanged).
+
+- **(A) Single backup execution.** An explicit host/process `flock`
+  (`nlw.backup.locking`) wraps the ENTIRE backup lifecycle on a shared runtime
+  volume (`backup_run` → `/run/nlw/backup.lock`), acquired before any dump/temp
+  artifact. A second process exits **3** ("already running") and runs no
+  dump/upload/prune/metrics. Released on success/failure/signal/death (advisory
+  lock keyed to the fd). restic's repo lock is defense in depth, **not** the proof
+  of single execution. Proven by a real multi-process test.
+- **(B) Runtime services proven stopped for restore.** Beyond the DB-session
+  check, the restore inspects Compose runtime state **scoped to the exact project
+  and service names** (`nlw.backup.runtime_guard`), fails closed if any of
+  api/worker/scheduler/web is running OR if state is undeterminable, and rechecks
+  immediately before the destructive restore and before quiescence (TOCTOU).
+  Network isolation from the runtime is achieved by running restore as a separate
+  Compose project on a fresh host (where those services are not defined).
+- **(C) Enforceable runtime-start gate.** After — and only after — quiescence AND
+  validation commit, the restore writes an atomic, non-secret **restore-ready
+  gate** (`nlw.backup.gate`) bound to this restore generation
+  (`dr_restore_events` id) and this cluster (`system_identifier`). Runtime start
+  in restore mode requires `nlw.backup gate-check` to pass; a missing, malformed,
+  stale, cross-DB, or wrong-project gate is rejected (exit **4**). Normal
+  (non-restore) deploys never require a gate (no `NLW_RESTORE_MODE`).
+- **(D) Retention vs immutable credentials.** Two explicit modes:
+  `simple` (the job prunes; needs delete rights) and `immutable` (the writer has
+  no delete rights; the job **never** prunes — a separate human-gated
+  `nlw.backup prune` with off-VPS credentials does). Contradictory config
+  (immutable + forced local prune) fails closed. Object-lock support is documented
+  but **not** verified against a real provider.
+- **(E) Functional post-restore drill.** The disposable drill proves startup is
+  blocked before the gate, quiescence+validation produce the gate, a separate
+  enable step passes gate-check, a brand-new post-restore run executes to
+  COMPLETED, restored work is not replayed, and the gate cannot be reused for a
+  second destination.

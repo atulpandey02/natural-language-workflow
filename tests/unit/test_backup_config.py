@@ -85,6 +85,36 @@ def test_restore_requires_matching_confirmation() -> None:
     RestoreSettings(**base, NLW_RESTORE_CONFIRM="nlw-dr-restore-2026").require_confirmation()  # type: ignore[arg-type]
 
 
+def test_immutable_mode_plus_local_prune_is_a_contradiction() -> None:
+    # Immutable writer + a forced local prune is contradictory -> fail closed.
+    with pytest.raises(ValidationError):
+        _backup(NLW_BACKUP_RETENTION_MODE="immutable", NLW_BACKUP_FORCE_LOCAL_PRUNE=True)
+    # Immutable mode WITHOUT a forced prune is fine (the writer just never prunes).
+    s = _backup(NLW_BACKUP_RETENTION_MODE="immutable")
+    assert s.retention_mode == "immutable"
+    # Simple mode (default) permits local prune.
+    assert _backup().retention_mode == "simple"
+
+
+def test_restore_requires_scoped_runtime_guard_in_production() -> None:
+    base = {
+        "app_env": "production",
+        "NLW_RESTORE_DATABASE_URL": "postgresql://nlw:pw@db/nlw",
+        "NLW_RESTORE_TARGET_ID": "nlw-dr",
+        "NLW_RESTORE_CONFIRM": "nlw-dr",
+    }
+    # No compose project in production -> the runtime guard cannot be scoped -> fail.
+    with pytest.raises(ValidationError):
+        RestoreSettings(**base)  # type: ignore[arg-type]
+    # Disabling the guard in production -> fail closed.
+    off = {**base, "NLW_RESTORE_COMPOSE_PROJECT": "p", "NLW_RESTORE_RUNTIME_GUARD": "off"}
+    with pytest.raises(ValidationError):
+        RestoreSettings(**off)  # type: ignore[arg-type]
+    # Scoped compose guard -> ok.
+    s = RestoreSettings(**base, NLW_RESTORE_COMPOSE_PROJECT="p")  # type: ignore[arg-type]
+    assert s.compose_project == "p" and s.runtime_guard == "compose"
+
+
 def test_sa_engine_url_forces_psycopg_v3_dialect() -> None:
     # A bare libpq URL (what pg_dump/pg_restore consume) must be routed to psycopg
     # v3 for the SQLAlchemy engine paths — SQLAlchemy would otherwise import

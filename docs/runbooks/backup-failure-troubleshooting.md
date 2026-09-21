@@ -51,6 +51,14 @@ Backups are still taken/verified, but the repo may grow.
 - Otherwise check for a stale restic **lock** (an interrupted run):
   `--entrypoint restic backup unlock` (only when no backup is in progress).
 
+## Backup "already running" (exit 3)
+
+A second backup found the `flock` held (manual run racing the timer, or a duplicate
+timer). This is expected and safe — the second process ran no dump/upload/prune and
+did not touch metrics. If it recurs, check for a stuck first process
+(`systemctl status nlw-backup.service`) or a duplicate timer. A leftover lock
+*file* does not block anything; only a live holder does.
+
 ## Restore failures
 
 - **`restore refused: NLW_RESTORE_CONFIRM must exactly equal
@@ -58,8 +66,19 @@ Backups are still taken/verified, but the repo may grow.
   to the exact fresh target id.
 - **`target database not empty`** — restore refuses to overwrite. Use a genuinely
   fresh DB (roles bootstrapped, no application tables).
-- **`runtime services appear active`** — an `nlw_app`/`worker`/`scheduler`
-  connection exists. Stop the runtime before restoring.
+- **`runtime services are running in the restore project`** (RuntimeActive) — the
+  scoped Compose probe found api/worker/scheduler/web up (even if idle). Stop them
+  in that project first.
+- **`cannot inspect Compose runtime state` / `no Compose project to scope`**
+  (RuntimeStateUnknown) — the guard failed closed because it could not determine
+  runtime state. Give the restore docker access, run the host preflight and set
+  `NLW_RESTORE_RUNTIME_GUARD` accordingly, or set `NLW_RESTORE_COMPOSE_PROJECT`.
+- **`runtime services appear active`** — an `nlw_app`/`worker`/`scheduler` DB
+  connection exists (defense-in-depth session check). Stop the runtime first.
+- **gate-check failed (exit 4)** — a runtime service in restore mode found a
+  missing/malformed/stale/cross-DB/wrong-project restore-ready gate. This is the
+  runtime-start gate doing its job: do not force-start. Ensure the restore
+  completed (quiescence+validation) and wrote the gate bound to THIS database.
 - **manifest hash mismatch** — the decrypted artifact does not match the recorded
   sha256; the snapshot is corrupt. Restore an earlier snapshot.
 - **`restore validation FAILED`** — the restored security posture/invariants are

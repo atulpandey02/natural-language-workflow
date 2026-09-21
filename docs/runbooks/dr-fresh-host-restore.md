@@ -39,15 +39,30 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    ```
    Set `NLW_RESTORE_SNAPSHOT` to `latest` (default) or a specific id.
 
-3. **Run the guarded restore** (does restic restore → manifest+hash verify →
-   `pg_restore` (ownership preserved) → flush Redis → **quiesce** → **validate**):
+2a. **Confirm runtime services are stopped (scoped preflight).** The restore
+   inspects Compose runtime state scoped to `NLW_RESTORE_COMPOSE_PROJECT` and fails
+   closed if `api`/`worker`/`scheduler`/`web` are running (a running-but-idle
+   container still blocks — a DB-session check alone is not enough) or if state
+   cannot be determined. If the restore container has no docker access, run the
+   scoped preflight on the host first:
+   ```bash
+   docker compose -p "$NLW_RESTORE_COMPOSE_PROJECT" ps --status running --services
+   # must list NONE of: api worker scheduler web
+   ```
+
+3. **Run the guarded restore** (runtime-state guard → no-runtime-connections →
+   empty-target → restic restore → manifest+hash verify → `pg_restore` (ownership
+   preserved) → flush Redis → recheck runtime → **quiesce** → **validate** → write
+   the **restore-ready gate**):
    ```bash
    docker compose --env-file /opt/nlw/.env.restore \
      -f docker-compose.prod.yml --profile restore run --rm restore
    ```
-   It exits non-zero on any failure (bad confirmation, non-empty target, active
-   runtime, hash mismatch, failed validation). On success it prints the validation
-   summary and the number of non-terminal runs quiesced.
+   It exits non-zero on any failure (bad confirmation, runtime active/undeterminable,
+   non-empty target, hash mismatch, failed validation). On success it prints the
+   validation summary, the number of non-terminal runs quiesced, and the gate
+   generation. The runtime-state guard is rechecked immediately before the
+   destructive `pg_restore` and again before quiescence (TOCTOU).
 
 4. **Review the validation summary.** Every check must be `[ok]`, including
    `security_definer_owners_and_search_path`, `rls_enabled_and_forced`,
@@ -62,9 +77,23 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    cutoff. This is deliberate — it prevents replaying already-delivered side
    effects and missed schedule occurrences.
 
-6. **Only now start the runtime.** The runtime-start gate (`restore_ready`) is
-   satisfied (a `dr_restore_events` row exists and no non-terminal runs remain).
-   Point `DATABASE_URL` at the restored DB and bring up api → worker → scheduler.
+6. **Operator ENABLE — verify the restore-ready gate, then start the runtime.**
+   The restore wrote an atomic, non-secret gate (`NLW_RESTORE_GATE_FILE`) bound to
+   this restore generation and this database cluster, only after quiescence AND
+   validation succeeded. Enabling the runtime is a **separate, explicit** step:
+   ```bash
+   # Verify the gate is present and bound to THIS restored DB (exit 4 if not):
+   NLW_RESTORE_MODE=1 docker compose --env-file /opt/nlw/.env.restore \
+     -f docker-compose.prod.yml --profile restore run --rm \
+     --entrypoint "python -m nlw.backup" restore gate-check
+   ```
+   Bring up api → worker → scheduler **in restore mode** (`NLW_RESTORE_MODE=1`, with
+   the gate volume mounted) so each service runs `gate-check` before starting and
+   refuses a missing/stale/cross-DB/tampered gate. Normal (non-restore) deployments
+   set no `NLW_RESTORE_MODE` and never require a gate. Starting the runtime does
+   **not** replay restored work (quiescence already neutralized it). The gate cannot
+   be reused for a different database (its `system_identifier`/restore-event binding
+   will not match).
 
 7. **Record** the incident: snapshot id/age, the measured RTO, the quiescence
    counts, and (if a real provider) note it in `docs/incidents/`.

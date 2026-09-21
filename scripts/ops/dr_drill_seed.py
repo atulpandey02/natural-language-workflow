@@ -3,6 +3,7 @@ recovery invariants. Runs as the owner (bypasses FORCE RLS). No secrets printed.
 
     python -m scripts.ops.dr_drill_seed seed    --url <owner-url>
     python -m scripts.ops.dr_drill_seed verify   --url <owner-url>   # post-restore
+    python -m scripts.ops.dr_drill_seed newrun   --url <owner-url>   # execute a NEW run
 """
 
 import sys
@@ -12,6 +13,9 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 
 _PLAN = '{"steps":[{"id":"a","tool":"fake.echo","args":{}}]}'
+# A connector-less inline tool (no outbound side effect) so the post-restore
+# execution proof needs no network and no SSRF-policy relaxation.
+_NEWRUN_PLAN = '{"steps":[{"id":"a","tool":"fake.echo","args":{"hello":"dr"}}]}'
 
 
 def _tenant(c: psycopg.Connection, label: str) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID]:
@@ -120,6 +124,13 @@ def verify(url: str) -> None:
             "SELECT count(*) FROM external_actions WHERE status='success'"
         ).fetchone()[0]
         assert success_still > 0, "SUCCESS actions must be preserved"
+        # No-replay: nothing is left in a retryable state that a started worker would
+        # re-drive (no pending status, no armed next_attempt_at on a non-final action).
+        retryable = c.execute(
+            "SELECT count(*) FROM external_actions "
+            "WHERE status NOT IN ('success','failed','unknown') OR next_attempt_at IS NOT NULL"
+        ).fetchone()[0]
+        assert retryable == 0, f"retryable external actions remain (would resend): {retryable}"
         cutoff = c.execute(
             "SELECT cutoff_at FROM dr_restore_events ORDER BY restored_at DESC LIMIT 1"
         ).fetchone()[0]
@@ -152,12 +163,70 @@ def verify(url: str) -> None:
     )
 
 
+def newrun(url: str) -> None:
+    """Create a BRAND-NEW post-restore workflow + run and EXECUTE it to COMPLETED
+    through the real engine (in-process, no queue), proving the recovered database
+    accepts and processes new work. Uses the connector-less fake.echo tool.
+
+    Also proves restored work is NOT replayed: no restored run advances here (they
+    are all terminal after quiescence), and only the brand-new run runs."""
+    import uuid as _uuid
+
+    from sqlalchemy import create_engine as _create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from nlw.backup.config import sa_engine_url
+    from nlw.engine.execution import process_advance
+
+    engine = _create_engine(sa_engine_url(url))
+    session_factory = sessionmaker(engine)
+
+    with psycopg.connect(url, autocommit=True) as c:
+        tid = c.execute("SELECT tenant_id FROM workflows LIMIT 1").fetchone()[0]
+        # Snapshot terminal runs BEFORE, to prove none of them get re-executed.
+        before_terminal = c.execute(
+            "SELECT count(*) FROM workflow_runs WHERE status IN ('COMPLETED','FAILED')"
+        ).fetchone()[0]
+        wf, ver, run = (_uuid.uuid4() for _ in range(3))
+        c.execute("INSERT INTO workflows (id, tenant_id, name) VALUES (%s,%s,'dr-new')", (wf, tid))
+        c.execute(
+            "INSERT INTO workflow_versions (id, tenant_id, workflow_id, version, plan) "
+            "VALUES (%s,%s,%s,1,%s::jsonb)",
+            (ver, tid, wf, _NEWRUN_PLAN),
+        )
+        c.execute(
+            "INSERT INTO workflow_runs (id, tenant_id, workflow_id, workflow_version_id, status) "
+            "VALUES (%s,%s,%s,%s,'PENDING')",
+            (run, tid, wf, ver),
+        )
+
+    pending: list[uuid.UUID] = [run]
+    for _ in range(20):  # bounded; a single inline step completes in a couple passes
+        if not pending:
+            break
+        rid = pending.pop(0)
+        process_advance(session_factory, rid, enqueue=lambda r, d: pending.append(r))
+
+    with psycopg.connect(url) as c:
+        status = c.execute("SELECT status FROM workflow_runs WHERE id=%s", (run,)).fetchone()[0]
+        after_terminal = c.execute(
+            "SELECT count(*) FROM workflow_runs WHERE status IN ('COMPLETED','FAILED')"
+        ).fetchone()[0]
+    assert status == "COMPLETED", f"new post-restore run did not complete: status={status}"
+    # Exactly ONE new terminal run (the new one); no restored run was replayed.
+    assert after_terminal == before_terminal + 1, (
+        f"unexpected terminal-run delta: before={before_terminal} after={after_terminal} "
+        "(restored work may have been replayed)"
+    )
+    print(f"newrun: OK — a brand-new post-restore run executed to COMPLETED (run={run})")
+
+
 def main() -> int:
     if len(sys.argv) < 4 or sys.argv[2] != "--url":
-        print("usage: dr_drill_seed.py {seed|verify} --url <owner-url>", file=sys.stderr)
+        print("usage: dr_drill_seed.py {seed|verify|newrun} --url <owner-url>", file=sys.stderr)
         return 2
     cmd, url = sys.argv[1], sys.argv[3]
-    {"seed": seed, "verify": verify}[cmd](url)
+    {"seed": seed, "verify": verify, "newrun": newrun}[cmd](url)
     return 0
 
 

@@ -14,8 +14,43 @@ from nlw.backup.restore import (
     restore_ready,
     run_restore,
 )
+from nlw.backup.runtime_guard import RuntimeActive, RuntimeStateUnknown
 
 pytestmark = pytest.mark.integration
+
+
+class _RunningProbe:
+    """A runtime service is up (idle) — restore must block."""
+
+    def running_runtime_services(self) -> set[str]:
+        return {"worker"}
+
+
+class _UndeterminableProbe:
+    """Runtime state cannot be determined — restore must fail closed."""
+
+    def running_runtime_services(self) -> set[str]:
+        raise RuntimeStateUnknown("cannot inspect compose state")
+
+
+def _restore_settings(pg_stack: SimpleNamespace) -> RestoreSettings:
+    return RestoreSettings(
+        app_env="local",
+        NLW_RESTORE_DATABASE_URL=pg_stack.owner_sa,
+        NLW_RESTORE_TARGET_ID="dr-target",
+        NLW_RESTORE_CONFIRM="dr-target",
+    )
+
+
+def test_running_runtime_container_blocks_restore(pg_stack: SimpleNamespace) -> None:
+    # A runtime container up with NO current DB session still blocks (compose probe).
+    with pytest.raises(RuntimeActive, match="worker"):
+        run_restore(_restore_settings(pg_stack), runtime_probe=_RunningProbe())
+
+
+def test_undeterminable_runtime_state_blocks_restore(pg_stack: SimpleNamespace) -> None:
+    with pytest.raises(RuntimeStateUnknown):
+        run_restore(_restore_settings(pg_stack), runtime_probe=_UndeterminableProbe())
 
 
 def test_target_empty_guard(pg_stack: SimpleNamespace) -> None:

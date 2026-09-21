@@ -78,6 +78,45 @@ docker compose -f docker-compose.prod.yml --profile backup run --rm \
 - It is independent of the object-store keys: rotating S3 keys does not require
   re-encrypting the repo; changing the repo password uses `restic key`.
 
+## Retention modes (pick one, explicitly)
+
+Retention (`restic forget --prune`, which **deletes**) and a non-delete
+backup-writer credential are different operational modes. A non-delete writer
+cannot prune; giving the VPS delete-capable repo credentials weakens
+compromise resistance. Choose one with `NLW_BACKUP_RETENTION_MODE`:
+
+### Mode 1 — Simple pilot (`NLW_BACKUP_RETENTION_MODE=simple`, default)
+
+- The VPS backup job has permissions for both `backup` and retention.
+- `restic forget --prune` runs automatically after each **verified** backup, using
+  `NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` (defaults 14/8/6).
+- **Versioning is recommended** at the provider.
+- This mode does **not** claim protection from a fully compromised VPS deleting
+  backups (the writer can delete).
+
+### Mode 2 — Immutable / append-only (`NLW_BACKUP_RETENTION_MODE=immutable`)
+
+- The VPS backup credential can `PutObject`/`GetObject` but **cannot** delete or
+  overwrite protected objects.
+- The ordinary backup job **never** prunes (it logs `backup.retention_delegated`);
+  selecting immutable mode **and** forcing a local prune
+  (`NLW_BACKUP_FORCE_LOCAL_PRUNE=true`) is a contradiction and **fails closed**.
+- Retention is a **separate, human-gated** admin process run from a trusted host
+  (not the VPS) with delete-capable credentials **not stored on the VPS**, and only
+  after the object-lock retention window allows deletion:
+  ```bash
+  # off-VPS, with a delete-capable key, explicit confirmation required:
+  NLW_BACKUP_ALLOW_PRUNE=1 RESTIC_REPOSITORY=... RESTIC_PASSWORD=... \
+    AWS_ACCESS_KEY_ID=<prune-key> AWS_SECRET_ACCESS_KEY=<prune-secret> \
+    python -m nlw.backup prune
+  ```
+- **restic + object-lock implications:** restic prune deletes/repacks pack and
+  index objects. Under object-lock, locked objects cannot be pruned until their
+  window expires, so the repo grows within the window — size the bucket for it.
+  Provider **lifecycle rules must not** delete arbitrary restic pack/index objects
+  (that corrupts the repo); use object-lock retention windows, not blanket
+  age-based expiry, and never expire objects the newest snapshots still reference.
+
 ## Ransomware / deletion resistance (must be explicitly configured)
 
 Client-side encryption protects **confidentiality**, not availability. To resist

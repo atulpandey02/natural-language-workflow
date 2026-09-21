@@ -22,7 +22,8 @@ from pathlib import Path
 
 import structlog
 
-from nlw.backup.config import BackupSettings, validated_work_dir
+from nlw.backup.config import BackupSettings, validated_runtime_file, validated_work_dir
+from nlw.backup.locking import backup_lock
 from nlw.backup.manifest import build_manifest, write_manifest
 from nlw.backup.metrics_file import BackupMetrics, write_metrics
 from nlw.backup.restic import Restic, ResticError
@@ -132,11 +133,37 @@ def run_backup(
     tool_versions_fn: Callable[[], dict[str, str]] = _tool_versions,
     now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> BackupResult:
-    started = now_fn()
-    t0 = time.monotonic()
     db_url = settings.backup_database_url.get_secret_value()
     if not db_url:
         raise ValueError("NLW_BACKUP_DATABASE_URL is required")
+    # (A) single-execution lock around the ENTIRE lifecycle, acquired BEFORE any dump
+    # or temp artifact. A second concurrent invocation raises BackupAlreadyRunning
+    # here — before pg_dump, upload, prune, or any metrics write.
+    lock_file = validated_runtime_file(settings.lock_file, what="backup lock")
+    with backup_lock(lock_file):
+        return _run_backup_locked(
+            settings,
+            db_url=db_url,
+            restic=restic,
+            dump_fn=dump_fn,
+            db_info_fn=db_info_fn,
+            tool_versions_fn=tool_versions_fn,
+            now_fn=now_fn,
+        )
+
+
+def _run_backup_locked(
+    settings: BackupSettings,
+    *,
+    db_url: str,
+    restic: Restic | None,
+    dump_fn: DumpFn,
+    db_info_fn: DbInfoFn,
+    tool_versions_fn: Callable[[], dict[str, str]],
+    now_fn: Callable[[], datetime],
+) -> BackupResult:
+    started = now_fn()
+    t0 = time.monotonic()
     restic = restic or Restic(settings.restic_env())
     work = validated_work_dir(settings.work_dir)
 
@@ -191,12 +218,17 @@ def run_backup(
         verify_ok = True
         verified_off_host = True  # dump reached the repo AND verified
 
-        # (9) retention ONLY after a verified success.
-        restic.forget_prune(
-            daily=settings.retention_daily,
-            weekly=settings.retention_weekly,
-            monthly=settings.retention_monthly,
-        )
+        # (9) retention ONLY after a verified success — and ONLY in simple mode.
+        # In immutable mode the writer has no delete rights; pruning is a separate,
+        # human-gated admin process off the VPS (see backup-providers.md).
+        if settings.retention_mode == "simple":
+            restic.forget_prune(
+                daily=settings.retention_daily,
+                weekly=settings.retention_weekly,
+                monthly=settings.retention_monthly,
+            )
+        else:
+            log.info("backup.retention_delegated", mode=settings.retention_mode)
         retention_ok = True
 
         _emit(True)  # (8) success signal

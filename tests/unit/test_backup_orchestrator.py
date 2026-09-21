@@ -48,6 +48,7 @@ def _settings(tmp_path: Path) -> BackupSettings:
         NLW_BACKUP_DATABASE_URL="postgresql://nlw:pw@db/nlw",  # type: ignore[arg-type]
         NLW_BACKUP_WORK_DIR=str(tmp_path / "work"),
         NLW_BACKUP_METRICS_FILE=str(tmp_path / "m.prom"),
+        NLW_BACKUP_LOCK_FILE=str(tmp_path / "backup.lock"),
     )
 
 
@@ -123,6 +124,33 @@ def test_local_dump_that_never_reached_off_host_cannot_update_timestamp(tmp_path
         _run(tmp_path, FakeRestic(fail_on="backup_dir"))
     after = _LAST_SUCCESS_RE.search(_metrics(tmp_path))
     assert after is not None and after.group(1) == prior  # unchanged
+
+
+def test_immutable_mode_skips_local_prune_but_still_succeeds(tmp_path: Path) -> None:
+    # In immutable mode the writer has no delete rights; the job must NOT prune,
+    # yet a verified backup still succeeds and records last-success.
+    settings = BackupSettings(
+        app_env="local",
+        NLW_BACKUP_DATABASE_URL="postgresql://nlw:pw@db/nlw",  # type: ignore[arg-type]
+        NLW_BACKUP_WORK_DIR=str(tmp_path / "work"),
+        NLW_BACKUP_METRICS_FILE=str(tmp_path / "m.prom"),
+        NLW_BACKUP_LOCK_FILE=str(tmp_path / "backup.lock"),
+        NLW_BACKUP_RETENTION_MODE="immutable",
+    )
+    restic = FakeRestic()
+    result = run_backup(
+        settings,
+        restic=restic,  # type: ignore[arg-type]
+        dump_fn=_dump,
+        db_info_fn=_info,
+        tool_versions_fn=lambda: {"pg_dump": "16", "restic": "0.18"},
+        now_fn=lambda: datetime(2026, 5, 1, tzinfo=UTC),
+    )
+    assert result.ok
+    assert "forget_prune" not in restic.calls  # immutable mode never prunes locally
+    m = _metrics(tmp_path)
+    assert "nlw_backup_success 1" in m
+    assert _LAST_SUCCESS_RE.search(m)
 
 
 def test_manifest_written_with_required_metadata(tmp_path: Path) -> None:
