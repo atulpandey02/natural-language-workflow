@@ -39,10 +39,36 @@ class MetricsMiddleware(Middleware):
             log.warning("worker.metrics_start_failed")
 
 
+class RecoveryLockMiddleware(Middleware):
+    """Authoritative recovery-lock preflight at worker boot (M11.5 P2 addendum).
+
+    ``before_worker_boot`` fires only in a real ``dramatiq`` worker process (not when
+    the API/scheduler import the actors module to enqueue). It consults the DB
+    recovery lock as the ``nlw_worker`` role and RAISES — aborting worker boot —
+    if the newest restore generation is not operator-enabled. Mandatory: not gated
+    on any env flag. A never-restored DB boots normally; state that cannot be read
+    fails closed.
+    """
+
+    def before_worker_boot(self, broker: object, worker: object) -> None:
+        from nlw.backup.recovery_lock import assert_startup_allowed_sync
+        from nlw.db.session import create_sync_engine
+
+        engine = create_sync_engine(get_settings())
+        try:
+            assert_startup_allowed_sync(engine)
+        finally:
+            engine.dispose()
+        log.info("worker.recovery_lock_ok")
+
+
 def make_broker(settings: Settings) -> RedisBroker:
     """Build a Redis-backed Dramatiq broker for ``settings.redis_url``."""
     # dramatiq ships py.typed but leaves RedisBroker.__init__ unannotated.
     broker = RedisBroker(url=settings.redis_url)  # type: ignore[no-untyped-call]
+    # Recovery-lock preflight FIRST — a locked restore must abort boot before any
+    # metrics server binds or actors register.
+    broker.add_middleware(RecoveryLockMiddleware())
     broker.add_middleware(MetricsMiddleware())
     return broker
 

@@ -26,6 +26,12 @@ def main() -> None:
     start_metrics_server(settings, role="scheduler")
 
     engine = create_sync_engine(settings)
+    # Authoritative recovery lock (M11.5 P2 addendum): refuse to start against a
+    # restored database whose newest generation is not operator-enabled. Mandatory,
+    # not gated on any env flag; a never-restored DB is unaffected; fails closed.
+    from nlw.backup.recovery_lock import assert_startup_allowed_sync
+
+    assert_startup_allowed_sync(engine)
     session_factory = create_sync_sessionmaker(engine)
 
     # Enqueue-only use of the queue; import here so the broker is configured once.

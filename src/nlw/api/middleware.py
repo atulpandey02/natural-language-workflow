@@ -26,6 +26,40 @@ from nlw.observability.correlation import (
 
 _413_BODY = b'{"error":{"code":"payload_too_large","message":"request body too large"}}'
 
+# Deny-by-default recovery gate: ONLY these exact paths are served when the DR
+# recovery state is not ALLOWED. Everything else (all business/DB-backed routes,
+# and any newly added route) is gated automatically. Readiness IS listed so it can
+# run and report a structured non-ready (it self-reports the recovery component);
+# it never mutates state or exposes data.
+_ALWAYS_AVAILABLE = frozenset({"/health", "/version", "/health/ready"})
+# Sanitized 503 body — never leaks restore ids, project, DB details, or exceptions.
+_503_BODY = b'{"error":{"code":"service_unavailable","message":"service temporarily unavailable"}}'
+
+
+class RecoveryGateMiddleware(BaseHTTPMiddleware):
+    """Fail-closed, deny-by-default gate on the authoritative DR recovery state.
+
+    Liveness and readiness (and genuinely static routes) stay available; every other
+    route returns a sanitized 503 unless ``app.state.recovery_gate`` reports ALLOWED.
+    The gate re-evaluates the database on a short bounded cache, so a locked/unknown
+    state — including a DB that became reachable while locked, or a later restore
+    generation — blocks a RUNNING API without a restart. If the gate is missing, fail
+    closed."""
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if request.url.path in _ALWAYS_AVAILABLE:
+            return await call_next(request)
+        gate = getattr(request.app.state, "recovery_gate", None)
+        state = await gate.check() if gate is not None else "UNKNOWN"
+        if state != "ALLOWED":
+            return Response(
+                content=_503_BODY,
+                status_code=503,
+                media_type="application/json",
+                headers={"Retry-After": "5"},
+            )
+        return await call_next(request)
+
 
 def _content_length(scope: Scope) -> int | None:
     for name, value in scope.get("headers", []):

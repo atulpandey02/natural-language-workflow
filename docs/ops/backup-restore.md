@@ -1,5 +1,16 @@
 # Backup & restore (M9, ADR-018)
 
+> **Superseded by [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md)
+> (M11.5 P2).** The `pg_dump` + gpg scripts described below are replaced by the
+> encrypted, off-host, **verified** restic mechanism with a guarded restore that
+> **quiesces + validates**. Start here instead:
+> [backup-operations](../runbooks/backup-operations.md),
+> [dr-fresh-host-restore](../runbooks/dr-fresh-host-restore.md),
+> [backup-systemd](backup-systemd.md), [backup-providers](backup-providers.md),
+> [rpo-rto](rpo-rto.md), [pitr-boundary](pitr-boundary.md). The RPO/RTO objective
+> framing and the "Redis is transport / roles from bootstrap" points below still
+> hold. The audit/disk-growth monitoring section still applies.
+
 ## Policy (staging)
 
 - **What:** nightly logical `pg_dump` of the platform database, **custom format**

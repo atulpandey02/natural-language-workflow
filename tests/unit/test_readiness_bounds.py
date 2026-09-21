@@ -42,10 +42,22 @@ def _raise(exc: Exception) -> Probe:
     return _fn
 
 
+class _StubGate:
+    """Stand-in recovery gate with a fixed state (these tests exercise the DB probes,
+    not the recovery lock — that has its own suite)."""
+
+    def __init__(self, state: str = "ALLOWED") -> None:
+        self._state = state
+
+    async def check(self) -> str:
+        return self._state
+
+
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     settings = Settings(readiness_probe_timeout_s=TIMEOUT_S)
     with TestClient(create_app(settings)) as c:
+        c.app.state.recovery_gate = _StubGate("ALLOWED")  # type: ignore[attr-defined]
         yield c
 
 
@@ -89,7 +101,12 @@ def test_b_all_healthy_is_200(client: TestClient, monkeypatch: pytest.MonkeyPatc
     _patch(monkeypatch, postgres=_ok)
     resp = client.get("/health/ready")
     assert resp.status_code == 200
-    assert resp.json()["checks"] == {"postgres": "ok", "redis": "ok", "schema": "ok"}
+    assert resp.json()["checks"] == {
+        "recovery": "ok",
+        "postgres": "ok",
+        "redis": "ok",
+        "schema": "ok",
+    }
 
 
 def test_c_redis_down_is_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,7 +114,18 @@ def test_c_redis_down_is_503(client: TestClient, monkeypatch: pytest.MonkeyPatch
     resp = client.get("/health/ready")
     assert resp.status_code == 503
     checks = resp.json()["checks"]
-    assert checks == {"postgres": "ok", "redis": "down", "schema": "ok"}
+    assert checks == {"recovery": "ok", "postgres": "ok", "redis": "down", "schema": "ok"}
+
+
+def test_f_recovery_locked_is_not_ready(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Even with every dependency healthy, a locked recovery generation is NOT ready.
+    client.app.state.recovery_gate = _StubGate("LOCKED")  # type: ignore[attr-defined]
+    _patch(monkeypatch, postgres=_ok)
+    resp = client.get("/health/ready")
+    assert resp.status_code == 503
+    assert resp.json()["checks"]["recovery"] == "locked"
 
 
 def test_d_schema_mismatch_is_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

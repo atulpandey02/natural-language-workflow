@@ -1,0 +1,63 @@
+# Backup / disaster-recovery alerts (M11.5 P2, ADR-022).
+#
+# Fed by the node_exporter textfile the backup job atomically writes
+# (nlw_backup.prom). The critical one is the DEAD-MAN: it fires when the last
+# verified backup is too old OR the series is missing entirely (the timer stopped
+# firing / node_exporter lost the textfile). Freshness advances ONLY on a verified
+# off-host snapshot, so this cannot be fooled by a local dump that never shipped.
+groups:
+  - name: nlw-backup
+    rules:
+      # DEAD-MAN: no verified backup within the freshness budget. `absent(...)`
+      # covers the "timer silently stopped / metric gone" case that a simple
+      # threshold on the timestamp would miss.
+      - alert: NlwBackupStale
+        expr: |
+          (time() - nlw_backup_last_success_timestamp_seconds > 26 * 3600)
+          or absent(nlw_backup_last_success_timestamp_seconds)
+        for: 15m
+        labels: { severity: critical, component: backup }
+        annotations:
+          summary: "No verified off-host backup in >26h (or metric missing)"
+          description: >
+            The last verified off-host backup is older than the freshness budget,
+            or the backup metric series is absent (the systemd timer may have
+            stopped, or node_exporter lost the textfile). Recovery point is
+            eroding. Runbook: docs/runbooks/backup-failure-troubleshooting.md
+
+      # The most recent run failed outright.
+      - alert: NlwBackupFailed
+        expr: nlw_backup_success == 0
+        for: 5m
+        labels: { severity: warning, component: backup }
+        annotations:
+          summary: "Last backup run failed"
+          description: >
+            The most recent nlw-backup run exited non-zero. The last-success
+            timestamp was NOT advanced. Investigate before the dead-man fires.
+            Runbook: docs/runbooks/backup-failure-troubleshooting.md
+
+      # The backup wrote but repository VERIFICATION failed — treat as no backup.
+      - alert: NlwBackupVerifyFailed
+        expr: nlw_backup_repository_verify_success == 0
+        for: 5m
+        labels: { severity: critical, component: backup }
+        annotations:
+          summary: "Backup repository verification failed"
+          description: >
+            restic check failed: the off-host repository may be corrupt or
+            unreadable. A backup that cannot be verified is not a backup.
+            Runbook: docs/runbooks/backup-failure-troubleshooting.md
+
+      # Retention pruning failed — non-fatal for RPO but repo may grow unbounded.
+      - alert: NlwBackupRetentionFailed
+        expr: nlw_backup_retention_success == 0
+        for: 30m
+        labels: { severity: warning, component: backup }
+        annotations:
+          summary: "Backup retention pruning failed"
+          description: >
+            forget --prune failed. Backups are still being taken/verified, but the
+            repository may grow. If provider object-lock is enabled this can be
+            expected; otherwise investigate.
+            Runbook: docs/runbooks/backup-failure-troubleshooting.md
