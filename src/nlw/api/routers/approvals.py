@@ -26,38 +26,71 @@ from nlw.db.repositories import ApprovalRepository
 from nlw.domain.workflow import WorkflowPlan
 from nlw.tenancy.context import Role, TenantContext
 from nlw.tenancy.session import set_current_tenant, set_current_user
+from nlw.tools.action_schemas import MAX_REVIEWABLE_ACTION_PAYLOAD_BYTES
 
 router = APIRouter()
 log = structlog.get_logger(__name__)
 
-_PREVIEW_MAX_CHARS = 4000
 # Admin/owner is required to decide an approval (also enforced by RLS).
 _require_admin = require_role(Role.ADMIN)
 
 
-async def _preview_for(session: AsyncSession, approval: Approval) -> dict[str, Any]:
+async def _effective_destination(
+    session: AsyncSession, approval: Approval, step: Any
+) -> str | None:
+    """The non-secret effective destination from the APPROVED connector (by id):
+    webhook host (no path/query/credentials) or Slack channel."""
+    from nlw.connectors.http_guard import SsrfError, validate_url
+    from nlw.db.models import Connector
+
+    connector = await session.get(Connector, approval.connector_id)
+    if connector is None:
+        return None
+    config = connector.config if isinstance(connector.config, dict) else {}
+    if approval.tool == "webhook.send":
+        try:
+            host, _port = validate_url(str(config.get("url", "")))
+        except (SsrfError, Exception):
+            return None
+        return host
+    if approval.tool == "slack.send_message":
+        args = step.args if isinstance(step.args, dict) else {}
+        ch = args.get("channel") or config.get("default_channel")
+        return str(ch) if ch else None
+    return None
+
+
+async def _preview_for(
+    session: AsyncSession, approval: Approval
+) -> tuple[dict[str, Any], str | None, bool]:
     """Derive a bounded, secret-free preview from the immutable workflow version.
 
-    Uses the run's version plan step args (workflow/user content). Never contains
-    connector secrets/secret_ref/tokens (those live only on the connector side).
+    Returns ``(preview, destination, payload_review_blocked)``. The preview uses
+    the run's version plan step args (workflow/user content) and NEVER contains
+    connector secrets/secret_ref/tokens. The effective destination comes from the
+    APPROVED connector. A payload exceeding the safe review size is NOT shown and
+    marks ``payload_review_blocked`` (the action must not be approved unseen).
     """
     from nlw.db.models import WorkflowRun
 
     run = await session.get(WorkflowRun, approval.run_id)
     if run is None:
-        return {}
+        return ({"tool": approval.tool, "args": None}, None, True)
     version = await session.get(WorkflowVersion, run.workflow_version_id)
     if version is None:
-        return {}
+        return ({"tool": approval.tool, "args": None}, None, True)
     try:
         plan = WorkflowPlan.model_validate(version.plan)
         step = plan.step(approval.step_id)
     except (ValueError, KeyError):
-        return {}
+        return ({"tool": approval.tool, "args": None}, None, True)
+    destination = await _effective_destination(session, approval, step)
     args = step.args
-    if len(json.dumps(args, default=str)) > _PREVIEW_MAX_CHARS:
-        return {"tool": step.tool, "args": {"_truncated": True}}
-    return {"tool": step.tool, "args": args}
+    blocked = (
+        len(json.dumps(args, default=str).encode("utf-8")) > MAX_REVIEWABLE_ACTION_PAYLOAD_BYTES
+    )
+    preview = {"tool": step.tool, "args": None if blocked else args}
+    return (preview, destination, blocked)
 
 
 def _iso(value: Any) -> str | None:
@@ -72,6 +105,7 @@ async def list_approvals(
     approvals = await ApprovalRepository(session).list_for_tenant(ctx.tenant_id, pending_only=True)
     out: list[ApprovalOut] = []
     for a in approvals:
+        preview, destination, blocked = await _preview_for(session, a)
         out.append(
             ApprovalOut(
                 id=a.id,
@@ -82,7 +116,9 @@ async def list_approvals(
                 status=a.status,
                 requested_at=_iso(a.requested_at),
                 decided_at=_iso(a.decided_at),
-                preview=await _preview_for(session, a),
+                destination=destination,
+                payload_review_blocked=blocked,
+                preview=preview,
             )
         )
     return out
@@ -145,7 +181,19 @@ async def approve(
     approval_id: uuid.UUID,
     request: Request,
     ctx: TenantContext = Depends(_require_admin),
+    session: AsyncSession = Depends(get_session),
 ) -> ApprovalDecisionOut:
+    # An action whose payload is too large to review safely must NOT be approved
+    # unseen (P1C). It can only be rejected. This is defence-in-depth on top of
+    # the materialization-time payload bound.
+    approval = await ApprovalRepository(session).get(approval_id, ctx.tenant_id)
+    if approval is not None and approval.status == "pending":
+        _preview, _dest, blocked = await _preview_for(session, approval)
+        if blocked:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "action payload exceeds the safe review size and cannot be approved unseen",
+            )
     return await _decide(request, approval_id, ctx, "approved")
 
 

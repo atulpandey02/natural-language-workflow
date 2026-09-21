@@ -212,6 +212,31 @@ def _fail_run_step(
     return AdvanceOutcome("failed", enqueue_next=False, step_id=step.step_id)
 
 
+def _action_unknown(
+    session: Session, run: WorkflowRun, step: StepRun, ea: ExternalAction, message: str
+) -> AdvanceOutcome:
+    """Terminal UNKNOWN: the external side effect MAY have occurred but cannot be
+    proven. The action is UNKNOWN (never resent/reclaimed); step/run FAIL with the
+    distinguishing ACTION_OUTCOME_UNKNOWN code so the UI reports "may have
+    occurred", not a definite failure."""
+    from nlw.engine.actions import ACTION_OUTCOME_UNKNOWN
+
+    now = _now()
+    ea.status = "unknown"
+    ea.error_class = ACTION_OUTCOME_UNKNOWN
+    ea.lease_token = None
+    ea.lease_owner = None
+    ea.lease_expires_at = None
+    ea.next_attempt_at = None
+    step.status = StepStatus.FAILED
+    step.error = ACTION_OUTCOME_UNKNOWN
+    step.finished_at = now
+    run.status = RunStatus.FAILED
+    run.finished_at = now
+    metrics.observe_run_completion("failed", (now - run.created_at).total_seconds())
+    return AdvanceOutcome("failed", enqueue_next=False, step_id=step.step_id)
+
+
 def _get_step(step_rows: list[StepRun], step_id: str) -> StepRun | None:
     return next((s for s in step_rows if s.step_id == step_id), None)
 
@@ -224,12 +249,19 @@ def _claim_action(
     step: StepRun,
     spec: ToolSpec,
     secret_store: SecretStore,
+    expected_connector_id: uuid.UUID | None = None,
 ) -> AdvanceOutcome:
     """Txn1 fresh claim: step -> RUNNING, create leased external_actions row."""
     assert spec.connector_type is not None
     connector_id, config, _secret = _load_action_connector(
         session, tenant_id, spec.connector_type, plan_step.connector, secret_store
     )
+    # Pin to the APPROVED connector identity: a post-approval connector edit /
+    # recreate (same name, different id, possibly a different destination) must
+    # NOT silently redirect an already-approved side effect. Require fresh
+    # approval by failing deterministically instead.
+    if expected_connector_id is not None and connector_id != expected_connector_id:
+        raise ConnectorError("connector changed after approval; re-approval required")
     now = _now()
     step.status = StepStatus.RUNNING
     step.started_at = now
@@ -307,23 +339,26 @@ def _resume_action(
     now = _now()
     if ea.status != "pending":
         return AdvanceOutcome("noop", enqueue_next=False)
-    if ea.attempts >= effective_attempt_cap():
-        ea.status = "failed"
-        ea.error_class = ea.error_class or "attempt_cap"
-        ea.lease_token = None
-        ea.lease_expires_at = None
-        return _fail_run_step(session, run, step, "action retry cap reached")
-    if ea.next_attempt_at is not None and now < ea.next_attempt_at:
-        return AdvanceOutcome(
-            "deferred", enqueue_next=False, defer_seconds=(ea.next_attempt_at - now).total_seconds()
-        )
+    # ORDER MATTERS (P1C): a LIVE lease is authoritative BEFORE the attempt cap.
+    # A duplicate/redelivered message must defer without mutating another worker's
+    # live attempt — never clear/replace its lease, never mark it failed, never
+    # increment attempts. (The old order checked the cap first and could fail a
+    # legitimate live final attempt and steal its lease.)
     if ea.lease_token is not None and ea.lease_expires_at is not None and ea.lease_expires_at > now:
-        # A live foreign lease: defer until it expires; NEVER permanently ack.
         return AdvanceOutcome(
             "deferred",
             enqueue_next=False,
             defer_seconds=(ea.lease_expires_at - now).total_seconds(),
         )
+    if ea.next_attempt_at is not None and now < ea.next_attempt_at:
+        return AdvanceOutcome(
+            "deferred", enqueue_next=False, defer_seconds=(ea.next_attempt_at - now).total_seconds()
+        )
+    if ea.attempts >= effective_attempt_cap():
+        # No live lease and the retry budget is exhausted: this is an EXPIRED FINAL
+        # attempt. Its prior send cannot be disproven, so it is NOT a definite
+        # delivery failure -> terminal UNKNOWN (never resent).
+        return _action_unknown(session, run, step, ea, "action retry cap reached")
     # Acquire the lease (CAS is serialized by the run FOR UPDATE lock we hold).
     ea.lease_token = uuid.uuid4()
     ea.lease_owner = WORKER_ID
@@ -356,7 +391,16 @@ def _handle_waiting(
     if run.status == RunStatus.WAITING_APPROVAL:
         run.status = RunStatus.RUNNING
     try:
-        return _claim_action(session, run, tenant_id, plan_step, step, spec, secret_store)
+        return _claim_action(
+            session,
+            run,
+            tenant_id,
+            plan_step,
+            step,
+            spec,
+            secret_store,
+            expected_connector_id=approval.connector_id,
+        )
     except _STEP_FAILURES as exc:
         return _fail_run_step(session, run, step, str(exc))
 

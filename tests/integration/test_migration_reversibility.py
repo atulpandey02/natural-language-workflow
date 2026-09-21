@@ -6,6 +6,7 @@ bootstrapped: head -> previous -> head -> base -> head. Proves the P1A migration
 prior ``users``/``connectors`` grants+policies are restored on downgrade.
 """
 
+import uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,8 +17,11 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-_HEAD = "0011_identity_connector_authz"
-_PREV = "0010_readiness_schema_grant"
+_HEAD = "0012_action_unknown_outcome"
+_PREV = "0011_identity_connector_authz"
+# The P1A revision whose users/connectors posture the matrix below asserts.
+_P1A = "0011_identity_connector_authz"
+_P1A_PREV = "0010_readiness_schema_grant"
 
 
 def _one(cur: Any) -> tuple[Any, ...]:
@@ -83,8 +87,8 @@ def test_reversibility_matrix(pg_stack: SimpleNamespace) -> None:
     assert at_head["policies"] == ["users_app_self_select", "users_app_self_update"]
     assert at_head["bootstrap_fn"] == 1
 
-    # head -> previous: restores the pre-P1A posture exactly.
-    command.downgrade(cfg, _PREV)
+    # down to pre-P1A: restores the pre-P1A posture exactly.
+    command.downgrade(cfg, _P1A_PREV)
     at_prev = _users_posture(pg_stack.owner_libpq)
     assert at_prev["rls"] == (False, False)
     assert at_prev["app_grants"] == ["INSERT", "SELECT", "UPDATE"]
@@ -94,7 +98,7 @@ def test_reversibility_matrix(pg_stack: SimpleNamespace) -> None:
     assert at_prev["policies"] == []
     assert at_prev["bootstrap_fn"] == 0
 
-    # previous -> head again.
+    # back up to head again.
     command.upgrade(cfg, _HEAD)
     assert _users_posture(pg_stack.owner_libpq)["rls"] == (True, True)
 
@@ -132,9 +136,75 @@ def test_connectors_insert_policy_flips_with_migration(pg_stack: SimpleNamespace
 
     # At head: admin/owner required.
     assert "is_current_user_admin_or_owner" in _insert_check()
-    # Downgrade restores the member-level check.
-    command.downgrade(cfg, _PREV)
+    # Downgrade below P1A restores the member-level check.
+    command.downgrade(cfg, _P1A_PREV)
     assert "is_current_user_member" in _insert_check()
     # Re-upgrade restores the admin/owner boundary.
     command.upgrade(cfg, _HEAD)
     assert "is_current_user_admin_or_owner" in _insert_check()
+
+
+def _status_check(owner_libpq: str) -> str:
+    with psycopg.connect(owner_libpq) as c:
+        return str(
+            _one(
+                c.execute(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conname='ck_external_action_status'"
+                )
+            )[0]
+        )
+
+
+def test_external_action_unknown_status_flips_with_migration(pg_stack: SimpleNamespace) -> None:
+    """0012 adds the terminal 'unknown' external-action status; downgrade removes
+    it (rewriting any unknown row -> failed) and re-upgrade restores it."""
+    cfg = _cfg(pg_stack.owner_sa)
+
+    # At head (0012): 'unknown' is an allowed status.
+    assert "unknown" in _status_check(pg_stack.owner_libpq)
+
+    # Downgrade to 0011: the 3-value CHECK is restored (no 'unknown').
+    command.downgrade(cfg, _PREV)
+    check = _status_check(pg_stack.owner_libpq)
+    assert "unknown" not in check
+    assert "pending" in check and "success" in check and "failed" in check
+
+    # Re-upgrade restores the 4-value CHECK.
+    command.upgrade(cfg, _HEAD)
+    assert "unknown" in _status_check(pg_stack.owner_libpq)
+
+
+def test_downgrade_rewrites_unknown_rows_to_failed(pg_stack: SimpleNamespace) -> None:
+    """A row in the terminal 'unknown' status must not block the downgrade: 0012's
+    downgrade rewrites it to 'failed' before restoring the 3-value CHECK."""
+    cfg = _cfg(pg_stack.owner_sa)
+    m = pg_stack.seed_member()
+    wf, ver, run, ea = (uuid.uuid4() for _ in range(4))
+    with psycopg.connect(pg_stack.owner_libpq, autocommit=True) as c:
+        c.execute(
+            "INSERT INTO workflows (id, tenant_id, name) VALUES (%s,%s,'w')", (wf, m.tenant_id)
+        )
+        c.execute(
+            "INSERT INTO workflow_versions (id, tenant_id, workflow_id, version, plan) "
+            "VALUES (%s,%s,%s,1,'{\"steps\":[]}'::jsonb)",
+            (ver, m.tenant_id, wf),
+        )
+        c.execute(
+            "INSERT INTO workflow_runs (id, tenant_id, workflow_id, workflow_version_id, status) "
+            "VALUES (%s,%s,%s,%s,'FAILED')",
+            (run, m.tenant_id, wf, ver),
+        )
+        c.execute(
+            "INSERT INTO external_actions (id, tenant_id, run_id, step_id, connector_id, tool, "
+            "external_action_key, status, attempts) "
+            "VALUES (%s,%s,%s,'s',%s,'webhook.send',%s,'unknown',1)",
+            (ea, m.tenant_id, run, uuid.uuid4(), uuid.uuid4()),
+        )
+
+    command.downgrade(cfg, _PREV)
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        status = _one(c.execute("SELECT status FROM external_actions WHERE id=%s", (ea,)))[0]
+    assert status == "failed"  # rewritten so the restored CHECK holds
+
+    command.upgrade(cfg, _HEAD)

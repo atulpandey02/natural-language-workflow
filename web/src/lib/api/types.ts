@@ -66,6 +66,13 @@ export interface ApprovalOut {
   status: string;
   requested_at: string | null;
   decided_at: string | null;
+  // The effective, non-secret destination the side effect will reach (webhook
+  // host / Slack channel), derived from the approved connector. null when it
+  // cannot be safely resolved.
+  destination: string | null;
+  // True when the payload exceeds the safe review size and is therefore NOT
+  // shown; the action must not be approved in that state.
+  payload_review_blocked: boolean;
   preview: Record<string, unknown>;
 }
 

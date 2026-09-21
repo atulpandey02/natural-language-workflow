@@ -231,7 +231,8 @@ class ExternalAction(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("run_id", "step_id", name="uq_external_action_run_step"),
         CheckConstraint(
-            "status in ('pending','success','failed')", name="ck_external_action_status"
+            "status in ('pending','success','failed','unknown')",
+            name="ck_external_action_status",
         ),
     )
 

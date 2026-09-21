@@ -43,7 +43,18 @@ _SQL = text(
     FROM workflow_runs r
     WHERE
       (r.status = 'PENDING' AND r.created_at < :stale_before)
-      OR (r.status = 'RUNNING' AND (
+      OR (r.status = 'RUNNING'
+          -- An UNKNOWN (ambiguous-outcome) action is TERMINAL and must never be
+          -- reclaimed, resumed, or redelivered (P1C part H). The finalizer sets
+          -- the run to FAILED atomically with the action, so a run bearing an
+          -- unknown action is normally already excluded by the status filter;
+          -- this guard is defence-in-depth against any partial/future state so
+          -- the reconciler can never auto-drive a run past an unknown outcome.
+          AND NOT EXISTS (
+                SELECT 1 FROM external_actions eu
+                WHERE eu.run_id = r.id AND eu.status = 'unknown'
+          )
+          AND (
             EXISTS (
                 SELECT 1 FROM external_actions e
                 WHERE e.run_id = r.id AND e.status = 'pending'

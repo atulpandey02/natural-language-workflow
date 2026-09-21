@@ -19,12 +19,13 @@ from nlw.connectors.base import (
     ConnectorType,
     register_connector_type,
 )
-from nlw.connectors.http_guard import GuardedTransport, SsrfError, validate_url
+from nlw.connectors.http_action import ActionHttpResponse, perform_action_request
+from nlw.connectors.http_guard import SsrfError, validate_url
 from nlw.registry.registry import (
     ActionAuthError,
     ActionContext,
     ActionResult,
-    RetryableActionError,
+    AmbiguousActionError,
     ToolExecutionError,
 )
 from nlw.secrets.store import SecretError
@@ -121,29 +122,43 @@ def send_webhook(
         raise ToolExecutionError("webhook payload exceeds maximum size")
     headers = _build_headers(config, secret, idempotency_key)
 
-    client_transport = transport if transport is not None else GuardedTransport()
-    try:
-        with httpx.Client(
-            transport=client_transport,
-            timeout=httpx.Timeout(config.timeout_s),
-            follow_redirects=False,
-        ) as client:
-            resp = client.request("POST", config.url, content=body, headers=headers)
-            # Bounded read.
-            preview = resp.content[: config.max_response_bytes]
-    except SsrfError as exc:
-        # Deterministic: a blocked destination will never succeed.
-        raise ToolExecutionError(f"webhook destination blocked: {exc}") from None
-    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError):
-        # Ambiguous after transmission for read timeouts -> retryable (may dup).
-        raise RetryableActionError("webhook transport error") from None
-    except httpx.HTTPError:
-        raise RetryableActionError("webhook request error") from None
-
-    return _classify_response(resp, preview)
+    # Total-deadline + streaming + phase-aware classification. The response body
+    # is not needed for classification (status + headers only); it is drained
+    # under a hard byte cap so an oversized/compressed body cannot be buffered.
+    resp = perform_action_request(
+        method="POST",
+        url=config.url,
+        content=body,
+        headers=headers,
+        transport=transport,
+        timeout_s=config.timeout_s,
+        max_response_bytes=config.max_response_bytes,
+        want_body=False,
+    )
+    return _classify_response(resp)
 
 
-def _classify_response(resp: httpx.Response, preview: bytes) -> ActionResult:
+def _classify_response(resp: ActionHttpResponse) -> ActionResult:
+    """Classify a webhook HTTP status CONSERVATIVELY (P1C).
+
+    A generic webhook has NO enforced idempotency contract and no transactional
+    guarantee tying an HTTP status to whether the effect occurred, so we auto-retry
+    ONLY when the effect provably did not occur:
+    - 2xx                -> success.
+    - 3xx                -> deterministic failure (redirects are disabled; a 3xx
+                            here is a misconfiguration, not an effect).
+    - 401/403            -> deterministic auth failure (request rejected, no effect).
+    - other 4xx          -> deterministic client error (request rejected, no effect).
+    - 429                -> AMBIGUOUS -> UNKNOWN. 429 signals rate limiting but gives
+                            NO guarantee an arbitrary receiver produced no effect
+                            (it may have acted and still returned 429). With no
+                            enforced idempotency contract we must not auto-resend.
+                            (Slack's 429 IS retryable — that is backed by Slack's own
+                            documented rate-limit contract; see slack.py.)
+    - 5xx                -> AMBIGUOUS -> UNKNOWN. A generic 5xx does NOT prove the
+                            effect did not occur: a receiver may perform the action
+                            and then fail while responding.
+    """
     code = resp.status_code
     if 200 <= code < 300:
         request_id = resp.headers.get("X-Request-Id") or resp.headers.get("X-Request-ID")
@@ -153,21 +168,11 @@ def _classify_response(resp: httpx.Response, preview: bytes) -> ActionResult:
     if code in (401, 403):
         raise ActionAuthError("webhook authentication failed")
     if code == 429:
-        retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-        raise RetryableActionError("webhook rate limited", retry_after_s=retry_after)
+        raise AmbiguousActionError("webhook rate limited (429); delivery outcome unprovable")
     if 500 <= code < 600:
-        raise RetryableActionError(f"webhook server error {code}")
+        raise AmbiguousActionError(f"webhook server error {code}; delivery outcome unprovable")
     # Other 4xx: deterministic client error.
     raise ToolExecutionError(f"webhook rejected the request ({code})")
-
-
-def _parse_retry_after(value: str | None) -> float | None:
-    if not value:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
 
 
 def _webhook_health(ctx: ConnectorContext) -> None:

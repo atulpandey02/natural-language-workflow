@@ -40,14 +40,29 @@ class ActionAuthError(ToolExecutionError, ConnectorUnhealthyError):
 
 
 class RetryableActionError(Exception):
-    """A transient action failure (5xx/429/network/timeout) -> retry with backoff.
+    """A transient failure that PROVABLY did NOT cause the side effect -> safe to
+    retry with backoff. Either the request never left (DNS/pool/connect/TLS failure
+    before any bytes were written) or a connector-specific contract makes retry
+    safe (Slack HTTP 429 / Slack ``ok:false`` transient errors, where Slack
+    documents the message as not delivered). A generic webhook 429 or 5xx is NOT
+    retryable — it is ``AmbiguousActionError``, since an arbitrary receiver gives
+    no guarantee it produced no effect. Contrast ``AmbiguousActionError``, where
+    the request may already have taken effect.
 
-    ``retry_after_s`` (when set, e.g. from a 429 Retry-After) is honored, bounded.
+    ``retry_after_s`` (when set, e.g. from a Slack 429 Retry-After) is honored,
+    bounded.
     """
 
     def __init__(self, message: str, retry_after_s: float | None = None) -> None:
         super().__init__(message)
         self.retry_after_s = retry_after_s
+
+
+class AmbiguousActionError(Exception):
+    """The external request MAY have been transmitted but the outcome cannot be
+    proven (write/read timeout after send, connection reset after send, total
+    deadline after send, response protocol failure). It is NOT safely retryable
+    -> the action becomes a terminal UNKNOWN outcome (no automatic resend)."""
 
 
 ToolCallable = Callable[[BaseModel, ConnectorContext | None], dict[str, Any]]

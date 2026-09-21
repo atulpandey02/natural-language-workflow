@@ -70,19 +70,23 @@ def _ext_action(
     *,
     lease_expires: datetime | None,
     next_attempt: datetime | None,
+    status: str = "pending",
+    step_id: str = "a",
 ) -> None:
     with psycopg.connect(owner, autocommit=True) as c:
         c.execute(
             "INSERT INTO external_actions (id, tenant_id, run_id, step_id, connector_id, tool, "
             "external_action_key, status, attempts, lease_token, lease_expires_at, "
             "next_attempt_at) "
-            "VALUES (%s,%s,%s,'a',%s,'webhook.send',%s,'pending',1,%s,%s,%s)",
+            "VALUES (%s,%s,%s,%s,%s,'webhook.send',%s,%s,1,%s,%s,%s)",
             (
                 uuid.uuid4(),
                 tenant,
                 run_id,
+                step_id,
                 uuid.uuid4(),
                 uuid.uuid4(),
+                status,
                 uuid.uuid4(),
                 lease_expires,
                 next_attempt,
@@ -162,6 +166,44 @@ def test_reconcile_eligibility_matrix(pg_stack: SimpleNamespace) -> None:
     assert waiting_pending not in stuck
     assert completed not in stuck
     assert failed not in stuck
+
+
+def test_reconcile_excludes_runs_with_unknown_actions(pg_stack: SimpleNamespace) -> None:
+    """An UNKNOWN (ambiguous-outcome) action is TERMINAL and must never be
+    reclaimed, resumed, or redelivered (P1C part H). The reconciler must never
+    re-enqueue a run bearing one, even if the run looks RUNNING and stale."""
+    m = pg_stack.seed_member()
+    ver = _seed_wf(pg_stack.owner_libpq, m.tenant_id)
+    o, t = pg_stack.owner_libpq, m.tenant_id
+
+    # A stale RUNNING run whose ONLY action is unknown: without the guard the
+    # NOT-EXISTS(pending) stall branch would wrongly re-enqueue it.
+    unknown_only = _run(o, t, ver, "RUNNING", created=OLD, updated=OLD)
+    _ext_action(o, t, unknown_only, lease_expires=None, next_attempt=None, status="unknown")
+
+    # A stale RUNNING run with an expired-lease PENDING action AND an unknown
+    # action from a different step: the run must still NOT be auto-driven.
+    mixed = _run(o, t, ver, "RUNNING", created=OLD, updated=OLD)
+    _ext_action(
+        o, t, mixed, lease_expires=NOW - timedelta(minutes=1), next_attempt=None, step_id="a"
+    )
+    _ext_action(o, t, mixed, lease_expires=None, next_attempt=None, status="unknown", step_id="b")
+
+    # Control: a normal expired-lease pending action IS eligible.
+    resumable = _run(o, t, ver, "RUNNING", created=OLD, updated=OLD)
+    _ext_action(o, t, resumable, lease_expires=NOW - timedelta(minutes=1), next_attempt=None)
+
+    with _sched_sm(pg_stack)() as s, s.begin():
+        stuck = {
+            r.run_id
+            for r in find_stuck_runs(
+                s, NOW, pending_threshold_s=60, batch_limit=100, recovery_horizon_s=10**9
+            )
+        }
+
+    assert unknown_only not in stuck
+    assert mixed not in stuck
+    assert resumable in stuck
 
 
 def test_reconcile_once_reenqueues_orphan_pending(pg_stack: SimpleNamespace) -> None:

@@ -55,6 +55,21 @@ def _runner(sink: Sink) -> ActionRunner:
     return run
 
 
+def _connect_error_runner(sink: Sink) -> ActionRunner:
+    """A runner whose send fails PROVABLY before transmission (connect refused) ->
+    RETRY. Records each invocation on the sink so attempts can be counted."""
+
+    class _Boom(httpx.BaseTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+    def run(task: ActionTask) -> ActionExecResult:
+        sink.calls.append(httpx.Request("POST", "https://sink.example/hook"))
+        return run_action(task, transport=_Boom())
+
+    return run
+
+
 def _seed_webhook(
     owner_libpq: str,
     tenant_id: uuid.UUID,
@@ -299,7 +314,7 @@ def test_w3_replay_after_finalize_is_noop(pg_stack: SimpleNamespace) -> None:
 # --- Retry + attempt cap ---
 
 
-def test_retryable_5xx_schedules_backoff_and_gates_early_redelivery(
+def test_retryable_connect_error_schedules_backoff_and_gates_early_redelivery(
     pg_stack: SimpleNamespace,
 ) -> None:
     m = pg_stack.seed_member()
@@ -308,11 +323,13 @@ def test_retryable_5xx_schedules_backoff_and_gates_early_redelivery(
     sm = _worker_sm(pg_stack)
     store = EnvironmentSecretStore({})
     sink = Sink()
-    sink.responses = [httpx.Response(503)]  # first attempt fails transiently
+    # The retryable case is a PROVABLY pre-transmission failure (connect refused);
+    # a webhook 429 or 5xx is now UNKNOWN, not retried (P1C).
+    runner = _connect_error_runner(sink)
 
-    process_advance(sm, run_id, _noop_enqueue, store, _runner(sink))  # park
+    process_advance(sm, run_id, _noop_enqueue, store, runner)  # park
     _approve(pg_stack.owner_libpq, run_id, m.user_id)
-    out = process_advance(sm, run_id, _noop_enqueue, store, _runner(sink))
+    out = process_advance(sm, run_id, _noop_enqueue, store, runner)
     assert out.result == "retry"
     ea = _ea(pg_stack.owner_libpq, run_id)
     assert ea["status"] == "pending" and ea["next_attempt_at"] is not None
@@ -331,14 +348,16 @@ def test_attempt_cap_fails_run(pg_stack: SimpleNamespace) -> None:
     sm = _worker_sm(pg_stack)
     store = EnvironmentSecretStore({})
     sink = Sink()
-    sink.responses = [httpx.Response(503) for _ in range(10)]  # always transient
+    # Every attempt fails PROVABLY before transmission (connect refused), so the
+    # attempt cap finally fails the run DEFINITIVELY (not UNKNOWN).
+    runner = _connect_error_runner(sink)
 
-    process_advance(sm, run_id, _noop_enqueue, store, _runner(sink))  # park
+    process_advance(sm, run_id, _noop_enqueue, store, runner)  # park
     _approve(pg_stack.owner_libpq, run_id, m.user_id)
     # Repeatedly attempt: clear the retry gate each time by expiring lease + due.
     result = "retry"
     for _ in range(8):
-        out = process_advance(sm, run_id, _noop_enqueue, store, _runner(sink))
+        out = process_advance(sm, run_id, _noop_enqueue, store, runner)
         result = out.result
         if result == "failed":
             break
@@ -349,6 +368,8 @@ def test_attempt_cap_fails_run(pg_stack: SimpleNamespace) -> None:
                 (run_id,),
             )
     assert result == "failed"
+    # Provable pre-transmission failures at the cap are a DEFINITE failure, not
+    # UNKNOWN (the effect provably never occurred).
     assert _ea(pg_stack.owner_libpq, run_id)["status"] == "failed"
     assert _step(pg_stack.owner_libpq, run_id)[0] == "FAILED"
 

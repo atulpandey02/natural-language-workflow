@@ -34,4 +34,14 @@ describe("StatusBadge", () => {
     render(<StatusBadge status="COMPLETED" />);
     expect(screen.getByText("COMPLETED")).toBeInTheDocument();
   });
+
+  it("renders the ambiguous unknown outcome as a warning, distinct from failure", () => {
+    render(<StatusBadge status="unknown" />);
+    const badge = screen.getByText("unknown");
+    expect(badge).toBeInTheDocument();
+    // Amber warning, NOT the red failure class — an unknown outcome is not a
+    // definite failure.
+    expect(badge).toHaveClass("warn");
+    expect(badge).not.toHaveClass("fail");
+  });
 });
