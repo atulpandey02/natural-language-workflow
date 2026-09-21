@@ -153,14 +153,29 @@ closes that:
   even before RLS. `nlw_worker`/`nlw_scheduler` get **no** access to `users`.
 - First login cannot rely on a self-scoped policy (the row does not exist yet and
   `app.user_id` is not established at `get_or_create` time — the resolution runs
-  *before* `set_current_user`). Resolution/provisioning therefore moves into one
-  narrow `SECURITY DEFINER` function, **`resolve_or_create_user(text, text)`**,
-  owned by the existing write-only `BYPASSRLS` non-login role
-  `nlw_workspace_bootstrap`, `SET search_path = pg_catalog`, all objects
-  schema-qualified, `REVOKE ALL … FROM PUBLIC`, `EXECUTE` granted to `nlw_app`
-  only (never worker/scheduler/PUBLIC). It resolves-or-creates by
-  `auth_provider_id`, converges concurrent first-login races via
-  `UNIQUE(auth_provider_id)`, syncs `email` only when the verified provider email
-  changed (no write/lock otherwise), and **never** reassigns `auth_provider_id`.
-- This does **not** provide signed/non-forgeable DB request context; the
-  forgeable-GUC residual risk above is unchanged and still deferred.
+  *before* `set_current_user`). Resolution therefore uses one **minimal**
+  `SECURITY DEFINER` function, **`resolve_or_create_user(text, text) RETURNS
+  uuid`**, owned by the existing write-only `BYPASSRLS` non-login role
+  `nlw_workspace_bootstrap` (granted only `SELECT, INSERT` on `users`),
+  `SET search_path = pg_catalog`, all objects schema-qualified,
+  `REVOKE ALL … FROM PUBLIC`, `EXECUTE` for `nlw_app` only (never
+  worker/scheduler/PUBLIC). It **returns only the internal `uuid` id** — never a
+  row, email, or `auth_provider_id` — inserts a missing identity (race-safe via
+  `UNIQUE(auth_provider_id)` + `ON CONFLICT DO NOTHING`), and does **nothing** to
+  an existing row. So a caller supplying an arbitrary `auth_provider_id` can
+  neither read that user's email/provider id nor modify it; at most it learns an
+  id exists.
+- **Email synchronization is a separate, self-scoped step**, performed by the app
+  *after* `app.user_id` is established: a self-only `UPDATE` policy
+  (`users_app_self_update`, `USING/WITH CHECK id = app.user_id`) plus a
+  **column-level `GRANT UPDATE (email, updated_at)`** — so a caller can update
+  only their own row and only those columns; the stable `auth_provider_id` is not
+  grantable and cannot be rewritten. The synced value comes exclusively from the
+  verified provider email, never request JSON.
+- **Honest boundary.** The above is a *direct function-call / direct-table
+  guarantee* for any `nlw_app` caller. It does **not** defend against a caller
+  that can **forge a complete authenticated DB context** (e.g. arbitrarily set
+  `app.user_id`): such a caller stays inside the deferred signed/non-forgeable-GUC
+  threat boundary (see the M9 note above), which P1A does not change. If a safe
+  self-scoped email sync were not achievable, deferring automatic email sync would
+  be preferred over leaving a privileged arbitrary-email-update primitive.

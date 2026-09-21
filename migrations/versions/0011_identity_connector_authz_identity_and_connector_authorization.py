@@ -6,14 +6,25 @@ Part A — protect ``users`` (identity table had NO RLS; ``nlw_app`` held broad
 SELECT/INSERT/UPDATE, so the runtime role could enumerate identities and rewrite
 unrelated identity mappings including the stable ``auth_provider_id``):
 - enable + FORCE RLS on ``users``;
-- remove the broad direct grant; ``nlw_app`` keeps only self-scoped SELECT (RLS);
-- first-login resolution/provisioning moves into a narrow SECURITY DEFINER
-  bootstrap function ``resolve_or_create_user`` owned by the existing write-only
-  non-login role ``nlw_workspace_bootstrap`` (the only user-write path). It never
-  reassigns an existing ``auth_provider_id`` and syncs email only when the
-  verified provider email actually changed. It is EXECUTE-only for ``nlw_app``
-  (never worker/scheduler/PUBLIC). Worker and scheduler get no access to
-  ``users`` (no demonstrated runtime requirement).
+- remove the broad direct grant; ``nlw_app`` keeps only self-scoped SELECT and a
+  self-scoped, column-limited UPDATE(email) (RLS + column grant);
+- first-login resolution moves into a *minimal* SECURITY DEFINER bootstrap
+  ``resolve_or_create_user`` owned by the existing write-only non-login role
+  ``nlw_workspace_bootstrap``. It returns ONLY the internal ``uuid`` id — never a
+  row, email, or ``auth_provider_id`` — and on an existing identity it does
+  NOTHING (``ON CONFLICT DO NOTHING``): it neither discloses nor mutates another
+  user's record, so a caller under ``nlw_app`` supplying an arbitrary
+  ``auth_provider_id`` learns at most that an id exists and can neither read that
+  user's email/provider id nor change it. It is EXECUTE-only for ``nlw_app``
+  (never worker/scheduler/PUBLIC). Worker and scheduler get no access to ``users``.
+- email synchronization is a SEPARATE self-scoped operation done by the app AFTER
+  ``app.user_id`` is established (self-only UPDATE policy + column-level
+  UPDATE(email, updated_at) grant), using only the verified provider email.
+
+NOTE (honest boundary): the DIRECT function-call guarantee above holds for any
+``nlw_app`` caller. Protection against a caller that can FORGE a complete
+authenticated DB context (e.g. arbitrarily set ``app.user_id``) is the deferred
+signed/non-forgeable-GUC item (ADR-003) and is explicitly NOT provided here.
 
 Part B — connector mutation authority (any member could create a connector and
 supply a credential alias): the ``connectors`` INSERT policy for ``nlw_app`` now
@@ -49,29 +60,31 @@ _CONN_ADMIN = f"(tenant_id = {_TENANT_GUC} AND public.is_current_user_admin_or_o
 
 def upgrade() -> None:
     # ---------------------------------------------------------------- Part A --
-    # 1. The write-only, BYPASSRLS, non-login role owns the sole user-write path.
-    #    It already exists (created in docker/postgres/initdb/00-roles.sh and the
-    #    test bootstrap) and owns create_workspace_for_current_user (0005). Grant
-    #    it the table privileges the definer function needs (BYPASSRLS bypasses
-    #    RLS policies, not GRANTs).
-    op.execute("GRANT SELECT, INSERT, UPDATE ON users TO nlw_workspace_bootstrap")
+    # 1. The write-only, BYPASSRLS, non-login role owns the sole first-login
+    #    INSERT path. It already exists (docker/postgres/initdb/00-roles.sh + the
+    #    test bootstrap) and owns create_workspace_for_current_user (0005). The
+    #    bootstrap only ever INSERTs a missing identity, so it needs SELECT+INSERT
+    #    (no UPDATE): it must never be able to mutate an existing user.
+    op.execute("GRANT SELECT, INSERT ON users TO nlw_workspace_bootstrap")
 
-    # 2. Narrow first-login bootstrap. Read-first so an established, unchanged
-    #    identity does NOT incur a write or a row lock; ON CONFLICT converges
-    #    concurrent first-login races onto exactly one row. auth_provider_id is
-    #    the conflict key and is NEVER in a SET clause -> immutable via this
-    #    function; direct UPDATE is revoked, so it is immutable to nlw_app.
+    # 2. MINIMAL first-login bootstrap. Returns ONLY the internal uuid id — never
+    #    a row, email, or auth_provider_id — and on an existing identity does
+    #    NOTHING (no read of its fields is returned, no write). So a caller under
+    #    nlw_app that supplies an arbitrary auth_provider_id can neither read that
+    #    user's email/provider id nor change it; at most it learns an id exists.
+    #    Email synchronization is handled separately by the app, self-scoped,
+    #    after app.user_id is established (see step 6 + the app repository).
     op.execute(
         """
         CREATE FUNCTION resolve_or_create_user(p_auth_provider_id text, p_email text)
-            RETURNS SETOF public.users
+            RETURNS uuid
             LANGUAGE plpgsql
             VOLATILE
             SECURITY DEFINER
             SET search_path = pg_catalog
             AS $fn$
             DECLARE
-                v_email text;
+                v_id uuid;
             BEGIN
                 IF p_auth_provider_id IS NULL OR p_auth_provider_id = '' THEN
                     RAISE EXCEPTION 'auth_provider_id is required';
@@ -80,38 +93,30 @@ def upgrade() -> None:
                     RAISE EXCEPTION 'email is required';
                 END IF;
 
-                -- Fast path: established identity. Plain read, no write, no lock.
-                SELECT u.email INTO v_email
+                -- Fast path: established identity -> return its id. NO write.
+                SELECT u.id INTO v_id
                     FROM public.users u
                     WHERE u.auth_provider_id = p_auth_provider_id;
-
                 IF FOUND THEN
-                    -- Narrow email sync: write ONLY when the verified provider
-                    -- email actually changed. auth_provider_id is not touched.
-                    IF v_email IS DISTINCT FROM p_email THEN
-                        UPDATE public.users u
-                            SET email = p_email, updated_at = pg_catalog.now()
-                            WHERE u.auth_provider_id = p_auth_provider_id;
-                    END IF;
-                    RETURN QUERY
-                        SELECT u.* FROM public.users u
-                            WHERE u.auth_provider_id = p_auth_provider_id;
-                    RETURN;
+                    RETURN v_id;
                 END IF;
 
-                -- First login: create exactly one row. ON CONFLICT makes
-                -- concurrent first-login callers converge; the DO UPDATE never
-                -- reassigns auth_provider_id and only writes email when changed.
+                -- First login: insert the missing identity. ON CONFLICT DO
+                -- NOTHING converges concurrent first-login races WITHOUT ever
+                -- touching an existing row (no email/auth_provider_id change).
                 INSERT INTO public.users (id, auth_provider_id, email, created_at, updated_at)
                     VALUES (pg_catalog.gen_random_uuid(), p_auth_provider_id, p_email,
                             pg_catalog.now(), pg_catalog.now())
-                    ON CONFLICT (auth_provider_id) DO UPDATE
-                        SET email = excluded.email, updated_at = pg_catalog.now()
-                        WHERE public.users.email IS DISTINCT FROM excluded.email;
+                    ON CONFLICT (auth_provider_id) DO NOTHING
+                    RETURNING id INTO v_id;
 
-                RETURN QUERY
-                    SELECT u.* FROM public.users u
+                IF v_id IS NULL THEN
+                    -- Lost the race: another session inserted first. Read its id.
+                    SELECT u.id INTO v_id
+                        FROM public.users u
                         WHERE u.auth_provider_id = p_auth_provider_id;
+                END IF;
+                RETURN v_id;
             END;
             $fn$
         """
@@ -120,11 +125,12 @@ def upgrade() -> None:
     op.execute("REVOKE ALL ON FUNCTION resolve_or_create_user(text, text) FROM PUBLIC")
     op.execute("GRANT EXECUTE ON FUNCTION resolve_or_create_user(text, text) TO nlw_app")
 
-    # 3. Remove the broad direct grant; nlw_app keeps only (RLS-scoped) SELECT.
-    #    No INSERT/UPDATE/DELETE grant -> all direct writes fail closed; the
-    #    definer function is the only write path.
+    # 3. Remove the broad direct grant. nlw_app keeps only (RLS-scoped) SELECT and
+    #    a column-limited UPDATE(email) — never INSERT/DELETE, and never UPDATE of
+    #    id/auth_provider_id/created_at (those columns are not granted).
     op.execute("REVOKE ALL ON users FROM nlw_app")
     op.execute("GRANT SELECT ON users TO nlw_app")
+    op.execute("GRANT UPDATE (email, updated_at) ON users TO nlw_app")
 
     # 4. Enable + FORCE RLS (FORCE subjects the table owner too).
     op.execute("ALTER TABLE users ENABLE ROW LEVEL SECURITY")
@@ -135,6 +141,14 @@ def upgrade() -> None:
     op.execute(
         f"CREATE POLICY users_app_self_select ON users FOR SELECT TO nlw_app "
         f"USING (id = {_USER_GUC})"
+    )
+
+    # 6. Self-update only (email sync). Combined with the column grant above, a
+    #    caller can update only their OWN row and only the email/updated_at
+    #    columns. Absent/empty context -> NULL -> no row matches -> no-op.
+    op.execute(
+        f"CREATE POLICY users_app_self_update ON users FOR UPDATE TO nlw_app "
+        f"USING (id = {_USER_GUC}) WITH CHECK (id = {_USER_GUC})"
     )
 
     # ---------------------------------------------------------------- Part B --
@@ -157,6 +171,13 @@ def downgrade() -> None:
     )
 
     # ---- Part A: restore the 0003 users posture (no RLS, broad grant). ----
+    #
+    # WARNING: this downgrade RE-OPENS the P1A defects — it restores the broad
+    # nlw_app SELECT/INSERT/UPDATE on `users` (no RLS) and, above, the member-level
+    # connector-insert policy. Do NOT run it on the live pilot without explicit
+    # security review + compensating controls (see docs/runbooks/failed-migration.md
+    # and the migration warning in docs).
+    op.execute("DROP POLICY IF EXISTS users_app_self_update ON users")
     op.execute("DROP POLICY IF EXISTS users_app_self_select ON users")
     op.execute("ALTER TABLE users NO FORCE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE users DISABLE ROW LEVEL SECURITY")

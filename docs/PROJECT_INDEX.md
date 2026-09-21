@@ -28,12 +28,17 @@ remains a required operator action — see runbooks/rotate-exposed-secrets.md.
 
 M11.5 P1A (identity & connector authorization, migration `0011`) closes two
 verified authorization findings. **users:** RLS is now `ENABLE`+`FORCE`; `nlw_app`
-loses its broad `SELECT/INSERT/UPDATE` and keeps only a self-scoped `SELECT`
-(no write grant at all); first-login resolution/provisioning moves into one narrow
-`SECURITY DEFINER` bootstrap `resolve_or_create_user` (owned by
+loses its broad `SELECT/INSERT/UPDATE` and keeps only a self-scoped `SELECT` plus
+a column-limited self `UPDATE(email)` (self-only RLS). First-login resolution uses
+a *minimal* `SECURITY DEFINER` bootstrap `resolve_or_create_user` (owned by
 `nlw_workspace_bootstrap`, `EXECUTE` for `nlw_app` only, never worker/scheduler/
-PUBLIC) that never reassigns `auth_provider_id` and syncs email only on change —
-so the app role can no longer enumerate or rewrite unrelated identities.
+PUBLIC) that returns **only the internal `uuid`** — never a row/email/provider id
+— inserts a missing identity race-safely and does nothing to an existing one, so
+it cannot read or rewrite another user's record. Email sync is a separate
+self-scoped step after `app.user_id` is established (verified provider email only).
+The stable `auth_provider_id` is never writable by the app role. So the runtime
+role can no longer enumerate or rewrite unrelated identities. (Honest boundary: a
+caller able to forge complete DB context stays in the deferred signed-GUC scope.)
 **connectors:** creation + credential-alias attachment is now admin/owner-only in
 both the API (`require_role(ADMIN)`) and RLS (`connectors_app_insert` now checks
 `is_current_user_admin_or_owner`); members keep read-only, secret-free access.

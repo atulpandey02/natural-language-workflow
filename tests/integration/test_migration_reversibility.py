@@ -49,7 +49,27 @@ def _users_posture(owner_libpq: str) -> dict[str, Any]:
         fn = _one(c.execute("SELECT count(*) FROM pg_proc WHERE proname='resolve_or_create_user'"))[
             0
         ]
-    return {"rls": rls, "app_grants": grants, "bootstrap_fn": fn}
+        policies = sorted(
+            r[0]
+            for r in c.execute(
+                "SELECT policyname FROM pg_policies WHERE tablename='users'"
+            ).fetchall()
+        )
+        # Column-level UPDATE(email) is not in role_table_grants; check separately.
+        upd_cols = sorted(
+            r[0]
+            for r in c.execute(
+                "SELECT column_name FROM information_schema.column_privileges "
+                "WHERE table_name='users' AND grantee='nlw_app' AND privilege_type='UPDATE'"
+            ).fetchall()
+        )
+    return {
+        "rls": rls,
+        "app_grants": grants,
+        "bootstrap_fn": fn,
+        "policies": policies,
+        "app_update_cols": upd_cols,
+    }
 
 
 def test_reversibility_matrix(pg_stack: SimpleNamespace) -> None:
@@ -58,7 +78,9 @@ def test_reversibility_matrix(pg_stack: SimpleNamespace) -> None:
     # pg_stack already applied head. Verify the P1A posture.
     at_head = _users_posture(pg_stack.owner_libpq)
     assert at_head["rls"] == (True, True)
-    assert at_head["app_grants"] == ["SELECT"]
+    assert at_head["app_grants"] == ["SELECT"]  # table-level; UPDATE is column-only
+    assert at_head["app_update_cols"] == ["email", "updated_at"]
+    assert at_head["policies"] == ["users_app_self_select", "users_app_self_update"]
     assert at_head["bootstrap_fn"] == 1
 
     # head -> previous: restores the pre-P1A posture exactly.
@@ -66,6 +88,10 @@ def test_reversibility_matrix(pg_stack: SimpleNamespace) -> None:
     at_prev = _users_posture(pg_stack.owner_libpq)
     assert at_prev["rls"] == (False, False)
     assert at_prev["app_grants"] == ["INSERT", "SELECT", "UPDATE"]
+    # The restored table-level UPDATE covers every column (the old broad posture);
+    # crucially auth_provider_id is writable again — that is the re-opened defect.
+    assert "auth_provider_id" in at_prev["app_update_cols"]
+    assert at_prev["policies"] == []
     assert at_prev["bootstrap_fn"] == 0
 
     # previous -> head again.

@@ -66,18 +66,36 @@ def test_user_cannot_enumerate_all_emails(pg_stack: SimpleNamespace) -> None:
 def test_user_cannot_update_another_users_email(pg_stack: SimpleNamespace) -> None:
     a = _seed_user(pg_stack.owner_libpq, "sub-A", "a@example.com")
     b = _seed_user(pg_stack.owner_libpq, "sub-B", "b@example.com")
-    # nlw_app holds no UPDATE grant at all -> fails at privilege level (stronger
-    # than an RLS "0 rows updated"): defence in depth.
-    with (
-        psycopg.connect(pg_stack.app_libpq) as c,
-        pytest.raises(psycopg.errors.InsufficientPrivilege),
-    ):
+    # nlw_app has a column-limited self-UPDATE(email); the self-only RLS policy
+    # makes B's row invisible for update -> 0 rows affected, B unchanged.
+    with psycopg.connect(pg_stack.app_libpq) as c:
         c.execute("SELECT set_config('app.user_id', %s, true)", (str(a),))
-        c.execute("UPDATE users SET email = 'hijack@evil.com' WHERE id = %s", (b,))
-    # The row is unchanged.
+        cur = c.execute("UPDATE users SET email = 'hijack@evil.com' WHERE id = %s", (b,))
+        assert cur.rowcount == 0
+        c.rollback()
     with psycopg.connect(pg_stack.owner_libpq) as c:
         email = _one(c.execute("SELECT email FROM users WHERE id = %s", (b,)))[0]
     assert email == "b@example.com"
+
+
+def test_user_can_sync_own_email_only_with_self_context(pg_stack: SimpleNamespace) -> None:
+    a = _seed_user(pg_stack.owner_libpq, "sub-A", "old@example.com")
+    # Without context: fails closed (self-only policy -> no row matches).
+    with psycopg.connect(pg_stack.app_libpq) as c:
+        cur = c.execute("UPDATE users SET email = 'new@example.com' WHERE id = %s", (a,))
+        assert cur.rowcount == 0
+        c.rollback()
+    # With self-context established: the verified email sync applies to own row.
+    with psycopg.connect(pg_stack.app_libpq) as c:
+        c.execute("SELECT set_config('app.user_id', %s, true)", (str(a),))
+        cur = c.execute(
+            "UPDATE users SET email = 'new@example.com', updated_at = now() WHERE id = %s", (a,)
+        )
+        assert cur.rowcount == 1
+        c.commit()
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        email = _one(c.execute("SELECT email FROM users WHERE id = %s", (a,)))[0]
+    assert email == "new@example.com"
 
 
 def test_user_cannot_modify_another_users_auth_provider_id(pg_stack: SimpleNamespace) -> None:
@@ -173,4 +191,4 @@ def test_worker_and_scheduler_cannot_execute_bootstrap(pg_stack: SimpleNamespace
     _seed_user(pg_stack.owner_libpq, "sub-A", "a@example.com")
     for url in (pg_stack.worker_libpq, pg_stack.scheduler_libpq):
         with psycopg.connect(url) as c, pytest.raises(psycopg.errors.InsufficientPrivilege):
-            c.execute("SELECT id FROM resolve_or_create_user('x','x@example.com')")
+            c.execute("SELECT resolve_or_create_user('x','x@example.com')")
