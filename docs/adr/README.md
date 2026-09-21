@@ -35,6 +35,7 @@ decision, numbered and never deleted (supersede instead of removing).
 | [018](ADR-018-production-topology-and-ops.md) | Production topology & operational readiness | Accepted |
 | [019](ADR-019-frontend-architecture.md) | Frontend architecture (Next.js App Router + BFF) | Accepted |
 | [020](ADR-020-staging-validation-and-capacity.md) | Staging validation, failure drills & capacity | Accepted |
+| [021](ADR-021-scheduler-reconciler-correctness.md) | Scheduler & reconciler correctness (occurrence idempotency, fairness, progress, approval binding) | Accepted |
 
 ## Template
 

@@ -86,32 +86,38 @@ def reconcile_once(
     """
     at = now or _now()
     with session_factory() as session, session.begin():
-        stuck = find_stuck_runs(
+        batch = find_stuck_runs(
             session,
             at,
             pending_threshold_s=settings.scheduler_pending_threshold_s,
             batch_limit=settings.scheduler_batch_limit,
             recovery_horizon_s=settings.scheduler_recovery_horizon_s,
+            per_tenant_limit=settings.scheduler_reconcile_per_tenant_limit,
         )
-    to_enqueue = [s.run_id for s in stuck if not s.beyond_horizon]
-    beyond = [s.run_id for s in stuck if s.beyond_horizon]
+    to_enqueue = batch.run_ids
 
     for run_id in to_enqueue:  # AFTER commit (read-only txn)
         enqueue(run_id)
 
     # Current count of runs past the horizon (a gauge, not an ever-incrementing
     # counter) so alerting reflects the present backlog, not cumulative scans.
-    metrics.set_runs_beyond_horizon(len(beyond))
-    if beyond:
+    metrics.set_runs_beyond_horizon(batch.beyond_horizon)
+    metrics.record_reconcile_candidates(len(to_enqueue))
+    if batch.fairness_deferred:
+        metrics.record_reconcile_fairness_deferred(batch.fairness_deferred)
+    if batch.beyond_horizon:
         log.warning(
             "scheduler.runs_beyond_horizon",
-            count=len(beyond),
+            count=batch.beyond_horizon,
             horizon_s=settings.scheduler_recovery_horizon_s,
-            sample=[str(r) for r in beyond[:10]],
         )
     if to_enqueue:
         metrics.record_reconcile(len(to_enqueue))
-        log.info("scheduler.reconcile", re_enqueued=len(to_enqueue))
+        log.info(
+            "scheduler.reconcile",
+            re_enqueued=len(to_enqueue),
+            fairness_deferred=batch.fairness_deferred,
+        )
     return to_enqueue
 
 

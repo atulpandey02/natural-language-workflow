@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from nlw.db.models import Schedule, WorkflowRun
+from nlw.observability import metrics
 from nlw.scheduler.recurrence import Frequency, Recurrence, latest_occurrence, next_occurrence
 
 
@@ -57,6 +58,7 @@ def scan_due(
     )
 
     created: list[CreatedRun] = []
+    already_existed = 0
     catchup = timedelta(seconds=catchup_window_s)
     for s in due:
         rec = _recurrence(s)
@@ -65,7 +67,13 @@ def scan_due(
 
         if scheduled_for is not None and (now - scheduled_for) <= catchup:
             run_id = uuid.uuid4()
-            key = f"sched:{s.id}:{scheduled_for.isoformat()}"
+            # Scheduled-run uniqueness comes SOLELY from the immutable occurrence
+            # identity (schedule_id, scheduled_for) via uq_run_schedule_occurrence.
+            # We deliberately leave idempotency_key NULL so a scheduled run never
+            # occupies the CLIENT idempotency namespace (uq_run_tenant_idempotency):
+            # a user-supplied Idempotency-Key can never collide with, suppress, or
+            # be mistaken for a scheduled occurrence (P1D). NULLs are distinct, so
+            # many scheduled runs per tenant coexist.
             stmt = (
                 pg_insert(WorkflowRun)
                 .values(
@@ -77,7 +85,7 @@ def scan_due(
                     trigger="schedule",  # enforced trigger (req 8)
                     schedule_id=s.id,
                     scheduled_for=scheduled_for,
-                    idempotency_key=key,
+                    idempotency_key=None,
                 )
                 .on_conflict_do_nothing(constraint="uq_run_schedule_occurrence")
                 .returning(WorkflowRun.id)
@@ -86,6 +94,10 @@ def scan_due(
             if inserted is not None:
                 run_made = True
                 created.append(CreatedRun(run_id, s.tenant_id, s.id, scheduled_for))
+            else:
+                # The occurrence's run already existed: a concurrent scheduler or a
+                # restart re-scanning the same occurrence -> idempotent no-op.
+                already_existed += 1
 
         # Advance to the next future occurrence. last_scheduled_for updates ONLY
         # when a run was actually created (req 10).
@@ -94,4 +106,5 @@ def scan_due(
             s.last_scheduled_for = scheduled_for
         s.updated_at = now
 
+    metrics.record_scheduler_occurrence_exists(already_existed)
     return created

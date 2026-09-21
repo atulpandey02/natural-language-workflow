@@ -33,6 +33,11 @@ router = APIRouter()
 log = structlog.get_logger(__name__)
 
 _IDEMPOTENCY_KEY_MAX = 200
+# Reserved prefix for scheduler-internal namespaces. A client Idempotency-Key must
+# not use it, so a manual key can never be confused with (or shadow) scheduler
+# state. Scheduled runs no longer store any client key (see scheduler/due.py); this
+# is defence-in-depth keeping the two namespaces unambiguous (P1D).
+_RESERVED_IDEMPOTENCY_PREFIX = "sched:"
 
 
 def _enqueue_advance(run_id: uuid.UUID) -> None:
@@ -130,6 +135,11 @@ async def create_run(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Idempotency-Key header is required (<= 200 chars)",
+        )
+    if idempotency_key.startswith(_RESERVED_IDEMPOTENCY_PREFIX):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Idempotency-Key must not use the reserved 'sched:' prefix",
         )
 
     # Dedicated session with explicit commit so the run is durable BEFORE we

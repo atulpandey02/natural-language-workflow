@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
 from nlw.db.models import ExternalAction, StepRun, WorkflowRun
@@ -203,6 +204,7 @@ def finalize_action(
             step.status = StepStatus.SUCCESS
             step.output = result.output
             step.finished_at = now
+            run.last_progress_at = func.now()  # action outcome finalized (success)
             return FinalizeOutcome("advanced", enqueue_next=True)
 
         if result.kind == ActionKind.UNKNOWN:
@@ -221,6 +223,7 @@ def finalize_action(
             step.finished_at = now
             run.status = RunStatus.FAILED
             run.finished_at = now
+            run.last_progress_at = func.now()  # run terminal (UNKNOWN outcome)
             return FinalizeOutcome("failed")
 
         if result.kind == ActionKind.RETRY and task.attempt < effective_attempt_cap():
@@ -232,6 +235,7 @@ def finalize_action(
             ea.lease_token = None
             ea.lease_owner = None
             ea.lease_expires_at = None
+            run.last_progress_at = func.now()  # retry scheduled (genuine progress)
             # Step stays RUNNING; a delayed advance_run resumes it.
             return FinalizeOutcome("retry", defer_seconds=delay)
 
@@ -247,6 +251,7 @@ def finalize_action(
         step.finished_at = now
         run.status = RunStatus.FAILED
         run.finished_at = now
+        run.last_progress_at = func.now()  # run terminal (deterministic/auth/cap)
         if result.kind == ActionKind.FAILED_AUTH:
             _set_connector_status(session, task.connector_id, "error")
         return FinalizeOutcome("failed")

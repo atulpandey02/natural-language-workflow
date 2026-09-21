@@ -129,6 +129,22 @@ def test_manual_run_requires_idempotency_key(
     assert client.post(f"/workflows/{wf}/runs", headers=h).status_code == 422
 
 
+def test_manual_run_rejects_reserved_scheduler_key_prefix(
+    client: TestClient, pg_stack: SimpleNamespace, enqueued: list[uuid.UUID]
+) -> None:
+    """A client Idempotency-Key must not use the reserved 'sched:' prefix, so the
+    manual and scheduler namespaces stay unambiguous (P1D)."""
+    m = pg_stack.seed_member()
+    wf, _ = _seed_workflow(pg_stack.owner_libpq, m.tenant_id)
+    h = {
+        **_auth_for(m.user_id),
+        "X-Workspace-Id": str(m.tenant_id),
+        "Idempotency-Key": "sched:deadbeef:2026-05-01T09:00:00+00:00",
+    }
+    assert client.post(f"/workflows/{wf}/runs", headers=h).status_code == 422
+    assert len(enqueued) == 0
+
+
 def test_manual_run_without_version_conflicts(
     client: TestClient, pg_stack: SimpleNamespace, enqueued: list[uuid.UUID]
 ) -> None:

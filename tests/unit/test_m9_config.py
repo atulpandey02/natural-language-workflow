@@ -35,3 +35,17 @@ def test_hardening_defaults() -> None:
     assert s.max_connectors_per_tenant > 0
     assert s.scheduler_recovery_horizon_s == 86_400
     assert s.db_statement_timeout_ms > 0
+
+
+def test_reconcile_per_tenant_cap_must_be_positive_and_within_batch() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    # Valid: 1 <= per_tenant <= batch.
+    assert _s(scheduler_reconcile_per_tenant_limit=20).scheduler_reconcile_per_tenant_limit == 20
+    assert _s(scheduler_batch_limit=10, scheduler_reconcile_per_tenant_limit=10)
+    # Invalid: zero/negative, or greater than the global batch.
+    with pytest.raises(ValidationError):
+        _s(scheduler_reconcile_per_tenant_limit=0)
+    with pytest.raises(ValidationError):
+        _s(scheduler_batch_limit=100, scheduler_reconcile_per_tenant_limit=101)

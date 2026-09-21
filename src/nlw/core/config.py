@@ -7,7 +7,7 @@ Secrets are never hard-coded; they arrive via the environment / ``.env``.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "dev", "staging", "production"]
@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     scheduler_scan_interval_s: float = 30.0  # due-schedule scan cadence
     scheduler_reconcile_interval_s: float = 60.0  # stale-run reconciliation cadence
     scheduler_batch_limit: int = 100  # max schedules / runs handled per tick
+    # Per-tenant fairness cap for one reconcile batch (M11.5 P1D): at most this
+    # many stale runs per tenant are selected, so one noisy tenant with thousands
+    # of stale rows cannot starve a quiet tenant's single eligible run. Must be
+    # >= 1 and <= scheduler_batch_limit (validated below).
+    scheduler_reconcile_per_tenant_limit: int = 20
     # Bounded catch-up: fire only the latest missed occurrence within this window.
     scheduler_catchup_window_s: int = 3600
     # A PENDING run older than this with no progress is considered un-enqueued.
@@ -155,6 +160,18 @@ class Settings(BaseSettings):
     # managed provider's publicly-rooted certificate. An operator MAY point this
     # at a specific CA bundle path inside the container; it is NOT tenant-supplied.
     postgres_ssl_root_cert: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_reconcile_fairness(self) -> "Settings":
+        """The per-tenant reconcile cap must be a positive share of the global
+        batch: >= 1 and <= scheduler_batch_limit (P1D fairness invariant)."""
+        if self.scheduler_reconcile_per_tenant_limit < 1:
+            raise ValueError("scheduler_reconcile_per_tenant_limit must be >= 1")
+        if self.scheduler_reconcile_per_tenant_limit > self.scheduler_batch_limit:
+            raise ValueError(
+                "scheduler_reconcile_per_tenant_limit must be <= scheduler_batch_limit"
+            )
+        return self
 
     @property
     def docs_enabled(self) -> bool:

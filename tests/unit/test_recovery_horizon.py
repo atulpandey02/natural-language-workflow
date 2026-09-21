@@ -8,7 +8,7 @@ import pytest
 import nlw.observability.metrics as metrics_mod
 import nlw.scheduler.service as service
 from nlw.core.config import Settings
-from nlw.scheduler.reconcile import StuckRun
+from nlw.scheduler.reconcile import ReconcileBatch
 
 
 class _Ctx:
@@ -35,14 +35,11 @@ def _settings() -> Settings:
 def test_beyond_horizon_runs_are_not_reenqueued_but_gauged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    live, poisoned = uuid.uuid4(), uuid.uuid4()
+    live = uuid.uuid4()
     monkeypatch.setattr(
         service,
         "find_stuck_runs",
-        lambda *a, **k: [
-            StuckRun(run_id=live, beyond_horizon=False),
-            StuckRun(run_id=poisoned, beyond_horizon=True),
-        ],
+        lambda *a, **k: ReconcileBatch(run_ids=[live], beyond_horizon=1, fairness_deferred=0),
     )
     gauge: list[int] = []
     reenq: list[int] = []
@@ -66,7 +63,9 @@ def test_beyond_horizon_runs_are_not_reenqueued_but_gauged(
 def test_no_beyond_runs_sets_gauge_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     ok = uuid.uuid4()
     monkeypatch.setattr(
-        service, "find_stuck_runs", lambda *a, **k: [StuckRun(run_id=ok, beyond_horizon=False)]
+        service,
+        "find_stuck_runs",
+        lambda *a, **k: ReconcileBatch(run_ids=[ok], beyond_horizon=0, fairness_deferred=0),
     )
     gauge: list[int] = []
     monkeypatch.setattr(metrics_mod, "set_runs_beyond_horizon", gauge.append)

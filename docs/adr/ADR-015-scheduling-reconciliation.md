@@ -79,5 +79,12 @@ at-least-once action safety).
 - Each schedule occurrence yields exactly one durable run row (across concurrency
   and restart); execution stays idempotent/at-least-once. Recurring workflows
   survive restarts and duplicate schedulers, respect DST, and recover unattended
-  without weakening any M7 guarantee. Raw cron, sub-minute cadence, backfill,
-  approval timeouts, and per-tenant scheduler sharding are deferred.
+  without weakening any M7 guarantee. Raw cron, sub-minute cadence, backfill, and
+  approval timeouts are deferred.
+
+**Superseded in part by ADR-021 (M11.5 P1D):** scheduled runs now store NULL
+`idempotency_key` (occurrence identity is the sole uniqueness); reconciler
+eligibility/horizon filters run before `ORDER BY`/`LIMIT`; RUNNING staleness is
+measured by `last_progress_at` (not `updated_at`); per-tenant reconciliation
+fairness is added; and WAITING_APPROVAL re-drive is bound to the currently-blocked
+step. See ADR-021.
