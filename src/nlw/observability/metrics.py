@@ -90,6 +90,23 @@ _SCHED_BEYOND_HORIZON = Gauge(
     "nlw_scheduler_runs_beyond_horizon",
     "Recoverable runs currently past the recovery horizon (need operator action).",
 )
+# P1D: candidates the reconciler selected (post fairness + horizon + batch limit).
+_SCHED_RECON_CANDIDATES = Counter(
+    "nlw_scheduler_reconcile_candidates_total",
+    "Eligible stuck runs selected by the reconciler (after fairness/horizon/limit).",
+)
+# P1D: eligible rows dropped by the per-tenant fairness cap this scan (they remain
+# for a later scan). A persistently high value signals a noisy tenant.
+_SCHED_RECON_FAIRNESS_DEFERRED = Counter(
+    "nlw_scheduler_reconcile_fairness_deferred_total",
+    "Eligible runs deferred by the per-tenant reconciliation fairness cap.",
+)
+# P1D: a due occurrence that already had its run (idempotent no-op insert), e.g. a
+# second scheduler instance or a restart re-scanning the same occurrence.
+_SCHED_OCCURRENCE_EXISTS = Counter(
+    "nlw_scheduler_occurrence_exists_total",
+    "Due occurrences whose run already existed (idempotent scheduler no-op).",
+)
 
 # --- Errors / rate limiting ---
 _ERRORS = Counter(
@@ -254,6 +271,21 @@ def record_reconcile(n: int) -> None:
 
 def set_runs_beyond_horizon(n: int) -> None:
     _SCHED_BEYOND_HORIZON.set(n)
+
+
+def record_reconcile_candidates(n: int) -> None:
+    if n:
+        _SCHED_RECON_CANDIDATES.inc(n)
+
+
+def record_reconcile_fairness_deferred(n: int) -> None:
+    if n:
+        _SCHED_RECON_FAIRNESS_DEFERRED.inc(n)
+
+
+def record_scheduler_occurrence_exists(n: int) -> None:
+    if n:
+        _SCHED_OCCURRENCE_EXISTS.inc(n)
 
 
 def record_rate_limit_rejected(endpoint: str) -> None:

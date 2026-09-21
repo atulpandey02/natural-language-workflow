@@ -147,6 +147,14 @@ class WorkflowRun(TimestampMixin, Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # M11.5 P1D: last MEANINGFUL execution-state advancement (server time). Updated
+    # ONLY on genuine state-machine progress (run/step/action transitions, retry
+    # scheduling, approval resolution) — NEVER on a reconciler scan, a read, or an
+    # unrelated metadata write. The reconciler uses this (not the mutable
+    # ``updated_at``) to tell a genuinely stuck run from one still progressing.
+    last_progress_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class StepRun(TimestampMixin, Base):

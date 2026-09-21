@@ -8,7 +8,7 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
-| Current milestone | **M11.5 P1C** — external-action lease, deadline, response-bound & ambiguous-outcome (UNKNOWN) safety (migration `0012`) |
+| Current milestone | **M11.5 P1D** — scheduler & reconciler correctness: occurrence idempotency, eligibility-before-limit, `last_progress_at`, per-tenant fairness, approval-to-step binding (migration `0013`) |
 | Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
 | Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
 | Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
@@ -90,8 +90,33 @@ truncate-and-approve); approval binds the immutable spec AND connector identity
 (a post-approval connector swap fails "re-approval required"). The stable
 `external_action_key`/`Idempotency-Key` is unchanged (still at-least-once, no
 exactly-once claim). Operator recovery: runbooks/action-outcome-unknown.md.
-Deferred (unchanged): scheduler namespace, reconciliation fairness/`last_progress_at`,
-signed GUC, HttpOnly sessions, invites, cloud secrets, DR/PITR, M12.
+Deferred (unchanged): signed GUC, HttpOnly sessions, invites, cloud secrets,
+DR/PITR, M12.
+
+M11.5 P1D (scheduler & reconciler correctness, migration `0013`, ADR-021) closes
+six verified defects. **Scheduled-run idempotency:** a scheduled run's uniqueness
+is the immutable occurrence identity `(schedule_id, scheduled_for)` (DB constraint
++ `ON CONFLICT DO NOTHING`); it stores NULL `idempotency_key`, so a client
+`Idempotency-Key` can never collide with, suppress, or be mistaken for a scheduled
+occurrence (three distinct namespaces: manual key / scheduler occurrence / P1C
+external-action key; the API also rejects the reserved `sched:` prefix).
+**Reconciler ordering:** all deterministic eligibility filters (incl. the recovery
+horizon and P1C-UNKNOWN exclusion) run BEFORE `ORDER BY`/`LIMIT`, so beyond-horizon
+rows can no longer crowd out eligible stale rows; a stable `progress_at, id` order.
+**Progress:** new `workflow_runs.last_progress_at` (server-stamped only on genuine
+state-machine advancement, never on a scan/read/no-op/stale-CAS) drives RUNNING
+staleness/horizon instead of the mutable `updated_at`; backfilled conservatively.
+**Fairness:** `row_number() OVER (PARTITION BY tenant_id ...)` caps each tenant at
+`scheduler_reconcile_per_tenant_limit` (default 20, validated `1..batch`) under a
+global `scheduler_batch_limit`, so a noisy tenant cannot starve a quiet one.
+**Approvals:** the reconciler re-drives a WAITING_APPROVAL run only when the
+CURRENTLY-blocked step's own approval is decided (bound via `approvals JOIN
+step_runs` on `(run_id, step_id)` + `status='WAITING_APPROVAL'`), never "any
+approval for the run". A new column-restricted `SELECT (id, tenant_id, run_id,
+step_id, status)` grant lets `nlw_scheduler` read step status without step I/O.
+Honest guarantee: exactly one run row per scheduled occurrence (DB uniqueness),
+at-least-once processing, CAS/leases constrain DB ownership only; external effects
+keep P1C's UNKNOWN + receiver-idempotency limits. Runbook: runs-beyond-horizon.md.
 
 M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
 so a user can operate the platform end-to-end without curl/SQL: Supabase

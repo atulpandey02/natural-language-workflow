@@ -17,8 +17,10 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-_HEAD = "0012_action_unknown_outcome"
+_HEAD = "0013_scheduler_reconciler"
 _PREV = "0011_identity_connector_authz"
+# The P1C revision just below the P1D head (for the 0013 up/down/up test).
+_P1C = "0012_action_unknown_outcome"
 # The P1A revision whose users/connectors posture the matrix below asserts.
 _P1A = "0011_identity_connector_authz"
 _P1A_PREV = "0010_readiness_schema_grant"
@@ -208,3 +210,51 @@ def test_downgrade_rewrites_unknown_rows_to_failed(pg_stack: SimpleNamespace) ->
     assert status == "failed"  # rewritten so the restored CHECK holds
 
     command.upgrade(cfg, _HEAD)
+
+
+def _has_last_progress_column(owner_libpq: str) -> bool:
+    with psycopg.connect(owner_libpq) as c:
+        count = _one(
+            c.execute(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name='workflow_runs' AND column_name='last_progress_at'"
+            )
+        )[0]
+    return bool(count == 1)
+
+
+def test_last_progress_at_column_flips_and_backfills(pg_stack: SimpleNamespace) -> None:
+    """0013 adds last_progress_at (up/down/up) and backfills it CONSERVATIVELY from
+    the best existing state timestamp; downgrade drops it."""
+    cfg = _cfg(pg_stack.owner_sa)
+    assert _has_last_progress_column(pg_stack.owner_libpq)  # present at head
+
+    # Downgrade to 0012 drops the column; re-upgrade restores + backfills it.
+    command.downgrade(cfg, _P1C)
+    assert not _has_last_progress_column(pg_stack.owner_libpq)
+
+    # Seed a run with a known finished_at while the column is ABSENT, so the
+    # UPGRADE backfill is what populates last_progress_at.
+    m = pg_stack.seed_member()
+    wf, ver, run = (uuid.uuid4() for _ in range(3))
+    finished = "2026-05-01 09:00:00+00"
+    with psycopg.connect(pg_stack.owner_libpq, autocommit=True) as c:
+        c.execute(
+            "INSERT INTO workflows (id, tenant_id, name) VALUES (%s,%s,'w')", (wf, m.tenant_id)
+        )
+        c.execute(
+            "INSERT INTO workflow_versions (id, tenant_id, workflow_id, version, plan) "
+            "VALUES (%s,%s,%s,1,'{\"steps\":[]}'::jsonb)",
+            (ver, m.tenant_id, wf),
+        )
+        c.execute(
+            "INSERT INTO workflow_runs (id, tenant_id, workflow_id, workflow_version_id, status, "
+            "finished_at) VALUES (%s,%s,%s,%s,'COMPLETED',%s)",
+            (run, m.tenant_id, wf, ver, finished),
+        )
+
+    command.upgrade(cfg, _HEAD)
+    assert _has_last_progress_column(pg_stack.owner_libpq)
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        lp = _one(c.execute("SELECT last_progress_at FROM workflow_runs WHERE id=%s", (run,)))[0]
+    assert lp is not None and lp.isoformat().startswith("2026-05-01T09:00:00")  # = finished_at

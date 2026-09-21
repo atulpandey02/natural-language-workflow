@@ -38,7 +38,12 @@ def test_scheduler_cannot_read_connectors_or_secrets(pg_stack: SimpleNamespace) 
 
 
 def test_scheduler_cannot_read_step_io_or_proposals(pg_stack: SimpleNamespace) -> None:
+    # P1D grants the reconciler a COLUMN-RESTRICTED SELECT on step_runs
+    # (id, tenant_id, run_id, step_id, status) to bind approvals to the blocked
+    # step — but step I/O (input/output/error) stays UNREADABLE.
     assert _denied(pg_stack.scheduler_libpq, "SELECT input, output FROM step_runs")
+    assert _denied(pg_stack.scheduler_libpq, "SELECT error FROM step_runs")
+    assert _denied(pg_stack.scheduler_libpq, "SELECT * FROM step_runs")
     assert _denied(pg_stack.scheduler_libpq, "SELECT prompt_len FROM plan_proposals")
     assert _denied(pg_stack.scheduler_libpq, "SELECT * FROM memberships")
 
@@ -50,3 +55,5 @@ def test_scheduler_can_read_its_own_tables(pg_stack: SimpleNamespace) -> None:
         c.execute("SELECT id FROM workflow_runs").fetchall()
         c.execute("SELECT id FROM external_actions").fetchall()
         c.execute("SELECT id FROM approvals").fetchall()
+        # Only the non-I/O columns needed for approval-to-step binding (P1D).
+        c.execute("SELECT run_id, step_id, status FROM step_runs").fetchall()

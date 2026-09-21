@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 import nlw.tools.builtin  # noqa: F401  (populates the tool + connector-type registries)
@@ -78,6 +78,20 @@ class AdvanceOutcome:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _mark_progress(run: WorkflowRun) -> None:
+    """Stamp genuine execution-state advancement using SERVER time (P1D).
+
+    Call ONLY where the run/step/action state machine actually advances (run
+    entering execution, step claim/start, step terminal, retry scheduling/claim,
+    approval resolution that unblocks work, action finalization, run terminal).
+    NEVER call it for a reconciler scan, a read, or an unrelated metadata write.
+    The reconciler reads this to distinguish a genuinely stuck run from one still
+    progressing. Server time (``func.now()`` = transaction time) keeps the signal
+    authoritative under cross-process app-clock skew.
+    """
+    run.last_progress_at = func.now()
 
 
 def _resolve_tenant(session: Session, run_id: uuid.UUID) -> uuid.UUID | None:
@@ -208,6 +222,7 @@ def _fail_run_step(
     step.finished_at = now
     run.status = RunStatus.FAILED
     run.finished_at = now
+    _mark_progress(run)  # run terminal transition
     metrics.observe_run_completion("failed", (now - run.created_at).total_seconds())
     return AdvanceOutcome("failed", enqueue_next=False, step_id=step.step_id)
 
@@ -233,6 +248,7 @@ def _action_unknown(
     step.finished_at = now
     run.status = RunStatus.FAILED
     run.finished_at = now
+    _mark_progress(run)  # run terminal transition (UNKNOWN action outcome)
     metrics.observe_run_completion("failed", (now - run.created_at).total_seconds())
     return AdvanceOutcome("failed", enqueue_next=False, step_id=step.step_id)
 
@@ -265,6 +281,7 @@ def _claim_action(
     now = _now()
     step.status = StepStatus.RUNNING
     step.started_at = now
+    _mark_progress(run)  # step claim/start (durable in-flight action)
     ea = ExternalAction(
         tenant_id=tenant_id,
         run_id=run.id,
@@ -365,6 +382,7 @@ def _resume_action(
     ea.lease_expires_at = now + timedelta(seconds=LEASE_DURATION_S)
     ea.attempts = ea.attempts + 1
     ea.last_attempt_at = now
+    _mark_progress(run)  # retry claim (a fresh delivery attempt is genuine progress)
     session.flush()
     return _build_action_task_outcome(session, tenant_id, run, plan_step, spec, ea, secret_store)
 
@@ -390,6 +408,7 @@ def _handle_waiting(
     spec = REGISTRY.get(step.tool)
     if run.status == RunStatus.WAITING_APPROVAL:
         run.status = RunStatus.RUNNING
+        _mark_progress(run)  # approval resolution unblocked execution
     try:
         return _claim_action(
             session,
@@ -437,6 +456,7 @@ def _park_for_approval(
             )
         )
     run.status = RunStatus.WAITING_APPROVAL
+    _mark_progress(run)  # run advanced to needing approval (a genuine transition)
     return AdvanceOutcome("waiting", enqueue_next=False, step_id=plan_step.id)
 
 
@@ -472,10 +492,12 @@ def execute_advancement(
         if run.status == RunStatus.PENDING:
             run.status = RunStatus.RUNNING
             run.started_at = _now()
+            _mark_progress(run)  # run entering execution
 
         if any_failed(states):
             run.status = RunStatus.FAILED
             run.finished_at = _now()
+            _mark_progress(run)  # run terminal transition
             metrics.observe_run_completion(
                 "failed", (run.finished_at - run.created_at).total_seconds()
             )
@@ -502,6 +524,7 @@ def execute_advancement(
             if all_succeeded(plan, states):
                 run.status = RunStatus.COMPLETED
                 run.finished_at = _now()
+                _mark_progress(run)  # run terminal transition
                 metrics.observe_run_completion(
                     "completed", (run.finished_at - run.created_at).total_seconds()
                 )
@@ -556,6 +579,7 @@ def execute_advancement(
         step.status = StepStatus.SUCCESS
         step.output = output
         step.finished_at = _now()
+        _mark_progress(run)  # step terminal transition (inline success)
         return AdvanceOutcome("advanced", enqueue_next=True, step_id=nxt.id)
 
 
