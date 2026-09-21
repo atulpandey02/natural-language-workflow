@@ -11,6 +11,7 @@ import datetime
 import socket
 import ssl
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -387,3 +388,55 @@ def test_verify_full_does_not_fall_back_to_plaintext(
     # startup packet was never sent because the TLS cert did not verify.
     assert len(raw_before_tls["data"]) <= 8
     assert b"PLAINTEXT-PW-must-not-leak" not in raw_before_tls["data"]
+
+
+# --- DNS wall-clock bound (genuinely blocking resolver + elapsed assertion) ---
+
+
+def test_dns_resolution_has_a_real_wall_clock_bound() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_resolver(_host: str) -> list[str]:
+        started.set()
+        release.wait(30)  # genuinely blocks far beyond the deadline
+        return ["93.184.216.34"]
+
+    policy = PostgresDestinationPolicy(
+        require_public=True, require_verify_full=True, resolver=blocking_resolver, dns_timeout_s=0.5
+    )
+    non_daemon_before = [t for t in threading.enumerate() if not t.daemon]
+    t0 = time.monotonic()
+    with pytest.raises(PostgresDestinationError):
+        policy.validate_and_pin("db.example.com", 5432, "verify-full")
+    elapsed = time.monotonic() - t0
+
+    assert started.is_set()  # the resolver really ran
+    assert elapsed < 3.0, f"validation waited {elapsed:.2f}s (should be ~0.5s + margin)"
+    # The still-blocked resolver runs on a daemon thread -> it never blocks
+    # process shutdown, and no new NON-daemon thread was spawned.
+    live = [t for t in threading.enumerate() if t.name.startswith("pg-dns-")]
+    assert live and all(t.daemon for t in live)
+    assert [t for t in threading.enumerate() if not t.daemon] == non_daemon_before
+    release.set()  # let the abandoned thread finish so the session stays tidy
+
+
+def test_repeated_resolver_timeouts_do_not_leak_nondaemon_threads() -> None:
+    release = threading.Event()
+
+    def blocking_resolver(_host: str) -> list[str]:
+        release.wait(30)
+        return []
+
+    policy = PostgresDestinationPolicy(
+        require_public=True, require_verify_full=True, resolver=blocking_resolver, dns_timeout_s=0.1
+    )
+    non_daemon_before = {t.ident for t in threading.enumerate() if not t.daemon}
+    for _ in range(12):
+        with pytest.raises(PostgresDestinationError):
+            policy.validate_and_pin("db.example.com", 5432, "verify-full")
+    # Every abandoned resolver thread is a daemon; no non-daemon thread leaked.
+    pg_threads = [t for t in threading.enumerate() if t.name.startswith("pg-dns-")]
+    assert all(t.daemon for t in pg_threads)
+    assert {t.ident for t in threading.enumerate() if not t.daemon} == non_daemon_before
+    release.set()

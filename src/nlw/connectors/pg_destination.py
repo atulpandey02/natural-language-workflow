@@ -6,13 +6,21 @@ bytes are sent to an external Postgres. It:
 1. rejects unsafe host forms (Unix sockets, multi-host/DSN strings);
 2. enforces the port policy;
 3. (production/staging) blocks platform-internal service names;
-4. resolves every A/AAAA answer with a bounded timeout;
+4. resolves every A/AAAA answer with a HARD wall-clock bound;
 5. (production/staging) rejects if ANY resolved address is non-global and not in
    the operator CIDR allowlist — never "pick the one safe answer";
-6. (production/staging) requires ``sslmode=verify-full``;
+6. (production/staging) requires ``sslmode=verify-full`` and supplies the CA trust
+   (``sslrootcert``, default libpq ``system`` = the OS trust store);
 7. returns a pinned destination: the ORIGINAL hostname (for TLS SNI / certificate
    verification) plus the validated IP as ``hostaddr`` (the TCP target), so libpq
    performs no second, unvalidated DNS resolution (DNS-rebinding safe).
+
+DNS bound: resolution runs on a DAEMON thread joined for at most
+``dns_timeout_s``. On timeout the destination is rejected and the daemon thread
+is abandoned — the underlying ``getaddrinfo`` keeps running in the background but,
+being a daemon, never blocks worker/process shutdown, and NO connection is
+attempted after the timeout. (A ``ThreadPoolExecutor`` is deliberately NOT used:
+its context-manager exit joins the still-blocked worker, defeating the bound.)
 
 Local/dev (the ``app_env`` gate) may target private fixtures and honour the
 connector's ``sslmode`` — this seam is dependency-injected/operator-controlled
@@ -20,16 +28,17 @@ and can NEVER be enabled by a connector field, API request, planner output or
 tenant setting. Production fails closed.
 """
 
-import concurrent.futures
 import ipaddress
 import socket
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from nlw.connectors.http_guard import is_public_ip
 from nlw.registry.registry import ToolExecutionError
 
-# host -> resolved IP strings. Injectable so tests are deterministic.
+# host -> resolved IP strings. May block; the policy bounds it. Injectable so
+# tests are deterministic.
 Resolver = Callable[[str], list[str]]
 
 # Stable error messages (P1B F2) — no internal address/DSN/port-state leakage.
@@ -56,6 +65,8 @@ _INTERNAL_HOSTNAMES = frozenset(
 
 _DEFAULT_PG_PORT = 5432
 _DNS_TIMEOUT_S = 5
+# libpq sslmodes that perform certificate verification and therefore need a CA.
+_VERIFY_SSLMODES = frozenset({"verify-ca", "verify-full"})
 
 
 class PostgresDestinationError(ToolExecutionError):
@@ -66,45 +77,31 @@ class PostgresTlsPolicyError(ToolExecutionError):
     """The TLS posture violates policy — deterministic (not retryable)."""
 
 
+def system_resolver(host: str) -> list[str]:
+    """Resolve all A/AAAA answers via ``getaddrinfo`` (may block; the policy
+    applies the wall-clock bound)."""
+    infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    return [str(info[4][0]) for info in infos]
+
+
 @dataclass(frozen=True)
 class ValidatedDestination:
     """A validated destination. ``host`` is preserved for TLS verification;
     ``hostaddrs`` are the validated TCP targets to attempt (in order, all already
     validated so retrying a later one is DNS-rebinding safe); ``sslmode`` is the
-    effective mode."""
+    effective mode; ``sslrootcert`` is the CA trust source (None for plaintext
+    modes, ``system`` or an operator path for verify modes)."""
 
     host: str
     hostaddrs: tuple[str, ...]
     port: int
     sslmode: str
+    sslrootcert: str | None = None
 
     @property
     def hostaddr(self) -> str:
         """The primary pinned address."""
         return self.hostaddrs[0]
-
-
-def bounded_resolver(host: str, timeout_s: int = _DNS_TIMEOUT_S) -> list[str]:
-    """Resolve all A/AAAA answers with a hard timeout so DNS cannot block
-    indefinitely. Returns de-duplicated IP strings."""
-
-    def _resolve() -> list[str]:
-        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-        return [str(info[4][0]) for info in infos]
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(_resolve)
-        try:
-            ips = future.result(timeout=timeout_s)
-        except concurrent.futures.TimeoutError as exc:
-            raise PostgresDestinationError(_ERR_DEST) from exc
-        except OSError as exc:  # resolution failed
-            raise PostgresDestinationError(_ERR_DEST) from exc
-    # Preserve order, drop duplicates.
-    seen: dict[str, None] = {}
-    for ip in ips:
-        seen.setdefault(ip, None)
-    return list(seen)
 
 
 def _looks_like_plain_host(host: str) -> bool:
@@ -128,8 +125,9 @@ class PostgresDestinationPolicy:
     require_verify_full: bool
     allow_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
     extra_allowed_ports: frozenset[int] = frozenset()
-    resolver: Resolver = bounded_resolver
-    dns_timeout_s: int = _DNS_TIMEOUT_S
+    resolver: Resolver = system_resolver
+    dns_timeout_s: float = _DNS_TIMEOUT_S
+    ssl_root_cert: str | None = None
 
     @classmethod
     def from_settings(
@@ -152,8 +150,37 @@ class PostgresDestinationPolicy:
             require_verify_full=strict,
             allow_networks=tuple(networks),
             extra_allowed_ports=ports,
-            resolver=resolver or bounded_resolver,
+            resolver=resolver or system_resolver,
+            ssl_root_cert=getattr(settings, "postgres_ssl_root_cert", None),
         )
+
+    def _resolve_bounded(self, host: str) -> list[str]:
+        """Run the (possibly blocking) resolver on a daemon thread and abandon it
+        if it exceeds ``dns_timeout_s``. Returns de-duplicated IPs; raises on
+        timeout or resolution failure. No connection is attempted on timeout."""
+        result: dict[str, object] = {}
+
+        def _run() -> None:
+            try:
+                result["ips"] = self.resolver(host)
+            except BaseException as exc:  # noqa: BLE001 - recorded, re-raised below
+                result["err"] = exc
+
+        thread = threading.Thread(target=_run, name=f"pg-dns-{host}", daemon=True)
+        thread.start()
+        thread.join(self.dns_timeout_s)
+        if thread.is_alive():
+            # Timed out: the daemon thread is abandoned (never blocks shutdown).
+            raise PostgresDestinationError(_ERR_DEST)
+        if "err" in result:
+            raise PostgresDestinationError(_ERR_DEST)
+        ips = result.get("ips") or []
+        if not isinstance(ips, list):
+            raise PostgresDestinationError(_ERR_DEST)
+        seen: dict[str, None] = {}
+        for ip in ips:
+            seen.setdefault(str(ip), None)
+        return list(seen)
 
     def _ip_allowed(self, ip_str: str) -> bool:
         if is_public_ip(ip_str):
@@ -171,6 +198,13 @@ class PostgresDestinationPolicy:
                 raise PostgresTlsPolicyError(_ERR_TLS)
             return "verify-full"
         return requested
+
+    def _effective_sslrootcert(self, effective_sslmode: str) -> str | None:
+        if effective_sslmode not in _VERIFY_SSLMODES:
+            return None
+        # Operator override (e.g. a test CA or a specific bundle path) else the
+        # OS trust store via libpq's "system" (libpq >= 16).
+        return self.ssl_root_cert or "system"
 
     def _check_port(self, port: int) -> None:
         if port == _DEFAULT_PG_PORT:
@@ -195,7 +229,7 @@ class PostgresDestinationPolicy:
         if self.require_public and host.lower() in _INTERNAL_HOSTNAMES:
             raise PostgresDestinationError(_ERR_DEST)
 
-        ips = self.resolver(host)
+        ips = self._resolve_bounded(host)
         if not ips:
             raise PostgresDestinationError(_ERR_DEST)
         if self.require_public:
@@ -212,5 +246,9 @@ class PostgresDestinationPolicy:
 
         ordered = tuple(sorted(ips, key=lambda ip: 0 if _is_v4(ip) else 1))
         return ValidatedDestination(
-            host=host, hostaddrs=ordered, port=port, sslmode=effective_sslmode
+            host=host,
+            hostaddrs=ordered,
+            port=port,
+            sslmode=effective_sslmode,
+            sslrootcert=self._effective_sslrootcert(effective_sslmode),
         )

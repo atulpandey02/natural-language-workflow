@@ -10,8 +10,12 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH"
 
 # procps provides pgrep for the worker/scheduler container healthchecks.
+# ca-certificates provides the system CA trust store at
+# /etc/ssl/certs/ca-certificates.crt, required by the postgres connector's
+# production TLS posture (sslmode=verify-full + sslrootcert=system) so a managed
+# PostgreSQL provider's publicly-rooted certificate is trusted (M11.5 P1B).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends procps \
+    && apt-get install -y --no-install-recommends procps ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # uv provides fast, reproducible installs from the committed lockfile.

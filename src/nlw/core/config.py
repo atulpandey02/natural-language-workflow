@@ -150,6 +150,11 @@ class Settings(BaseSettings):
     # Approved non-default ports for external Postgres in production/staging.
     # 5432 is always allowed; this only widens it under explicit operator control.
     postgres_extra_allowed_ports: list[int] = Field(default_factory=list)
+    # CA trust for the external Postgres verify-full connection. None -> libpq
+    # "system" (the OS trust store / ca-certificates bundle), which trusts a
+    # managed provider's publicly-rooted certificate. An operator MAY point this
+    # at a specific CA bundle path inside the container; it is NOT tenant-supplied.
+    postgres_ssl_root_cert: str | None = None
 
     @property
     def docs_enabled(self) -> bool:

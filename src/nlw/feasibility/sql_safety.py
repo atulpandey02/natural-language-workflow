@@ -37,6 +37,7 @@ _ERR_SCHEMA = "schema not allowed"
 _ERR_TABLE = "table not allowed"
 _ERR_FUNCTION = "sql function not allowed"
 _ERR_CAST = "cast to an unsupported type is not allowed"
+_ERR_SCOPE = "could not analyze SQL scope"
 
 
 class SqlSafetyError(ToolExecutionError):
@@ -186,19 +187,30 @@ def _cte_reference_node_ids(statement: exp.Expression) -> set[int]:
 
     A CTE reference is never schema-qualified, so a table with a schema is always
     treated as physical regardless of any name coincidence with a CTE alias.
+
+    Fails closed: if scope construction/traversal raises, the whole statement is
+    rejected (never accepted or partially validated). If ``build_scope`` returns
+    ``None`` (no analyzable scope), NO reference is exempted, so every table is
+    validated as physical against the allowlist.
     """
-    root = build_scope(statement)
+    try:
+        root = build_scope(statement)
+    except Exception as exc:  # noqa: BLE001 - any scope failure must fail closed
+        raise SqlSafetyError(_ERR_SCOPE) from exc
     if root is None:
         return set()
-    cte_ids: set[int] = set()
-    for scope in root.traverse():
-        for table in scope.tables:
-            if table.db:
-                continue  # schema-qualified -> always physical
-            source = scope.sources.get(table.name)
-            if isinstance(source, Scope):
-                cte_ids.add(id(table))
-    return cte_ids
+    try:
+        cte_ids: set[int] = set()
+        for scope in root.traverse():
+            for table in scope.tables:
+                if table.db:
+                    continue  # schema-qualified -> always physical
+                source = scope.sources.get(table.name)
+                if isinstance(source, Scope):
+                    cte_ids.add(id(table))
+        return cte_ids
+    except Exception as exc:  # noqa: BLE001 - any scope failure must fail closed
+        raise SqlSafetyError(_ERR_SCOPE) from exc
 
 
 def _validate_tables(

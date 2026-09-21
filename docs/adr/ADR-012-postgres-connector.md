@@ -120,3 +120,28 @@ credentials, or open/closed-port state.
 explicit operator approval; DNS + network controls reduce credential-exfiltration
 risk but do not make an external database a trusted system; credentials remain
 operator-managed. No tenant-supplied CA material in this package.
+
+### Update (M11.5 P1B addendum) — exact libpq trust config + DNS bound
+
+**TLS trust (verify-full).** The connector passes `sslmode=verify-full` plus
+`sslrootcert`, resolved as: an operator-configured bundle path
+(`postgres_ssl_root_cert`) if set, else libpq **`system`** (the OS trust store).
+`sslrootcert=system` requires libpq ≥ 16; the worker bundles psycopg-binary's
+libpq **18.6**, which supports it. The worker image installs `ca-certificates`,
+so the OS bundle exists at `/etc/ssl/certs/ca-certificates.crt` — this is how a
+managed PostgreSQL provider's publicly-rooted certificate is trusted. `host` is
+the original hostname (SNI + certificate verification); `hostaddr` is the pinned
+validated IP (TCP target). `sslrootcert` is **never tenant-supplied** and no
+tenant-supplied arbitrary CA file is accepted. A production-equivalent integration
+test (a TLS Postgres with a test CA + SAN-matched cert) proves verify-full
+succeeds with the correct host + trusted CA + pinned hostaddr and fails closed on
+an untrusted CA or a hostname/SAN mismatch — with no plaintext fallback.
+
+**DNS wall-clock bound.** Resolution runs on a **daemon** thread joined for at
+most `dns_timeout_s` (default 5s). On timeout the destination is rejected
+(`POSTGRES_DESTINATION_NOT_ALLOWED`) and the daemon thread is **abandoned**: the
+underlying `getaddrinfo` keeps running in the background but, being a daemon,
+never blocks worker/process shutdown, and **no connection is attempted after the
+timeout**. A `ThreadPoolExecutor` is deliberately not used (its context-manager
+exit joins the still-blocked worker, which would defeat the bound). Repeated
+timeouts spawn only daemon threads and leak no non-daemon/background threads.

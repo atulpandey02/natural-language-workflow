@@ -343,6 +343,12 @@ def _read_only_connection(
         f"-c lock_timeout={config.lock_timeout_ms} "
         f"-c idle_in_transaction_session_timeout={idle_timeout}"
     )
+    # CA trust for verify-ca/verify-full is supplied via sslrootcert (libpq
+    # "system" = OS trust store, or an operator-configured bundle path). It is
+    # omitted for plaintext modes. It is NEVER tenant-supplied.
+    tls_kwargs: dict[str, Any] = {}
+    if pinned.sslrootcert is not None:
+        tls_kwargs["sslrootcert"] = pinned.sslrootcert
     # Attempt each already-validated address (IPv4 first) in order. No address is
     # ever re-resolved, so a later attempt is still rebinding-safe.
     conn: psycopg.Connection[Any] | None = None
@@ -360,6 +366,7 @@ def _read_only_connection(
                 connect_timeout=config.connect_timeout_s,
                 options=options,
                 autocommit=False,
+                **tls_kwargs,
             )
             break
         except psycopg.Error as exc:

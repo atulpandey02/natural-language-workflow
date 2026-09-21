@@ -311,3 +311,60 @@ def test_rejects_garbage() -> None:
 
 def test_rejects_empty() -> None:
     _bad("   ")
+
+
+# --- P1B addendum: SQL analysis fails closed ---
+
+
+def test_parse_failure_is_a_stable_rejection() -> None:
+    _bad("SELECT * FROM (")  # malformed -> could not parse
+
+
+def test_build_scope_none_falls_back_to_full_physical_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nlw.feasibility import sql_safety
+
+    monkeypatch.setattr(sql_safety, "build_scope", lambda *_a, **_k: None)
+    # No scope -> nothing exempted -> a disallowed table is still rejected,
+    # and a genuine CTE (which relied on scope) is now treated as physical
+    # (unqualified) and rejected. Never accepted-by-fallback.
+    _bad("SELECT * FROM private.secret")
+    _bad("WITH x AS (SELECT 1) SELECT * FROM x")
+    # An allowlisted schema-qualified table still validates.
+    assert _ok("SELECT id FROM public.users")
+
+
+def test_build_scope_exception_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nlw.feasibility import sql_safety
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise RuntimeError("scope construction failure")
+
+    monkeypatch.setattr(sql_safety, "build_scope", _boom)
+    with pytest.raises(SqlSafetyError):
+        validate_select("SELECT id FROM public.users", SCHEMAS, None)
+
+
+def test_scope_traversal_exception_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nlw.feasibility import sql_safety
+
+    class _BadScope:
+        def traverse(self) -> object:
+            raise RuntimeError("traverse failure")
+
+    monkeypatch.setattr(sql_safety, "build_scope", lambda *_a, **_k: _BadScope())
+    with pytest.raises(SqlSafetyError):
+        validate_select("SELECT id FROM public.users", SCHEMAS, None)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM json_to_recordset('[]') AS x(a int)",  # record-returning TVF
+        "SELECT * FROM unnest(ARRAY[1,2,3]) AS u",  # set-returning function
+        "SELECT * FROM jsonb_array_elements('[]'::jsonb) AS e",  # TVF + jsonb cast ok, fn not
+    ],
+)
+def test_unsupported_table_valued_constructs_are_rejected(sql: str) -> None:
+    _bad(sql)
