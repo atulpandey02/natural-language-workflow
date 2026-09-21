@@ -138,6 +138,24 @@ class Settings(BaseSettings):
     max_schedules_per_tenant: int = 100
     max_workflows_per_tenant: int = 200
 
+    # --- PostgreSQL connector egress policy (M11.5 P1B) ---
+    # In production/staging, external Postgres destinations must resolve to
+    # global/public addresses only and connect with sslmode=verify-full. This is
+    # an OPERATOR-owned exact-IP / CIDR allowlist for approved PRIVATE databases
+    # (e.g. a staging DB on a private network). It never comes from a connector
+    # field, API request, planner output or tenant setting. Empty by default;
+    # non-production (local/dev) allows private fixtures via the app_env gate, not
+    # via this list. See ADR-009 / docs/security.
+    postgres_destination_allowlist: list[str] = Field(default_factory=list)
+    # Approved non-default ports for external Postgres in production/staging.
+    # 5432 is always allowed; this only widens it under explicit operator control.
+    postgres_extra_allowed_ports: list[int] = Field(default_factory=list)
+    # CA trust for the external Postgres verify-full connection. None -> libpq
+    # "system" (the OS trust store / ca-certificates bundle), which trusts a
+    # managed provider's publicly-rooted certificate. An operator MAY point this
+    # at a specific CA bundle path inside the container; it is NOT tenant-supplied.
+    postgres_ssl_root_cert: str | None = None
+
     @property
     def docs_enabled(self) -> bool:
         """OpenAPI/docs served? Off in production by default; explicit override wins."""

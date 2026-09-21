@@ -61,3 +61,41 @@ validated here.
   a small authoring constraint for a large safety gain.
 - Bind parameters, `schema.inspect`, and write tools are out of scope here and
   slot into the same validator/driver seam later without weakening these rules.
+
+## Update (M11.5 P1B) — lexical-scope tables + default-deny functions
+
+Two verified bypasses in the original validator are closed; the same single
+`validate_select` remains authoritative for planner feasibility, plan
+materialization/revalidation, and runtime execution.
+
+**Table authorization by lexical scope (not name coincidence).** The original
+CTE exemption was a flat, global name match: any table whose *unqualified* name
+equalled a CTE alias skipped the schema/table allowlist — so
+`WITH secret_table AS (...) SELECT * FROM private.secret_table` bypassed
+validation. P1B resolves references with `sqlglot.optimizer.scope`
+(`build_scope`): a reference is exempt only if it actually resolves to an
+in-scope CTE/derived table. Because a CTE reference is never schema-qualified, a
+schema-qualified table is *always* treated as physical and allowlist-checked.
+Nested/shadowed/recursive CTEs resolve in their correct lexical scope; unauthorized
+tables inside subqueries or CTE bodies are checked; catalog/system schemas stay
+blocked; table-valued functions are not treated as ordinary tables (their
+function node is governed by the function allowlist).
+
+**Functions are default-DENY.** The original blacklist let arbitrary,
+user-defined and schema-qualified functions through (e.g. `private.read_secret()`,
+`myfunc()`), and only a read-only session — which does **not** stop a
+`SECURITY DEFINER` function from returning protected data. P1B replaces it with an
+explicit allowlist of safe, deterministic, side-effect-free functions (aggregates
+COUNT/SUM/AVG/MIN/MAX; COALESCE/NULLIF; DATE_TRUNC/EXTRACT/now/current_date;
+LOWER/UPPER/LENGTH/TRIM/SUBSTRING/CONCAT; ABS/ROUND/CEIL/FLOOR; CAST to a safe set
+of target types). Everything else rejects: every schema-qualified / user-defined /
+unknown function parses to `exp.Anonymous` (rejected), unlisted typed functions
+(e.g. `generate_series`, `pg_read_file`, `dblink`, `pg_sleep`, `nextval`) reject,
+and casts to `regclass`/OID/catalog types are rejected so a cast cannot trigger a
+catalog lookup. Rejections use stable, inventory-safe messages.
+
+**Limitations (pilot).** No arbitrary user-defined functions; no schema-qualified
+functions; the platform validator is defense-in-depth and does **not** replace
+external least-privilege grants. If a previously accepted function is now rejected,
+it is an intentional pilot restriction unless re-added after a documented safety
+review.
