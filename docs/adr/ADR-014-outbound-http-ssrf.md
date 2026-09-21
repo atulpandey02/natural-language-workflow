@@ -91,7 +91,8 @@ that adds, on top of the SSRF guard above:
   (`WriteError`/`WriteTimeout`/`ReadError`/`ReadTimeout`/`RemoteProtocolError`/
   total-deadline-at-or-after-head) is **ambiguous** → terminal UNKNOWN (ADR-013),
   never a silent retry. The connector layer maps HTTP status likewise (ADR-013
-  matrix): 429 retryable, generic 5xx UNKNOWN.
+  matrix): a **generic webhook 429 or 5xx is UNKNOWN**; only **Slack 429** (its
+  documented rate-limit contract) is retryable.
 
 ## Consequences
 

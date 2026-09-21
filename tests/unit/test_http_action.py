@@ -268,17 +268,22 @@ class _ClockAdvancingTransport(httpx.BaseTransport):
         return httpx.Response(200, stream=self._stream)
 
 
-def test_dns_consumes_budget_and_connect_gets_only_the_remainder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # DNS eats 20s of a 30s budget; the phase timeouts handed to httpx (connect
-    # AND pool) must be the ~10s REMAINDER, not a fresh 30s — proving DNS time is
-    # inside the one total budget.
+def _capture_phase_timeout(
+    monkeypatch: pytest.MonkeyPatch, *, budget: float, dns_cost: float
+) -> httpx.Timeout:
+    """Exercise the REAL DNS pre-resolve path with a resolver that consumes
+    ``dns_cost`` of ``budget``, and capture the ``httpx.Timeout`` our code hands to
+    the client (raising before any real connect). This is production deadline
+    PROPAGATION: httpx then enforces each phase (connect incl. TLS, write, read
+    incl. header wait + stream, pool) against that value. httpx has no separate TLS
+    or header timeout — TLS is inside `connect`, header-wait is inside `read` — so
+    those phases are proven bounded via the `connect`/`read` fields plus the
+    controlled-server elapsed-time tests below."""
     clock = FakeClock()
     captured: dict[str, httpx.Timeout] = {}
 
-    def _slow_resolver(host: str) -> list[str]:
-        clock.advance(20.0)
+    def _resolver(host: str) -> list[str]:
+        clock.advance(dns_cost)
         return ["93.184.216.34"]  # a public IP (passes the SSRF policy)
 
     class _SpyClient:
@@ -294,16 +299,63 @@ def test_dns_consumes_budget_and_connect_gets_only_the_remainder(
             content=b"{}",
             headers={},
             transport=None,  # exercise the real DNS pre-resolve path
-            timeout_s=15,
+            timeout_s=budget,  # large enough that `remaining` is the binding cap
             max_response_bytes=1000,
             want_body=False,
-            total_deadline_s=30.0,
-            resolver=_slow_resolver,
+            total_deadline_s=budget,
+            resolver=_resolver,
             monotonic=clock,
         )
-    t = captured["timeout"]
-    assert 9.0 <= float(t.connect or 0) <= 10.0  # the remainder, not 15 or 30
-    assert 9.0 <= float(t.pool or 0) <= 10.0  # pool wait is inside the same budget
+    return captured["timeout"]
+
+
+def test_deadline_budget_covers_dns_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DNS time is INSIDE the budget: after DNS eats 20s of 30s, the connection
+    # phase gets only the ~10s remainder, not a fresh 30s.
+    t = _capture_phase_timeout(monkeypatch, budget=30.0, dns_cost=20.0)
+    assert 9.0 <= float(t.connect or 0) <= 10.0
+
+
+def test_deadline_budget_covers_tcp_connect_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    t = _capture_phase_timeout(monkeypatch, budget=30.0, dns_cost=5.0)
+    assert 24.0 <= float(t.connect or 0) <= 25.0  # the remainder after 5s DNS
+
+
+def test_deadline_budget_covers_tls_negotiation_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    # httpx folds the TLS handshake into the CONNECT phase (there is no separate
+    # TLS timeout), so TLS is bounded by the connect timeout == remaining budget.
+    t = _capture_phase_timeout(monkeypatch, budget=30.0, dns_cost=8.0)
+    assert 21.0 <= float(t.connect or 0) <= 22.0
+
+
+def test_deadline_budget_covers_request_write_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    t = _capture_phase_timeout(monkeypatch, budget=30.0, dns_cost=6.0)
+    assert 23.0 <= float(t.write or 0) <= 24.0
+
+
+def test_deadline_budget_covers_response_header_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The read timeout (which bounds the header wait AND body streaming) is also
+    # the remaining budget — see the controlled-server test for real enforcement.
+    t = _capture_phase_timeout(monkeypatch, budget=30.0, dns_cost=7.0)
+    assert 22.0 <= float(t.read or 0) <= 23.0
+
+
+def test_no_later_phase_gets_a_fresh_full_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    # After DNS consumes 20s, EVERY subsequent phase (connect/write/read/pool) sees
+    # only the ~10s remainder — none is handed a fresh full 30s budget.
+    t = _capture_phase_timeout(monkeypatch, budget=30.0, dns_cost=20.0)
+    for phase in (t.connect, t.write, t.read, t.pool):
+        val = float(phase or 0)
+        assert 9.0 <= val <= 10.0
+        assert val < 30.0  # not a fresh full timeout
+
+
+def test_write_timeout_after_partial_send_is_unknown() -> None:
+    # A write timeout means request bytes MAY already have been transmitted, so the
+    # outcome is unprovable -> UNKNOWN, never a silent retry.
+    transport = _RaisingTransport(httpx.WriteTimeout("write timed out"))
+    with pytest.raises(AmbiguousActionError):
+        _perform(transport)
 
 
 def test_no_connection_started_after_caller_deadline() -> None:

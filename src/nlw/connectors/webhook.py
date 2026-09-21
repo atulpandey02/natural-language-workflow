@@ -26,7 +26,6 @@ from nlw.registry.registry import (
     ActionContext,
     ActionResult,
     AmbiguousActionError,
-    RetryableActionError,
     ToolExecutionError,
 )
 from nlw.secrets.store import SecretError
@@ -142,24 +141,23 @@ def send_webhook(
 def _classify_response(resp: ActionHttpResponse) -> ActionResult:
     """Classify a webhook HTTP status CONSERVATIVELY (P1C).
 
-    A generic webhook has no enforced idempotency contract, so we retry ONLY when
-    the effect provably did not occur:
+    A generic webhook has NO enforced idempotency contract and no transactional
+    guarantee tying an HTTP status to whether the effect occurred, so we auto-retry
+    ONLY when the effect provably did not occur:
     - 2xx                -> success.
     - 3xx                -> deterministic failure (redirects are disabled; a 3xx
                             here is a misconfiguration, not an effect).
     - 401/403            -> deterministic auth failure (request rejected, no effect).
-    - 429               -> retryable. RFC 6585 defines 429 as "too many requests":
-                            the server declined to PROCESS this request due to rate
-                            limiting and asks us to retry later (Retry-After honored,
-                            bounded). Residual risk: a non-conforming receiver could
-                            perform the effect and still return 429 — a spec
-                            violation we accept, because treating every 429 as
-                            UNKNOWN would make ordinary rate limiting unrecoverable.
     - other 4xx          -> deterministic client error (request rejected, no effect).
+    - 429                -> AMBIGUOUS -> UNKNOWN. 429 signals rate limiting but gives
+                            NO guarantee an arbitrary receiver produced no effect
+                            (it may have acted and still returned 429). With no
+                            enforced idempotency contract we must not auto-resend.
+                            (Slack's 429 IS retryable — that is backed by Slack's own
+                            documented rate-limit contract; see slack.py.)
     - 5xx                -> AMBIGUOUS -> UNKNOWN. A generic 5xx does NOT prove the
                             effect did not occur: a receiver may perform the action
-                            and then fail while responding. Without an explicit,
-                            enforced idempotency contract we must not auto-resend.
+                            and then fail while responding.
     """
     code = resp.status_code
     if 200 <= code < 300:
@@ -170,21 +168,11 @@ def _classify_response(resp: ActionHttpResponse) -> ActionResult:
     if code in (401, 403):
         raise ActionAuthError("webhook authentication failed")
     if code == 429:
-        retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-        raise RetryableActionError("webhook rate limited", retry_after_s=retry_after)
+        raise AmbiguousActionError("webhook rate limited (429); delivery outcome unprovable")
     if 500 <= code < 600:
         raise AmbiguousActionError(f"webhook server error {code}; delivery outcome unprovable")
     # Other 4xx: deterministic client error.
     raise ToolExecutionError(f"webhook rejected the request ({code})")
-
-
-def _parse_retry_after(value: str | None) -> float | None:
-    if not value:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
 
 
 def _webhook_health(ctx: ConnectorContext) -> None:

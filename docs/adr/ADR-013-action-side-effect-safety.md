@@ -41,12 +41,14 @@ queries and must NOT be reused for side effects.
   so a claim-then-die can always be recovered after lease expiry
   (`lease_duration > max network timeout + margin`).
 - **Retry.** `external_actions` carries `attempts, last_attempt_at,
-  next_attempt_at, error_class`. Retryable failures (5xx/429/network/timeout)
-  clear the lease, set a bounded backoff `next_attempt_at` (honoring a bounded
-  `Retry-After`), and schedule a delayed resume; an early redelivery before
+  next_attempt_at, error_class`. A retryable failure (see the P1C classification
+  matrix below for the current, narrower set — NOT a generic 5xx/429) clears the
+  lease, sets a bounded backoff `next_attempt_at` (honoring a bounded
+  `Retry-After`), and schedules a delayed resume; an early redelivery before
   `next_attempt_at` does not execute. At the attempt cap (default 5, hard cap 10)
-  the action → step → run FAIL. `attempts` counts durable **claims**, so a crash
-  after claim but before send may consume an attempt (accepted for M7).
+  a provable pre-transmission failure → step → run FAIL definitively (an ambiguous
+  one is UNKNOWN). `attempts` counts durable **claims**, so a crash after claim but
+  before send may consume an attempt (accepted for M7).
 - **Audit.** Every attempt is recorded (tenant/run/step/connector/key/status/
   provider id/classification) with **no secret-bearing headers/bodies, no full
   provider response, and no payload hash**; `destination_summary` is host/channel
@@ -103,8 +105,9 @@ value `unknown`).
   terminal, and excluded from retry, reconciliation, and redelivery** — the side
   effect is never auto-resent. Classification is **conservative**: we auto-retry
   ONLY when the effect provably did not occur (DNS/connect/TLS/pool failure before
-  the request left) **or** a connector-specific contract makes retry safe (HTTP
-  429; Slack `ok:false`). Everything else once transmission may have started is
+  the request left) **or** a connector-specific contract makes retry safe (Slack
+  HTTP 429; Slack `ok:false` transient). A generic webhook 429 or 5xx is **not**
+  retried (it is UNKNOWN). Everything else once transmission may have started is
   UNKNOWN. There is **no retry/resend button** for UNKNOWN in this package
   (operators follow the runbook below). See the full matrix below.
 - **True total wall-clock deadline.** Delivery is bounded by a single monotonic
@@ -160,7 +163,7 @@ immediate redelivery (RETRY defers until `next_attempt_at`).
 | 2xx                                         | SUCCESS  | —                        | Status is authoritative (body not read) |
 | 3xx                                         | FAILED   | `deterministic`          | Redirects disabled (SSRF); misconfiguration |
 | 401 / 403                                   | FAILED   | `auth`                   | Rejected, no effect |
-| 429                                         | RETRY    | `retryable`              | RFC 6585: rate-limited, **not processed**; `Retry-After` honored, bounded. Residual: a non-conforming receiver could act then return 429 (accepted; treating all 429 as UNKNOWN would make ordinary rate limiting unrecoverable) |
+| **429**                                     | **UNKNOWN** | `ACTION_OUTCOME_UNKNOWN` | 429 signals rate limiting but gives NO guarantee an arbitrary receiver produced no effect (it may have acted and still returned 429); no enforced idempotency contract, so no auto-resend. (Slack 429 differs — see below.) |
 | Other 4xx                                   | FAILED   | `deterministic`          | Rejected, no effect |
 | **5xx**                                     | **UNKNOWN** | `ACTION_OUTCOME_UNKNOWN` | A generic 5xx does NOT prove no effect; may have acted then failed responding |
 | Body stream error / trickle past deadline   | n/a for webhook | —                  | Webhook does not read the body (ADR-014); a 2xx head already decided SUCCESS |

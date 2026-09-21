@@ -76,8 +76,10 @@ def test_webhook_auth_error() -> None:
         _webhook_send(401)
 
 
-def test_webhook_rate_limit_is_retryable() -> None:
-    with pytest.raises(RetryableActionError):
+def test_webhook_429_is_ambiguous_not_retried() -> None:
+    # A generic webhook 429 gives no guarantee the receiver produced no effect,
+    # and there is no enforced idempotency contract -> UNKNOWN, never auto-resent.
+    with pytest.raises(AmbiguousActionError):
         _webhook_send(429, {"Retry-After": "2"})
 
 
@@ -164,6 +166,56 @@ def test_slack_5xx_is_ambiguous_not_retried() -> None:
     for code in (500, 502, 503):
         with pytest.raises(AmbiguousActionError):
             _slack_send(code, {})
+
+
+def test_http_429_classification_differs_between_webhook_and_slack() -> None:
+    # The two connectors INTENTIONALLY classify HTTP 429 differently: a generic
+    # webhook has no rate-limit contract (-> UNKNOWN), while Slack's documented
+    # rate-limit contract makes it a safe retry.
+    with pytest.raises(AmbiguousActionError):
+        _webhook_send(429, {"Retry-After": "2"})
+    with pytest.raises(RetryableActionError):
+        _slack_send(429, {"ok": False, "error": "ratelimited"})
+
+
+# Table-driven HTTP-status classification for BOTH connectors. `None` means the
+# call succeeds; otherwise the expected exception type. Note the 429 divergence.
+_WEBHOOK_STATUS_MATRIX = [
+    (200, None),
+    (302, ToolExecutionError),
+    (400, ToolExecutionError),
+    (401, ActionAuthError),
+    (403, ActionAuthError),
+    (429, AmbiguousActionError),  # generic webhook: UNKNOWN
+    (500, AmbiguousActionError),
+    (503, AmbiguousActionError),
+]
+
+_SLACK_STATUS_MATRIX = [
+    (200, None),  # with ok:true
+    (429, RetryableActionError),  # Slack rate-limit contract: safe retry
+    (500, AmbiguousActionError),
+    (503, AmbiguousActionError),
+]
+
+
+@pytest.mark.parametrize(("code", "expected"), _WEBHOOK_STATUS_MATRIX)
+def test_webhook_status_classification_matrix(code: int, expected: type | None) -> None:
+    if expected is None:
+        assert _webhook_send(code) is not None
+    else:
+        with pytest.raises(expected):
+            _webhook_send(code)
+
+
+@pytest.mark.parametrize(("code", "expected"), _SLACK_STATUS_MATRIX)
+def test_slack_status_classification_matrix(code: int, expected: type | None) -> None:
+    body = {"ok": True, "ts": "1", "channel": "C0000"} if code == 200 else {}
+    if expected is None:
+        assert _slack_send(code, body) is not None
+    else:
+        with pytest.raises(expected):
+            _slack_send(code, body)
 
 
 # --- Post-transmission ambiguity (P1C): the message was POSTed, but the outcome

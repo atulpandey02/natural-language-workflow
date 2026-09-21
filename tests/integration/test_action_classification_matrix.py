@@ -77,7 +77,13 @@ class Case:
 _CASES = [
     Case("2xx_success", _status_runner(200), "success", "SUCCESS", "COMPLETED", False, None),
     Case(
-        "429_rate_limited", _status_runner(429), "pending", "RUNNING", "RUNNING", True, "retryable"
+        "webhook_429_ambiguous",
+        _status_runner(429),
+        "unknown",
+        "FAILED",
+        "FAILED",
+        False,
+        ACTION_OUTCOME_UNKNOWN,
     ),
     Case(
         "400_client_error",

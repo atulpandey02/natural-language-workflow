@@ -75,8 +75,9 @@ have been transmitted (write/read/reset/total-deadline, a truncated/garbled
 response, or an expired unprovable final attempt) resolves to a terminal `unknown`
 action with step/run FAILED under a distinguishing error class — persistent,
 excluded from retry/reconciliation/redelivery, never auto-resent, no retry button;
-classification is conservative and phase-aware (only a provable pre-transmission
-failure is retried or definitively FAILED). **Total deadline:** one monotonic
+classification is conservative (auto-retry only on a provable pre-transmission
+failure or a connector contract — Slack 429 / `ok:false`; a generic webhook 429 or
+5xx is UNKNOWN, not retried). **Total deadline:** one monotonic
 wall-clock budget (30s) covering resolve/connect/TLS/write/response, with
 `TOTAL + FINALIZE_MARGIN(10s) < LEASE(45s)`, stops a trickling response before it
 can outlive the lease; no background thread survives the caller. **Streaming
