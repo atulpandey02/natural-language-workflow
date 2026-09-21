@@ -172,10 +172,25 @@ closes that:
   only their own row and only those columns; the stable `auth_provider_id` is not
   grantable and cannot be rewritten. The synced value comes exclusively from the
   verified provider email, never request JSON.
-- **Honest boundary.** The above is a *direct function-call / direct-table
-  guarantee* for any `nlw_app` caller. It does **not** defend against a caller
-  that can **forge a complete authenticated DB context** (e.g. arbitrarily set
-  `app.user_id`): such a caller stays inside the deferred signed/non-forgeable-GUC
-  threat boundary (see the M9 note above), which P1A does not change. If a safe
-  self-scoped email sync were not achievable, deferring automatic email sync would
-  be preferred over leaving a privileged arbitrary-email-update primitive.
+- **Arguments come from the verified JWT.** During normal application execution
+  the function's `auth_provider_id` and `email` arguments are supplied by the
+  server from the **verified Supabase JWT** (`sub` / `email`) — never from
+  client-controlled request JSON.
+- **Honest boundary — what is and is not guaranteed.** The **guaranteed**
+  protection is against **cross-user table reads/updates** (RLS + the column-level
+  grant) and **cross-user mutation or disclosure through the bootstrap function**
+  (it returns only a uuid and does nothing to an existing row). It is **not** a
+  guarantee against *arbitrary SQL executed as `nlw_app`*:
+  - The function does **not** cryptographically authenticate its own arguments.
+    Arbitrary SQL running as `nlw_app` could invoke `resolve_or_create_user` with
+    an **unused** provider id and thereby create a **junk / reserved** `users` row
+    (a brand-new identity). It still cannot read or modify any **existing** user's
+    row through the function or by direct table access.
+  - A caller that can **forge a complete authenticated DB context** — arbitrary
+    function arguments, or arbitrarily setting `app.user_id` — stays inside the
+    deferred **signed/non-forgeable-context** threat boundary (see the M9 note
+    above). Defending against forged request/identity context is that later
+    milestone; P1A does not change it.
+  If a safe self-scoped email sync were not achievable, deferring automatic email
+  sync would be preferred over leaving a privileged arbitrary-email-update
+  primitive.
