@@ -8,9 +8,9 @@
 # stop the instance during the validation window.
 set -euo pipefail
 
-DEPLOY_SHA="6a169e82e5e72a331e858ddde69c6d177bb3d991"
-BACKEND_IMAGE="ghcr.io/atulpandey02/natural-language-workflow@sha256:ec0f33832f5a5de484c0cb795b08135f7548a14255154d3d5d8e18813d4e5792"
-WEB_IMAGE="ghcr.io/atulpandey02/natural-language-workflow/web@sha256:ed477cad1a0e3a55a6a04d968d7ed807ff6307c14078e42215f257135ac742da"
+DEPLOY_SHA="5151a2cc54cfb63b276bd3b30cf0e683263525ac"
+BACKEND_IMAGE="ghcr.io/atulpandey02/natural-language-workflow@sha256:fef5464b674695050ad4b1ca2e80ca7f03bfdd3b03a6519352e52c8377d7728e"
+WEB_IMAGE="ghcr.io/atulpandey02/natural-language-workflow/web@sha256:57276f04e27e350a8eb8044349346af0f426274e9d27750bec904c203a007228"
 STAGING_HOST="32-197-83-193.sslip.io"
 SUPABASE_JWKS_URL="https://uqjqdfshuwcjftdvxbrm.supabase.co/auth/v1/.well-known/jwks.json"
 
