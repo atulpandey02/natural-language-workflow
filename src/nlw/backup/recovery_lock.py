@@ -72,6 +72,25 @@ def check_recovery_lock(conn: Connection) -> None:
     _evaluate(row)
 
 
+def read_recovery_state(conn: Connection) -> str:
+    """Return the authoritative newest-generation state as a plain string for the
+    live API gate: "ALLOWED" (no event, or validated+enabled) or "LOCKED" (quiesced/
+    validated but not enabled). Raises RecoveryStateUnknown on a query error or a
+    malformed row (the caller maps that to UNKNOWN / fail closed)."""
+    try:
+        row = conn.execute(_NEWEST_STATE).first()
+    except SQLAlchemyError as exc:
+        raise RecoveryStateUnknown("cannot read authoritative recovery-lock state") from exc
+    if row is None:
+        return "ALLOWED"
+    event_id, validated, enabled = row[0], row[1], row[2]
+    if event_id is None:
+        raise RecoveryStateUnknown("malformed restore event (missing id)")
+    if validated is None or enabled is None:
+        return "LOCKED"
+    return "ALLOWED"
+
+
 def assert_startup_allowed_sync(engine: Engine) -> None:
     """Startup preflight for the worker/scheduler (sync engines). Fails closed on any
     inability to determine the recovery state (including connection failure)."""

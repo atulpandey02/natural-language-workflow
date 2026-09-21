@@ -216,6 +216,21 @@ change (migration `0014` unchanged).
   `system_identifier`, verified by `gate-check`, exit **4**) and the
   `NLW_RESTORE_MODE` entrypoint wrapper remain as **defense in depth** and a binding
   artifact — never the sole authority.
+  - **Live API gate.** The worker/scheduler evaluate the lock once at boot and refuse
+    to start; the API instead may stay ALIVE for DB-independent liveness, so it must
+    not treat a boot-time connection failure as "allowed" and then serve forever. A
+    live gate (`nlw.api.recovery_gate.RecoveryGate`) holds a three-valued state —
+    `ALLOWED`/`LOCKED`/`UNKNOWN` (initial `UNKNOWN`, never allowed until proven) —
+    refreshed from `dr_restore_events` on a short **bounded cache**
+    (`recovery_gate_ttl_s`, default 5s) under a bounded query timeout
+    (`recovery_gate_query_timeout_s`, default 2s). A **deny-by-default** middleware
+    keeps only liveness/version/readiness available and returns a sanitized **503**
+    (no ids/project/DB/exception text) on every other route unless `ALLOWED`;
+    readiness reports a `recovery` component. Because the state is re-read on the
+    cache boundary, a **running** API re-locks when a later restore generation
+    appears, opens when the generation is enabled, and fails closed when the DB is
+    lost after being allowed — all without a restart. Any query failure/timeout/
+    malformed row → `UNKNOWN` (fail closed). Liveness never triggers a query.
 - **(D) Retention vs immutable credentials.** Two explicit modes:
   `simple` (the job prunes; needs delete rights) and `immutable` (the writer has
   no delete rights; the job **never** prunes — a separate human-gated

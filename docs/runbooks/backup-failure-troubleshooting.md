@@ -87,6 +87,11 @@ did not touch metrics. If it recurs, check for a stuck first process
 - **enable-runtime rejected (exit 5)** — the supplied generation is not the newest
   validated one, or the project confirmation does not match. Re-query the newest
   `dr_restore_events` id and confirm the project.
+- **API returns 503 on business routes / readiness `recovery` != `ok`** — the live
+  API recovery gate has the newest generation as `locked` (enable it) or `unknown`
+  (DB unreachable/indeterminate — fail closed). Liveness (`/health`) stays 200. After
+  enabling, the running API opens within `recovery_gate_ttl_s` (default 5s) with no
+  restart; a later restore generation re-locks it the same way.
 - **manifest hash mismatch** — the decrypted artifact does not match the recorded
   sha256; the snapshot is corrupt. Restore an earlier snapshot.
 - **`restore validation FAILED`** — the restored security posture/invariants are

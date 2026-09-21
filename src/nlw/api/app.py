@@ -28,7 +28,12 @@ from fastapi.responses import JSONResponse
 
 from nlw import __version__
 from nlw.api.errors import install_exception_handlers
-from nlw.api.middleware import BodySizeLimitMiddleware, ObservabilityMiddleware
+from nlw.api.middleware import (
+    BodySizeLimitMiddleware,
+    ObservabilityMiddleware,
+    RecoveryGateMiddleware,
+)
+from nlw.api.recovery_gate import RecoveryGate
 from nlw.api.routers import (
     approvals,
     connectors,
@@ -56,22 +61,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     configure_logging(settings)
     app.state.engine = create_engine(settings)
-    # Authoritative recovery lock (M11.5 P2 addendum): refuse to start against a
-    # restored database whose newest generation has not been explicitly enabled by
-    # the operator. Mandatory — NOT gated on any env flag. A never-restored DB is
-    # unaffected. Fails closed if the state cannot be read.
-    from nlw.backup.recovery_lock import (
-        RecoveryLocked,
-        RecoveryStateUnknown,
-        assert_startup_allowed_async,
+    # Authoritative recovery lock (M11.5 P2 addendum): the API stays ALIVE for
+    # DB-independent liveness, but a LIVE gate re-evaluates the authoritative
+    # dr_restore_events state and fail-closes readiness + all business routes until
+    # the newest generation is operator-enabled. Never decides ALLOWED from a
+    # boot-time connection failure; re-locks a running process when a later restore
+    # generation appears. (Worker/scheduler stay boot-time fail-closed.)
+    app.state.recovery_gate = RecoveryGate(
+        app.state.engine,
+        ttl_s=settings.recovery_gate_ttl_s,
+        query_timeout_s=settings.recovery_gate_query_timeout_s,
     )
-
-    try:
-        await assert_startup_allowed_async(app.state.engine)
-    except (RecoveryLocked, RecoveryStateUnknown) as exc:
-        log.error("api.startup_blocked_by_recovery_lock", error_class=type(exc).__name__)
-        await app.state.engine.dispose()
-        raise
+    # Best-effort initial evaluation; NEVER blocks boot (liveness must stay up).
+    initial = await app.state.recovery_gate.check()
+    log.info("api.recovery_gate_initial", state=initial)
     app.state.sessionmaker = create_sessionmaker(app.state.engine)
     app.state.auth_provider = build_auth_provider(settings)
     # Planner provider (M6). Built once; the platform LLM key (if any) lives only
@@ -114,8 +117,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     # Middleware order (outermost first): body cap -> observability/headers ->
-    # trusted host -> CORS. The body cap runs first so oversized requests are
-    # rejected before any routing work.
+    # trusted host -> CORS -> recovery gate. The body cap runs first so oversized
+    # requests are rejected before any routing work; the recovery gate runs LAST
+    # (innermost, just before routing) so gated 503s still carry a correlation id.
+    app.add_middleware(RecoveryGateMiddleware)
     if settings.cors_allow_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -177,6 +182,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 healthy = False
                 log.warning("readiness.check_failed", dependency=name, error=str(exc))
                 return False
+
+        # Recovery lock is part of readiness: a locked/unknown generation is NOT
+        # ready even if Postgres/Redis are up. This reads the live gate (bounded).
+        recovery_state = await app.state.recovery_gate.check()
+        checks["recovery"] = "ok" if recovery_state == "ALLOWED" else recovery_state.lower()
+        if recovery_state != "ALLOWED":
+            healthy = False
 
         postgres_ok = await probe("postgres", check_connection(app.state.engine))
         await probe("redis", check_redis(settings_))

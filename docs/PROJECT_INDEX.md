@@ -163,7 +163,12 @@ preflight (API lifespan, scheduler main, worker `before_worker_boot`) that fails
 closed unless the newest restore generation is operator-enabled — regardless of
 `NLW_RESTORE_MODE`, profile, or file. A separate `nlw.backup enable-runtime`
 operator command performs the audited, conditional enable; a later restore re-locks.
-The file gate / `NLW_RESTORE_MODE` are now defense-in-depth only.
+The file gate / `NLW_RESTORE_MODE` are now defense-in-depth only. Because the API
+can stay alive for DB-independent liveness, it carries a **live** recovery gate
+(three-valued ALLOWED/LOCKED/UNKNOWN, short bounded cache + query timeout) with a
+**deny-by-default** middleware: liveness/version/readiness stay available, every
+other route returns a sanitized 503 unless ALLOWED, and a running API re-locks on a
+later generation / opens on enable / fails closed on DB loss without a restart.
 
 M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
 so a user can operate the platform end-to-end without curl/SQL: Supabase

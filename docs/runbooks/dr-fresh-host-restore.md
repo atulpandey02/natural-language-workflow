@@ -104,11 +104,17 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    records the server-side enablement time + operator, and is idempotent for the
    same already-enabled generation. It does **not** start any container.
 
-8. **Only now start the runtime.** Bring up api → worker → scheduler; each passes
-   the startup preflight (the generation is enabled) and serves. Starting the
-   runtime does **not** replay restored work (quiescence neutralized it). A **later**
-   restore inserts a new locked generation, so this enablement cannot authorize it —
-   you must enable the new generation explicitly.
+8. **Start the runtime.** Bring up api → worker → scheduler. Worker/scheduler check
+   the lock once at boot and start only when enabled. The **API** may already be
+   running (it stays alive for liveness): it carries a **live** recovery gate that
+   re-reads `dr_restore_events` on a short bounded cache
+   (`recovery_gate_ttl_s`, default 5s), so it becomes ready and serves business
+   traffic within that window **without a restart** once you enable — and, symmetrically,
+   a **later** restore generation re-locks a running API (readiness non-ready,
+   business routes sanitized 503) until you enable the new generation. Liveness
+   (`/health`) is always available; readiness (`/health/ready`) reports a `recovery`
+   component. Starting the runtime does **not** replay restored work (quiescence
+   neutralized it).
 
 7. **Record** the incident: snapshot id/age, the measured RTO, the quiescence
    counts, and (if a real provider) note it in `docs/incidents/`.

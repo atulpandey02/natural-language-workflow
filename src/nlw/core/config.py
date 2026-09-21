@@ -101,6 +101,15 @@ class Settings(BaseSettings):
     # in this timeout and reports the dependency "down" (503) rather than hanging.
     readiness_probe_timeout_s: float = 3.0
 
+    # --- Recovery-lock gate (M11.5 P2 addendum) ---
+    # The API re-evaluates the authoritative DR recovery lock (dr_restore_events)
+    # on a short bounded cache: a business request refreshes the state at most once
+    # per TTL, under a bounded query timeout. A cached ALLOWED decision goes stale
+    # (-> UNKNOWN, fail closed) once older than the TTL, so losing the DB after being
+    # allowed does not keep serving. Liveness is never gated (no query).
+    recovery_gate_ttl_s: float = 5.0
+    recovery_gate_query_timeout_s: float = 2.0
+
     # --- Observability / metrics (M9) ---
     # Each process (api / worker / scheduler) serves Prometheus metrics on its own
     # INTERNAL port. This port is never published publicly (see docker-compose);
@@ -171,6 +180,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "scheduler_reconcile_per_tenant_limit must be <= scheduler_batch_limit"
             )
+        if self.recovery_gate_ttl_s <= 0:
+            raise ValueError("recovery_gate_ttl_s must be > 0")
+        if self.recovery_gate_query_timeout_s <= 0:
+            raise ValueError("recovery_gate_query_timeout_s must be > 0")
         return self
 
     @property

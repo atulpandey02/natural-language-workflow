@@ -33,10 +33,25 @@ BAK_IMG="nlw-backup:drill"
 cleanup() {
   echo "--- cleanup (${PROJ}) ---"
   docker rm -f "${PROJ}-minio" "${PROJ}-srcdb" "${PROJ}-destdb" "${PROJ}-destdb2" \
-    "${PROJ}-redis" >/dev/null 2>&1 || true
+    "${PROJ}-redis" "${PROJ}-api" >/dev/null 2>&1 || true
   docker volume rm "${PROJ}-srcdata" "${PROJ}-destdata" "${PROJ}-destdata2" \
     "${PROJ}-miniodata" "${PROJ}-gate" >/dev/null 2>&1 || true
   docker network rm "${NET}" >/dev/null 2>&1 || true
+}
+
+CURL_IMG="curlimages/curl:8.11.1"
+_api_code() {  # path -> HTTP status code (Host: localhost satisfies TrustedHost)
+  docker run --rm --network "${NET}" "${CURL_IMG}" -s -o /dev/null -w "%{http_code}" \
+    -H "Host: localhost" "http://${PROJ}-api:8000$1"
+}
+_api_body() {  # path -> response body
+  docker run --rm --network "${NET}" "${CURL_IMG}" -s -H "Host: localhost" \
+    "http://${PROJ}-api:8000$1"
+}
+_expect_api() {  # path expected_code label
+  local got; got=$(_api_code "$1")
+  [ "${got}" = "$2" ] && echo "  [ok] $3 ($1 -> ${got})" \
+    || { echo "FAIL: $3 expected $2 got ${got} for $1" >&2; exit 1; }
 }
 trap cleanup EXIT
 
@@ -161,6 +176,18 @@ _startup_check() {  # url -> expected_rc ; returns 0 on match
   [ "${rc}" -eq "$2" ] || { echo "FAIL: startup-check rc=${rc} expected $2" >&2; exit 1; }
 }
 
+echo "=== (G1-G3) API PROCESS starts against the LOCKED restored DB: alive but gated ==="
+docker run -d --name "${PROJ}-api" --network "${NET}" -e APP_ENV=local \
+  -e "DATABASE_URL=postgresql+psycopg://nlw_app:nlw_app@${PROJ}-destdb:5432/nlw" \
+  -e "REDIS_URL=redis://${PROJ}-redis:6379/0" -e "RECOVERY_GATE_TTL_S=1" \
+  "${APP_IMG}" python -m nlw.api >/dev/null
+for _ in $(seq 1 30); do [ "$(_api_code /health)" = "200" ] && break; sleep 1; done
+_expect_api /health 200 "liveness available while DB is locked"
+_expect_api /health/ready 503 "readiness blocked (locked)"
+_expect_api /workflows 503 "representative business route blocked (locked)"
+_api_body /health/ready | grep -q '"recovery": *"locked"' \
+  && echo "  [ok] readiness reports recovery=locked"
+
 echo "=== (F3/F4/F6) DB lock BLOCKS runtime startup even though the file gate passes ==="
 # The file gate is valid now, but the DB generation is validated-but-NOT-enabled.
 docker run --rm --network "${NET}" "${_gate_env[@]}" -e APP_ENV=local "${BAK_IMG}" gate-check \
@@ -189,6 +216,15 @@ echo "=== (F8) runtime startup now permitted ==="
 _startup_check "${APP_URL}" 0
 echo "  [ok] startup-check permits startup after explicit enable"
 
+echo "=== (G4-G5) the SAME running API process detects the enable: ready + un-gated ==="
+sleep 2  # let the API's recovery-gate cache (TTL 1s) re-read
+_expect_api /health 200 "liveness still available"
+_expect_api /health/ready 200 "readiness now healthy (same process)"
+_api_body /health/ready | grep -q '"recovery": *"ok"' && echo "  [ok] readiness reports recovery=ok"
+biz=$(_api_code /workflows)
+[ "${biz}" != "503" ] && echo "  [ok] business route un-gated (${biz}, not 503)" \
+  || { echo "FAIL: business route still gated after enable" >&2; exit 1; }
+
 echo "=== (F9/F10) start runtime: a BRAND-NEW post-restore run executes to COMPLETED ==="
 docker run --rm --network "${NET}" -v "${REPO}/scripts:/scripts:ro" "${APP_IMG}" \
   python /scripts/ops/dr_drill_seed.py newrun --url "${DEST_URL}"
@@ -211,6 +247,13 @@ old_enable_rc=$?; set -e
 [ "${old_enable_rc}" -eq 5 ] && echo "  [ok] stale enablement rejected (exit 5)" \
   || { echo "FAIL: old enable should have exited 5, got ${old_enable_rc}" >&2; exit 1; }
 
+echo "=== (G6) the SAME running API process RE-LOCKS on the later generation ==="
+sleep 2  # let the API's recovery-gate cache (TTL 1s) re-read the newer generation
+_expect_api /workflows 503 "business route re-blocked by the later generation"
+_expect_api /health/ready 503 "readiness non-ready again"
+_expect_api /health 200 "liveness still available"
+docker rm -f "${PROJ}-api" >/dev/null
+
 echo "=== (C/E) file gate CANNOT be reused for a second empty destination ==="
 _run_owner_db "${PROJ}-destdb2" "${PROJ}-destdata2"; _wait_db "${PROJ}-destdb2"
 set +e
@@ -230,6 +273,7 @@ echo "  backup_duration_seconds   = ${BACKUP_S}"
 echo "  restore_duration_seconds  = ${RESTORE_S}  (observed local RTO component)"
 echo "  observed_snapshot_age     = ~0s (backup taken immediately before restore; RPO in prod = backup interval)"
 echo "  authoritative DB lock     = blocks api/worker/scheduler until explicit enable (no env flag)"
+echo "  live API gate             = alive+gated while locked; same process opens on enable, re-locks on new gen"
 echo "  file gate                 = defense in depth; cannot unlock the DB lock; not reusable"
 echo "  new post-restore run      = executed to COMPLETED; no restored work replayed"
 echo "  later generation          = re-locks runtime; stale enablement rejected"

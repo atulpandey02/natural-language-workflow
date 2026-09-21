@@ -36,7 +36,12 @@ def test_ready_when_all_dependencies_and_schema_ok(
     with TestClient(create_app(_settings(pg_stack, redis_url=redis_url))) as client:
         resp = client.get("/health/ready")
     assert resp.status_code == 200
-    assert resp.json()["checks"] == {"postgres": "ok", "redis": "ok", "schema": "ok"}
+    assert resp.json()["checks"] == {
+        "recovery": "ok",
+        "postgres": "ok",
+        "redis": "ok",
+        "schema": "ok",
+    }
 
 
 def test_not_ready_when_redis_down(pg_stack: SimpleNamespace) -> None:
