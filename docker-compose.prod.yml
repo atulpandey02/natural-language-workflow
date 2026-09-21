@@ -268,15 +268,21 @@ services:
     image: ${NLW_BACKUP_IMAGE:-nlw-backup:local}
     profiles: ["backup"]
     command: ["backup"]
+    # NOTE: the DR vars below use empty defaults (${VAR:-}), NOT compose ${VAR:?}
+    # requireds. `docker compose config` interpolates EVERY service regardless of the
+    # active profile, so a bare `:?` here would force unrelated renders (migration,
+    # normal runtime) to supply backup/restore secrets. Fail-closed is enforced
+    # authoritatively in Python: BackupSettings/RestoreSettings raise in
+    # staging/production when a required secret is missing (see nlw.backup.config).
     environment:
       APP_ENV: production
       LOG_LEVEL: info
-      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required (backup)}
-      RESTIC_PASSWORD: ${RESTIC_PASSWORD:?RESTIC_PASSWORD is required (backup)}
-      AWS_ACCESS_KEY_ID: ${BACKUP_AWS_ACCESS_KEY_ID:?BACKUP_AWS_ACCESS_KEY_ID is required (backup)}
-      AWS_SECRET_ACCESS_KEY: ${BACKUP_AWS_SECRET_ACCESS_KEY:?BACKUP_AWS_SECRET_ACCESS_KEY is required (backup)}
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:-}
+      AWS_ACCESS_KEY_ID: ${BACKUP_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_AWS_SECRET_ACCESS_KEY:-}
       AWS_DEFAULT_REGION: ${BACKUP_AWS_REGION:-}
-      NLW_BACKUP_DATABASE_URL: ${NLW_BACKUP_DATABASE_URL:?NLW_BACKUP_DATABASE_URL is required (backup)}
+      NLW_BACKUP_DATABASE_URL: ${NLW_BACKUP_DATABASE_URL:-}
       NLW_BACKUP_METRICS_FILE: /textfile/nlw_backup.prom
       NLW_BACKUP_RETENTION_DAILY: ${NLW_BACKUP_RETENTION_DAILY:-14}
       NLW_BACKUP_RETENTION_WEEKLY: ${NLW_BACKUP_RETENTION_WEEKLY:-8}
@@ -321,20 +327,20 @@ services:
     environment:
       APP_ENV: production
       LOG_LEVEL: info
-      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required (restore)}
-      RESTIC_PASSWORD: ${RESTIC_PASSWORD:?RESTIC_PASSWORD is required (restore)}
-      AWS_ACCESS_KEY_ID: ${RESTORE_AWS_ACCESS_KEY_ID:?RESTORE_AWS_ACCESS_KEY_ID is required (restore)}
-      AWS_SECRET_ACCESS_KEY: ${RESTORE_AWS_SECRET_ACCESS_KEY:?RESTORE_AWS_SECRET_ACCESS_KEY is required (restore)}
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:-}
+      AWS_ACCESS_KEY_ID: ${RESTORE_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${RESTORE_AWS_SECRET_ACCESS_KEY:-}
       AWS_DEFAULT_REGION: ${BACKUP_AWS_REGION:-}
-      NLW_RESTORE_DATABASE_URL: ${NLW_RESTORE_DATABASE_URL:?NLW_RESTORE_DATABASE_URL is required (restore)}
+      NLW_RESTORE_DATABASE_URL: ${NLW_RESTORE_DATABASE_URL:-}
       NLW_RESTORE_SNAPSHOT: ${NLW_RESTORE_SNAPSHOT:-latest}
-      NLW_RESTORE_TARGET_ID: ${NLW_RESTORE_TARGET_ID:?NLW_RESTORE_TARGET_ID is required (restore)}
+      NLW_RESTORE_TARGET_ID: ${NLW_RESTORE_TARGET_ID:-}
       NLW_RESTORE_CONFIRM: ${NLW_RESTORE_CONFIRM:-}
       REDIS_URL: ${RESTORE_REDIS_URL:-}
       # (B) runtime-state guard, scoped to THIS exact Compose project. Required in
       # production. The container needs docker access (mount the socket read-only) to
       # run the compose probe, OR run the host preflight in dr-fresh-host-restore.md.
-      NLW_RESTORE_COMPOSE_PROJECT: ${NLW_RESTORE_COMPOSE_PROJECT:?NLW_RESTORE_COMPOSE_PROJECT is required (restore)}
+      NLW_RESTORE_COMPOSE_PROJECT: ${NLW_RESTORE_COMPOSE_PROJECT:-}
       NLW_RESTORE_RUNTIME_GUARD: ${NLW_RESTORE_RUNTIME_GUARD:-compose}
       # (C) restore-ready gate written atomically after quiescence+validation, onto a
       # shared volume the recovered runtime reads via `nlw.backup gate-check`.
