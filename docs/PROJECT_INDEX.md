@@ -8,7 +8,7 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
-| Current milestone | **M11.5 P0** — runtime credential & launch-gate isolation (`fix/pre-m12-runtime-credential-isolation`) |
+| Current milestone | **M11.5 P1A** — identity & connector authorization boundary (`fix/pre-m12-identity-connector-authorization`) |
 | Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
 | Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
 | Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
@@ -25,6 +25,27 @@ SQL-safety, action lease/UNKNOWN outcomes, scheduler/reconciler fixes, `users`
 RLS, signed GUC, DR/PITR, membership/invites, alerting) are tracked from the
 reviews. Secret rotation (Anthropic key + Supabase password exposed in setup)
 remains a required operator action — see runbooks/rotate-exposed-secrets.md.
+
+M11.5 P1A (identity & connector authorization, migration `0011`) closes two
+verified authorization findings. **users:** RLS is now `ENABLE`+`FORCE`; `nlw_app`
+loses its broad `SELECT/INSERT/UPDATE` and keeps only a self-scoped `SELECT` plus
+a column-limited self `UPDATE(email)` (self-only RLS). First-login resolution uses
+a *minimal* `SECURITY DEFINER` bootstrap `resolve_or_create_user` (owned by
+`nlw_workspace_bootstrap`, `EXECUTE` for `nlw_app` only, never worker/scheduler/
+PUBLIC) that returns **only the internal `uuid`** — never a row/email/provider id
+— inserts a missing identity race-safely and does nothing to an existing one, so
+it cannot read or rewrite another user's record. Email sync is a separate
+self-scoped step after `app.user_id` is established (verified provider email only).
+The stable `auth_provider_id` is never writable by the app role. So the runtime
+role can no longer enumerate or rewrite unrelated identities. (Honest boundary: a
+caller able to forge complete DB context stays in the deferred signed-GUC scope.)
+**connectors:** creation + credential-alias attachment is now admin/owner-only in
+both the API (`require_role(ADMIN)`) and RLS (`connectors_app_insert` now checks
+`is_current_user_admin_or_owner`); members keep read-only, secret-free access.
+`secret_ref` remains absent from all member-facing responses, planner context,
+plans, step state, approvals, logs and errors. Deferred: signed/non-forgeable DB
+context, cloud/encrypted secret storage, self-service secret onboarding,
+connector→credential-entity binding, team invitations (see ADR-003/006/011).
 
 M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
 so a user can operate the platform end-to-end without curl/SQL: Supabase

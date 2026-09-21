@@ -2,11 +2,13 @@
 
 import { AppShell } from "@/components/AppShell";
 import { ConnectorForm } from "@/components/ConnectorForm";
-import { ErrorBanner, Empty, Loading, StatusBadge } from "@/components/ui";
-import { useConnectors } from "@/lib/api/hooks";
+import { ErrorBanner, Empty, Loading, RoleGate, StatusBadge, canApprove } from "@/components/ui";
+import { useConnectors, useCurrentWorkspace } from "@/lib/api/hooks";
 
 export default function ConnectorsPage() {
   const connectors = useConnectors();
+  const current = useCurrentWorkspace();
+  const role = current.data?.role;
 
   return (
     <AppShell>
@@ -43,7 +45,15 @@ export default function ConnectorsPage() {
         </table>
       ) : null}
 
-      <ConnectorForm />
+      {/* Creating a connector attaches a credential and is admin/owner-only.
+          This gate is usability only; the API and PostgreSQL RLS are the
+          authoritative boundary. */}
+      <RoleGate role={role} allow={["owner", "admin"]}>
+        <ConnectorForm />
+      </RoleGate>
+      {role && !canApprove(role) ? (
+        <p className="muted">An admin or owner must add or configure connectors.</p>
+      ) : null}
     </AppShell>
   );
 }

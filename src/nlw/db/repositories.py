@@ -8,7 +8,7 @@ authorization is membership-based at the application layer.
 import uuid
 from typing import Any, Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ from nlw.db.models import (
     WorkflowVersion,
     Workspace,
 )
+from nlw.tenancy.session import set_current_user
 
 DecisionOutcome = Literal["transitioned", "idempotent", "conflict", "not_found"]
 
@@ -35,26 +36,49 @@ class UserRepository:
         self.session = session
 
     async def get_or_create(self, auth_provider_id: str, email: str) -> User:
-        """Idempotent, race-safe first-sight provisioning.
+        """Idempotent, race-safe first-sight identity resolution/provisioning.
 
-        Relies on ``UNIQUE(auth_provider_id)``: concurrent callers converge on a
-        single row via ``INSERT ... ON CONFLICT``.
+        Three narrow steps (M11.5 P1A), so no single primitive can read or mutate
+        another user's identity:
+
+        1. Resolve the internal id via the minimal ``resolve_or_create_user``
+           SECURITY DEFINER bootstrap. It inserts a missing identity (race-safe via
+           ``UNIQUE(auth_provider_id)``, ``ON CONFLICT DO NOTHING``) and returns
+           ONLY the ``uuid`` — never a row, email, or ``auth_provider_id`` — and
+           does nothing to an existing row. This is required because at first login
+           the row does not exist yet and ``app.user_id`` is not established.
+        2. Establish ``app.user_id`` so the self-scoped RLS read/update apply.
+        3. Read the caller's own row and, only if the *verified provider* email
+           changed, synchronize it through a self-scoped UPDATE (RLS restricts to
+           the own row; the column grant restricts to ``email``/``updated_at`` — the
+           stable ``auth_provider_id`` can never be written). The email value comes
+           exclusively from the verified token, never from request JSON.
+
+        No commit here: the caller's request transaction owns commit/rollback.
         """
-        stmt = (
-            pg_insert(User)
-            .values(id=uuid.uuid4(), auth_provider_id=auth_provider_id, email=email)
-            .on_conflict_do_update(index_elements=["auth_provider_id"], set_={"email": email})
-        )
-        # No commit here: the caller's request transaction owns commit/rollback.
-        # The row is visible to later statements in the same transaction, and
-        # ON CONFLICT keeps it race-safe regardless of commit timing.
-        await self.session.execute(stmt)
-        user = (
+        user_id = (
             await self.session.execute(
-                select(User).where(User.auth_provider_id == auth_provider_id)
+                text("SELECT resolve_or_create_user(:sub, :email)"),
+                {"sub": auth_provider_id, "email": email},
             )
         ).scalar_one()
-        return user
+
+        # Establish self-context, then read/sync self-scoped (deps also sets this
+        # after us; a repeated SET LOCAL of the same value is a harmless no-op).
+        await set_current_user(self.session, user_id)
+        row = (
+            await self.session.execute(
+                text("SELECT id, auth_provider_id, email FROM users WHERE id = :id"),
+                {"id": user_id},
+            )
+        ).one()
+        if row.email != email:
+            await self.session.execute(
+                text("UPDATE users SET email = :email, updated_at = now() WHERE id = :id"),
+                {"email": email, "id": user_id},
+            )
+            return User(id=row.id, auth_provider_id=row.auth_provider_id, email=email)
+        return User(id=row.id, auth_provider_id=row.auth_provider_id, email=row.email)
 
 
 class WorkspaceRepository:

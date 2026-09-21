@@ -1,8 +1,11 @@
 """Connector and tool endpoints.
 
-- ``POST /connectors``  create a tenant connector (secret_ref only; never a secret)
-- ``GET  /connectors``  list the tenant's connectors (no secret, no secret_ref)
-- ``GET  /tools``       tools available to the tenant (registry + owned connectors)
+- ``POST /connectors``  admin/owner: create a tenant connector and attach a
+                         credential alias (secret_ref only; never a secret).
+                         Members are denied (a secret alias never confers
+                         authority to attach it) — enforced by role AND RLS.
+- ``GET  /connectors``  member: list the tenant's connectors (no secret, no secret_ref)
+- ``GET  /tools``       member: tools available to the tenant (registry + owned connectors)
 
 The API never resolves secrets and has no ``NLW_SECRET_*`` environment.
 """
@@ -11,7 +14,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import nlw.tools.builtin  # noqa: F401  (populates registries)
-from nlw.api.deps import get_app_settings, get_session, get_tenant_context, rate_limit
+from nlw.api.deps import (
+    get_app_settings,
+    get_session,
+    get_tenant_context,
+    rate_limit,
+    require_role,
+)
 from nlw.api.schemas import ConnectorCreate, ConnectorOut, ToolOut
 from nlw.connectors.base import (
     ConnectorConfigError,
@@ -24,9 +33,14 @@ from nlw.db.quota import QuotaExceededError, connectors_count_stmt, enforce_cap
 from nlw.db.repositories import ConnectorRepository
 from nlw.registry.registry import REGISTRY
 from nlw.secrets.store import InvalidSecretRefError, validate_secret_ref
-from nlw.tenancy.context import TenantContext
+from nlw.tenancy.context import Role, TenantContext
 
 router = APIRouter()
+# Connector creation + credential attachment is a mutation of connector
+# authority: admin/owner only (require_role(ADMIN) admits admin and owner). The
+# DB RLS INSERT policy enforces the same boundary, so a direct request that
+# bypasses this check still fails.
+_require_admin = require_role(Role.ADMIN)
 
 
 def _to_out(connector: object) -> ConnectorOut:
@@ -49,7 +63,7 @@ def _to_out(connector: object) -> ConnectorOut:
 )
 async def create_connector(
     body: ConnectorCreate,
-    ctx: TenantContext = Depends(get_tenant_context),
+    ctx: TenantContext = Depends(_require_admin),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_app_settings),
 ) -> ConnectorOut:

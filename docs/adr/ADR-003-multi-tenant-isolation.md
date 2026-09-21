@@ -137,3 +137,60 @@ staging**, on the following honest basis:
   context or a per-request DB identity model (options A/B) must be implemented and
   reconsidered before public production. This stays a pre-production hardening item
   (see ADR-018 §remaining risks). M9 does not implement it.
+
+## Update (M11.5 P1A / migration 0011) — `users` identity RLS + bootstrap
+
+The M3 note above stated *"`users`: global identity, no tenant RLS."* Two
+independent pre-launch reviews flagged that this left `nlw_app` with broad
+`SELECT/INSERT/UPDATE` on `users` and no RLS, so a runtime-role compromise (or a
+future unscoped query path) could **enumerate every identity and rewrite
+unrelated identity mappings — including the stable `auth_provider_id`**. P1A
+closes that:
+
+- `users` now has **RLS `ENABLE` + `FORCE`**. `nlw_app` keeps only a self-scoped
+  `SELECT` policy (`USING (id = app.user_id)`); it holds **no** direct
+  `INSERT/UPDATE/DELETE` grant, so identity writes fail at the privilege level
+  even before RLS. `nlw_worker`/`nlw_scheduler` get **no** access to `users`.
+- First login cannot rely on a self-scoped policy (the row does not exist yet and
+  `app.user_id` is not established at `get_or_create` time — the resolution runs
+  *before* `set_current_user`). Resolution therefore uses one **minimal**
+  `SECURITY DEFINER` function, **`resolve_or_create_user(text, text) RETURNS
+  uuid`**, owned by the existing write-only `BYPASSRLS` non-login role
+  `nlw_workspace_bootstrap` (granted only `SELECT, INSERT` on `users`),
+  `SET search_path = pg_catalog`, all objects schema-qualified,
+  `REVOKE ALL … FROM PUBLIC`, `EXECUTE` for `nlw_app` only (never
+  worker/scheduler/PUBLIC). It **returns only the internal `uuid` id** — never a
+  row, email, or `auth_provider_id` — inserts a missing identity (race-safe via
+  `UNIQUE(auth_provider_id)` + `ON CONFLICT DO NOTHING`), and does **nothing** to
+  an existing row. So a caller supplying an arbitrary `auth_provider_id` can
+  neither read that user's email/provider id nor modify it; at most it learns an
+  id exists.
+- **Email synchronization is a separate, self-scoped step**, performed by the app
+  *after* `app.user_id` is established: a self-only `UPDATE` policy
+  (`users_app_self_update`, `USING/WITH CHECK id = app.user_id`) plus a
+  **column-level `GRANT UPDATE (email, updated_at)`** — so a caller can update
+  only their own row and only those columns; the stable `auth_provider_id` is not
+  grantable and cannot be rewritten. The synced value comes exclusively from the
+  verified provider email, never request JSON.
+- **Arguments come from the verified JWT.** During normal application execution
+  the function's `auth_provider_id` and `email` arguments are supplied by the
+  server from the **verified Supabase JWT** (`sub` / `email`) — never from
+  client-controlled request JSON.
+- **Honest boundary — what is and is not guaranteed.** The **guaranteed**
+  protection is against **cross-user table reads/updates** (RLS + the column-level
+  grant) and **cross-user mutation or disclosure through the bootstrap function**
+  (it returns only a uuid and does nothing to an existing row). It is **not** a
+  guarantee against *arbitrary SQL executed as `nlw_app`*:
+  - The function does **not** cryptographically authenticate its own arguments.
+    Arbitrary SQL running as `nlw_app` could invoke `resolve_or_create_user` with
+    an **unused** provider id and thereby create a **junk / reserved** `users` row
+    (a brand-new identity). It still cannot read or modify any **existing** user's
+    row through the function or by direct table access.
+  - A caller that can **forge a complete authenticated DB context** — arbitrary
+    function arguments, or arbitrarily setting `app.user_id` — stays inside the
+    deferred **signed/non-forgeable-context** threat boundary (see the M9 note
+    above). Defending against forged request/identity context is that later
+    milestone; P1A does not change it.
+  If a safe self-scoped email sync were not achievable, deferring automatic email
+  sync would be preferred over leaving a privileged arbitrary-email-update
+  primitive.

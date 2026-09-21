@@ -24,6 +24,7 @@ from nlw.auth.supabase import SupabaseAuthProvider
 from nlw.db.models import User
 from nlw.db.repositories import UserRepository
 from nlw.db.session import create_engine, create_sessionmaker
+from nlw.tenancy.session import set_current_user
 
 pytestmark = pytest.mark.integration
 
@@ -146,7 +147,11 @@ def test_user_provisioning_is_race_safe(pg_stack: SimpleNamespace) -> None:
                 return await UserRepository(session).get_or_create("race-sub", "race@example.com")
 
         first, second = await asyncio.gather(once(), once())
-        async with sessionmaker() as session:
+        # users now enforces RLS (P1A): a read needs app.user_id. Both concurrent
+        # callers converge on the same id, so a self-scoped read for that id
+        # returns exactly the one row that must exist.
+        async with sessionmaker() as session, session.begin():
+            await set_current_user(session, first.id)
             rows = (
                 (await session.execute(select(User).where(User.auth_provider_id == "race-sub")))
                 .scalars()
@@ -157,4 +162,4 @@ def test_user_provisioning_is_race_safe(pg_stack: SimpleNamespace) -> None:
 
     id1, id2, count = asyncio.run(run())
     assert id1 == id2
-    assert count == 1
+    assert count == 1  # concurrent first-login converged on a single row
