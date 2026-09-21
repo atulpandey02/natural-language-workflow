@@ -82,8 +82,9 @@ jobs:
           NLW_WEB_IMAGE: ${{ needs.build-push.outputs.web_image }}@${{ needs.build-push.outputs.web_digest }}
         run: |
           echo "Deploy $NLW_IMAGE to staging."
-          echo "Run migrations first: docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head"
-          echo "Then: docker compose -f docker-compose.prod.yml up -d"
+          echo "Run migrations first (dedicated migrate service; owner cred not in runtime services):"
+          echo "  docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.staging.yml --profile migration run --rm migrate"
+          echo "Then: docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.staging.yml up -d"
           # TODO: wire to the staging host (SSH / compose). Placeholder for M9.
       - name: Smoke test staging
         run: |

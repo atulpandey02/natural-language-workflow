@@ -2,7 +2,7 @@ import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getServerPublicConfig, getServerSupabaseUrl } from "../public-config";
-import { SUPABASE_COOKIE_NAME } from "./shared";
+import { supabaseCookieOptions } from "./shared";
 
 /**
  * Server-side Supabase client bound to the request cookies. The session lives in
@@ -16,7 +16,7 @@ export async function getSupabaseServerClient(): Promise<SupabaseClient> {
   // prefers SUPABASE_SERVER_URL, falling back to the public URL. Both are read at
   // runtime; the anon key is the same public value the browser uses.
   return createServerClient(getServerSupabaseUrl(), getServerPublicConfig().supabaseAnonKey, {
-    cookieOptions: { name: SUPABASE_COOKIE_NAME },
+    cookieOptions: supabaseCookieOptions(),
     cookies: {
       getAll() {
         return cookieStore.getAll();

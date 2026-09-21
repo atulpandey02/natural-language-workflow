@@ -3,7 +3,7 @@ import { createServerClient } from "@supabase/ssr";
 import { WORKSPACE_COOKIE_NAME } from "@/lib/workspace";
 import { buildContentSecurityPolicy } from "@/lib/csp";
 import { getServerPublicConfig, getServerSupabaseUrl } from "@/lib/public-config";
-import { SUPABASE_COOKIE_NAME } from "@/lib/supabase/shared";
+import { supabaseCookieOptions } from "@/lib/supabase/shared";
 
 // Next.js 16 proxy (formerly middleware): refreshes the Supabase session on
 // every request, enforces the route-protection boundary, and sets a per-request
@@ -30,7 +30,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   response.headers.set("content-security-policy", csp);
 
   const supabase = createServerClient(getServerSupabaseUrl(), supabaseAnonKey, {
-    cookieOptions: { name: SUPABASE_COOKIE_NAME },
+    cookieOptions: supabaseCookieOptions(),
     cookies: {
       getAll() {
         return request.cookies.getAll();

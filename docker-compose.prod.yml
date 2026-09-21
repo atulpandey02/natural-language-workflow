@@ -6,23 +6,28 @@
 #
 # The application image is pinned to an immutable GHCR digest via NLW_IMAGE
 # (staging and production run the EXACT same digest). Migrations are run as a
-# one-off before switching traffic:
-#   docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head
+# one-off via the dedicated `migrate` service (the ONLY holder of the privileged
+# owner credential) before switching traffic:
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml \
+#     -f docker-compose.staging.yml --profile migration run --rm migrate
 #
 # Required env (e.g. a git-ignored .env.prod):
 #   NLW_IMAGE               ghcr.io/<owner>/nlw@sha256:...
 #   PUBLIC_HOSTNAME         the DNS name Caddy serves (also the TrustedHost)
-#   DATABASE_URL / DATABASE_MIGRATION_URL / REDIS_URL
+#   DATABASE_URL            (nlw_app; api)   WORKER_/SCHEDULER_DATABASE_URL
+#   DATABASE_MIGRATION_URL  (owner; migrate service ONLY)  REDIS_URL
 #   SUPABASE_URL            (JWKS verification)
 #   NLW_LLM_API_KEY         (api only)
-#   POSTGRES_PASSWORD
+#   POSTGRES_PASSWORD  WORKSPACE_COOKIE_SECRET  NLW_*_DB_PASSWORD
 
 x-app-env: &app-env
   APP_ENV: production
   LOG_LEVEL: info
   DATABASE_URL: ${DATABASE_URL}
-  # Alembic (owner) connection, used only by `alembic upgrade head`.
-  DATABASE_MIGRATION_URL: ${DATABASE_MIGRATION_URL}
+  # NOTE: DATABASE_MIGRATION_URL (the privileged owner credential) is intentionally
+  # NOT here. Long-running runtime services (api/worker/scheduler) must never hold
+  # a credential that can change schema/grants/RLS. Migrations run in the dedicated
+  # one-shot `migrate` service (profile: migration) only. (M11.5 P0.)
   REDIS_URL: ${REDIS_URL}
   SUPABASE_URL: ${SUPABASE_URL}
   # Asymmetric (JWKS) verification is the production/target auth path. Passed
@@ -93,7 +98,9 @@ services:
       SUPABASE_URL: ${SUPABASE_URL}
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
       SUPABASE_SERVER_URL: ${SUPABASE_SERVER_URL:-}
-      WORKSPACE_COOKIE_SECRET: ${WORKSPACE_COOKIE_SECRET}
+      # Required in production: signs the workspace-selection cookie. No silent
+      # dev fallback — a missing value fails the prod render/start.
+      WORKSPACE_COOKIE_SECRET: ${WORKSPACE_COOKIE_SECRET:?WORKSPACE_COOKIE_SECRET is required}
     security_opt:
       - no-new-privileges:true
     mem_limit: 512m
@@ -125,6 +132,11 @@ services:
   worker:
     <<: *app-hardening
     command: ["dramatiq", "nlw.worker.actors", "--processes", "2", "--threads", "4"]
+    # Give in-flight actions (bounded ~15s) time to finish on stop/redeploy so a
+    # SIGKILL mid-send doesn't orphan a delivery. This REDUCES avoidable duplicate
+    # sends on shutdown; it does NOT provide exactly-once delivery (external
+    # effects still require receiver-side idempotency — ADR-013).
+    stop_grace_period: 60s
     # Connector secrets are injected HERE only, via a git-ignored env_file.
     env_file:
       - path: docker/worker.secrets.env
@@ -165,6 +177,41 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+
+  # One-shot migration runner (M11.5 P0). The ONLY service that receives the
+  # privileged owner credential (DATABASE_MIGRATION_URL). Gated behind the
+  # `migration` profile so it never runs as a long-lived service; it runs
+  # `alembic upgrade head` and exits. Same immutable image as the app; NO ports,
+  # NO connector secrets, NO LLM key, NO Supabase keys.
+  #   docker compose --env-file .env.prod -f docker-compose.prod.yml \
+  #     -f docker-compose.staging.yml --profile migration run --rm migrate
+  migrate:
+    image: ${NLW_IMAGE:?set NLW_IMAGE to the GHCR image digest}
+    profiles: ["migration"]
+    # Fail fast at RUNTIME (not render) if the owner credential wasn't injected.
+    # $$ escapes Compose interpolation so the CONTAINER shell evaluates it — this
+    # way a normal runtime `up` (which excludes this profiled service) never needs
+    # DATABASE_MIGRATION_URL defined at all; it is injected only for migration.
+    command: ["sh", "-c", ': "$${DATABASE_MIGRATION_URL:?DATABASE_MIGRATION_URL is required (migrate service)}"; exec alembic upgrade head']
+    environment:
+      APP_ENV: production
+      LOG_LEVEL: info
+      DATABASE_MIGRATION_URL: ${DATABASE_MIGRATION_URL:-}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    mem_limit: 256m
+    pids_limit: 128
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   postgres:
     image: postgres:16

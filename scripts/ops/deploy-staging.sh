@@ -316,9 +316,11 @@ verify_roles() {
 }
 
 run_migrations() {
-  # Idempotent: a no-op when already at head. NEVER downgrades.
-  log "Applying Alembic migrations to head (owner connection; idempotent) …"
-  rsh "$DC run --rm api alembic upgrade head" || die "alembic upgrade failed (volumes preserved; NO rollback)."
+  # Idempotent: a no-op when already at head. NEVER downgrades. Runs via the
+  # dedicated one-shot `migrate` service (the ONLY holder of the owner credential;
+  # api/worker/scheduler never receive it).
+  log "Applying Alembic migrations to head (dedicated migrate service; idempotent) …"
+  rsh "$DC --profile migration run --rm migrate" || die "alembic upgrade failed (volumes preserved; NO rollback)."
   mark migrations_applied
 }
 

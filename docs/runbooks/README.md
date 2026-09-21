@@ -13,6 +13,7 @@ control plane) and the internal Prometheus metrics (ADR-016).
 - [restore-from-backup.md](restore-from-backup.md)
 - [rotate-secret.md](rotate-secret.md) — connector secrets (worker env `NLW_SECRET_*`)
 - [rotate-db-role-password.md](rotate-db-role-password.md) — DB runtime role passwords (`ALTER ROLE`)
+- [rotate-exposed-secrets.md](rotate-exposed-secrets.md) — rotate exposed migration/Anthropic/Supabase secrets
 - [disable-tenant-connector.md](disable-tenant-connector.md)
 - [rate-limit-tuning.md](rate-limit-tuning.md)
 - [inspect-failed-run.md](inspect-failed-run.md)

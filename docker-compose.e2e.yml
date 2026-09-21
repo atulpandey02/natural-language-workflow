@@ -29,6 +29,9 @@ services:
       SUPABASE_URL: ${SUPABASE_URL}
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
       SUPABASE_SERVER_URL: http://host.docker.internal:54321
+      # This overlay serves over plain HTTP (Caddy :8080), so Secure cookies would
+      # be dropped — disable Secure ONLY here. Real staging/production is HTTPS.
+      COOKIE_SECURE: "false"
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

@@ -107,7 +107,9 @@ jobs:
         run: |
           $COMPOSE up -d postgres redis
           for i in $(seq 1 60); do $COMPOSE exec -T postgres pg_isready -U nlw -d nlw && break; sleep 2; done
-          $COMPOSE run --rm api alembic upgrade head
+          # Migrations run in the dedicated one-shot migrate service (owner cred is
+          # NOT in api/worker/scheduler). --profile migration includes that service.
+          $COMPOSE --profile migration run --rm migrate
           $COMPOSE up -d api worker scheduler web caddy prometheus
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8000/health/ready >/dev/null 2>&1 && break; sleep 2; done
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/login >/dev/null 2>&1 && break; sleep 2; done

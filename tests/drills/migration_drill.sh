@@ -14,8 +14,8 @@ ready_code() {
 
 echo "== Schema-incompatibility / readiness drill =="
 
-# 1) Fresh DB -> head (idempotent re-run).
-$COMPOSE run --rm api alembic upgrade head
+# 1) Fresh DB -> head (idempotent re-run) via the dedicated migrate service.
+$COMPOSE --profile migration run --rm migrate
 echo "fresh upgrade head: OK"
 
 # 2) Incompatible schema must NOT be reported ready: stamp a bogus revision.
@@ -29,7 +29,7 @@ echo "readiness with mismatched schema: $code (expect 503)"
 #    alone would fail ("Can't locate revision 'not_the_head'") because it cannot
 #    resolve the unknown CURRENT revision, so use --purge to empty the version
 #    table first, then stamp head. This is robust regardless of the bogus value.
-$COMPOSE run --rm api alembic stamp head --purge
+$COMPOSE --profile migration run --rm migrate alembic stamp head --purge
 for i in $(seq 1 30); do [ "$(ready_code)" = "200" ] && break; sleep 2; done
 [ "$(ready_code)" = "200" ] || { echo "FAIL: readiness did not recover"; exit 1; }
 echo "SCHEMA/READINESS DRILL COMPLETE (incompatible schema never reported ready)"

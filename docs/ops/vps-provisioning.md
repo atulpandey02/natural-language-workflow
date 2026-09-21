@@ -417,7 +417,7 @@ docker compose \
   --env-file .env.prod \
   -f docker-compose.prod.yml \
   -f docker-compose.staging.yml \
-  <config|pull|run --rm api alembic upgrade head|up -d|down|ps|logs>
+  <config|pull|--profile migration run --rm migrate|up -d|down|ps|logs>
 ```
 
 The same `--env-file .env.prod` + `-f prod -f staging` prefix applies to

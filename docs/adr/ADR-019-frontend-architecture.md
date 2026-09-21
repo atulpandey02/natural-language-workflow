@@ -8,8 +8,9 @@
 M10 adds the minimum product UI so a real user can operate the platform
 end-to-end without curl/SQL. The backend authenticates via Supabase-issued JWTs
 (Bearer) and is tenant-scoped by an `X-Workspace-Id` header + RLS. We need an
-auth/session model that keeps tokens out of browser JS, a data layer that does
-not scatter fetches, and a deployment that keeps the API internal.
+auth/session model that keeps access tokens out of `localStorage` and out of the
+browser's direct FastAPI calls, a data layer that does not scatter fetches, and a
+deployment that keeps the API internal.
 
 ## Decision
 
@@ -28,11 +29,23 @@ returned.
 
 **Auth/session.** `@supabase/ssr` cookie-based sessions; the Next 16 `proxy.ts`
 boundary refreshes the session and enforces route protection (unauthenticated →
-`/login`; authenticated without a workspace → `/select-workspace`). Access tokens
-are never placed in `localStorage`.
+`/login`; authenticated without a workspace → `/select-workspace`).
+
+**Session-cookie security posture (accurate).** Access tokens are NOT in
+`localStorage`, and the browser never calls FastAPI directly — the BFF injects the
+bearer server-side. However, `@supabase/ssr` (0.7.x) keeps the Supabase auth
+cookies **readable by browser JavaScript** (not `HttpOnly`) because the browser
+client reads the session; so these cookies are within XSS reach the same as any
+JS-accessible cookie. The pilot controls are: nonce-based CSP + same-origin CSRF
+on mutating routes + `SameSite=Lax` + **`Secure` in production** (set explicitly;
+disabled only on the plain-HTTP e2e harness via `COOKIE_SECURE=false`). A move to
+an `HttpOnly`/opaque server-owned application session (login/refresh/logout moved
+fully server-side) is a **future customer-production hardening item**, not a P0
+change.
 
 **CSRF.** Cookie-authenticated mutating routes (POST/PATCH/DELETE) require a
-same-origin Origin/Host match; cookies are `SameSite=Lax` + `Secure` in prod.
+same-origin Origin/Host match; auth cookies are `SameSite=Lax` + `Secure` in prod
+(see the session-cookie posture above).
 
 **Caching.** All authenticated reads are dynamic/no-store; no ISR/shared caching
 of tenant-specific responses. Switching workspace clears the TanStack cache so no
