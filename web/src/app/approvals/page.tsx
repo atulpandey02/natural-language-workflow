@@ -32,12 +32,27 @@ export default function ApprovalsPage() {
             run {a.run_id.slice(0, 8)} · step {a.step_id}
             {a.requested_at ? ` · requested ${new Date(a.requested_at).toLocaleString()}` : ""}
           </p>
-          <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(a.preview, null, 2)}</pre>
+          <p className="muted">
+            destination: <strong>{a.destination ?? "unresolved"}</strong>
+          </p>
+          {a.payload_review_blocked ? (
+            <p className="badge warn" role="alert">
+              This action’s payload is too large to review safely and cannot be approved. Reject it,
+              or reduce the payload and re-run.
+            </p>
+          ) : (
+            <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(a.preview, null, 2)}</pre>
+          )}
           <RoleGate role={role} allow={["owner", "admin"]}>
             <div className="row">
               <button
                 onClick={() => decide.mutate({ id: a.id, decision: "approve" })}
-                disabled={decide.isPending}
+                disabled={decide.isPending || a.payload_review_blocked}
+                title={
+                  a.payload_review_blocked
+                    ? "Payload exceeds the safe review size; it cannot be approved unseen."
+                    : undefined
+                }
               >
                 Approve
               </button>

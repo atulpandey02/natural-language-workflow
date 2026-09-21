@@ -50,9 +50,53 @@ choose destinations, and the guard must resist DNS rebinding.
   are safer.
 - **Follow redirects** — rejected: a redirect can point back at an internal IP.
 
+## P1C amendment (M11.5 hardening, 2026-09-21)
+
+The webhook and Slack connectors share one HTTP path (`nlw.connectors.http_action`)
+that adds, on top of the SSRF guard above:
+
+- **One total wall-clock budget (monotonic), not a per-op inactivity timer and
+  not a fresh timeout per phase.** One budget (`TOTAL_ACTION_DEADLINE_S = 30s`)
+  covers resolution → pool acquire → connect → TLS → write → response-head →
+  streamed response consumption. Each httpx phase timeout is set to the budget
+  **remaining** when the request starts (so no single phase blocks past the total,
+  and **pool wait is inside the same budget** — a fresh single-use pool per call
+  makes it trivial anyway), and the monotonic deadline is re-checked at every seam
+  we control (after DNS, immediately after the response head, before every streamed
+  chunk). A trickle response that stays under every inactivity timer is therefore
+  still stopped at the total deadline, streaming can neither restart nor extend the
+  budget, and no connection begins after the caller has already timed out — so a
+  send can never outlive the action lease (`TOTAL + FINALIZE_MARGIN_S <
+  LEASE_DURATION_S`, enforced at startup; see ADR-013). Residual: several
+  sequential pre-response phases each blocking near the full remaining budget can
+  reach ~2× the budget before the post-header check aborts (documented, bounded).
+  The operation is fully synchronous — no background thread continues after the
+  caller returns, and every resource is closed on exit.
+- **Webhook: no body consumption; Slack: bounded body.** A webhook decides
+  SUCCESS/UNKNOWN from the **status line alone**, so after the response head it
+  **closes the stream without reading the body** — a slow/trickling/huge webhook
+  body can neither delay the result nor be buffered. Slack must read the body to
+  determine `ok`, so it streams under a hard `max_response_bytes` cap.
+- **`Accept-Encoding: identity` + raw streaming cap (Slack).** The request
+  advertises identity encoding and the consumed body is read as **raw wire bytes**
+  (`iter_raw`) under the cap, enforced **while** reading. The body is never
+  decompressed, so a compression bomb cannot expand in memory; at most one bounded
+  chunk beyond the cap is ever held, and a breach closes the connection. No
+  response body, header, or secret is persisted.
+- **Conservative phase-aware classification (SSRF-preserving).** An `SsrfError`
+  from the guard is a deterministic `ToolExecutionError` (policy rejection, no
+  effect). A transient **DNS resolution failure** and a failure **provably before
+  transmission** (`ConnectError`/`ConnectTimeout`/`PoolTimeout`) are retryable
+  (nothing left the host). A failure once transmission may have started
+  (`WriteError`/`WriteTimeout`/`ReadError`/`ReadTimeout`/`RemoteProtocolError`/
+  total-deadline-at-or-after-head) is **ambiguous** → terminal UNKNOWN (ADR-013),
+  never a silent retry. The connector layer maps HTTP status likewise (ADR-013
+  matrix): 429 retryable, generic 5xx UNKNOWN.
+
 ## Consequences
 
 - A tenant can deliver to a public webhook safely; internal/metadata destinations
   are unreachable, and rebinding is defeated. Slack's fixed public API host passes
-  the same guard. Broader outbound capability (arbitrary REST, per-tenant egress
-  proxy) is deferred.
+  the same guard. A slow, oversized, or compressed response can neither exhaust
+  memory nor outlive the lease. Broader outbound capability (arbitrary REST,
+  per-tenant egress proxy) is deferred.

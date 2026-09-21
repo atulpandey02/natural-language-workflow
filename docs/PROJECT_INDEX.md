@@ -8,7 +8,7 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
-| Current milestone | **M11.5 P1B** — PostgreSQL SQL-safety, destination egress & TLS (`fix/pre-m12-postgres-connector-boundary`) |
+| Current milestone | **M11.5 P1C** — external-action lease, deadline, response-bound & ambiguous-outcome (UNKNOWN) safety (migration `0012`) |
 | Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
 | Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
 | Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
@@ -63,6 +63,34 @@ closed with stable codes BEFORE any auth bytes are sent (credential-exfiltration
 proof: zero bytes). Private fixtures are allowed only via the `app_env` gate
 (local/dev) or an operator CIDR allowlist (staging) — never a tenant/connector
 field. Deferred: tenant-supplied CA material, connector→durable-credential binding.
+
+M11.5 P1C (external-action delivery safety, migration `0012`) closes eight
+verified action-delivery defects without expanding run/step states (the only new
+persisted state is `external_actions.status = 'unknown'`). **Lease ordering:** on
+resume a live foreign lease is authoritative BEFORE the attempt cap, so a
+duplicate can no longer fail a legitimate live final attempt or steal/clear
+another worker's lease; only the lease-token owner finalizes. **Ambiguous outcome
+→ terminal UNKNOWN (`ACTION_OUTCOME_UNKNOWN`):** a failure once the request may
+have been transmitted (write/read/reset/total-deadline, a truncated/garbled
+response, or an expired unprovable final attempt) resolves to a terminal `unknown`
+action with step/run FAILED under a distinguishing error class — persistent,
+excluded from retry/reconciliation/redelivery, never auto-resent, no retry button;
+classification is conservative and phase-aware (only a provable pre-transmission
+failure is retried or definitively FAILED). **Total deadline:** one monotonic
+wall-clock budget (30s) covering resolve/connect/TLS/write/response, with
+`TOTAL + FINALIZE_MARGIN(10s) < LEASE(45s)`, stops a trickling response before it
+can outlive the lease; no background thread survives the caller. **Streaming
+caps:** `Accept-Encoding: identity` + raw `iter_raw` under a hard byte cap, so a
+compression bomb never expands and no response/secret is persisted. **Approval
+preview:** shows connector type/name, effective non-secret destination (webhook
+host / Slack channel) and the complete bounded payload; an oversized payload
+(>16 KB) is rejected at materialization and 422 at approve-time (never
+truncate-and-approve); approval binds the immutable spec AND connector identity
+(a post-approval connector swap fails "re-approval required"). The stable
+`external_action_key`/`Idempotency-Key` is unchanged (still at-least-once, no
+exactly-once claim). Operator recovery: runbooks/action-outcome-unknown.md.
+Deferred (unchanged): scheduler namespace, reconciliation fairness/`last_progress_at`,
+signed GUC, HttpOnly sessions, invites, cloud secrets, DR/PITR, M12.
 
 M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
 so a user can operate the platform end-to-end without curl/SQL: Supabase

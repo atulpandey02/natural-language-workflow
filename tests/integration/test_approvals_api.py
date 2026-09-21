@@ -74,7 +74,13 @@ def _seed_workspace(owner_libpq: str) -> uuid.UUID:
     return tid
 
 
-def _seed_parked_action(owner_libpq: str, tenant_id: uuid.UUID) -> uuid.UUID:
+def _seed_parked_action(
+    owner_libpq: str,
+    tenant_id: uuid.UUID,
+    *,
+    payload: dict[str, object] | None = None,
+    connector_url: str = "https://sink.example/h",
+) -> uuid.UUID:
     """Seed a webhook connector + a run parked at WAITING_APPROVAL with a pending
     approval (as the worker would leave it)."""
     connector_id = uuid.uuid4()
@@ -84,7 +90,7 @@ def _seed_parked_action(owner_libpq: str, tenant_id: uuid.UUID) -> uuid.UUID:
             {
                 "id": "notify",
                 "tool": "webhook.send",
-                "args": {"payload": {"msg": "hi"}},
+                "args": {"payload": payload if payload is not None else {"msg": "hi"}},
                 "connector": "hook",
             }
         ]
@@ -93,7 +99,7 @@ def _seed_parked_action(owner_libpq: str, tenant_id: uuid.UUID) -> uuid.UUID:
         c.execute(
             "INSERT INTO connectors (id, tenant_id, type, name, config, secret_ref, status) "
             "VALUES (%s,%s,'webhook','hook',%s::jsonb,NULL,'active')",
-            (connector_id, tenant_id, json.dumps({"url": "https://sink.example/h"})),
+            (connector_id, tenant_id, json.dumps({"url": connector_url})),
         )
         c.execute(
             "INSERT INTO workflows (id, tenant_id, name) VALUES (%s,%s,'wf')", (wf_id, tenant_id)
@@ -205,6 +211,54 @@ def test_list_approvals_preview_is_secret_free(
     blob = json.dumps(item)
     for forbidden in ("secret", "token", "Authorization", "url"):
         assert forbidden not in blob
+
+
+def test_preview_shows_effective_destination_host_only(
+    client: TestClient, pg_stack: SimpleNamespace, enqueued: list[uuid.UUID]
+) -> None:
+    """The approver sees the effective, non-secret destination the side effect
+    will reach — the webhook HOST only (never the path/query/credentials)."""
+    tid = _seed_workspace(pg_stack.owner_libpq)
+    _seed_user_member(pg_stack.owner_libpq, tid, "adm-d", "admin")
+    _seed_parked_action(
+        pg_stack.owner_libpq, tid, connector_url="https://hooks.example.com/secret-path?token=abc"
+    )
+    h = {**_auth("adm-d", "d@x.com"), "X-Workspace-Id": str(tid)}
+
+    item = client.get("/approvals", headers=h).json()[0]
+    assert item["destination"] == "hooks.example.com"  # host only
+    assert item["payload_review_blocked"] is False
+    blob = json.dumps(item)
+    assert "secret-path" not in blob  # path never exposed
+    assert "token=abc" not in blob  # credential query never exposed
+
+
+def test_oversized_payload_is_review_blocked_and_cannot_be_approved(
+    client: TestClient, pg_stack: SimpleNamespace, enqueued: list[uuid.UUID]
+) -> None:
+    """A payload too large to review safely is NOT shown and CANNOT be approved
+    unseen — it can only be rejected (P1C part G, defence-in-depth)."""
+    from nlw.tools.action_schemas import MAX_REVIEWABLE_ACTION_PAYLOAD_BYTES
+
+    tid = _seed_workspace(pg_stack.owner_libpq)
+    _seed_user_member(pg_stack.owner_libpq, tid, "adm-o", "admin")
+    big: dict[str, object] = {"blob": "x" * (MAX_REVIEWABLE_ACTION_PAYLOAD_BYTES + 5000)}
+    approval_id = _seed_parked_action(pg_stack.owner_libpq, tid, payload=big)
+    h = {**_auth("adm-o", "o@x.com"), "X-Workspace-Id": str(tid)}
+
+    item = client.get("/approvals", headers=h).json()[0]
+    assert item["payload_review_blocked"] is True
+    assert item["preview"]["args"] is None  # oversized payload is NOT shown
+
+    # Approve is refused (422); the approval stays pending and nothing is enqueued.
+    r = client.post(f"/approvals/{approval_id}/approve", headers=h)
+    assert r.status_code == 422
+    assert _approval_status(pg_stack.owner_libpq, approval_id) == "pending"
+    assert len(enqueued) == 0
+
+    # It can still be REJECTED.
+    assert client.post(f"/approvals/{approval_id}/reject", headers=h).status_code == 200
+    assert _approval_status(pg_stack.owner_libpq, approval_id) == "rejected"
 
 
 def test_cross_tenant_cannot_see_or_decide(

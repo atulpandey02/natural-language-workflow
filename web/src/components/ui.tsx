@@ -47,6 +47,10 @@ const STATUS_CLASS: Record<string, string> = {
   WAITING_APPROVAL: "warn",
   unchecked: "warn",
   disabled: "warn",
+  // An ambiguous external-action outcome: the side effect MAY have occurred but
+  // cannot be proven. Distinct from a definite failure — surfaced as a warning.
+  unknown: "warn",
+  UNKNOWN: "warn",
 };
 
 export function StatusBadge({ status }: { status: string }) {

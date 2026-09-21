@@ -9,8 +9,10 @@ Side-effecting tools do NOT run inside the M3 run lock. Instead:
 
 The idempotency key is generated once per (run, step) and reused on every
 retry/resume. We do NOT claim exactly-once: an external success followed by a
-crash before finalize, or an ambiguous timeout after transmission, can duplicate
-a side effect against a non-idempotent receiver.
+crash before finalize can re-send the same request (same key) and duplicate a
+side effect against a non-idempotent receiver. An ambiguous outcome once the
+request may have been transmitted is NOT retried — it becomes a terminal UNKNOWN
+(ACTION_OUTCOME_UNKNOWN; see ADR-013) so the platform never auto-resends it.
 """
 
 import enum
@@ -31,9 +33,13 @@ from nlw.registry.registry import (
     REGISTRY,
     ActionAuthError,
     ActionContext,
+    AmbiguousActionError,
     RetryableActionError,
     ToolExecutionError,
 )
+
+# Stable, sanitized error code for an ambiguous external outcome (P1C).
+ACTION_OUTCOME_UNKNOWN = "ACTION_OUTCOME_UNKNOWN"
 
 # Lease must outlast the hard-max action network timeout (15s) + margin, so a
 # lease only expires on genuine worker death, not on a slow-but-alive send.
@@ -60,6 +66,8 @@ class ActionKind(enum.StrEnum):
     FAILED_DETERMINISTIC = "failed_deterministic"
     FAILED_AUTH = "failed_auth"
     RETRY = "retry"
+    # Transmission may have occurred; outcome unprovable -> terminal UNKNOWN.
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -113,6 +121,9 @@ def run_action(task: ActionTask, transport: httpx.BaseTransport | None = None) -
         result = spec.execute_action(args_model, connector_ctx, action_ctx)
     except ActionAuthError:
         return ActionExecResult(kind=ActionKind.FAILED_AUTH, error_class="auth")
+    except AmbiguousActionError:
+        # May have transmitted; not safely retryable -> terminal UNKNOWN.
+        return ActionExecResult(kind=ActionKind.UNKNOWN, error_class=ACTION_OUTCOME_UNKNOWN)
     except RetryableActionError as exc:
         return ActionExecResult(
             kind=ActionKind.RETRY, error_class="retryable", retry_after_s=exc.retry_after_s
@@ -193,6 +204,24 @@ def finalize_action(
             step.output = result.output
             step.finished_at = now
             return FinalizeOutcome("advanced", enqueue_next=True)
+
+        if result.kind == ActionKind.UNKNOWN:
+            # Ambiguous: the side effect MAY have occurred. Terminal, NEVER resent.
+            # The external action is UNKNOWN; step/run FAIL with a distinguishing
+            # code so the UI reports "may have occurred", not a definite failure.
+            ea.status = "unknown"
+            ea.error_class = ACTION_OUTCOME_UNKNOWN
+            ea.http_status = result.http_status
+            ea.lease_token = None
+            ea.lease_owner = None
+            ea.lease_expires_at = None
+            ea.next_attempt_at = None
+            step.status = StepStatus.FAILED
+            step.error = ACTION_OUTCOME_UNKNOWN
+            step.finished_at = now
+            run.status = RunStatus.FAILED
+            run.finished_at = now
+            return FinalizeOutcome("failed")
 
         if result.kind == ActionKind.RETRY and task.attempt < effective_attempt_cap():
             delay = _backoff_seconds(task.attempt, result.retry_after_s)

@@ -299,7 +299,7 @@ def test_w3_replay_after_finalize_is_noop(pg_stack: SimpleNamespace) -> None:
 # --- Retry + attempt cap ---
 
 
-def test_retryable_5xx_schedules_backoff_and_gates_early_redelivery(
+def test_retryable_429_schedules_backoff_and_gates_early_redelivery(
     pg_stack: SimpleNamespace,
 ) -> None:
     m = pg_stack.seed_member()
@@ -308,7 +308,9 @@ def test_retryable_5xx_schedules_backoff_and_gates_early_redelivery(
     sm = _worker_sm(pg_stack)
     store = EnvironmentSecretStore({})
     sink = Sink()
-    sink.responses = [httpx.Response(503)]  # first attempt fails transiently
+    # 429 is the retryable case (rate limited: not processed); a generic 5xx is
+    # now UNKNOWN, not retried (P1C).
+    sink.responses = [httpx.Response(429)]
 
     process_advance(sm, run_id, _noop_enqueue, store, _runner(sink))  # park
     _approve(pg_stack.owner_libpq, run_id, m.user_id)
@@ -331,7 +333,9 @@ def test_attempt_cap_fails_run(pg_stack: SimpleNamespace) -> None:
     sm = _worker_sm(pg_stack)
     store = EnvironmentSecretStore({})
     sink = Sink()
-    sink.responses = [httpx.Response(503) for _ in range(10)]  # always transient
+    # 429 stays retryable (rate limited: provably not processed), so the attempt
+    # cap is what finally fails the run.
+    sink.responses = [httpx.Response(429) for _ in range(10)]
 
     process_advance(sm, run_id, _noop_enqueue, store, _runner(sink))  # park
     _approve(pg_stack.owner_libpq, run_id, m.user_id)

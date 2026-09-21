@@ -23,6 +23,7 @@ from nlw.connectors.webhook import (
 from nlw.registry.registry import (
     REGISTRY,
     ActionAuthError,
+    AmbiguousActionError,
     RetryableActionError,
     ToolExecutionError,
     ToolSpec,
@@ -80,9 +81,13 @@ def test_webhook_rate_limit_is_retryable() -> None:
         _webhook_send(429, {"Retry-After": "2"})
 
 
-def test_webhook_5xx_is_retryable() -> None:
-    with pytest.raises(RetryableActionError):
-        _webhook_send(503)
+def test_webhook_5xx_is_ambiguous_not_retried() -> None:
+    # A generic webhook 5xx does NOT prove the effect did not occur (the receiver
+    # may have acted and then failed responding). Conservative -> UNKNOWN, never a
+    # silent resend (P1C).
+    for code in (500, 502, 503, 504):
+        with pytest.raises(AmbiguousActionError):
+            _webhook_send(code)
 
 
 def test_webhook_4xx_is_deterministic() -> None:
@@ -151,6 +156,42 @@ def test_slack_channel_not_found_deterministic() -> None:
 def test_slack_ratelimited_retryable() -> None:
     with pytest.raises(RetryableActionError):
         _slack_send(429, {"ok": False, "error": "ratelimited"})
+
+
+def test_slack_5xx_is_ambiguous_not_retried() -> None:
+    # An HTTP 5xx is NOT part of Slack's deterministic ok/error contract; the
+    # message may already have posted -> UNKNOWN, never a silent resend (P1C).
+    for code in (500, 502, 503):
+        with pytest.raises(AmbiguousActionError):
+            _slack_send(code, {})
+
+
+# --- Post-transmission ambiguity (P1C): the message was POSTed, but the outcome
+# cannot be proven -> UNKNOWN (AmbiguousActionError), never a silent retry. ---
+
+
+def test_slack_oversized_response_is_ambiguous() -> None:
+    # The POST succeeded (status 200) but the response body exceeds the cap, so
+    # ok/error cannot be read -> the message may have been delivered -> UNKNOWN.
+    cfg = SlackConnectorConfig(workspace_label="w", default_channel="C0000", max_response_bytes=100)
+    big = {"ok": True, "ts": "1", "padding": "P" * 5000}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=big))
+    with pytest.raises(AmbiguousActionError):
+        send_slack_message(cfg, "xoxb-token", "C0000", "hi", transport)
+
+
+def test_slack_non_json_body_is_ambiguous() -> None:
+    cfg = SlackConnectorConfig(workspace_label="w", default_channel="C0000")
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, content=b"not json <html>"))
+    with pytest.raises(AmbiguousActionError):
+        send_slack_message(cfg, "xoxb-token", "C0000", "hi", transport)
+
+
+def test_slack_non_object_body_is_ambiguous() -> None:
+    cfg = SlackConnectorConfig(workspace_label="w", default_channel="C0000")
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=[1, 2, 3]))
+    with pytest.raises(AmbiguousActionError):
+        send_slack_message(cfg, "xoxb-token", "C0000", "hi", transport)
 
 
 # --- Action registration ---

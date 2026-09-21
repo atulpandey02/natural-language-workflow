@@ -7,6 +7,7 @@ appears in plans, logs, output, errors, or the audit table, and the full Slack
 response (which echoes message content) is never persisted.
 """
 
+import json
 import re
 from typing import Any
 
@@ -19,11 +20,12 @@ from nlw.connectors.base import (
     ConnectorType,
     register_connector_type,
 )
-from nlw.connectors.http_guard import GuardedTransport
+from nlw.connectors.http_action import perform_action_request
 from nlw.registry.registry import (
     ActionAuthError,
     ActionContext,
     ActionResult,
+    AmbiguousActionError,
     RetryableActionError,
     ToolExecutionError,
 )
@@ -103,42 +105,56 @@ def send_slack_message(
 ) -> ActionResult:
     """POST chat.postMessage. Raises typed errors; never leaks the token or the
     full response."""
-    client_transport = transport if transport is not None else GuardedTransport()
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json; charset=utf-8",
         "User-Agent": "nlw-slack/1.0",
     }
-    try:
-        with httpx.Client(
-            transport=client_transport,
-            timeout=httpx.Timeout(config.timeout_s),
-            follow_redirects=False,
-        ) as client:
-            resp = client.post(
-                _POST_MESSAGE_URL, json={"channel": channel, "text": text}, headers=headers
-            )
-    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError):
-        raise RetryableActionError("slack transport error") from None
-    except httpx.HTTPError:
-        raise RetryableActionError("slack request error") from None
+    content = json.dumps({"channel": channel, "text": text}).encode("utf-8")
+    # Total-deadline + streaming under a hard byte cap. The request was posted
+    # before any response-read issue, so oversized/malformed responses are
+    # AMBIGUOUS (the message may have been delivered), not deterministic failures.
+    resp = perform_action_request(
+        method="POST",
+        url=_POST_MESSAGE_URL,
+        content=content,
+        headers=headers,
+        transport=transport,
+        timeout_s=config.timeout_s,
+        max_response_bytes=config.max_response_bytes,
+        want_body=True,
+    )
 
+    # Conservative HTTP-status classification (P1C). Slack's DOCUMENTED contract
+    # makes some outcomes deterministic; an HTTP 5xx is NOT one of them.
     if resp.status_code == 429:
+        # Slack rate limiting: the call was throttled (not delivered) and Slack
+        # asks us to retry after the given delay -> safe by Slack's documented
+        # rate-limit contract.
         retry_after = resp.headers.get("Retry-After")
         raise RetryableActionError(
             "slack rate limited", retry_after_s=float(retry_after) if retry_after else None
         )
     if 500 <= resp.status_code < 600:
-        raise RetryableActionError(f"slack server error {resp.status_code}")
+        # A 5xx after we POSTed chat.postMessage does NOT prove the message was
+        # not delivered (Slack may have accepted it and then failed responding).
+        # Conservative -> AMBIGUOUS -> UNKNOWN, never an automatic resend.
+        raise AmbiguousActionError(f"slack server error {resp.status_code}; outcome unprovable")
     if resp.status_code != 200:
         raise ToolExecutionError(f"slack returned status {resp.status_code}")
 
+    if resp.truncated:
+        # The message was posted but the response exceeded the cap -> UNKNOWN.
+        raise AmbiguousActionError("slack response exceeded the response cap")
     # Parse ONLY the safe fields; never persist/log the full body (it contains
     # message content).
     try:
-        body = resp.json()
+        body = json.loads(resp.body)
     except ValueError:
-        raise ToolExecutionError("slack returned a non-JSON response") from None
+        # A protocol failure AFTER the message was transmitted -> UNKNOWN.
+        raise AmbiguousActionError("slack returned a non-JSON response") from None
+    if not isinstance(body, dict):
+        raise AmbiguousActionError("slack returned an unexpected response shape") from None
     if body.get("ok") is True:
         return ActionResult(
             output={"ok": True, "channel": body.get("channel")},

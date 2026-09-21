@@ -92,8 +92,16 @@ class ApprovalOut(BaseModel):
     status: str
     requested_at: str | None
     decided_at: str | None
+    # The effective, non-secret destination the side effect will reach (webhook
+    # host / Slack channel), derived from the APPROVED connector. None if it
+    # cannot be safely resolved.
+    destination: str | None = None
+    # True when the payload exceeds the safe review size and therefore is NOT
+    # shown; the action must NOT be approved in that state (P1C).
+    payload_review_blocked: bool = False
     # Bounded, secret-free preview derived from the immutable plan step so a human
     # can approve knowingly. Contains only workflow/user content, never secrets.
+    # ``args`` is None when payload_review_blocked is True.
     preview: dict[str, Any]
 
 
