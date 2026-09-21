@@ -34,7 +34,10 @@ from nlw.connectors.base import (
     ConnectorUnhealthyError,
     register_connector_type,
 )
-from nlw.connectors.pg_destination import PostgresDestinationPolicy
+from nlw.connectors.pg_destination import (
+    PostgresDestinationPolicy,
+    PostgresDnsUnavailableError,
+)
 from nlw.core.config import get_settings
 from nlw.registry.registry import ToolExecutionError
 from nlw.secrets.store import SecretError
@@ -334,8 +337,13 @@ def _read_only_connection(
 ) -> Iterator[psycopg.Connection[Any]]:
     # Validate the destination + TLS posture and PIN the address BEFORE any
     # network/authentication bytes are sent. A policy rejection raises a
-    # deterministic (non-retryable) error here and never reaches psycopg.connect.
-    pinned = _resolve_policy(policy).validate_and_pin(config.host, config.port, config.sslmode)
+    # deterministic (non-retryable) error here and never reaches psycopg.connect;
+    # a DNS timeout / resolver-capacity failure is transient -> map to the
+    # sanitized retryable PostgresUnavailableError.
+    try:
+        pinned = _resolve_policy(policy).validate_and_pin(config.host, config.port, config.sslmode)
+    except PostgresDnsUnavailableError:
+        raise PostgresUnavailableError("external postgres database unavailable") from None
     idle_timeout = config.statement_timeout_ms + config.lock_timeout_ms
     options = (
         f"-c default_transaction_read_only=on "

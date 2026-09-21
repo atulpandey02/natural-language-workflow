@@ -15,12 +15,17 @@ bytes are sent to an external Postgres. It:
    verification) plus the validated IP as ``hostaddr`` (the TCP target), so libpq
    performs no second, unvalidated DNS resolution (DNS-rebinding safe).
 
-DNS bound: resolution runs on a DAEMON thread joined for at most
-``dns_timeout_s``. On timeout the destination is rejected and the daemon thread
-is abandoned — the underlying ``getaddrinfo`` keeps running in the background but,
-being a daemon, never blocks worker/process shutdown, and NO connection is
-attempted after the timeout. (A ``ThreadPoolExecutor`` is deliberately NOT used:
-its context-manager exit joins the still-blocked worker, defeating the bound.)
+DNS bound: resolution is delegated to a FIXED, shared pool of daemon workers with
+a bounded task queue (``BoundedResolverPool``). This bounds three things at once:
+caller latency (a caller waits at most ``dns_timeout_s``), resolver RESOURCE
+consumption (the number of resolver threads never exceeds ``max_workers`` and the
+queue never exceeds ``max_queue`` regardless of request volume — no new thread per
+request), and worker shutdown (all workers are daemons). A timed-out caller
+abandons only its result slot, never a thread; a late result is discarded and can
+never trigger a connection; when capacity is exhausted the caller fails fast with
+a sanitized transient error. (A ``ThreadPoolExecutor`` is deliberately NOT used:
+its context-manager exit joins still-blocked workers, and a plain thread-per-call
+leaks unbounded abandoned threads.)
 
 Local/dev (the ``app_env`` gate) may target private fixtures and honour the
 connector's ``sslmode`` — this seam is dependency-injected/operator-controlled
@@ -29,15 +34,16 @@ tenant setting. Production fails closed.
 """
 
 import ipaddress
+import queue
 import socket
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from nlw.connectors.http_guard import is_public_ip
 from nlw.registry.registry import ToolExecutionError
 
-# host -> resolved IP strings. May block; the policy bounds it. Injectable so
+# host -> resolved IP strings. May block; the pool bounds it. Injectable so
 # tests are deterministic.
 Resolver = Callable[[str], list[str]]
 
@@ -45,6 +51,11 @@ Resolver = Callable[[str], list[str]]
 _ERR_DEST = "POSTGRES_DESTINATION_NOT_ALLOWED"
 _ERR_TLS = "POSTGRES_TLS_POLICY_VIOLATION"
 _ERR_PORT = "POSTGRES_PORT_NOT_ALLOWED"
+_ERR_DNS = "POSTGRES_DNS_UNAVAILABLE"
+
+# Conservative pilot resource bounds for external-DB DNS resolution.
+_MAX_DNS_WORKERS = 4
+_MAX_DNS_QUEUE = 16
 
 # Platform-internal service names that must never be a tenant destination in
 # production (search domains / container DNS could otherwise make them reachable).
@@ -77,11 +88,105 @@ class PostgresTlsPolicyError(ToolExecutionError):
     """The TLS posture violates policy — deterministic (not retryable)."""
 
 
+class PostgresDnsUnavailableError(Exception):
+    """DNS timed out, failed, or the resolver pool was at capacity — TRANSIENT /
+    RETRYABLE infrastructure, NOT a deterministic policy rejection. It is a plain
+    Exception (not a ``ToolExecutionError``) so the engine retries it; the
+    connector maps it to the sanitized ``PostgresUnavailableError``."""
+
+
 def system_resolver(host: str) -> list[str]:
-    """Resolve all A/AAAA answers via ``getaddrinfo`` (may block; the policy
-    applies the wall-clock bound)."""
+    """Resolve all A/AAAA answers via ``getaddrinfo`` (may block; the resolver
+    pool applies the wall-clock + resource bound)."""
     infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     return [str(info[4][0]) for info in infos]
+
+
+@dataclass
+class _ResolveTask:
+    host: str
+    resolver: Resolver
+    done: threading.Event
+    result: dict[str, object]
+
+
+class BoundedResolverPool:
+    """A FIXED pool of daemon workers draining a BOUNDED queue.
+
+    Guarantees, independent of request volume:
+    - the number of resolver threads never exceeds ``max_workers`` (no thread per
+      request); workers are started once, lazily, and are daemons;
+    - the pending queue never exceeds ``max_queue``;
+    - a timed-out caller abandons only its result slot (no thread is created or
+      leaked); the worker later fills the abandoned slot and it is discarded, so a
+      late result can never initiate a connection;
+    - when both workers and queue are saturated, admission fails fast with
+      ``PostgresDnsUnavailableError`` (transient) — no network, no credentials.
+    """
+
+    def __init__(
+        self, max_workers: int = _MAX_DNS_WORKERS, max_queue: int = _MAX_DNS_QUEUE
+    ) -> None:
+        self.max_workers = max_workers
+        self.max_queue = max_queue
+        self._queue: queue.Queue[_ResolveTask] = queue.Queue(maxsize=max_queue)
+        self._lock = threading.Lock()
+        self._started = False
+        self._workers: list[threading.Thread] = []
+
+    def _ensure_workers(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+            for i in range(self.max_workers):
+                worker = threading.Thread(
+                    target=self._worker, name=f"pg-dns-worker-{id(self)}-{i}", daemon=True
+                )
+                self._workers.append(worker)
+                worker.start()
+            self._started = True
+
+    def _worker(self) -> None:
+        while True:
+            task = self._queue.get()
+            try:
+                task.result["ips"] = task.resolver(task.host)
+            except BaseException as exc:  # noqa: BLE001 - recorded, mapped below
+                task.result["err"] = exc
+            finally:
+                task.done.set()
+                self._queue.task_done()
+
+    def resolve(self, host: str, resolver: Resolver, timeout_s: float) -> list[str]:
+        self._ensure_workers()
+        task = _ResolveTask(host=host, resolver=resolver, done=threading.Event(), result={})
+        try:
+            self._queue.put_nowait(task)  # fail fast when saturated
+        except queue.Full as exc:
+            raise PostgresDnsUnavailableError(_ERR_DNS) from exc
+        if not task.done.wait(timeout_s):
+            # Caller abandons only this result slot; no thread was created for it.
+            raise PostgresDnsUnavailableError(_ERR_DNS)
+        if "err" in task.result:
+            raise PostgresDnsUnavailableError(_ERR_DNS)
+        ips = task.result.get("ips")
+        if not isinstance(ips, list):
+            raise PostgresDnsUnavailableError(_ERR_DNS)
+        seen: dict[str, None] = {}
+        for ip in ips:
+            seen.setdefault(str(ip), None)
+        return list(seen)
+
+    def live_worker_count(self) -> int:
+        """Live workers belonging to THIS pool (never exceeds ``max_workers``)."""
+        return sum(1 for t in self._workers if t.is_alive())
+
+    def queued(self) -> int:
+        return self._queue.qsize()
+
+
+# Shared, process-wide pool: the resource bound is global, not per-request.
+_DEFAULT_POOL = BoundedResolverPool()
 
 
 @dataclass(frozen=True)
@@ -128,6 +233,7 @@ class PostgresDestinationPolicy:
     resolver: Resolver = system_resolver
     dns_timeout_s: float = _DNS_TIMEOUT_S
     ssl_root_cert: str | None = None
+    resolver_pool: BoundedResolverPool = field(default=_DEFAULT_POOL)
 
     @classmethod
     def from_settings(
@@ -155,32 +261,10 @@ class PostgresDestinationPolicy:
         )
 
     def _resolve_bounded(self, host: str) -> list[str]:
-        """Run the (possibly blocking) resolver on a daemon thread and abandon it
-        if it exceeds ``dns_timeout_s``. Returns de-duplicated IPs; raises on
-        timeout or resolution failure. No connection is attempted on timeout."""
-        result: dict[str, object] = {}
-
-        def _run() -> None:
-            try:
-                result["ips"] = self.resolver(host)
-            except BaseException as exc:  # noqa: BLE001 - recorded, re-raised below
-                result["err"] = exc
-
-        thread = threading.Thread(target=_run, name=f"pg-dns-{host}", daemon=True)
-        thread.start()
-        thread.join(self.dns_timeout_s)
-        if thread.is_alive():
-            # Timed out: the daemon thread is abandoned (never blocks shutdown).
-            raise PostgresDestinationError(_ERR_DEST)
-        if "err" in result:
-            raise PostgresDestinationError(_ERR_DEST)
-        ips = result.get("ips") or []
-        if not isinstance(ips, list):
-            raise PostgresDestinationError(_ERR_DEST)
-        seen: dict[str, None] = {}
-        for ip in ips:
-            seen.setdefault(str(ip), None)
-        return list(seen)
+        """Resolve via the bounded pool. Raises ``PostgresDnsUnavailableError``
+        (transient) on timeout, resolution failure, or pool saturation — never a
+        deterministic policy error, and never after a connection attempt."""
+        return self.resolver_pool.resolve(host, self.resolver, self.dns_timeout_s)
 
     def _ip_allowed(self, ip_str: str) -> bool:
         if is_public_ip(ip_str):
@@ -231,7 +315,8 @@ class PostgresDestinationPolicy:
 
         ips = self._resolve_bounded(host)
         if not ips:
-            raise PostgresDestinationError(_ERR_DEST)
+            # Resolved to nothing: a resolution outcome, not a policy violation.
+            raise PostgresDnsUnavailableError(_ERR_DNS)
         if self.require_public:
             # Fail closed if ANY answer is unsafe (rebinding / mixed-answer safe).
             for ip in ips:

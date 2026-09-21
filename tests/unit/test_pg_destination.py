@@ -21,11 +21,14 @@ import pytest
 
 from nlw.connectors import postgres as pg
 from nlw.connectors.pg_destination import (
+    BoundedResolverPool,
     PostgresDestinationError,
     PostgresDestinationPolicy,
+    PostgresDnsUnavailableError,
     PostgresTlsPolicyError,
     Resolver,
 )
+from nlw.registry.registry import ToolExecutionError
 
 
 def _resolver(mapping: dict[str, list[str]]) -> Resolver:
@@ -201,13 +204,14 @@ def test_from_settings_local_is_permissive() -> None:
 
 
 def test_private_override_cannot_leak_via_config_in_production() -> None:
-    # No connector/config field can flip the gate: a production policy still
-    # blocks a private target regardless of what the config asked for.
+    # No connector/config field can flip the gate: a production policy (empty
+    # operator allowlist) still deterministically blocks a private target.
     policy = PostgresDestinationPolicy.from_settings(
-        SimpleNamespace(app_env="production", postgres_destination_allowlist=[])
+        SimpleNamespace(app_env="production", postgres_destination_allowlist=[]),
+        resolver=_resolver({"db.example.com": ["10.0.0.5"]}),
     )
     with pytest.raises(PostgresDestinationError):
-        policy.validate_and_pin("db.example.com", 5432, "verify-full")  # no resolver -> no answer
+        policy.validate_and_pin("db.example.com", 5432, "verify-full")
 
 
 # --- Connection-parameter proof (hostname preserved, IP pinned, verify-full) -
@@ -390,53 +394,204 @@ def test_verify_full_does_not_fall_back_to_plaintext(
     assert b"PLAINTEXT-PW-must-not-leak" not in raw_before_tls["data"]
 
 
-# --- DNS wall-clock bound (genuinely blocking resolver + elapsed assertion) ---
+# --- DNS bound: latency + RESOURCE consumption (fixed pool + bounded queue) ---
 
 
-def test_dns_resolution_has_a_real_wall_clock_bound() -> None:
-    started = threading.Event()
-    release = threading.Event()
-
-    def blocking_resolver(_host: str) -> list[str]:
-        started.set()
-        release.wait(30)  # genuinely blocks far beyond the deadline
+def _blocking_resolver(release: threading.Event) -> Resolver:
+    def _r(_host: str) -> list[str]:
+        release.wait(30)  # blocks far beyond any test deadline
         return ["93.184.216.34"]
 
-    policy = PostgresDestinationPolicy(
-        require_public=True, require_verify_full=True, resolver=blocking_resolver, dns_timeout_s=0.5
+    return _r
+
+
+def _pool_policy(
+    pool: BoundedResolverPool, resolver: Resolver, dns_timeout_s: float = 0.4
+) -> PostgresDestinationPolicy:
+    return PostgresDestinationPolicy(
+        require_public=True,
+        require_verify_full=True,
+        resolver=resolver,
+        dns_timeout_s=dns_timeout_s,
+        resolver_pool=pool,
     )
-    non_daemon_before = [t for t in threading.enumerate() if not t.daemon]
-    t0 = time.monotonic()
-    with pytest.raises(PostgresDestinationError):
-        policy.validate_and_pin("db.example.com", 5432, "verify-full")
-    elapsed = time.monotonic() - t0
-
-    assert started.is_set()  # the resolver really ran
-    assert elapsed < 3.0, f"validation waited {elapsed:.2f}s (should be ~0.5s + margin)"
-    # The still-blocked resolver runs on a daemon thread -> it never blocks
-    # process shutdown, and no new NON-daemon thread was spawned.
-    live = [t for t in threading.enumerate() if t.name.startswith("pg-dns-")]
-    assert live and all(t.daemon for t in live)
-    assert [t for t in threading.enumerate() if not t.daemon] == non_daemon_before
-    release.set()  # let the abandoned thread finish so the session stays tidy
 
 
-def test_repeated_resolver_timeouts_do_not_leak_nondaemon_threads() -> None:
-    release = threading.Event()
+def _saturate(
+    pool: BoundedResolverPool, policy: PostgresDestinationPolicy, n: int
+) -> list[threading.Thread]:
+    """Fire n concurrent callers to fill workers + queue; return the threads."""
 
-    def blocking_resolver(_host: str) -> list[str]:
-        release.wait(30)
-        return []
-
-    policy = PostgresDestinationPolicy(
-        require_public=True, require_verify_full=True, resolver=blocking_resolver, dns_timeout_s=0.1
-    )
-    non_daemon_before = {t.ident for t in threading.enumerate() if not t.daemon}
-    for _ in range(12):
-        with pytest.raises(PostgresDestinationError):
+    def _call() -> None:
+        with contextlib.suppress(Exception):  # saturation callers may time out
             policy.validate_and_pin("db.example.com", 5432, "verify-full")
-    # Every abandoned resolver thread is a daemon; no non-daemon thread leaked.
-    pg_threads = [t for t in threading.enumerate() if t.name.startswith("pg-dns-")]
-    assert all(t.daemon for t in pg_threads)
-    assert {t.ident for t in threading.enumerate() if not t.daemon} == non_daemon_before
+
+    threads = [threading.Thread(target=_call, daemon=True) for _ in range(n)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + 4
+    while (
+        pool.live_worker_count() < pool.max_workers or pool.queued() < pool.max_queue
+    ) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return threads
+
+
+def test_repeated_timeouts_do_not_grow_threads_and_never_exceed_max_workers() -> None:
+    pool = BoundedResolverPool(max_workers=2, max_queue=2)
+    release = threading.Event()
+    policy = _pool_policy(pool, _blocking_resolver(release), dns_timeout_s=0.3)
+    try:
+        for _ in range(20):
+            t0 = time.monotonic()
+            with pytest.raises(PostgresDnsUnavailableError):
+                policy.validate_and_pin("db.example.com", 5432, "verify-full")
+            assert time.monotonic() - t0 < 2.0  # bounded caller latency
+            assert pool.live_worker_count() <= pool.max_workers  # fixed pool
+            assert pool.queued() <= pool.max_queue  # bounded queue
+        # 20 timed-out calls left exactly the fixed pool (not ~20 threads), all daemon.
+        assert pool.live_worker_count() == 2
+        assert all(t.daemon for t in threading.enumerate() if t.name.startswith("pg-dns-worker"))
+    finally:
+        release.set()
+
+
+def test_blocked_lookup_caller_returns_within_dns_timeout_plus_margin() -> None:
+    pool = BoundedResolverPool(max_workers=2, max_queue=2)
+    release = threading.Event()
+    policy = _pool_policy(pool, _blocking_resolver(release), dns_timeout_s=0.5)
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(PostgresDnsUnavailableError):
+            policy.validate_and_pin("db.example.com", 5432, "verify-full")
+        assert time.monotonic() - t0 < 2.0  # ~0.5s bound, not ~30s
+    finally:
+        release.set()
+
+
+def test_capacity_exhaustion_fails_fast() -> None:
+    pool = BoundedResolverPool(max_workers=2, max_queue=2)
+    release = threading.Event()
+    # Long caller timeout so the fast-fail is due to saturation, not the deadline.
+    policy = _pool_policy(pool, _blocking_resolver(release), dns_timeout_s=5)
+    threads = _saturate(pool, policy, n=4)
+    try:
+        assert pool.live_worker_count() <= pool.max_workers
+        assert pool.queued() <= pool.max_queue
+        t0 = time.monotonic()
+        with pytest.raises(PostgresDnsUnavailableError):
+            policy.validate_and_pin("other.example.com", 5432, "verify-full")
+        assert time.monotonic() - t0 < 0.5  # admission rejected promptly, no waiting
+    finally:
+        release.set()
+        for t in threads:
+            t.join(2)
+
+
+def test_capacity_recovers_after_blocked_lookups_release() -> None:
+    pool = BoundedResolverPool(max_workers=2, max_queue=2)
+    release = threading.Event()
+    blocked = _pool_policy(pool, _blocking_resolver(release), dns_timeout_s=5)
+    threads = _saturate(pool, blocked, n=4)
     release.set()
+    for t in threads:
+        t.join(3)
+    # The same pool now resolves a fresh safe host successfully.
+    ok = _pool_policy(pool, _resolver({"good.example.com": ["93.184.216.34"]}), dns_timeout_s=2)
+    dest = ok.validate_and_pin("good.example.com", 5432, "verify-full")
+    assert dest.hostaddr == "93.184.216.34"
+
+
+def test_late_dns_result_never_initiates_a_connection(listener: SimpleNamespace) -> None:
+    pool = BoundedResolverPool(max_workers=1, max_queue=1)
+    release = threading.Event()
+    resolved = threading.Event()
+
+    def late_resolver(_host: str) -> list[str]:
+        release.wait(30)  # completes only AFTER the caller has timed out
+        resolved.set()
+        return ["127.0.0.1"]  # a late answer pointing at the controlled listener
+
+    config = pg.parse_config(
+        {
+            "host": "127.0.0.1",
+            "port": listener.port,
+            "database": "d",
+            "sslmode": "disable",
+            "connect_timeout_s": 2,
+        }
+    )
+    secret = pg.parse_secret('{"username": "dummy", "password": "dummy-PW-must-not-leak"}')
+    policy = PostgresDestinationPolicy(
+        require_public=False,
+        require_verify_full=False,
+        resolver=late_resolver,
+        dns_timeout_s=0.3,
+        resolver_pool=pool,
+    )
+    # DNS times out -> transient, mapped by the connector to PostgresUnavailableError.
+    with (
+        pytest.raises(pg.PostgresUnavailableError),
+        pg._read_only_connection(config, secret, policy),
+    ):
+        pass
+    # Release the late resolution; it completes but the caller already returned.
+    release.set()
+    assert resolved.wait(3)
+    time.sleep(0.3)  # give any erroneous connection a chance to appear
+    listener.thread.join(timeout=1)
+    assert listener.state.accepted is False  # no connection after caller timeout
+    assert listener.state.received == b""  # no credential bytes transmitted
+
+
+def test_dns_timeout_is_transient_but_policy_rejection_is_deterministic() -> None:
+    pool = BoundedResolverPool(max_workers=1, max_queue=1)
+    release = threading.Event()
+    # Transient: a DNS timeout is retryable.
+    transient = _pool_policy(pool, _blocking_resolver(release), dns_timeout_s=0.2)
+    try:
+        with pytest.raises(PostgresDnsUnavailableError):
+            transient.validate_and_pin("db.example.com", 5432, "verify-full")
+    finally:
+        release.set()
+    # PostgresDnsUnavailableError is NOT a deterministic ToolExecutionError.
+    assert not issubclass(PostgresDnsUnavailableError, ToolExecutionError)
+    # Deterministic: an unsafe RESOLVED address is a policy rejection (not DNS).
+    deterministic = PostgresDestinationPolicy(
+        require_public=True,
+        require_verify_full=True,
+        resolver=_resolver({"db.example.com": ["10.0.0.9"]}),
+    )
+    with pytest.raises(PostgresDestinationError):
+        deterministic.validate_and_pin("db.example.com", 5432, "verify-full")
+
+
+def test_concurrent_resolutions_do_not_cross_contaminate() -> None:
+    pool = BoundedResolverPool(max_workers=4, max_queue=16)
+    mapping = {
+        "a.example.com": ["93.184.216.34"],
+        "b.example.com": ["93.184.216.35"],
+        "c.example.com": ["93.184.216.36"],
+    }
+
+    def slow_resolver(host: str) -> list[str]:
+        time.sleep(0.02)
+        return mapping[host]
+
+    policy = _pool_policy(pool, slow_resolver, dns_timeout_s=3)
+    got: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def _call(host: str) -> None:
+        addr = policy.validate_and_pin(host, 5432, "verify-full").hostaddr
+        with lock:
+            got.append((host, addr))
+
+    threads = [threading.Thread(target=_call, args=(h,)) for h in mapping for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert len(got) == 12
+    for host, addr in got:
+        assert addr == mapping[host][0]  # each caller got ITS OWN host's answer

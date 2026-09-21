@@ -137,11 +137,26 @@ test (a TLS Postgres with a test CA + SAN-matched cert) proves verify-full
 succeeds with the correct host + trusted CA + pinned hostaddr and fails closed on
 an untrusted CA or a hostname/SAN mismatch — with no plaintext fallback.
 
-**DNS wall-clock bound.** Resolution runs on a **daemon** thread joined for at
-most `dns_timeout_s` (default 5s). On timeout the destination is rejected
-(`POSTGRES_DESTINATION_NOT_ALLOWED`) and the daemon thread is **abandoned**: the
-underlying `getaddrinfo` keeps running in the background but, being a daemon,
-never blocks worker/process shutdown, and **no connection is attempted after the
-timeout**. A `ThreadPoolExecutor` is deliberately not used (its context-manager
-exit joins the still-blocked worker, which would defeat the bound). Repeated
-timeouts spawn only daemon threads and leak no non-daemon/background threads.
+**DNS bound (latency + resource).** Resolution is delegated to a fixed, shared
+`BoundedResolverPool`: a fixed number of **daemon** workers (`max_workers`, pilot
+default 4) draining a **bounded** queue (`max_queue`, default 16). A caller waits
+at most `dns_timeout_s` (default 5s). This bounds all three of: caller latency,
+resolver **resource consumption** (the number of resolver threads never exceeds
+`max_workers` and the queue never exceeds `max_queue` regardless of request
+volume — no thread per request), and shutdown (all workers are daemons). A
+timed-out caller abandons only its result slot (never a thread); a late result is
+filled into the abandoned slot and discarded — it can **never** initiate a
+connection. When both workers and queue are saturated, admission fails fast. A
+`ThreadPoolExecutor` is deliberately not used (its exit joins blocked workers),
+and a plain thread-per-lookup is not used (it leaks unbounded abandoned threads —
+12 timed-out calls left 12 live threads before this change).
+
+**DNS error classification.** DNS timeout, resolution failure, and resolver-pool
+saturation are **transient/retryable** — `PostgresDnsUnavailableError` (a plain
+Exception, not a `ToolExecutionError`), which the connector maps to the sanitized
+retryable `PostgresUnavailableError`. This is distinct from the **deterministic,
+non-retryable** policy rejections (`POSTGRES_DESTINATION_NOT_ALLOWED` for a
+prohibited/unsafe/mixed resolved address or invalid host form,
+`POSTGRES_PORT_NOT_ALLOWED`, `POSTGRES_TLS_POLICY_VIOLATION`). An empty resolution
+and NXDOMAIN follow the transient path (documented, consistent); neither reveals
+resolver internals, resolved private addresses, credentials, or DSNs.
