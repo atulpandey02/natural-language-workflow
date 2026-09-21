@@ -1,12 +1,12 @@
 #!/usr/bin/env sh
-# Restore-mode runtime-start gate wrapper (M11.5 P2 addendum C).
+# Restore-mode file-gate wrapper — DEFENSE IN DEPTH (M11.5 P2 addendum C).
 #
-# Wrap api/worker/scheduler startup with this ONLY when bringing a recovered stack
-# up in restore mode. When NLW_RESTORE_MODE=1 it verifies the restore-ready gate
-# (bound to this restore generation + database cluster) and refuses to start
-# (non-zero) on a missing/stale/cross-DB/tampered gate. When NLW_RESTORE_MODE is
-# unset (every normal deployment) it does nothing and execs the real command, so
-# normal deploys never require a DR gate.
+# NOTE: the AUTHORITATIVE runtime-start gate is the database recovery lock
+# (dr_restore_events), which api/worker/scheduler enforce unconditionally at boot
+# via nlw.backup.recovery_lock — NOT this optional wrapper. This wrapper only adds
+# the file-gate binding check when NLW_RESTORE_MODE=1; omitting it does NOT bypass
+# the DB lock. When NLW_RESTORE_MODE is unset (every normal deployment) it does
+# nothing and execs the real command.
 #
 # Use via an override that sets, for api/worker/scheduler:
 #   entrypoint: ["/app/docker/entrypoint-gate.sh"]

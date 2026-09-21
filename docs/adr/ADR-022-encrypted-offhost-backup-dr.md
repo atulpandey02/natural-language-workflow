@@ -194,13 +194,28 @@ change (migration `0014` unchanged).
   immediately before the destructive restore and before quiescence (TOCTOU).
   Network isolation from the runtime is achieved by running restore as a separate
   Compose project on a fresh host (where those services are not defined).
-- **(C) Enforceable runtime-start gate.** After — and only after — quiescence AND
-  validation commit, the restore writes an atomic, non-secret **restore-ready
-  gate** (`nlw.backup.gate`) bound to this restore generation
-  (`dr_restore_events` id) and this cluster (`system_identifier`). Runtime start
-  in restore mode requires `nlw.backup gate-check` to pass; a missing, malformed,
-  stale, cross-DB, or wrong-project gate is rejected (exit **4**). Normal
-  (non-restore) deploys never require a gate (no `NLW_RESTORE_MODE`).
+- **(C) Enforceable runtime-start gate — DATABASE-authoritative.** The gate is
+  `dr_restore_events` itself (runtime roles cannot write it). The restore leaves the
+  newest generation *validated* but with `runtime_enabled_at` NULL (LOCKED). Every
+  api/worker/scheduler process runs a **mandatory** startup preflight
+  (`nlw.backup.recovery_lock`, via the API lifespan, the scheduler main, and a
+  worker `before_worker_boot` middleware) that reads this state and fails closed
+  (exit **6**) unless the newest generation is validated **and** operator-enabled —
+  **regardless of `NLW_RESTORE_MODE`, compose profile, or any mounted file**. This
+  closes the earlier fail-open where an omitted `NLW_RESTORE_MODE` let services start
+  against a restored DB. A never-restored DB (no event) starts normally; a reachable
+  but indeterminate state fails closed (a pure connection failure is tolerated only
+  by the API, preserving its DB-free liveness/readiness contract — a restored DB is
+  reachable, so it is always evaluated). Runtime roles get only column-scoped SELECT
+  on the lock-state columns (migration `0014`); only the operator credential can
+  INSERT an event, mark it validated, or enable. A **separate** operator command
+  `nlw.backup enable-runtime` performs the conditional, audited enable of the exact
+  newest validated generation (idempotent; rejects stale/mismatched/unvalidated,
+  exit **5**); a later restore re-locks (its new generation is not enabled). The
+  file **restore-ready gate** (`nlw.backup.gate`, bound to generation +
+  `system_identifier`, verified by `gate-check`, exit **4**) and the
+  `NLW_RESTORE_MODE` entrypoint wrapper remain as **defense in depth** and a binding
+  artifact — never the sole authority.
 - **(D) Retention vs immutable credentials.** Two explicit modes:
   `simple` (the job prunes; needs delete rights) and `immutable` (the writer has
   no delete rights; the job **never** prunes — a separate human-gated

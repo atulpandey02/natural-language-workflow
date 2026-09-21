@@ -56,6 +56,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     configure_logging(settings)
     app.state.engine = create_engine(settings)
+    # Authoritative recovery lock (M11.5 P2 addendum): refuse to start against a
+    # restored database whose newest generation has not been explicitly enabled by
+    # the operator. Mandatory — NOT gated on any env flag. A never-restored DB is
+    # unaffected. Fails closed if the state cannot be read.
+    from nlw.backup.recovery_lock import (
+        RecoveryLocked,
+        RecoveryStateUnknown,
+        assert_startup_allowed_async,
+    )
+
+    try:
+        await assert_startup_allowed_async(app.state.engine)
+    except (RecoveryLocked, RecoveryStateUnknown) as exc:
+        log.error("api.startup_blocked_by_recovery_lock", error_class=type(exc).__name__)
+        await app.state.engine.dispose()
+        raise
     app.state.sessionmaker = create_sessionmaker(app.state.engine)
     app.state.auth_provider = build_auth_provider(settings)
     # Planner provider (M6). Built once; the platform LLM key (if any) lives only

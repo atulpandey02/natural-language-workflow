@@ -35,6 +35,7 @@ from nlw.backup.config import (
 from nlw.backup.gate import build_gate, db_system_identifier, write_gate
 from nlw.backup.manifest import MANIFEST_NAME, verify_manifest
 from nlw.backup.quiescence import quiesce
+from nlw.backup.recovery_lock import mark_validated
 from nlw.backup.restic import Restic
 from nlw.backup.runtime_guard import (
     ComposeRuntimeProbe,
@@ -198,8 +199,17 @@ def run_restore(
     if not report["ok"]:
         raise RuntimeError("restore validation FAILED:\n" + human_summary(report))
 
-    # (C) restore-ready gate — written atomically ONLY now (quiescence + validation
-    # both succeeded), bound to THIS restore generation and THIS DB cluster.
+    # Authoritative DB recovery lock: mark THIS generation validated (still LOCKED —
+    # runtime_enabled_at stays NULL until the explicit operator enable command). The
+    # api/worker/scheduler startup preflight reads this state, so the DB — not an env
+    # flag — is the authority.
+    project = settings.compose_project or settings.target_id
+    mark_validated(engine, qr.event_id or "", target_project=project)
+    log.info("restore.generation_validated_locked", event_id=qr.event_id)
+
+    # (C) restore-ready gate — a binding artifact + defense in depth. Written
+    # atomically ONLY now (quiescence + validation both succeeded), bound to THIS
+    # restore generation and THIS DB cluster. NOT the sole authority (the DB lock is).
     generation = str(uuid.uuid4())
     gate = build_gate(
         restore_event_id=qr.event_id or "",

@@ -77,23 +77,38 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    cutoff. This is deliberate — it prevents replaying already-delivered side
    effects and missed schedule occurrences.
 
-6. **Operator ENABLE — verify the restore-ready gate, then start the runtime.**
-   The restore wrote an atomic, non-secret gate (`NLW_RESTORE_GATE_FILE`) bound to
-   this restore generation and this database cluster, only after quiescence AND
-   validation succeeded. Enabling the runtime is a **separate, explicit** step:
+6. **Runtime is DATABASE-LOCKED until you explicitly enable it.** The restore
+   marked this generation *validated* in `dr_restore_events` but left
+   `runtime_enabled_at` NULL, so it is **locked**. api/worker/scheduler run a
+   **mandatory** startup preflight that reads this DB state — **regardless of any
+   env flag, compose profile, or mounted file** — and refuse to start while the
+   newest generation is not enabled. (The file gate / `NLW_RESTORE_MODE` /
+   `gate-check` are now defense-in-depth and a binding artifact; the **database is
+   the authority**.) Attempting to start a service now fails closed (exit 6).
+
+7. **Operator ENABLE — a separate, explicit command (operator credential).** Get the
+   generation id and enable exactly it:
    ```bash
-   # Verify the gate is present and bound to THIS restored DB (exit 4 if not):
-   NLW_RESTORE_MODE=1 docker compose --env-file /opt/nlw/.env.restore \
+   # the newest restore generation id (operator/owner credential):
+   psql "$NLW_RESTORE_DATABASE_URL" -tAc \
+     "SELECT id FROM dr_restore_events ORDER BY restored_at DESC LIMIT 1"
+   NLW_RESTORE_EVENT_ID=<that-id> \
+   NLW_RESTORE_COMPOSE_PROJECT=<exact-project> \
+   NLW_RESTORE_OPERATOR="$(whoami)" \
+   docker compose --env-file /opt/nlw/.env.restore \
      -f docker-compose.prod.yml --profile restore run --rm \
-     --entrypoint "python -m nlw.backup" restore gate-check
+     --entrypoint "python -m nlw.backup" restore enable-runtime
    ```
-   Bring up api → worker → scheduler **in restore mode** (`NLW_RESTORE_MODE=1`, with
-   the gate volume mounted) so each service runs `gate-check` before starting and
-   refuses a missing/stale/cross-DB/tampered gate. Normal (non-restore) deployments
-   set no `NLW_RESTORE_MODE` and never require a gate. Starting the runtime does
-   **not** replay restored work (quiescence already neutralized it). The gate cannot
-   be reused for a different database (its `system_identifier`/restore-event binding
-   will not match).
+   `enable-runtime` uses the restore/operator credential (never a runtime role),
+   requires the exact newest **validated** generation and the project confirmation,
+   records the server-side enablement time + operator, and is idempotent for the
+   same already-enabled generation. It does **not** start any container.
+
+8. **Only now start the runtime.** Bring up api → worker → scheduler; each passes
+   the startup preflight (the generation is enabled) and serves. Starting the
+   runtime does **not** replay restored work (quiescence neutralized it). A **later**
+   restore inserts a new locked generation, so this enablement cannot authorize it —
+   you must enable the new generation explicitly.
 
 7. **Record** the incident: snapshot id/age, the measured RTO, the quiescence
    counts, and (if a real provider) note it in `docs/incidents/`.

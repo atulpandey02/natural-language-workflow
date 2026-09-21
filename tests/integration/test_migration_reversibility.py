@@ -285,10 +285,13 @@ def test_dr_restore_events_table_flips_with_migration(pg_stack: SimpleNamespace)
 
     command.upgrade(cfg, _HEAD)
     assert _has_table(pg_stack.owner_libpq, "dr_restore_events")
-    # No runtime role may read the DR audit table (only the owner).
+    # Runtime roles may read ONLY the minimal recovery-lock columns (for their
+    # mandatory startup preflight); they may NOT read the provenance/note columns,
+    # and may NOT write. (M11.5 P2 addendum: the DB lock is the authority.)
     with psycopg.connect(pg_stack.scheduler_libpq) as c:
+        c.execute("SELECT id, validation_completed_at, runtime_enabled_at FROM dr_restore_events")
         try:
-            c.execute("SELECT count(*) FROM dr_restore_events")
-            raise AssertionError("nlw_scheduler could read dr_restore_events")
+            c.execute("SELECT note FROM dr_restore_events")
+            raise AssertionError("nlw_scheduler could read the note column")
         except psycopg.errors.InsufficientPrivilege:
             pass

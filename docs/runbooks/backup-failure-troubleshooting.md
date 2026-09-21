@@ -75,10 +75,18 @@ did not touch metrics. If it recurs, check for a stuck first process
   `NLW_RESTORE_RUNTIME_GUARD` accordingly, or set `NLW_RESTORE_COMPOSE_PROJECT`.
 - **`runtime services appear active`** — an `nlw_app`/`worker`/`scheduler` DB
   connection exists (defense-in-depth session check). Stop the runtime first.
-- **gate-check failed (exit 4)** — a runtime service in restore mode found a
-  missing/malformed/stale/cross-DB/wrong-project restore-ready gate. This is the
-  runtime-start gate doing its job: do not force-start. Ensure the restore
-  completed (quiescence+validation) and wrote the gate bound to THIS database.
+- **gate-check failed (exit 4)** — a runtime service (restore mode) found a
+  missing/malformed/stale/cross-DB/wrong-project restore-ready file gate
+  (defense-in-depth). Ensure the restore completed and wrote the gate for THIS DB.
+- **startup blocked by the recovery lock (exit 6 / RecoveryLocked)** — the
+  AUTHORITATIVE database lock: the newest `dr_restore_events` generation is not
+  operator-enabled (or is quiesced-but-not-validated). api/worker/scheduler refuse
+  to start until you run `nlw.backup enable-runtime` for the exact newest validated
+  generation. `RecoveryStateUnknown` means the state could not be read (e.g. missing
+  grant/columns) — fail closed; check the migration ran and the grant is present.
+- **enable-runtime rejected (exit 5)** — the supplied generation is not the newest
+  validated one, or the project confirmation does not match. Re-query the newest
+  `dr_restore_events` id and confirm the project.
 - **manifest hash mismatch** — the decrypted artifact does not match the recorded
   sha256; the snapshot is corrupt. Restore an earlier snapshot.
 - **`restore validation FAILED`** — the restored security posture/invariants are

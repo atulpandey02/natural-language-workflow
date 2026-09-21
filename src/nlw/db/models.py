@@ -374,3 +374,14 @@ class DrRestoreEvent(Base):
     actions_unknowned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     schedules_recomputed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Authoritative recovery-lock state (addendum): a restored generation is
+    # runtime-LOCKED until validated (by the restore) AND explicitly enabled (by the
+    # operator enable command). Runtime roles have column-scoped SELECT only.
+    target_project: Mapped[str | None] = mapped_column(String, nullable=True)
+    validation_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    runtime_enabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    runtime_enabled_by: Mapped[str | None] = mapped_column(String, nullable=True)

@@ -84,6 +84,13 @@ docker run --rm --network "${NET}" \
 docker run --rm --network "${NET}" -v "${REPO}/scripts:/scripts:ro" "${APP_IMG}" \
   python /scripts/ops/dr_drill_seed.py seed --url "postgresql://nlw:nlw@${PROJ}-srcdb:5432/nlw"
 
+echo "=== (F1) ordinary DB (no restore event) permits normal startup ==="
+# The migrated+seeded SOURCE has no dr_restore_events row -> runtime startup allowed.
+docker run --rm --network "${NET}" -e APP_ENV=local \
+  -e "NLW_RESTORE_DATABASE_URL=postgresql://nlw_app:nlw_app@${PROJ}-srcdb:5432/nlw" \
+  "${BAK_IMG}" startup-check \
+  && echo "  [ok] startup-check permits a never-restored DB (as nlw_app)"
+
 echo "=== BACKUP (encrypted, off-host to MinIO) ==="
 t0=$(date +%s)
 docker run --rm --network "${NET}" "${_restic_env[@]}" -e APP_ENV=local \
@@ -144,15 +151,67 @@ echo "=== post-restore invariant assertions (no replay) ==="
 docker run --rm --network "${NET}" -v "${REPO}/scripts:/scripts:ro" "${APP_IMG}" \
   python /scripts/ops/dr_drill_seed.py verify --url "${DEST_URL}"
 
-echo "=== (C) operator ENABLE: gate-check now PASSES ==="
-docker run --rm --network "${NET}" "${_gate_env[@]}" -e APP_ENV=local "${BAK_IMG}" gate-check \
-  && echo "  [ok] valid restore-ready gate accepted (runtime may now start)"
+APP_URL="postgresql://nlw_app:nlw_app@${PROJ}-destdb:5432/nlw"
+_dest_psql() { docker exec "${PROJ}-destdb" psql -U nlw -d nlw -tAc "$1" | tr -d '[:space:]'; }
+_startup_check() {  # url -> expected_rc ; returns 0 on match
+  set +e
+  docker run --rm --network "${NET}" -e APP_ENV=local \
+    -e "NLW_RESTORE_DATABASE_URL=$1" "${BAK_IMG}" startup-check
+  local rc=$?; set -e
+  [ "${rc}" -eq "$2" ] || { echo "FAIL: startup-check rc=${rc} expected $2" >&2; exit 1; }
+}
 
-echo "=== (E) start runtime: a BRAND-NEW post-restore run executes to COMPLETED ==="
+echo "=== (F3/F4/F6) DB lock BLOCKS runtime startup even though the file gate passes ==="
+# The file gate is valid now, but the DB generation is validated-but-NOT-enabled.
+docker run --rm --network "${NET}" "${_gate_env[@]}" -e APP_ENV=local "${BAK_IMG}" gate-check \
+  && echo "  [ok] file gate passes (defense in depth) ..."
+_startup_check "${APP_URL}" 6
+echo "  [ok] ... but the AUTHORITATIVE DB lock blocks startup-check (exit 6), no NLW_RESTORE_MODE set"
+# A real service (scheduler) must also abort at boot.
+set +e
+docker run --rm --network "${NET}" -e APP_ENV=local \
+  -e "DATABASE_URL=postgresql+psycopg://nlw_scheduler:nlw_scheduler@${PROJ}-destdb:5432/nlw" \
+  -e "REDIS_URL=redis://${PROJ}-redis:6379/0" "${APP_IMG}" \
+  sh -c 'timeout 25 python -m nlw.scheduler'
+sched_rc=$?; set -e
+[ "${sched_rc}" -ne 0 ] && echo "  [ok] real scheduler aborted at boot (rc=${sched_rc})" \
+  || { echo "FAIL: scheduler should have refused to start" >&2; exit 1; }
+
+echo "=== (F7) operator ENABLE the exact generation (owner credential) ==="
+EVENT_ID=$(_dest_psql "SELECT id FROM dr_restore_events ORDER BY restored_at DESC LIMIT 1")
+docker run --rm --network "${NET}" -e APP_ENV=local \
+  -e "NLW_RESTORE_DATABASE_URL=${DEST_URL}" -e "NLW_RESTORE_EVENT_ID=${EVENT_ID}" \
+  -e "NLW_RESTORE_COMPOSE_PROJECT=${PROJ}" -e "NLW_RESTORE_OPERATOR=drill" \
+  "${BAK_IMG}" enable-runtime \
+  && echo "  [ok] generation ${EVENT_ID} enabled"
+
+echo "=== (F8) runtime startup now permitted ==="
+_startup_check "${APP_URL}" 0
+echo "  [ok] startup-check permits startup after explicit enable"
+
+echo "=== (F9/F10) start runtime: a BRAND-NEW post-restore run executes to COMPLETED ==="
 docker run --rm --network "${NET}" -v "${REPO}/scripts:/scripts:ro" "${APP_IMG}" \
   python /scripts/ops/dr_drill_seed.py newrun --url "${DEST_URL}"
 
-echo "=== (C/E) gate CANNOT be reused for a second empty destination ==="
+echo "=== (F11/F12) a LATER restore generation re-locks runtime; old enable cannot authorize it ==="
+# Insert new non-terminal work + quiesce -> a new locked generation.
+TID=$(_dest_psql "SELECT tenant_id FROM workflows LIMIT 1")
+WFID=$(_dest_psql "SELECT id FROM workflows WHERE tenant_id='${TID}' LIMIT 1")
+VERID=$(_dest_psql "SELECT id FROM workflow_versions WHERE workflow_id='${WFID}' LIMIT 1")
+_dest_psql "INSERT INTO workflow_runs (id, tenant_id, workflow_id, workflow_version_id, status) VALUES (gen_random_uuid(), '${TID}', '${WFID}', '${VERID}', 'RUNNING')" >/dev/null
+docker run --rm --network "${NET}" -e APP_ENV=local \
+  -e "NLW_RESTORE_DATABASE_URL=${DEST_URL}" "${BAK_IMG}" quiesce >/dev/null
+_startup_check "${APP_URL}" 6
+echo "  [ok] later generation re-locks startup (exit 6)"
+set +e
+docker run --rm --network "${NET}" -e APP_ENV=local \
+  -e "NLW_RESTORE_DATABASE_URL=${DEST_URL}" -e "NLW_RESTORE_EVENT_ID=${EVENT_ID}" \
+  -e "NLW_RESTORE_COMPOSE_PROJECT=${PROJ}" "${BAK_IMG}" enable-runtime
+old_enable_rc=$?; set -e
+[ "${old_enable_rc}" -eq 5 ] && echo "  [ok] stale enablement rejected (exit 5)" \
+  || { echo "FAIL: old enable should have exited 5, got ${old_enable_rc}" >&2; exit 1; }
+
+echo "=== (C/E) file gate CANNOT be reused for a second empty destination ==="
 _run_owner_db "${PROJ}-destdb2" "${PROJ}-destdata2"; _wait_db "${PROJ}-destdb2"
 set +e
 docker run --rm --network "${NET}" -v "${GATE_VOL}:/var/lib/nlw" -e APP_ENV=local \
@@ -170,6 +229,8 @@ echo "=== DR DRILL RESULT (MinIO / local Docker — NOT a real provider) ==="
 echo "  backup_duration_seconds   = ${BACKUP_S}"
 echo "  restore_duration_seconds  = ${RESTORE_S}  (observed local RTO component)"
 echo "  observed_snapshot_age     = ~0s (backup taken immediately before restore; RPO in prod = backup interval)"
-echo "  runtime-start gate        = blocked before validation; enabled only after; not reusable"
+echo "  authoritative DB lock     = blocks api/worker/scheduler until explicit enable (no env flag)"
+echo "  file gate                 = defense in depth; cannot unlock the DB lock; not reusable"
 echo "  new post-restore run      = executed to COMPLETED; no restored work replayed"
+echo "  later generation          = re-locks runtime; stale enablement rejected"
 echo "ALL DR DRILL CHECKS PASSED"

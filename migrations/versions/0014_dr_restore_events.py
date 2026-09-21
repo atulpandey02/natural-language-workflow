@@ -9,10 +9,13 @@ The recovery REASON (``DR_RESTORE_UNCERTAIN``) is a stable sanitized string writ
 into the existing ``error`` text columns of workflow_runs/step_runs and the P1C
 ``unknown`` external-action status — so no run/step/action enum changes are needed.
 
-Non-tenant-forgeable: the table receives NO grant to any runtime role
-(nlw_app/nlw_worker/nlw_scheduler), so only the owner/restore connection can write
-or read it. It is intentionally OUTSIDE row-level security (a platform operations
-table, not tenant data).
+Non-tenant-forgeable: runtime roles (nlw_app/nlw_worker/nlw_scheduler) get NO write
+grant and only a MINIMAL, column-scoped SELECT on the recovery-lock state columns
+(id, restored_at, validation_completed_at, runtime_enabled_at) — needed for their
+mandatory startup preflight (M11.5 P2 addendum). Only the owner/restore (operator)
+connection can INSERT an event, mark it validated, or enable runtime; runtime roles
+cannot read the provenance/note columns. It is intentionally OUTSIDE row-level
+security (a platform operations table, not tenant data).
 
 Reversible. Downgrade drops the table (losing the DR audit trail — documented).
 
@@ -58,9 +61,28 @@ def upgrade() -> None:
         sa.Column("actions_unknowned", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("schedules_recomputed", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("note", sa.Text(), nullable=True),
+        # --- Authoritative recovery-lock state machine (addendum) ---
+        # A restored generation is runtime-LOCKED until an operator explicitly
+        # enables it. Startup for api/worker/scheduler consults this DB state
+        # (not an env flag / file), so a restored DB cannot serve before enablement.
+        #   quiesced  -> validation_completed_at set by the restore after validation
+        #   validated -> runtime_enabled_at set by the explicit operator enable command
+        # The runtime roles get column-scoped SELECT only (below); they can never
+        # write these, so the lock is not forgeable by a runtime/tenant role.
+        sa.Column("target_project", sa.String(), nullable=True),
+        sa.Column("validation_completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("runtime_enabled_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("runtime_enabled_by", sa.String(), nullable=True),
     )
-    # No GRANT to any runtime role: only the owner/restore connection touches it,
-    # so a tenant/runtime role can neither read nor forge a restore event.
+    # Runtime roles get MINIMAL, column-scoped, READ-ONLY access so their startup
+    # preflight can read the newest generation's lock state — never the manifest
+    # provenance, counts, or note, and never any write. Only the owner/restore
+    # (operator) connection can INSERT a restore event, mark it validated, or enable
+    # runtime. So a runtime/tenant role can neither forge nor unlock a restore.
+    op.execute(
+        "GRANT SELECT (id, restored_at, validation_completed_at, runtime_enabled_at) "
+        "ON dr_restore_events TO nlw_app, nlw_worker, nlw_scheduler"
+    )
 
 
 def downgrade() -> None:

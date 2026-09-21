@@ -155,7 +155,15 @@ stale/cross-DB/tampered gates rejected; normal deploys need no gate); explicit
 `simple`/`immutable` retention modes (immutable never prunes from the VPS —
 a separate `nlw.backup prune` does; contradictory config fails closed); and an
 extended drill proving startup is blocked pre-gate, a new post-restore run runs to
-COMPLETED, no restored work is replayed, and the gate cannot be reused.
+COMPLETED, no restored work is replayed, and the gate cannot be reused. A follow-up
+correction makes the runtime-start gate **database-authoritative**: `dr_restore_events`
+(migration `0014`, runtime roles have only column-scoped SELECT) carries a
+validated→enabled state machine; api/worker/scheduler run a **mandatory** startup
+preflight (API lifespan, scheduler main, worker `before_worker_boot`) that fails
+closed unless the newest restore generation is operator-enabled — regardless of
+`NLW_RESTORE_MODE`, profile, or file. A separate `nlw.backup enable-runtime`
+operator command performs the audited, conditional enable; a later restore re-locks.
+The file gate / `NLW_RESTORE_MODE` are now defense-in-depth only.
 
 M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
 so a user can operate the platform end-to-end without curl/SQL: Supabase

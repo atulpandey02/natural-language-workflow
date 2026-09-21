@@ -16,6 +16,8 @@ Exit codes:
     2  usage / unexpected error (sanitized to a class name)
     3  backup already running (single-execution lock held by another process)
     4  restore-ready gate check failed (missing/stale/tampered/wrong DB)
+    5  enable-runtime rejected (stale/mismatched/unvalidated generation)
+    6  startup blocked by the authoritative DB recovery lock (or indeterminate)
 """
 
 import argparse
@@ -31,6 +33,13 @@ from nlw.backup.config import BackupSettings, RestoreSettings, sa_engine_url, va
 from nlw.backup.gate import GateError, verify_restore_gate
 from nlw.backup.locking import BackupAlreadyRunning
 from nlw.backup.quiescence import quiesce
+from nlw.backup.recovery_lock import (
+    EnableRejected,
+    RecoveryLocked,
+    RecoveryStateUnknown,
+    assert_startup_allowed_sync,
+    enable_runtime,
+)
 from nlw.backup.restic import Restic
 from nlw.backup.restore import run_restore
 from nlw.backup.validate import human_summary, validate_restore
@@ -39,6 +48,8 @@ log = structlog.get_logger("nlw.backup.cli")
 
 EXIT_ALREADY_RUNNING = 3
 EXIT_GATE_FAILED = 4
+EXIT_ENABLE_REJECTED = 5
+EXIT_STARTUP_BLOCKED = 6
 
 
 def _cmd_backup() -> int:
@@ -140,11 +151,69 @@ def _cmd_gate_check() -> int:
     return 0
 
 
+def _cmd_enable_runtime() -> int:
+    """Explicitly enable the newest, validated restore generation (operator step).
+
+    Uses the RESTORE/operator DB credential (never a runtime role). Does not start
+    any container. Requires the exact generation id + the project/database
+    confirmation; rejects stale/mismatched/unvalidated generations.
+    """
+    url = os.environ.get("NLW_RESTORE_DATABASE_URL", "")
+    event_id = os.environ.get("NLW_RESTORE_EVENT_ID", "")
+    confirm_project = os.environ.get("NLW_RESTORE_COMPOSE_PROJECT") or os.environ.get(
+        "NLW_RESTORE_TARGET_ID", ""
+    )
+    operator = os.environ.get("NLW_RESTORE_OPERATOR", "operator")
+    if not url or not event_id or not confirm_project:
+        raise ValueError(
+            "enable-runtime requires NLW_RESTORE_DATABASE_URL, NLW_RESTORE_EVENT_ID, and "
+            "NLW_RESTORE_COMPOSE_PROJECT (or NLW_RESTORE_TARGET_ID)"
+        )
+    engine = create_engine(sa_engine_url(url))
+    try:
+        result = enable_runtime(
+            engine, event_id=event_id, confirm_project=confirm_project, operator=operator
+        )
+    except EnableRejected as exc:
+        log.error("backup.cli.enable_rejected", error_class=type(exc).__name__)
+        print(f"enable-runtime REJECTED: {exc}", file=sys.stderr)
+        return EXIT_ENABLE_REJECTED
+    state = "already enabled" if result.already_enabled else "ENABLED"
+    print(f"enable-runtime ok: generation {result.event_id} {state} at {result.enabled_at}")
+    return 0
+
+
+def _cmd_startup_check() -> int:
+    """The exact preflight api/worker/scheduler run at boot, against the runtime DB
+    role. Exit 6 if the newest restore generation is not operator-enabled."""
+    url = os.environ.get("NLW_RESTORE_DATABASE_URL") or os.environ.get("DATABASE_URL", "")
+    if not url:
+        raise ValueError("NLW_RESTORE_DATABASE_URL (or DATABASE_URL) is required for startup-check")
+    engine = create_engine(sa_engine_url(url))
+    try:
+        assert_startup_allowed_sync(engine)
+    except (RecoveryLocked, RecoveryStateUnknown) as exc:
+        log.error("backup.cli.startup_blocked", error_class=type(exc).__name__)
+        print(f"startup-check BLOCKED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_STARTUP_BLOCKED
+    print("startup-check ok: recovery lock permits startup")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nlw.backup")
     parser.add_argument(
         "command",
-        choices=("backup", "restore", "quiesce", "validate", "prune", "gate-check"),
+        choices=(
+            "backup",
+            "restore",
+            "quiesce",
+            "validate",
+            "prune",
+            "gate-check",
+            "enable-runtime",
+            "startup-check",
+        ),
     )
     args = parser.parse_args(argv)
     handlers = {
@@ -154,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
         "validate": _cmd_validate,
         "prune": _cmd_prune,
         "gate-check": _cmd_gate_check,
+        "enable-runtime": _cmd_enable_runtime,
+        "startup-check": _cmd_startup_check,
     }
     try:
         return handlers[args.command]()

@@ -56,13 +56,14 @@ is a decision aid, not automation.
 
 ## 7. Enable the runtime (separate, explicit)
 
-- [ ] Restore finished with all validation `[ok]` and wrote the **restore-ready
-      gate**. Runtime start is a **separate operator action**: verify the gate
-      (`nlw.backup gate-check`, exit 4 if not bound to this DB) and bring up
-      api/worker/scheduler in restore mode. See
-      [dr-fresh-host-restore](dr-fresh-host-restore.md) step 6.
-- [ ] Starting the runtime does **not** replay restored work (quiescence handled
-      it); confirm no duplicate side effects.
+- [ ] The runtime is **database-locked** after restore: api/worker/scheduler refuse
+      to start (exit 6) against the restored generation until it is explicitly
+      enabled — regardless of any env flag or file. Enable it with the operator
+      credential: `nlw.backup enable-runtime` (exact newest validated generation +
+      project confirmation). See [dr-fresh-host-restore](dr-fresh-host-restore.md)
+      steps 6–8.
+- [ ] Only then start api/worker/scheduler. Starting the runtime does **not** replay
+      restored work (quiescence handled it); confirm no duplicate side effects.
 
 ## 8. After go-live
 
