@@ -224,15 +224,57 @@ def check_approval_binding() -> None:
     _ok("approval reconciliation binds to the currently-blocked step only")
 
 
+def check_single_approval_instance() -> None:
+    """Current-vs-historical binding: the DB enforces one approval per (run_id,
+    step_id), so a historical decided row cannot coexist with the current pending
+    one for the SAME step — a second insert fails closed."""
+    tid, _, ver, _ = _tenant()
+    run = _run(tid, ver, "WAITING_APPROVAL", created=OLD, last_progress=OLD)
+    with psycopg.connect(OWNER, autocommit=True) as c:
+        c.execute(
+            "INSERT INTO step_runs (id, tenant_id, run_id, step_id, tool, status, attempt) "
+            "VALUES (%s,%s,%s,'s','webhook.send','WAITING_APPROVAL',0)",
+            (uuid.uuid4(), tid, run),
+        )
+        c.execute(
+            "INSERT INTO approvals (id, tenant_id, run_id, step_id, connector_id, connector_name, "
+            "tool, status) VALUES (%s,%s,%s,'s',%s,'h','webhook.send','pending')",
+            (uuid.uuid4(), tid, run, uuid.uuid4()),
+        )
+    # Injecting a second (historical) approval for the same (run_id, step_id) fails.
+    rejected = False
+    try:
+        with psycopg.connect(OWNER, autocommit=True) as c:
+            c.execute(
+                "INSERT INTO approvals (id, tenant_id, run_id, step_id, connector_id, "
+                "connector_name, tool, status) VALUES (%s,%s,%s,'s',%s,'h','webhook.send',"
+                "'approved')",
+                (uuid.uuid4(), tid, run, uuid.uuid4()),
+            )
+    except psycopg.errors.UniqueViolation:
+        rejected = True
+    if not rejected:
+        _fail("a second approval for the same (run_id, step_id) was allowed")
+    with psycopg.connect(OWNER) as c:
+        n = c.execute(
+            "SELECT count(*) FROM approvals WHERE run_id=%s AND step_id='s'", (run,)
+        ).fetchone()[0]
+    if n != 1:
+        _fail(f"expected exactly one approval per (run_id, step_id), found {n}")
+    _ok("exactly one approval per (run_id, step_id); historical/current cannot coexist")
+
+
 def main() -> None:
     print("P1D scheduler/reconciler smoke (containerized Postgres, real packaged code)")
     check_migration()
     check_occurrence_idempotency()
     check_reconciler_fairness_and_eligibility()
     check_approval_binding()
+    check_single_approval_instance()
     print(
         "SMOKE PASS: scheduler occurrence idempotency, reconciler fairness/eligibility, "
-        "progress-aware recovery, and approval-to-step binding all verified."
+        "progress-aware recovery, approval-to-step binding, and single-approval-instance "
+        "binding all verified."
     )
 
 

@@ -76,6 +76,31 @@ small PostgreSQL-native mechanisms, not a new distributed system.
   guarantees one approval per step. Two advances can't double-advance a step
   (`WorkflowRun FOR UPDATE` + CAS approval decide).
 
+### Approval-instance binding (review outcome)
+
+A `(run_id, step_id)` binding is exact and unambiguous because **at most one
+approval row can ever exist per `(run_id, step_id)`** — a "historical decided +
+current pending" pair for the SAME step is impossible:
+
+- **Constraint:** `uq_approval_run_step UNIQUE(run_id, step_id)` (migration 0008).
+  Attempting a second row fails closed (unique violation).
+- **Creation:** the only approval producer, `_park_for_approval`, is
+  get-or-create (inserts only when none exists); nothing deletes, replaces, or
+  supersedes an approval, and `decide` is a CAS `UPDATE` on the single row.
+- **No stale generation:** a step is never reset to WAITING_APPROVAL after
+  advancing (retries keep it RUNNING); P1C re-approval after a connector change
+  **fails the current run** (deterministic `re-approval required`) rather than
+  materializing a second approval, so re-approval is a NEW run with its own new
+  approval (a different `run_id`).
+
+No `current_approval_id`/schema change is therefore needed — it would add
+redundant state. Proven by real-DB tests
+(`tests/integration/test_approval_instance_binding.py`): a second same-step
+insert is rejected; a pending approval blocks and its decision advances once; an
+approval for another run/step/tenant is never consumed; a connector change fails
+the run without a second approval; concurrent advances consume the single
+approval once.
+
 ### Privileges
 
 - `nlw_worker` already had table-level `SELECT,UPDATE` on workflow_runs (writes
