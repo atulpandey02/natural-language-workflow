@@ -7,11 +7,24 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M11 — Staging validation + failure drills + capacity |
-| Current milestone | **M11 — Staging validation** (`feat/staging-validation`, in review) |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 |
-| Next milestone | M12 — limited production launch (blocked; see ADR-020) |
-| Release status | pre-alpha, staging-candidate |
+| Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
+| Current milestone | **M11.5 P0** — runtime credential & launch-gate isolation (`fix/pre-m12-runtime-credential-isolation`) |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
+| Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
+| Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
+
+M11.5 P0 (runtime credential isolation) closes the top verified review finding:
+the privileged `DATABASE_MIGRATION_URL` (owner) is removed from every long-running
+runtime service (api/worker/scheduler/web) and confined to a dedicated one-shot
+`migrate` service (Compose `migration` profile). Also: `WORKSPACE_COOKIE_SECRET`
+is now production-required (fail-fast), the worker gets `stop_grace_period: 60s`,
+production auth cookies are explicitly `Secure` (`SameSite=Lax`), and ADR-019's
+session-cookie claim is corrected (Supabase cookies are JS-readable; HttpOnly/
+opaque session is future work). Remaining P1–P3 packages (connector authz/egress,
+SQL-safety, action lease/UNKNOWN outcomes, scheduler/reconciler fixes, `users`
+RLS, signed GUC, DR/PITR, membership/invites, alerting) are tracked from the
+reviews. Secret rotation (Anthropic key + Supabase password exposed in setup)
+remains a required operator action — see runbooks/rotate-exposed-secrets.md.
 
 M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
 so a user can operate the platform end-to-end without curl/SQL: Supabase

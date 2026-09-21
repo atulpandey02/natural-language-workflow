@@ -207,3 +207,77 @@ def test_env_prod_example_documents_required_vars() -> None:
     assert "chmod 600 docker/worker.secrets.env" in text
     assert "--env-file .env.prod" in text
     assert "openssl rand -hex 32" in text
+
+
+# --- M11.5 P0: runtime credential isolation --------------------------------
+
+
+def test_migration_credential_only_in_migrate_service() -> None:
+    services = _load("docker-compose.prod.yml")["services"]
+    assert "migrate" in services, "one-shot migrate service missing"
+    assert "DATABASE_MIGRATION_URL" in services["migrate"]["environment"]
+    for name, svc in services.items():
+        if name == "migrate":
+            continue
+        env = svc.get("environment", {}) or {}
+        assert "DATABASE_MIGRATION_URL" not in env, (
+            f"{name} must NOT receive DATABASE_MIGRATION_URL"
+        )
+
+
+def test_migrate_service_is_one_shot_and_minimal() -> None:
+    m = _load("docker-compose.prod.yml")["services"]["migrate"]
+    assert m.get("profiles") == ["migration"]  # not started as a normal service
+    assert "ports" not in m  # no exposed ports
+    assert "env_file" not in m  # no connector secrets
+    assert m.get("restart") == "no"  # one-shot
+    env = m.get("environment", {}) or {}
+    for forbidden in (
+        "NLW_LLM_API_KEY",
+        "NLW_LLM_PROVIDER",
+        "SUPABASE_ANON_KEY",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "WORKSPACE_COOKIE_SECRET",
+    ):
+        assert forbidden not in env, forbidden
+    assert m["image"] == "${NLW_IMAGE:?set NLW_IMAGE to the GHCR image digest}"
+    assert "alembic upgrade head" in " ".join(m["command"])
+
+
+def test_runtime_services_have_no_migration_credential() -> None:
+    services = _load("docker-compose.prod.yml")["services"]
+    for svc in ("api", "worker", "scheduler", "web", "postgres", "redis", "caddy"):
+        env = services[svc].get("environment", {}) or {}
+        assert "DATABASE_MIGRATION_URL" not in env, svc
+    # x-app-env (which worker/scheduler inherit) must not ASSIGN it (a NOTE
+    # comment may mention the name, but there must be no `KEY: ${...}` binding).
+    raw = (ROOT / "docker-compose.prod.yml").read_text()
+    xapp = raw.split("x-app-env:", 1)[1].split("x-app-hardening:", 1)[0]
+    assert "DATABASE_MIGRATION_URL: ${" not in xapp
+
+
+def test_workspace_cookie_secret_required_in_prod() -> None:
+    text = (ROOT / "docker-compose.prod.yml").read_text()
+    assert "WORKSPACE_COOKIE_SECRET: ${WORKSPACE_COOKIE_SECRET:?" in text
+    services = _load("docker-compose.prod.yml")["services"]
+    assert "WORKSPACE_COOKIE_SECRET" in services["web"]["environment"]
+    for svc in ("api", "worker", "scheduler"):
+        assert "WORKSPACE_COOKIE_SECRET" not in (services[svc].get("environment", {}) or {})
+
+
+def test_worker_has_stop_grace_period_only() -> None:
+    services = _load("docker-compose.prod.yml")["services"]
+    assert services["worker"].get("stop_grace_period") == "60s"
+    for svc in ("api", "scheduler", "web", "caddy", "postgres", "redis", "migrate"):
+        assert "stop_grace_period" not in services[svc], svc
+
+
+def test_prod_flows_use_migrate_service_not_api_alembic() -> None:
+    for rel in (
+        "scripts/ops/deploy-staging.sh",
+        ".github/workflows/staging-validation.yml",
+        "tests/drills/migration_drill.sh",
+    ):
+        t = (ROOT / rel).read_text()
+        assert "run --rm api alembic" not in t, f"{rel} still runs alembic via api"
+        assert "--profile migration run --rm migrate" in t, f"{rel} must use the migrate service"

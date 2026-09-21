@@ -3,7 +3,7 @@
 import { createBrowserClient } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getBrowserPublicConfig } from "../public-config.client";
-import { SUPABASE_COOKIE_NAME } from "./shared";
+import { supabaseCookieOptions } from "./shared";
 
 let _client: SupabaseClient | null = null;
 
@@ -19,7 +19,7 @@ export function getSupabaseBrowserClient(): SupabaseClient {
   if (_client) return _client;
   const { supabaseUrl, supabaseAnonKey } = getBrowserPublicConfig();
   _client = createBrowserClient(supabaseUrl, supabaseAnonKey, {
-    cookieOptions: { name: SUPABASE_COOKIE_NAME },
+    cookieOptions: supabaseCookieOptions(),
   });
   return _client;
 }
