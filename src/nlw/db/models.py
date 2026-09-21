@@ -348,3 +348,29 @@ class Schedule(TimestampMixin, Base):
     created_by: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
+
+
+# --- Disaster recovery (M11.5 P2) ---
+# Append-only, PLATFORM-level audit of post-restore quiescence. NOT tenant-scoped
+# and outside RLS; no runtime role is granted access (only the owner/restore
+# connection writes it), so a restore event cannot be forged by a tenant.
+
+
+class DrRestoreEvent(Base):
+    __tablename__ = "dr_restore_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    restored_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+    cutoff_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    manifest_format: Mapped[str | None] = mapped_column(String, nullable=True)
+    snapshot_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    alembic_revision: Mapped[str | None] = mapped_column(String, nullable=True)
+    app_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    pg_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    runs_quiesced: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    steps_quiesced: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    actions_unknowned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    schedules_recomputed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -1,0 +1,33 @@
+# NLW encrypted off-host database backup — one-shot (M11.5 P2, ADR-022).
+#
+# Install to /etc/systemd/system/nlw-backup.service on the VPS. See
+# docs/ops/backup-systemd.md and docs/runbooks/backup-operations.md. Do NOT enable
+# on a developer machine.
+#
+# Overlap is prevented three ways: Type=oneshot (systemd runs one instance), the
+# timer waits for completion before the next fire, and restic locks the repository
+# (a second writer cannot corrupt it). The job exits non-zero on any failure, so a
+# failed unit is visible to journald/alerting and the freshness metric is not
+# advanced.
+[Unit]
+Description=NLW encrypted off-host database backup (one-shot)
+Documentation=file:/opt/nlw/docs/runbooks/backup-operations.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/nlw
+# Bounded runtime; a hung backup fails rather than blocking the next window.
+TimeoutStartSec=1800
+# The backup credentials live in a root-only 0600 env file — never on argv.
+ExecStart=/usr/bin/docker compose --env-file /opt/nlw/.env.backup \
+    -f /opt/nlw/docker-compose.prod.yml --profile backup run --rm backup
+# Logs flow to the journal (the existing operational logging approach).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nlw-backup
+
+[Install]
+WantedBy=multi-user.target

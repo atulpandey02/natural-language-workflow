@@ -252,10 +252,95 @@ services:
     networks:
       - internal
 
+  # --- Disaster recovery (M11.5 P2, ADR-022) ---
+  # One-shot, profile-gated jobs that NEVER run on a normal `up`. Backup/restore
+  # credentials (RESTIC_*, object-storage keys, the privileged backup/restore DB
+  # URLs) are injected HERE ONLY and are DELIBERATELY absent from x-app-env, so the
+  # api/worker/scheduler/web/migrate services can never inherit them.
+  #   docker compose --env-file .env.prod -f docker-compose.prod.yml \
+  #     --profile backup run --rm backup
+  backup:
+    build:
+      context: .
+      dockerfile: docker/backup/Dockerfile
+      args:
+        NLW_IMAGE: ${NLW_IMAGE:?set NLW_IMAGE}
+    image: ${NLW_BACKUP_IMAGE:-nlw-backup:local}
+    profiles: ["backup"]
+    command: ["backup"]
+    environment:
+      APP_ENV: production
+      LOG_LEVEL: info
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required (backup)}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:?RESTIC_PASSWORD is required (backup)}
+      AWS_ACCESS_KEY_ID: ${BACKUP_AWS_ACCESS_KEY_ID:?BACKUP_AWS_ACCESS_KEY_ID is required (backup)}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_AWS_SECRET_ACCESS_KEY:?BACKUP_AWS_SECRET_ACCESS_KEY is required (backup)}
+      AWS_DEFAULT_REGION: ${BACKUP_AWS_REGION:-}
+      NLW_BACKUP_DATABASE_URL: ${NLW_BACKUP_DATABASE_URL:?NLW_BACKUP_DATABASE_URL is required (backup)}
+      NLW_BACKUP_METRICS_FILE: /textfile/nlw_backup.prom
+      NLW_BACKUP_RETENTION_DAILY: ${NLW_BACKUP_RETENTION_DAILY:-14}
+      NLW_BACKUP_RETENTION_WEEKLY: ${NLW_BACKUP_RETENTION_WEEKLY:-8}
+      NLW_BACKUP_RETENTION_MONTHLY: ${NLW_BACKUP_RETENTION_MONTHLY:-6}
+      NLW_BACKUP_MAX_AGE_HOURS: ${NLW_BACKUP_MAX_AGE_HOURS:-26}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    mem_limit: 512m
+    pids_limit: 256
+    networks:
+      - internal
+    volumes:
+      # Host-readable node_exporter textfile directory (see G / systemd guide).
+      - backup_textfile:/textfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Restore is intended for a NEW / disposable host. It refuses an active or
+  # non-empty target and requires NLW_RESTORE_CONFIRM == NLW_RESTORE_TARGET_ID.
+  # Restore object-storage credentials are SEPARATE from the backup writer's.
+  #   docker compose --env-file .env.restore -f docker-compose.prod.yml \
+  #     --profile restore run --rm restore
+  restore:
+    image: ${NLW_BACKUP_IMAGE:-nlw-backup:local}
+    profiles: ["restore"]
+    command: ["restore"]
+    environment:
+      APP_ENV: production
+      LOG_LEVEL: info
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required (restore)}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:?RESTIC_PASSWORD is required (restore)}
+      AWS_ACCESS_KEY_ID: ${RESTORE_AWS_ACCESS_KEY_ID:?RESTORE_AWS_ACCESS_KEY_ID is required (restore)}
+      AWS_SECRET_ACCESS_KEY: ${RESTORE_AWS_SECRET_ACCESS_KEY:?RESTORE_AWS_SECRET_ACCESS_KEY is required (restore)}
+      AWS_DEFAULT_REGION: ${BACKUP_AWS_REGION:-}
+      NLW_RESTORE_DATABASE_URL: ${NLW_RESTORE_DATABASE_URL:?NLW_RESTORE_DATABASE_URL is required (restore)}
+      NLW_RESTORE_SNAPSHOT: ${NLW_RESTORE_SNAPSHOT:-latest}
+      NLW_RESTORE_TARGET_ID: ${NLW_RESTORE_TARGET_ID:?NLW_RESTORE_TARGET_ID is required (restore)}
+      NLW_RESTORE_CONFIRM: ${NLW_RESTORE_CONFIRM:-}
+      REDIS_URL: ${RESTORE_REDIS_URL:-}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    mem_limit: 512m
+    pids_limit: 256
+    networks:
+      - internal
+
 volumes:
   pgdata:
   caddy_data:
   caddy_config:
+  backup_textfile:
 
 networks:
   internal:

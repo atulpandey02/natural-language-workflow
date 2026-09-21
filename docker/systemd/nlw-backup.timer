@@ -1,0 +1,20 @@
+# Daily NLW encrypted off-host backup timer (M11.5 P2, ADR-022).
+#
+# Install to /etc/systemd/system/nlw-backup.timer, then:
+#   systemctl enable --now nlw-backup.timer
+# See docs/ops/backup-systemd.md. Do NOT enable on a developer machine or any
+# real VPS as part of this package.
+[Unit]
+Description=Daily NLW encrypted off-host database backup
+
+[Timer]
+# ~03:00 UTC with up to 1h of jitter so many hosts don't hit the provider at once.
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=3600
+# Persistent: if the machine was off at 03:00, run the backup once after boot so a
+# missed daily backup is not silently skipped.
+Persistent=true
+Unit=nlw-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -8,7 +8,7 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
-| Current milestone | **M11.5 P1D** — scheduler & reconciler correctness: occurrence idempotency, eligibility-before-limit, `last_progress_at`, per-tenant fairness, approval-to-step binding (migration `0013`) |
+| Current milestone | **M11.5 P2** — encrypted off-host backup & disaster recovery: verified restic backup, fail-closed secret isolation, systemd scheduling, dead-man metrics, guarded restore + mandatory post-restore quiescence + deep validation (migration `0014`, ADR-022) |
 | Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
 | Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
 | Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
@@ -117,6 +117,33 @@ step_id, status)` grant lets `nlw_scheduler` read step status without step I/O.
 Honest guarantee: exactly one run row per scheduled occurrence (DB uniqueness),
 at-least-once processing, CAS/leases constrain DB ownership only; external effects
 keep P1C's UNKNOWN + receiver-idempotency limits. Runbook: runs-beyond-horizon.md.
+
+M11.5 P2 (encrypted off-host backup & disaster recovery, migration `0014`,
+ADR-022) replaces the M9 gpg+`pg_dump` scripts (now deprecation stubs) with a
+restic mechanism where **success = a verified off-host snapshot**, never
+`pg_dump` exit 0. Backup config is isolated in its own fail-closed Pydantic model
+(secrets `SecretStr`, passed via a sanitized child env, never argv; never
+inherited by api/worker/scheduler/web/migrate); scheduling is a **systemd timer**,
+not the app scheduler; freshness/dead-man + failure/verify metrics feed Prometheus
+alerts. **Restore** is human-gated (destructive confirmation `NLW_RESTORE_CONFIRM
+== NLW_RESTORE_TARGET_ID`, no-runtime-active + empty-target guards), preserves
+object ownership (a drill caught that `--no-owner` silently turned the NOSUPERUSER
+SECURITY DEFINER functions into a privilege-escalation vector), then runs
+**mandatory post-restore quiescence** — the correctness core: in-flight
+runs/steps → `FAILED`/`DR_RESTORE_UNCERTAIN`, ambiguous external actions →
+`unknown` (P1C UNKNOWN semantics, so already-delivered side effects are never
+blindly re-driven), stale schedules recomputed after the recovery cutoff;
+idempotent and audited via `dr_restore_events` (outside RLS, non-forgeable). A
+deep **validation** asserts the restored security posture (RLS+FORCE, roles
+NOSUPERUSER/NOBYPASSRLS, SECURITY DEFINER owners + search_path, ownership) and
+invariants before a runtime-start gate opens. A disposable MinIO drill
+(`scripts/ops/dr-drill.sh`) proves the mechanism end-to-end. Honest boundaries:
+**RPO ≤ 24h / RTO ≤ 4h are objectives, not guarantees**; **no PITR** (WAL-G/
+pgBackRest is future work); ransomware resistance requires operator-configured
+object-lock/isolated-credentials; **Supabase Auth is a separate DR dependency**.
+Docs: runbooks/backup-operations, dr-fresh-host-restore, post-restore-quiescence,
+backup-failure-troubleshooting, disaster-declaration-checklist, dr-real-vps-checklist;
+ops/backup-systemd, backup-providers, rpo-rto, pitr-boundary.
 
 M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
 so a user can operate the platform end-to-end without curl/SQL: Supabase
@@ -280,6 +307,13 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-013 — Action side-effect execution, approvals & idempotency](adr/ADR-013-action-side-effect-safety.md)
 - [ADR-014 — Outbound HTTP / SSRF safety](adr/ADR-014-outbound-http-ssrf.md)
 - [ADR-015 — Durable scheduling & unattended reconciliation](adr/ADR-015-scheduling-reconciliation.md)
+- [ADR-016 — Observability: correlation IDs & Prometheus metrics](adr/ADR-016-observability-and-correlation.md)
+- [ADR-017 — Rate limiting & per-tenant resource limits](adr/ADR-017-rate-and-resource-limits.md)
+- [ADR-018 — Production topology & operational readiness](adr/ADR-018-production-topology-and-ops.md)
+- [ADR-019 — Frontend architecture (Next.js App Router + BFF)](adr/ADR-019-frontend-architecture.md)
+- [ADR-020 — Staging validation, failure drills & capacity](adr/ADR-020-staging-validation-and-capacity.md)
+- [ADR-021 — Scheduler & reconciler correctness (M11.5 P1D)](adr/ADR-021-scheduler-reconciler-correctness.md)
+- [ADR-022 — Encrypted off-host backup & disaster recovery (M11.5 P2)](adr/ADR-022-encrypted-offhost-backup-dr.md)
 
 Planned: ADR-008 Deployment strategy.
 

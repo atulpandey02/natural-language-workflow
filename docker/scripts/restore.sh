@@ -1,34 +1,21 @@
 #!/usr/bin/env bash
-# Restore an encrypted logical backup into a FRESH database (M9, ADR-018).
+# DEPRECATED (M11.5 P2, ADR-022). Superseded by the guarded restore
+# `python -m nlw.backup restore`, run via the `restore` Compose profile.
 #
-# Restores into a NEW target database (never overwrites a live one implicitly),
-# then the caller verifies (row counts + `alembic current`) before switching
-# traffic. Roles/bootstrap are NOT restored from the dump — they come from
-# version-controlled bootstrap/IaC (docker/postgres/initdb), so backups never
-# carry role passwords.
+# This script decrypted a gpg dump and ran `pg_restore` with NO destructive
+# confirmation, NO runtime-active/empty-target guards, NO post-restore quiescence
+# (so starting the runtime replayed in-flight side effects and missed schedules),
+# and NO deep validation. Do not use it.
 #
-# Required env:
-#   PGHOST PGPORT PGUSER PGPASSWORD   (target server; PGUSER must be able to createdb)
-#   BACKUP_FILE                       (the *.dump.gpg artifact)
-#   BACKUP_PASSPHRASE                 (symmetric decryption secret)
-#   TARGET_DATABASE                   (fresh DB name to create + restore into)
+# Use instead (human-gated, quiesces + validates before any runtime start):
+#   docker compose --env-file /opt/nlw/.env.restore \
+#     -f docker-compose.prod.yml --profile restore run --rm restore
+# See docs/runbooks/dr-fresh-host-restore.md,
+# docs/runbooks/post-restore-quiescence.md, and
+# docs/adr/ADR-022-encrypted-offhost-backup-dr.md.
 set -euo pipefail
 
-: "${BACKUP_FILE:?set BACKUP_FILE}"
-: "${BACKUP_PASSPHRASE:?set BACKUP_PASSPHRASE}"
-: "${TARGET_DATABASE:?set TARGET_DATABASE}"
-
-tmp="$(mktemp)"
-trap 'rm -f "${tmp}"' EXIT
-
-echo "[restore] decrypting ${BACKUP_FILE}"
-gpg --batch --yes --decrypt --passphrase "${BACKUP_PASSPHRASE}" \
-    --output "${tmp}" "${BACKUP_FILE}"
-
-echo "[restore] creating fresh database ${TARGET_DATABASE}"
-createdb "${TARGET_DATABASE}"
-
-echo "[restore] restoring into ${TARGET_DATABASE}"
-pg_restore --no-owner --dbname="${TARGET_DATABASE}" "${tmp}"
-
-echo "[restore] done. Verify with: psql -d ${TARGET_DATABASE} -c 'SELECT version_num FROM alembic_version;'"
+echo "docker/scripts/restore.sh is DEPRECATED (ADR-022)." >&2
+echo "Use: docker compose --profile restore run --rm restore" >&2
+echo "See docs/runbooks/dr-fresh-host-restore.md" >&2
+exit 1

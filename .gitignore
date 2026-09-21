@@ -11,6 +11,8 @@ dist/
 .env.*
 !.env.example
 !.env.prod.example
+!.env.backup.example
+!.env.restore.example
 
 # Tooling caches
 .mypy_cache/

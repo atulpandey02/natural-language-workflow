@@ -3,8 +3,9 @@
 Proves the custom-format logical dump restores with full fidelity into a FRESH
 database. pg_dump/pg_restore run inside the Postgres container (so the host needs
 no client tools); this exercises the exact dump/restore path the runbook uses.
-Encryption (gpg) is a script-level concern covered by docker/scripts/backup.sh
-and the runbook; this drill validates the risky part — data round-trips.
+This is the M9 fidelity drill; the M11.5 P2 DR mechanism (encrypted off-host
+restic + guarded restore + quiescence + validation, ADR-022) is exercised by the
+`tests/*/test_dr_*` suites and `scripts/ops/dr-drill.sh`.
 """
 
 import psycopg

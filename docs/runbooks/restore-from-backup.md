@@ -1,24 +1,30 @@
 # Restore from backup
 
-See [../ops/backup-restore.md](../ops/backup-restore.md) for policy + RPO/RTO.
+> **Superseded (M11.5 P2, ADR-022).** The gpg + `pg_restore` flow below is
+> replaced by the guarded restic restore that quiesces and validates before any
+> runtime start. Use **[dr-fresh-host-restore](dr-fresh-host-restore.md)** and
+> **[disaster-declaration-checklist](disaster-declaration-checklist.md)**. This
+> page is kept as a pointer only.
 
-**Do:**
-1. Choose the latest good encrypted backup artifact.
-2. Restore into a FRESH database (never overwrite the live DB implicitly):
-   `BACKUP_FILE=... BACKUP_PASSPHRASE=... TARGET_DATABASE=nlw_restore
-   ./docker/scripts/restore.sh`
-3. Verify: `SELECT version_num FROM alembic_version` matches the expected head;
-   spot-check critical tables' row counts.
-4. Cut over (point `DATABASE_URL` at the restored DB, or rename) during a
-   maintenance window. Roles come from bootstrap/IaC, not the dump.
-5. Record the incident, the backup used, and the measured RTO.
+The current disaster-recovery restore:
 
-## Scope: application state only (M11)
+```bash
+docker compose --env-file /opt/nlw/.env.restore \
+  -f docker-compose.prod.yml --profile restore run --rm restore
+```
 
-This restores **NLW application PostgreSQL state** (users, workspaces, connectors,
-workflows, versions, runs, schedules, approvals, external-action audit). It does
-**NOT** restore the external **Supabase Auth** identity provider (accounts,
-passwords, sessions/JWT signing keys). Supabase Auth DR is a **separate dependency
-and responsibility** — full-platform recovery requires both this restore AND the
-identity provider's own backup/restore. Do not claim full-platform DR from the
-NLW `pg_dump` restore alone.
+It refuses to run unless `NLW_RESTORE_CONFIRM == NLW_RESTORE_TARGET_ID`, the
+target DB is empty, and no runtime role is connected; it verifies manifest hashes,
+restores with **ownership preserved**, flushes Redis, runs mandatory
+**post-restore quiescence** ([post-restore-quiescence](post-restore-quiescence.md)),
+then **deep-validates** the restored security posture. See
+[ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md) and
+[backup-operations](backup-operations.md).
+
+## Scope: application state only
+
+This restores **NLW application PostgreSQL state**. It does **NOT** restore the
+external **Supabase Auth** identity provider (accounts, passwords, sessions/JWT
+signing keys). Full-platform recovery requires both this restore AND the identity
+provider's own backup/restore. Do not claim full-platform DR from the NLW restore
+alone.

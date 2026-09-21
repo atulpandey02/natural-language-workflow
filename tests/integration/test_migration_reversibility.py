@@ -17,10 +17,12 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-_HEAD = "0013_scheduler_reconciler"
+_HEAD = "0014_dr_restore_events"
 _PREV = "0011_identity_connector_authz"
 # The P1C revision just below the P1D head (for the 0013 up/down/up test).
 _P1C = "0012_action_unknown_outcome"
+# The P1D revision just below the P2 head (for the 0014 up/down/up test).
+_P1D = "0013_scheduler_reconciler"
 # The P1A revision whose users/connectors posture the matrix below asserts.
 _P1A = "0011_identity_connector_authz"
 _P1A_PREV = "0010_readiness_schema_grant"
@@ -258,3 +260,35 @@ def test_last_progress_at_column_flips_and_backfills(pg_stack: SimpleNamespace) 
     with psycopg.connect(pg_stack.owner_libpq) as c:
         lp = _one(c.execute("SELECT last_progress_at FROM workflow_runs WHERE id=%s", (run,)))[0]
     assert lp is not None and lp.isoformat().startswith("2026-05-01T09:00:00")  # = finished_at
+
+
+def _has_table(owner_libpq: str, table: str) -> bool:
+    with psycopg.connect(owner_libpq) as c:
+        return bool(
+            _one(
+                c.execute(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name=%s",
+                    (table,),
+                )
+            )[0]
+        )
+
+
+def test_dr_restore_events_table_flips_with_migration(pg_stack: SimpleNamespace) -> None:
+    """0014 adds the DR audit table (up/down/up); downgrade drops it."""
+    cfg = _cfg(pg_stack.owner_sa)
+    assert _has_table(pg_stack.owner_libpq, "dr_restore_events")  # present at head
+
+    command.downgrade(cfg, _P1D)
+    assert not _has_table(pg_stack.owner_libpq, "dr_restore_events")
+
+    command.upgrade(cfg, _HEAD)
+    assert _has_table(pg_stack.owner_libpq, "dr_restore_events")
+    # No runtime role may read the DR audit table (only the owner).
+    with psycopg.connect(pg_stack.scheduler_libpq) as c:
+        try:
+            c.execute("SELECT count(*) FROM dr_restore_events")
+            raise AssertionError("nlw_scheduler could read dr_restore_events")
+        except psycopg.errors.InsufficientPrivilege:
+            pass

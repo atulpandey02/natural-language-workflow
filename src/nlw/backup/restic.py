@@ -1,0 +1,105 @@
+"""Thin, testable wrapper around the ``restic`` CLI (M11.5 P2).
+
+Restic is a mature client-side-encrypted, deduplicating backup tool with native
+S3-compatible backends (AWS S3, Backblaze B2, MinIO) and repository-side retention
+(``forget --prune``). We do NOT implement custom cryptography — restic encrypts the
+repository with ``RESTIC_PASSWORD``.
+
+Secrets are passed to restic via the ENVIRONMENT (``RESTIC_PASSWORD``,
+``AWS_*``), never on argv (so they can't appear in a process listing). The command
+runner is injectable so unit tests can simulate failures without a real repository;
+integration/drill runs use the real subprocess against MinIO.
+"""
+
+import json
+import subprocess
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+# A runner takes (argv, env) and returns (returncode, stdout, stderr). No secret
+# is ever placed in argv; env carries restic's credentials.
+Runner = Callable[[Sequence[str], dict[str, str]], "ResticResult"]
+
+
+@dataclass(frozen=True)
+class ResticResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+class ResticError(RuntimeError):
+    """A restic operation failed. Message is sanitized (no repo password)."""
+
+
+def _subprocess_runner(argv: Sequence[str], env: dict[str, str]) -> ResticResult:
+    proc = subprocess.run(list(argv), env=env, capture_output=True, text=True, check=False)
+    return ResticResult(proc.returncode, proc.stdout, proc.stderr)
+
+
+class Restic:
+    def __init__(self, env: dict[str, str], runner: Runner | None = None) -> None:
+        self._env = env
+        self._run = runner or _subprocess_runner
+
+    def _restic(self, *args: str) -> ResticResult:
+        res = self._run(["restic", "--json", *args], self._env)
+        return res
+
+    def _restic_checked(self, *args: str, what: str) -> ResticResult:
+        res = self._restic(*args)
+        if res.returncode != 0:
+            # NEVER echo the repo password / env; restic's stderr is safe-ish but we
+            # keep the message to the operation name + return code.
+            raise ResticError(f"restic {what} failed (exit {res.returncode})")
+        return res
+
+    def ensure_repository(self) -> None:
+        """Initialize the repository if it does not already exist (idempotent)."""
+        cat = self._restic("cat", "config")
+        if cat.returncode == 0:
+            return
+        self._restic_checked("init", what="init")
+
+    def backup_dir(self, path: Path, tags: Sequence[str] = ()) -> str:
+        """Snapshot ``path``; return the created snapshot short id."""
+        args = ["backup", str(path)]
+        for t in tags:
+            args += ["--tag", t]
+        res = self._restic_checked(*args, what="backup")
+        # restic --json emits one JSON object per line; the summary carries the id.
+        snapshot_id = ""
+        for line in res.stdout.splitlines():
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("message_type") == "summary" and obj.get("snapshot_id"):
+                snapshot_id = str(obj["snapshot_id"])
+        return snapshot_id
+
+    def check(self) -> None:
+        """Verify repository structure + that pack files are intact."""
+        self._restic_checked("check", what="check")
+
+    def snapshot_exists(self, snapshot_id: str) -> bool:
+        res = self._restic("snapshots", snapshot_id)
+        return res.returncode == 0
+
+    def restore(self, snapshot: str, target: Path) -> None:
+        self._restic_checked("restore", snapshot, "--target", str(target), what="restore")
+
+    def forget_prune(self, *, daily: int, weekly: int, monthly: int) -> None:
+        """Apply retention against the REPOSITORY (never shell globs) and prune."""
+        self._restic_checked(
+            "forget",
+            "--keep-daily",
+            str(daily),
+            "--keep-weekly",
+            str(weekly),
+            "--keep-monthly",
+            str(monthly),
+            "--prune",
+            what="forget/prune",
+        )
