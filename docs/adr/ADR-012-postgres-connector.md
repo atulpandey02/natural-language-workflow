@@ -77,3 +77,46 @@ failures.
 - `schema.inspect`, bind parameters, additional dialects, pooling, and moving
   network I/O out of the advancement transaction are follow-ups that reuse this
   connector/validator/driver seam.
+
+## Update (M11.5 P1B) — destination egress + TLS enforcement + address pinning
+
+The connector now validates the destination and TLS posture BEFORE any
+network/authentication bytes are sent (new `nlw.connectors.pg_destination`,
+reusing the ADR-014 IP classifier). Governing rule: *validate first, pin the
+validated address, then transmit credentials.*
+
+**Destination policy (production/staging).** Every A/AAAA answer is resolved with
+a bounded timeout and classified; the destination is rejected if ANY answer is
+non-global and not in the operator CIDR allowlist (never "pick the one safe
+answer" — mixed-answer / DNS-rebinding safe). Blocked classes: IPv4/IPv6 loopback,
+RFC1918, IPv6 ULA, link-local incl. cloud metadata (169.254.0.0/16), CGNAT,
+multicast, reserved, unspecified, IPv4-mapped-private IPv6, and platform-internal
+service names (`postgres`, `redis`, `api`, `worker`, `scheduler`, `web`, `caddy`,
+`prometheus`, `localhost`, `host.docker.internal`). Unix-socket and DSN/multi-host
+`host` forms are rejected. Port policy: 5432 by default; non-default ports only via
+an explicit operator allowlist. **No connector field, API request, planner output
+or tenant setting can weaken this.**
+
+**TLS.** Production/staging require `sslmode=verify-full`; `disable`/`allow`/
+`prefer`/`require`/`verify-ca` are rejected — tenant config cannot weaken TLS. The
+original hostname is preserved for certificate/SNI verification; the validated IP
+is passed to libpq as `hostaddr` (the TCP target), so libpq performs no second,
+unvalidated DNS resolution and there is no plaintext downgrade.
+
+**Private-destination exception (env gate).** Non-production (`app_env` local/dev)
+may target private fixtures and honour the connector `sslmode` — this seam is
+dependency-injected / `app_env`-gated and **fails closed in production**. Staging
+with a legitimately private approved DB uses the operator-owned CIDR allowlist
+(`postgres_destination_allowlist`).
+
+**Errors + retry.** Policy rejections are deterministic, stable codes
+(`POSTGRES_DESTINATION_NOT_ALLOWED`, `POSTGRES_TLS_POLICY_VIOLATION`,
+`POSTGRES_PORT_NOT_ALLOWED`) raised before any connection — they are
+`ToolExecutionError`s (deterministic step failures), never treated as retryable
+infrastructure outages, and never expose resolved internal addresses, DSNs,
+credentials, or open/closed-port state.
+
+**Limitations (pilot).** Public/global destinations by default; private requires
+explicit operator approval; DNS + network controls reduce credential-exfiltration
+risk but do not make an external database a trusted system; credentials remain
+operator-managed. No tenant-supplied CA material in this package.

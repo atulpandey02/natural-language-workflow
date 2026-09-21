@@ -34,6 +34,8 @@ from nlw.connectors.base import (
     ConnectorUnhealthyError,
     register_connector_type,
 )
+from nlw.connectors.pg_destination import PostgresDestinationPolicy
+from nlw.core.config import get_settings
 from nlw.registry.registry import ToolExecutionError
 from nlw.secrets.store import SecretError
 
@@ -320,10 +322,20 @@ def _classify_and_raise(exc: psycopg.Error) -> NoReturn:
     raise PostgresQueryError("postgres query execution failed") from None
 
 
+def _resolve_policy(policy: PostgresDestinationPolicy | None) -> PostgresDestinationPolicy:
+    return policy or PostgresDestinationPolicy.from_settings(get_settings())
+
+
 @contextmanager
 def _read_only_connection(
-    config: PostgresConnectorConfig, secret: PostgresSecret
+    config: PostgresConnectorConfig,
+    secret: PostgresSecret,
+    policy: PostgresDestinationPolicy | None = None,
 ) -> Iterator[psycopg.Connection[Any]]:
+    # Validate the destination + TLS posture and PIN the address BEFORE any
+    # network/authentication bytes are sent. A policy rejection raises a
+    # deterministic (non-retryable) error here and never reaches psycopg.connect.
+    pinned = _resolve_policy(policy).validate_and_pin(config.host, config.port, config.sslmode)
     idle_timeout = config.statement_timeout_ms + config.lock_timeout_ms
     options = (
         f"-c default_transaction_read_only=on "
@@ -331,20 +343,30 @@ def _read_only_connection(
         f"-c lock_timeout={config.lock_timeout_ms} "
         f"-c idle_in_transaction_session_timeout={idle_timeout}"
     )
-    try:
-        conn = psycopg.connect(
-            host=config.host,
-            port=config.port,
-            dbname=config.database,
-            user=secret.username,
-            password=secret.password.get_secret_value(),
-            sslmode=config.sslmode,
-            connect_timeout=config.connect_timeout_s,
-            options=options,
-            autocommit=False,
-        )
-    except psycopg.Error as exc:
-        _classify_and_raise(exc)
+    # Attempt each already-validated address (IPv4 first) in order. No address is
+    # ever re-resolved, so a later attempt is still rebinding-safe.
+    conn: psycopg.Connection[Any] | None = None
+    last_exc: psycopg.Error | None = None
+    for hostaddr in pinned.hostaddrs:
+        try:
+            conn = psycopg.connect(
+                host=pinned.host,  # original hostname -> TLS SNI / certificate verification
+                hostaddr=hostaddr,  # pinned validated IP -> the actual TCP target
+                port=pinned.port,
+                dbname=config.database,
+                user=secret.username,
+                password=secret.password.get_secret_value(),
+                sslmode=pinned.sslmode,
+                connect_timeout=config.connect_timeout_s,
+                options=options,
+                autocommit=False,
+            )
+            break
+        except psycopg.Error as exc:
+            last_exc = exc
+    if conn is None:
+        assert last_exc is not None
+        _classify_and_raise(last_exc)
     try:
         yield conn
     finally:
@@ -355,12 +377,15 @@ def _read_only_connection(
 
 
 def run_read_only_query(
-    config: PostgresConnectorConfig, secret: PostgresSecret, rendered_sql: str
+    config: PostgresConnectorConfig,
+    secret: PostgresSecret,
+    rendered_sql: str,
+    policy: PostgresDestinationPolicy | None = None,
 ) -> QueryResult:
     # Server-side cap independent of any LIMIT in the user's SQL.
     wrapped = f"SELECT * FROM ({rendered_sql}) AS _nlw_sub LIMIT {config.max_rows + 1}"
     try:
-        with _read_only_connection(config, secret) as conn, conn.cursor() as cur:
+        with _read_only_connection(config, secret, policy) as conn, conn.cursor() as cur:
             cur.execute(wrapped)
             fetched = cur.fetchmany(config.max_rows + 1)
             columns = [d.name for d in cur.description or []]
@@ -378,10 +403,10 @@ def run_read_only_query(
     return QueryResult(columns=columns, rows=rows, truncated=truncated)
 
 
-def health_check(ctx: ConnectorContext) -> None:
+def health_check(ctx: ConnectorContext, policy: PostgresDestinationPolicy | None = None) -> None:
     config = parse_config(ctx.config)
     secret = parse_secret(ctx.secret)
-    with _read_only_connection(config, secret) as conn, conn.cursor() as cur:
+    with _read_only_connection(config, secret, policy) as conn, conn.cursor() as cur:
         try:
             cur.execute("SELECT 1")
             cur.fetchone()

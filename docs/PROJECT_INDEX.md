@@ -8,7 +8,7 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
-| Current milestone | **M11.5 P1A** — identity & connector authorization boundary (`fix/pre-m12-identity-connector-authorization`) |
+| Current milestone | **M11.5 P1B** — PostgreSQL SQL-safety, destination egress & TLS (`fix/pre-m12-postgres-connector-boundary`) |
 | Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
 | Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
 | Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
@@ -46,6 +46,23 @@ both the API (`require_role(ADMIN)`) and RLS (`connectors_app_insert` now checks
 plans, step state, approvals, logs and errors. Deferred: signed/non-forgeable DB
 context, cloud/encrypted secret storage, self-service secret onboarding,
 connector→credential-entity binding, team invitations (see ADR-003/006/011).
+
+M11.5 P1B (PostgreSQL connector trust boundary, no migration) closes the verified
+SQL-safety and network-egress defects. **SQL:** the single `validate_select`
+(shared by planner feasibility, materialization and runtime) now resolves table
+authorization by real lexical scope (`sqlglot.optimizer.scope`) — a
+schema-qualified physical table is always allowlist-checked even if it shares a
+CTE name — and uses a default-deny function allowlist (schema-qualified/UDF/unknown
+functions and unsafe builtins reject; casts restricted to safe target types).
+**Network:** a new `pg_destination` policy validates every resolved A/AAAA answer
+and pins the connection to a validated IP via libpq `hostaddr` while preserving the
+hostname for TLS; production/staging block loopback/RFC1918/ULA/link-local+metadata/
+CGNAT/multicast/internal-service-name/Unix-socket/DSN destinations, restrict ports,
+and require `sslmode=verify-full` (tenant cannot weaken). Unsafe destinations fail
+closed with stable codes BEFORE any auth bytes are sent (credential-exfiltration
+proof: zero bytes). Private fixtures are allowed only via the `app_env` gate
+(local/dev) or an operator CIDR allowlist (staging) — never a tenant/connector
+field. Deferred: tenant-supplied CA material, connector→durable-credential binding.
 
 M10 adds the minimum product UI (Next.js 16 App Router + TypeScript, in `web/`)
 so a user can operate the platform end-to-end without curl/SQL: Supabase

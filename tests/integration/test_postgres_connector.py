@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 from testcontainers.community.postgres import PostgresContainer
 
+from nlw.connectors.pg_destination import PostgresDestinationError, PostgresDestinationPolicy
 from nlw.connectors.postgres import (
     PostgresAuthError,
     PostgresConnectorConfig,
@@ -35,6 +36,7 @@ from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.domain.workflow import WorkflowPlan
 from nlw.engine.execution import execute_advancement
 from nlw.engine.runs import create_run, create_workflow_with_version
+from nlw.feasibility.sql_safety import SqlSafetyError, validate_select
 from nlw.secrets.store import EnvironmentSecretStore, env_key_for
 
 pytestmark = pytest.mark.integration
@@ -351,3 +353,51 @@ def test_cross_tenant_cannot_use_connector(
     run_b = _seed_run(pg_stack, b.user_id, b.tenant_id, plan)
     # B references connector name "pgdemo" it does not own -> fails (RLS-scoped lookup).
     assert execute_advancement(_worker_sm(pg_stack), run_b, _store(b.tenant_id)).result == "failed"
+
+
+def test_security_definer_function_is_rejected_and_would_otherwise_leak(
+    ext_pg: SimpleNamespace,
+) -> None:
+    """A2: the deterministic validator (layer 1) is the essential control against
+    SECURITY DEFINER functions — the read-only session + SELECT-only role do NOT
+    stop a definer function from returning data the reader cannot access."""
+    with psycopg.connect(ext_pg.owner_libpq, autocommit=True) as c:
+        c.execute("INSERT INTO analytics.secret_costs VALUES (1, 999)")
+        c.execute(
+            "CREATE OR REPLACE FUNCTION public.read_secret() RETURNS numeric "
+            "LANGUAGE sql SECURITY DEFINER AS $$ SELECT sum(amount) FROM analytics.secret_costs $$"
+        )
+        c.execute(f"GRANT EXECUTE ON FUNCTION public.read_secret() TO {READER_USER}")
+
+    # Layer 1 rejects the call: schema-qualified function is not allowlisted.
+    with pytest.raises(SqlSafetyError):
+        validate_select("SELECT public.read_secret()", ["public"], ["public.people"])
+
+    # Demonstrate WHY layer 1 matters: bypassing validation, the definer function
+    # returns protected data through the read-only, SELECT-only-role connection.
+    leaked = run_read_only_query(
+        _config(ext_pg), _reader_secret(), "SELECT public.read_secret() AS s"
+    )
+    assert leaked.rows[0][0] == "999"  # definer bypasses table grants + read-only
+
+
+def _prod_policy(resolver_ips: list[str]) -> PostgresDestinationPolicy:
+    return PostgresDestinationPolicy(
+        require_public=True, require_verify_full=True, resolver=lambda _h: resolver_ips
+    )
+
+
+def test_production_policy_blocks_private_external_db_through_connector(
+    ext_pg: SimpleNamespace,
+) -> None:
+    """The connector applies the destination policy: a production policy rejects
+    the private external DB deterministically, before any connection."""
+    # Config is otherwise valid; the injected production policy resolves to a
+    # private address and must reject it (non-retryable, before connect).
+    with pytest.raises(PostgresDestinationError):
+        run_read_only_query(
+            _config(ext_pg, sslmode="verify-full"),
+            _reader_secret(),
+            "SELECT id FROM public.people",
+            policy=_prod_policy(["10.0.0.9"]),
+        )
