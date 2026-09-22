@@ -19,8 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nlw.api.deps import get_session, get_tenant_context
 from nlw.api.schemas import ExternalActionOut, RunOut, StepRunOut
-from nlw.db.models import ExternalAction, StepRun, WorkflowRun
+from nlw.db.models import ExternalAction, StepRun, WorkflowRun, WorkflowVersion
 from nlw.db.repositories import RunRepository
+from nlw.domain.workflow import RunStatus, StepStatus, WorkflowPlan
+from nlw.engine.summary import ActionView, RunSummary, StepView, summarize_run
+from nlw.observability import metrics
 from nlw.tenancy.context import TenantContext
 
 router = APIRouter()
@@ -138,3 +141,40 @@ async def get_run_actions(
     await _load_run(run_id, ctx, session)
     actions = await RunRepository(session).actions(run_id, ctx.tenant_id)
     return [_action_out(a) for a in actions]
+
+
+@router.get("/runs/{run_id}/summary", response_model=RunSummary)
+async def get_run_summary(
+    run_id: uuid.UUID,
+    ctx: TenantContext = Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> RunSummary:
+    """Deterministic, grounded run summary (M12B-A, Part H).
+
+    Reads only the immutable plan + persisted step/action state; makes no model
+    call and mutates nothing. It never reports FAILED/SKIPPED/UNKNOWN as success.
+    """
+    run = await _load_run(run_id, ctx, session)
+    version = await session.get(WorkflowVersion, run.workflow_version_id)
+    if version is None:  # pragma: no cover - version is FK-pinned and immutable
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "run version not found")
+    plan = WorkflowPlan.model_validate(version.plan)
+    repo = RunRepository(session)
+    step_rows = await repo.steps(run_id, ctx.tenant_id)
+    action_rows = await repo.actions(run_id, ctx.tenant_id)
+    steps = [
+        StepView(
+            step_id=s.step_id,
+            tool=s.tool,
+            status=StepStatus(s.status),
+            error=s.error,
+            has_output=s.output is not None,
+        )
+        for s in step_rows
+    ]
+    actions = [ActionView(step_id=a.step_id, status=a.status) for a in action_rows]
+    summary = summarize_run(
+        run_status=RunStatus(run.status), plan=plan, steps=steps, actions=actions
+    )
+    metrics.record_run_summary(summary.outcome.value)
+    return summary
