@@ -17,7 +17,8 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-_HEAD = "0014_dr_restore_events"
+_HEAD = "0015_membership_approval_sod"
+_P2 = "0014_dr_restore_events"
 _PREV = "0011_identity_connector_authz"
 # The P1C revision just below the P1D head (for the 0013 up/down/up test).
 _P1C = "0012_action_unknown_outcome"
@@ -295,3 +296,34 @@ def test_dr_restore_events_table_flips_with_migration(pg_stack: SimpleNamespace)
             raise AssertionError("nlw_scheduler could read the note column")
         except psycopg.errors.InsufficientPrivilege:
             pass
+
+
+def test_membership_sod_migration_flips(pg_stack: SimpleNamespace) -> None:
+    """0015 adds invitations + SoD provenance + the owner trigger (up/down/up)."""
+    cfg = _cfg(pg_stack.owner_sa)
+    assert _has_table(pg_stack.owner_libpq, "workspace_invitations")
+
+    def _has_col(table: str, col: str) -> bool:
+        with psycopg.connect(pg_stack.owner_libpq) as c:
+            row = c.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name=%s AND column_name=%s",
+                (table, col),
+            ).fetchone()
+        return row is not None
+
+    assert _has_col("approvals", "requested_by_user_id")
+    assert _has_col("workflow_runs", "initiated_by_user_id")
+
+    command.downgrade(cfg, _P2)
+    assert not _has_table(pg_stack.owner_libpq, "workspace_invitations")
+    assert not _has_col("approvals", "requested_by_user_id")
+
+    command.upgrade(cfg, _HEAD)
+    assert _has_table(pg_stack.owner_libpq, "workspace_invitations")
+    assert _has_col("approvals", "requested_by_user_id")
+    # The owner-preservation trigger + four-eyes policy are back.
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        trg = c.execute(
+            "SELECT 1 FROM pg_trigger WHERE tgname='trg_workspace_owner_present'"
+        ).fetchone()
+    assert trg is not None

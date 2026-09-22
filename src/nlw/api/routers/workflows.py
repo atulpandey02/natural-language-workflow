@@ -162,6 +162,7 @@ async def create_run(
             workflow_id=workflow_id,
             workflow_version_id=workflow.current_version_id,
             idempotency_key=idempotency_key,
+            initiated_by_user_id=ctx.user_id,
         )
         run_id = run.id
         run_status = run.status

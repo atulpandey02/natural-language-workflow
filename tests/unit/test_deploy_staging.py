@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "scripts" / "ops" / "deploy-staging.sh"
 VERIFY = ROOT / "scripts" / "ops" / "verify-staging-deployment.sh"
-NAMED_REV = "0014_dr_restore_events"
+NAMED_REV = "0015_membership_approval_sod"
 
 
 def _sh(call: str, stdin: str = "") -> subprocess.CompletedProcess[str]:

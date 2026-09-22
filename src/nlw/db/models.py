@@ -89,6 +89,54 @@ class Membership(TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class WorkspaceInvitation(TimestampMixin, Base):
+    """A single-use invitation to join a workspace (M11.5 P3A).
+
+    Only the sha256 hash of the high-entropy token is stored; the raw token is
+    returned once at creation for manual sharing and never persisted/logged.
+    """
+
+    __tablename__ = "workspace_invitations"
+    __table_args__ = (
+        CheckConstraint("role in ('admin','member')", name="ck_invitation_role"),
+        CheckConstraint(
+            "status in ('pending','accepted','revoked','expired')", name="ck_invitation_status"
+        ),
+        UniqueConstraint("token_hash", name="uq_invitation_token_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    invited_by: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuthzAuditEvent(Base):
+    """Append-only authorization audit (M11.5 P3A). No tokens/secrets/payloads."""
+
+    __tablename__ = "authz_audit_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    subject_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    detail: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+
+
 # --- Durable workflow execution (M3) ---
 # Every table carries tenant_id for RLS. workflow_versions is immutable.
 
@@ -140,6 +188,11 @@ class WorkflowRun(TimestampMixin, Base):
     )
     status: Mapped[str] = mapped_column(String, nullable=False, default="PENDING")
     trigger: Mapped[str] = mapped_column(String, nullable=False, default="manual")
+    # M11.5 P3A: the authenticated user who created a MANUAL run (approval-requester
+    # provenance). NULL for scheduled runs — schedules.created_by is authoritative.
+    initiated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
     # M8: scheduled runs pin the schedule + occurrence (exactly-once per occurrence).
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
@@ -227,6 +280,12 @@ class Approval(TimestampMixin, Base):
     connector_name: Mapped[str] = mapped_column(String, nullable=False)
     tool: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    # M11.5 P3A: immutable identity of the human whose action requires approval
+    # (derived from run provenance by the worker, NEVER from request JSON). A NULL
+    # requester (legacy/unknown) fails closed for decision (four-eyes RLS).
+    requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     requested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

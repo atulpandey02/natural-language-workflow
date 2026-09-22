@@ -6,14 +6,16 @@ authorization is membership-based at the application layer.
 """
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nlw.db.models import (
     Approval,
+    AuthzAuditEvent,
     Connector,
     ExternalAction,
     Membership,
@@ -25,10 +27,13 @@ from nlw.db.models import (
     WorkflowRun,
     WorkflowVersion,
     Workspace,
+    WorkspaceInvitation,
 )
 from nlw.tenancy.session import set_current_user
 
-DecisionOutcome = Literal["transitioned", "idempotent", "conflict", "not_found"]
+DecisionOutcome = Literal[
+    "transitioned", "idempotent", "conflict", "not_found", "self_approval", "requester_unknown"
+]
 
 
 class UserRepository:
@@ -108,6 +113,151 @@ class MembershipRepository:
                 )
             )
         ).scalar_one_or_none()
+
+    async def list_for_workspace(self, workspace_id: uuid.UUID) -> list[Membership]:
+        """The workspace roster (RLS: co-members see it; admin/owner manage)."""
+        rows = await self.session.execute(
+            select(Membership)
+            .where(Membership.workspace_id == workspace_id)
+            .order_by(Membership.created_at.asc())
+        )
+        return list(rows.scalars().all())
+
+    async def set_role(
+        self, user_id: uuid.UUID, workspace_id: uuid.UUID, role: str
+    ) -> Membership | None:
+        """Change a member's role. RLS gates admin/owner + owner-only owner rows;
+        the owner-preservation trigger blocks demoting the final owner. Returns the
+        updated row, or None if no writable row matched (RLS/absent)."""
+        await self.session.execute(
+            update(Membership)
+            .where(Membership.user_id == user_id, Membership.workspace_id == workspace_id)
+            .values(role=role, updated_at=func.now())
+        )
+        return await self.get(user_id, workspace_id)
+
+    async def remove(self, user_id: uuid.UUID, workspace_id: uuid.UUID) -> int:
+        """Remove a member. RLS gates admin/owner + owner-only owner rows; the
+        owner-preservation trigger blocks removing the final owner. Returns rowcount."""
+        result = await self.session.execute(
+            delete(Membership).where(
+                Membership.user_id == user_id, Membership.workspace_id == workspace_id
+            )
+        )
+        return int(result.rowcount)  # type: ignore[attr-defined]
+
+
+class AuditRepository:
+    """Append-only authorization audit. No tokens/secrets/payloads are recorded."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def emit(
+        self,
+        *,
+        tenant_id: uuid.UUID | None,
+        event_type: str,
+        actor_user_id: uuid.UUID | None,
+        subject_id: uuid.UUID | None = None,
+        detail: str | None = None,
+    ) -> None:
+        self.session.add(
+            AuthzAuditEvent(
+                tenant_id=tenant_id,
+                event_type=event_type,
+                actor_user_id=actor_user_id,
+                subject_id=subject_id,
+                detail=detail,
+            )
+        )
+
+
+class InvitationRepository:
+    """Workspace invitations (nlw_app; RLS admin/owner-gated create/list/revoke).
+
+    Only the token hash is stored. Acceptance is the SECURITY DEFINER
+    ``accept_workspace_invitation`` function (the accepter is not yet a member).
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def count_pending(self, tenant_id: uuid.UUID) -> int:
+        return int(
+            (
+                await self.session.execute(
+                    select(func.count())
+                    .select_from(WorkspaceInvitation)
+                    .where(
+                        WorkspaceInvitation.tenant_id == tenant_id,
+                        WorkspaceInvitation.status == "pending",
+                    )
+                )
+            ).scalar_one()
+        )
+
+    async def create(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        email: str,
+        role: str,
+        invited_by: uuid.UUID,
+        token_hash: str,
+        expiry_hours: int,
+    ) -> WorkspaceInvitation | None:
+        """Create a pending invitation. Returns the row, or None on a duplicate
+        pending invite for the same (workspace, email) — conflict-safe."""
+        inv = WorkspaceInvitation(
+            tenant_id=tenant_id,
+            email=email,
+            role=role,
+            invited_by=invited_by,
+            token_hash=token_hash,
+            status="pending",
+            expires_at=datetime.now(UTC) + timedelta(hours=expiry_hours),
+        )
+        self.session.add(inv)
+        try:
+            await self.session.flush()
+        except Exception:
+            return None
+        return inv
+
+    async def list_pending(self, tenant_id: uuid.UUID) -> list[WorkspaceInvitation]:
+        rows = await self.session.execute(
+            select(WorkspaceInvitation)
+            .where(
+                WorkspaceInvitation.tenant_id == tenant_id,
+                WorkspaceInvitation.status == "pending",
+            )
+            .order_by(WorkspaceInvitation.created_at.desc())
+        )
+        return list(rows.scalars().all())
+
+    async def revoke(self, invitation_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+        """Revoke a pending invitation. Returns True if one was revoked."""
+        result = await self.session.execute(
+            update(WorkspaceInvitation)
+            .where(
+                WorkspaceInvitation.id == invitation_id,
+                WorkspaceInvitation.tenant_id == tenant_id,
+                WorkspaceInvitation.status == "pending",
+            )
+            .values(status="revoked", updated_at=func.now())
+        )
+        return int(result.rowcount) == 1  # type: ignore[attr-defined]
+
+    async def accept(self, token_hash: str) -> uuid.UUID:
+        """Atomic single-use acceptance via the SECURITY DEFINER function. Raises on
+        any invalid/expired/used/wrong-email invitation (uniform, non-enumerating)."""
+        raw = (
+            await self.session.execute(
+                text("SELECT accept_workspace_invitation(:h)"), {"h": token_hash}
+            )
+        ).scalar_one()
+        return raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
 
 
 class ConnectorRepository:
@@ -255,6 +405,13 @@ class ApprovalRepository:
         appr = await self.get(approval_id, tenant_id)
         if appr is None:
             return "not_found", None
+        # Separation of duties (also enforced by the RLS WITH CHECK as the backstop
+        # against direct SQL): the decider must not be the requester, and a legacy
+        # approval whose requester is unknown cannot be decided (fail closed).
+        if appr.requested_by_user_id is None:
+            return "requester_unknown", appr.run_id
+        if appr.requested_by_user_id == user_id:
+            return "self_approval", appr.run_id
         if appr.status == target:
             return "idempotent", appr.run_id
         if appr.status != "pending":
@@ -265,6 +422,10 @@ class ApprovalRepository:
                 Approval.id == approval_id,
                 Approval.tenant_id == tenant_id,
                 Approval.status == "pending",
+                # Belt-and-suspenders: never attempt a self / unknown-requester
+                # decision (the RLS WITH CHECK would reject it anyway).
+                Approval.requested_by_user_id.isnot(None),
+                Approval.requested_by_user_id != user_id,
             )
             .values(status=target, decided_by=user_id, decided_at=func.now())
         )
@@ -369,12 +530,14 @@ class RunRepository:
         workflow_id: uuid.UUID,
         workflow_version_id: uuid.UUID,
         idempotency_key: str,
+        initiated_by_user_id: uuid.UUID,
     ) -> tuple[WorkflowRun, bool]:
         """Idempotent PENDING manual run. Returns (run, created).
 
         A repeat with the same (tenant_id, idempotency_key) returns the existing
         run without creating a duplicate — this is what makes retries/double-clicks
-        safe. Race-safe via ``INSERT ... ON CONFLICT DO NOTHING``.
+        safe. Race-safe via ``INSERT ... ON CONFLICT DO NOTHING``. ``initiated_by``
+        records the authenticated creator (approval-requester provenance, P3A).
         """
         run_id = uuid.uuid4()
         stmt = (
@@ -387,6 +550,7 @@ class RunRepository:
                 status="PENDING",
                 trigger="manual",
                 idempotency_key=idempotency_key,
+                initiated_by_user_id=initiated_by_user_id,
             )
             .on_conflict_do_nothing(constraint="uq_run_tenant_idempotency")
             .returning(WorkflowRun.id)

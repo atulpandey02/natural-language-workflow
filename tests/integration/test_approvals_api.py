@@ -85,6 +85,10 @@ def _seed_parked_action(
     approval (as the worker would leave it)."""
     connector_id = uuid.uuid4()
     wf_id, ver_id, run_id, approval_id = (uuid.uuid4() for _ in range(4))
+    # A DISTINCT requester (P3A separation of duties): the human whose action needs
+    # approval, recorded immutably on the run + approval. The deciding admin/owner in
+    # each test is a different user, so four-eyes is satisfied.
+    requester_id = _seed_user_member(owner_libpq, tenant_id, f"req-{run_id.hex[:8]}", "member")
     plan = {
         "steps": [
             {
@@ -110,9 +114,9 @@ def _seed_parked_action(
             (ver_id, tenant_id, wf_id, json.dumps(plan)),
         )
         c.execute(
-            "INSERT INTO workflow_runs (id, tenant_id, workflow_id, workflow_version_id, status) "
-            "VALUES (%s,%s,%s,%s,'WAITING_APPROVAL')",
-            (run_id, tenant_id, wf_id, ver_id),
+            "INSERT INTO workflow_runs (id, tenant_id, workflow_id, workflow_version_id, status, "
+            "initiated_by_user_id) VALUES (%s,%s,%s,%s,'WAITING_APPROVAL',%s)",
+            (run_id, tenant_id, wf_id, ver_id, requester_id),
         )
         c.execute(
             "INSERT INTO step_runs (id, tenant_id, run_id, step_id, tool, status, attempt) "
@@ -121,8 +125,9 @@ def _seed_parked_action(
         )
         c.execute(
             "INSERT INTO approvals (id, tenant_id, run_id, step_id, connector_id, connector_name, "
-            "tool, status) VALUES (%s,%s,%s,'notify',%s,'hook','webhook.send','pending')",
-            (approval_id, tenant_id, run_id, connector_id),
+            "tool, status, requested_by_user_id) "
+            "VALUES (%s,%s,%s,'notify',%s,'hook','webhook.send','pending',%s)",
+            (approval_id, tenant_id, run_id, connector_id, requester_id),
         )
     return approval_id
 

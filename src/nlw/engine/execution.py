@@ -452,6 +452,12 @@ def _park_for_approval(
                 connector_name=plan_step.connector or "",
                 tool=spec.name,
                 status="pending",
+                # P3A separation of duties: the immutable requester is the run's
+                # responsible human (manual creator or, for scheduled runs, the
+                # schedule creator — both denormalized onto initiated_by_user_id).
+                # NEVER derived from request JSON. A NULL requester fails closed for
+                # decision (four-eyes RLS).
+                requested_by_user_id=run.initiated_by_user_id,
                 requested_at=_now(),
             )
         )

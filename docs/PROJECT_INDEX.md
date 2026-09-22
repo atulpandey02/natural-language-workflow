@@ -8,7 +8,7 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
-| Current milestone | **M11.5 P2** — encrypted off-host backup & disaster recovery: verified restic backup, fail-closed secret isolation, systemd scheduling, dead-man metrics, guarded restore + mandatory post-restore quiescence + deep validation (migration `0014`, ADR-022) |
+| Current milestone | **M11.5 P3A** — membership invitations + approval separation of duties: hashed single-use invites, owner-preservation invariant, DB-enforced four-eyes approvals, immutable requester provenance (migration `0015`, ADR-023). P3B (signed context) in progress. |
 | Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
 | Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
 | Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
@@ -117,6 +117,26 @@ step_id, status)` grant lets `nlw_scheduler` read step status without step I/O.
 Honest guarantee: exactly one run row per scheduled occurrence (DB uniqueness),
 at-least-once processing, CAS/leases constrain DB ownership only; external effects
 keep P1C's UNKNOWN + receiver-idempotency limits. Runbook: runs-beyond-horizon.md.
+
+M11.5 P3A (membership, invitations & approval separation of duties, migration
+`0015`, ADR-023) closes two authorization gaps. **Invitations:**
+`workspace_invitations` stores only the sha256 hash of a high-entropy token (the
+raw token is returned once for manual sharing, never logged/persisted); acceptance
+is an atomic SECURITY DEFINER function that requires an authenticated identity whose
+verified email matches, is single-use + concurrency-safe (one membership), and
+returns a uniform non-enumerating error on any invalid case. **Owner invariant:** a
+constraint trigger (advisory-locked per workspace) refuses any change leaving a
+workspace with zero owners, so the final owner can't be removed/demoted even under
+concurrency; admins can manage member/admin rows but not owner rows. **Approval
+four-eyes:** `approvals.requested_by_user_id` (immutable, derived from run
+provenance — manual creator or schedule creator, never request JSON) plus a DB
+`WITH CHECK` that the decider is an admin/owner, stamps themselves, and is **not**
+the requester; a legacy unknown-requester approval fails closed. Self-approval is
+rejected even by an owner and even via direct SQL. Append-only `authz_audit_events`
+records invite/membership/approval events without tokens/secrets. Honest boundary:
+this does not yet close the **forgeable-GUC** threat (an SQL attacker as `nlw_app`
+forging `app.user_id`) — that is **P3B (signed context)**, a launch gate. Docs:
+runbooks/invitation-operations, approval-operations.
 
 M11.5 P2 (encrypted off-host backup & disaster recovery, migration `0014`,
 ADR-022) replaces the M9 gpg+`pg_dump` scripts (now deprecation stubs) with a
@@ -339,6 +359,7 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-020 — Staging validation, failure drills & capacity](adr/ADR-020-staging-validation-and-capacity.md)
 - [ADR-021 — Scheduler & reconciler correctness (M11.5 P1D)](adr/ADR-021-scheduler-reconciler-correctness.md)
 - [ADR-022 — Encrypted off-host backup & disaster recovery (M11.5 P2)](adr/ADR-022-encrypted-offhost-backup-dr.md)
+- [ADR-023 — Membership, invitations & approval separation of duties (M11.5 P3A)](adr/ADR-023-membership-approval-sod.md)
 
 Planned: ADR-008 Deployment strategy.
 

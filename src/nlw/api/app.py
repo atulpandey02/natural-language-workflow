@@ -38,6 +38,7 @@ from nlw.api.routers import (
     approvals,
     connectors,
     identity,
+    members,
     plans,
     runs,
     schedules,
@@ -136,6 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_exception_handlers(app)
 
     app.include_router(identity.router)
+    app.include_router(members.router)
     app.include_router(connectors.router)
     app.include_router(plans.router)
     app.include_router(approvals.router)

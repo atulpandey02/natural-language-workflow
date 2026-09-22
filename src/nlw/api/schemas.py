@@ -92,6 +92,11 @@ class ApprovalOut(BaseModel):
     status: str
     requested_at: str | None
     decided_at: str | None
+    # P3A: the immutable requester (opaque user id) and whether the CURRENT viewer
+    # is eligible to decide (an admin/owner who is not the requester). The frontend
+    # uses eligibility to disable self-approval; the backend remains authoritative.
+    requested_by_user_id: uuid.UUID | None = None
+    viewer_can_decide: bool = False
     # The effective, non-secret destination the side effect will reach (webhook
     # host / Slack channel), derived from the APPROVED connector. None if it
     # cannot be safely resolved.
@@ -109,6 +114,47 @@ class ApprovalDecisionOut(BaseModel):
     id: uuid.UUID
     status: str
     resumed: bool
+
+
+# --- Membership & invitations (M11.5 P3A) ---
+
+
+class MemberOut(BaseModel):
+    user_id: uuid.UUID
+    role: str
+
+
+class RoleUpdate(BaseModel):
+    role: str  # 'owner' | 'admin' | 'member' (validated server-side)
+
+
+class InvitationCreate(BaseModel):
+    email: str
+    role: str  # 'admin' | 'member'
+
+
+class InvitationOut(BaseModel):
+    id: uuid.UUID
+    email: str
+    role: str
+    status: str
+    expires_at: str | None
+    created_at: str | None
+
+
+class InvitationCreatedOut(InvitationOut):
+    # The raw token is returned ONCE, only at creation, for manual sharing. It is
+    # never stored, logged, or returned again.
+    token: str
+
+
+class InvitationAccept(BaseModel):
+    token: str
+
+
+class InvitationAcceptedOut(BaseModel):
+    workspace_id: uuid.UUID
+    role: str
 
 
 class ScheduleCreate(BaseModel):

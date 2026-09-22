@@ -86,6 +86,10 @@ def scan_due(
                     schedule_id=s.id,
                     scheduled_for=scheduled_for,
                     idempotency_key=None,
+                    # P3A: the responsible human for a scheduled run is the immutable
+                    # schedule creator — denormalized here so the worker (which has no
+                    # schedules access) can set the approval requester from the run.
+                    initiated_by_user_id=s.created_by,
                 )
                 .on_conflict_do_nothing(constraint="uq_run_schedule_occurrence")
                 .returning(WorkflowRun.id)

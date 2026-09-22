@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     # in this timeout and reports the dependency "down" (503) rather than hanging.
     readiness_probe_timeout_s: float = 3.0
 
+    # --- Membership invitations (M11.5 P3A) ---
+    # Pilot default: an invite link is valid for 72h. Bounded pending invitations
+    # per workspace guards against unbounded invite spam.
+    invitation_expiry_hours: int = 72
+    invitation_max_pending_per_workspace: int = 100
+
     # --- Recovery-lock gate (M11.5 P2 addendum) ---
     # The API re-evaluates the authoritative DR recovery lock (dr_restore_events)
     # on a short bounded cache: a business request refreshes the state at most once
@@ -184,6 +190,10 @@ class Settings(BaseSettings):
             raise ValueError("recovery_gate_ttl_s must be > 0")
         if self.recovery_gate_query_timeout_s <= 0:
             raise ValueError("recovery_gate_query_timeout_s must be > 0")
+        if self.invitation_expiry_hours < 1:
+            raise ValueError("invitation_expiry_hours must be >= 1")
+        if self.invitation_max_pending_per_workspace < 1:
+            raise ValueError("invitation_max_pending_per_workspace must be >= 1")
         return self
 
     @property

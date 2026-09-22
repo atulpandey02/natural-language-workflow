@@ -24,7 +24,7 @@ from nlw.api.schemas import ApprovalDecisionOut, ApprovalOut
 from nlw.db.models import Approval, WorkflowVersion
 from nlw.db.repositories import ApprovalRepository
 from nlw.domain.workflow import WorkflowPlan
-from nlw.tenancy.context import Role, TenantContext
+from nlw.tenancy.context import Role, TenantContext, role_at_least
 from nlw.tenancy.session import set_current_tenant, set_current_user
 from nlw.tools.action_schemas import MAX_REVIEWABLE_ACTION_PAYLOAD_BYTES
 
@@ -103,9 +103,17 @@ async def list_approvals(
     session: AsyncSession = Depends(get_session),
 ) -> list[ApprovalOut]:
     approvals = await ApprovalRepository(session).list_for_tenant(ctx.tenant_id, pending_only=True)
+    # The viewer may decide only when eligible (admin/owner) AND not the requester.
+    is_admin = role_at_least(ctx.role, Role.ADMIN)
     out: list[ApprovalOut] = []
     for a in approvals:
         preview, destination, blocked = await _preview_for(session, a)
+        can_decide = (
+            is_admin
+            and a.status == "pending"
+            and a.requested_by_user_id is not None
+            and a.requested_by_user_id != ctx.user_id
+        )
         out.append(
             ApprovalOut(
                 id=a.id,
@@ -116,6 +124,8 @@ async def list_approvals(
                 status=a.status,
                 requested_at=_iso(a.requested_at),
                 decided_at=_iso(a.decided_at),
+                requested_by_user_id=a.requested_by_user_id,
+                viewer_can_decide=can_decide,
                 destination=destination,
                 payload_review_blocked=blocked,
                 preview=preview,
@@ -148,6 +158,17 @@ async def _decide(
         )
     if outcome == "not_found":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "approval not found")
+    if outcome == "self_approval":
+        # Separation of duties: the requester of an action cannot decide it.
+        log.info("approval.self_approval_denied", approval_id=str(approval_id))
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "you cannot decide an approval you requested"
+        )
+    if outcome == "requester_unknown":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "approval has no recorded requester and cannot be decided; re-request the action",
+        )
     if outcome == "conflict":
         raise HTTPException(status.HTTP_409_CONFLICT, "approval already decided")
 
