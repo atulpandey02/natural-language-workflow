@@ -60,29 +60,44 @@ The **code gate** closed with P3B (`1eebf2e`) and the M12A-Prep tooling; the
 CI "staging simulation" job, which contacts no host). Decision = GO only when
 all boxes are ticked.
 
+- [ ] Release manifest artifact `release-manifest-<sha>` downloaded from the
+      `Delivery` run of the **merged main** commit (never a PR build, never a
+      locally edited file; `deploy/staging/release.example.json` is a rejected
+      template); `nlw.ops.release_manifest validate` passes; sha256 recorded.
+- [ ] `python -m nlw.ops.rollout preflight --release <manifest>` clean against
+      the intended instance (`i-0d1e65cdc9401dbb9`): revision
+      `0010_readiness_schema_grant`, M11 roles, zero non-terminal work.
+- [ ] `verify-release` passed: both digests pulled, revision labels == release
+      SHA, backend image reports the SHA, migrations 0011–0016, head `0016`, all
+      rollout commands present (an older image such as `1eebf2e` is refused).
 - [ ] Off-host backup provider configured (`docs/ops/backup-providers.md`),
-      `/opt/nlw/.env.backup` in place, `nlw-backup.timer` active, and
-      **one verified backup** of the pre-upgrade database (`rev-0010…`) — the
-      `verify-backup` gate proves it; a MinIO/local fixture never counts.
-- [ ] `python -m nlw.ops.rollout preflight` clean against the intended instance
-      (`i-0d1e65cdc9401dbb9`): revision `0010_readiness_schema_grant`, M11 roles,
-      zero non-terminal work.
+      `/opt/nlw/.env.backup` in place, `nlw-backup.timer` active; the release
+      staged inactive (`stage-release`, `/opt/nlw/releases/<sha>`); the rollout
+      `backup` phase ran and **`verify-backup` passed** on evidence bound to
+      this instance, environment, database identifier, active release and
+      `rev-0010…` — **before any role, migration or config change**. A
+      MinIO/local fixture or operator-edited JSON never counts.
 - [ ] Production-grade keys prepared on the host (`prepare-keys`: 0700/0400,
       uid 10001, fingerprints only) and **escrowed off-host** with a recovery
       test; attestation written by the operator; `verify-escrow` passed with
       `SIGNED_CONTEXT_KEYS_ESCROWED_AND_RECOVERY_TESTED`.
 - [ ] Operator authorization `AUTHORIZE_M12A_SIGNED_CONTEXT_STAGING_DEPLOYMENT`
-      given for this host + release (`deploy/staging/release.json`). Neither
-      phrase substitutes for the backup provider.
-- [ ] Rollout phases `drain → migrate → install-context-keys → recreate-runtime →
-      validate → reopen` completed; state file kept as evidence; `signed_context: ok`.
+      given for this host + release (the CI manifest). Neither phrase
+      substitutes for the backup provider.
+- [ ] Rollout phases `drain → prepare-roles → migrate → install-context-keys →
+      recreate-runtime (activation: /opt/nlw/current) → validate → reopen`
+      completed; state file (`/opt/nlw/rollout/<sha>.json`) kept as evidence;
+      `signed_context: ok`; the open launch gates recorded by `reopen` listed
+      verbatim in the report.
 - [ ] `scripts/ops/verify-staging-deployment.sh` green after reopen (instance id,
       release digests, roles incl. `nlw_ctx_verifier`, schema `0016`, registry
       posture, TLS).
 - [ ] Prometheus rule groups `nlw-backup` + `nlw-signed-context` loaded;
-      Alertmanager healthy; **a real alert receiver wired and a controlled test
-      alert delivered** (open until an operator chooses the channel —
-      `docs/ops/alerting.md`).
+      Alertmanager reachable; **a real alert receiver wired, credential files
+      present, and a controlled test alert delivered and recorded** —
+      `python -m nlw.ops.rollout go-check` passes. With the committed null
+      receiver this stays **open** (`alert delivery unverified`) and the
+      decision is NO-GO, however healthy the pipeline is (`docs/ops/alerting.md`).
 - [ ] Non-destructive key-rotation drill on staging (API class, overlap, revoke).
 - [ ] k6 planner/API load profile + non-destructive failure drills (restart
       api/worker/scheduler; wrong-key canary fails closed).

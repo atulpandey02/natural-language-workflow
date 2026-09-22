@@ -63,7 +63,8 @@ def test_deploy_script_requires_installed_keys_before_starting_runtimes() -> Non
 
 def test_deploy_script_reads_release_identity_not_hard_coded_pins() -> None:
     text = (OPS / "deploy-staging.sh").read_text()
-    assert "deploy/staging/release.json" in text or "release.json" in text
+    assert "NLW_STAGING_RELEASE_FILE" in text and "release_manifest validate" in text
+    assert "release.json" not in text.replace("release.example.json", "")
     assert "staging-target.sh" in text
     assert not re.search(r'^DEPLOY_SHA="[0-9a-f]{40}"', text, re.M)
     assert not re.search(r'^BACKEND_IMAGE="ghcr', text, re.M)
@@ -73,22 +74,29 @@ def test_deploy_script_reads_release_identity_not_hard_coded_pins() -> None:
 def test_upgrade_path_is_the_phased_rollout_not_the_first_deploy_script() -> None:
     """0010 -> 0016 must go through the gated state machine (stop/migrate/install/
     recreate), never `alembic upgrade head` + `up -d` in one breath."""
-    from nlw.ops.rollout.state import PHASES
+    from nlw.ops.rollout.state import PHASES, PRE_BACKUP_PHASES
 
-    assert PHASES.index("drain") < PHASES.index("migrate") < PHASES.index("install-context-keys")
     assert (
-        PHASES.index("install-context-keys")
+        PHASES.index("verify-release")
+        < PHASES.index("prepare-keys")
+        < PHASES.index("verify-escrow")
+    )
+    assert PHASES.index("verify-escrow") < PHASES.index("stage-release") < PHASES.index("backup")
+    assert PHASES.index("backup") < PHASES.index("verify-backup") < PHASES.index("drain")
+    assert PHASES.index("drain") < PHASES.index("prepare-roles") < PHASES.index("migrate")
+    assert (
+        PHASES.index("migrate")
+        < PHASES.index("install-context-keys")
         < PHASES.index("recreate-runtime")
-        < PHASES.index("validate")
     )
-    assert PHASES.index("validate") < PHASES.index("reopen")
-    assert (
-        PHASES.index("prepare-keys") < PHASES.index("verify-escrow") < PHASES.index("pin-release")
-    )
-    assert (
-        PHASES.index("pin-release") < PHASES.index("prepare-roles") < PHASES.index("verify-backup")
-    )
-    assert PHASES.index("verify-backup") < PHASES.index("drain")
+    assert PHASES.index("recreate-runtime") < PHASES.index("validate") < PHASES.index("reopen")
+    assert "prepare-roles" not in PRE_BACKUP_PHASES and "migrate" not in PRE_BACKUP_PHASES
+
+
+def test_no_committed_deployable_manifest_only_a_rejected_example() -> None:
+    assert not (ROOT / "deploy/staging/release.json").exists()
+    example = yaml.safe_load((ROOT / "deploy/staging/release.example.json").read_text())
+    assert example["kind"] == "example" and example["deployable"] is False
 
 
 # --- A.5 / §J: every referenced Prometheus rule file is mounted ------------------
@@ -168,6 +176,12 @@ def test_rendered_staging_keeps_runtime_key_isolation_and_maintenance_volume() -
             assert mounts[0].get("read_only") is True
         else:
             assert mounts == [], f"{name} must not mount a key file"
+    # The backup evidence volume is mounted by the backup job ONLY (runtime roles
+    # cannot write accepted evidence).
+    for name, svc in services.items():
+        targets = {m.get("target") for m in (svc.get("volumes") or [])}
+        if name != "backup":
+            assert "/textfile" not in targets, f"{name} mounts the backup evidence volume"
     caddy_targets = {m["target"] for m in services["caddy"]["volumes"]}
     assert "/srv/maint" in caddy_targets
     prom_targets = {m["target"] for m in services["prometheus"]["volumes"]}
@@ -265,8 +279,8 @@ def test_backup_env_example_matches_compose_interpolation_names() -> None:
 
 def test_backup_systemd_unit_renders_with_both_env_files() -> None:
     unit = (ROOT / "docker/systemd/nlw-backup.service").read_text()
-    assert "--env-file /opt/nlw/app/.env.prod --env-file /opt/nlw/.env.backup" in unit
-    assert "/opt/nlw/app/docker-compose.prod.yml" in unit
+    assert "--env-file /opt/nlw/current/.env.prod --env-file /opt/nlw/.env.backup" in unit
+    assert "/opt/nlw/current/docker-compose.prod.yml" in unit and "-p app" in unit
 
 
 def test_rollout_backup_gate_is_wired_before_migration() -> None:
@@ -275,5 +289,18 @@ def test_rollout_backup_gate_is_wired_before_migration() -> None:
     src = (ROOT / "src/nlw/ops/rollout/phases.py").read_text()
     assert "evaluate_backup_evidence" in src
     migrate_body = src[src.index("def migrate(") :]
-    assert '"verify-backup"' in migrate_body[: migrate_body.index("pull -q")]
+    assert '"verify-backup"' in migrate_body[: migrate_body.index("_migrate_run")]
     assert phases.EXPECTED_SIGNED_POLICIES == 51
+
+
+def test_local_executor_timeout_kills_the_whole_process_group() -> None:
+    """A phase that times out must not leave `docker compose run` (or any other
+    child) alive behind the STOP — the local executor kills its process group."""
+    import time
+
+    from nlw.ops.rollout.remote import LocalRemote
+
+    started = time.monotonic()
+    res = LocalRemote().run("sleep 30 & wait", timeout=1)
+    assert res.returncode == 124 and "timed out" in res.stderr
+    assert time.monotonic() - started < 5

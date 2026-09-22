@@ -1,19 +1,22 @@
-"""Pre-deployment backup evidence gate (M12A-Prep §G).
+"""Pre-deployment backup evidence gate (M12A-Prep §F/§G).
 
-Consumes the non-secret evidence the P2 backup path already produces — the
-node_exporter metrics textfile (``nlw_backup.prom``) and restic's snapshot
-listing (id, time, hostname, ``nlw-db`` / ``rev-<revision>`` tags) — plus the
-sanitized repository location, and decides whether a REAL, VERIFIED, OFF-HOST
-backup of the pre-upgrade schema exists. ``pg_dump`` success alone is never
-enough: the last-success timestamp advances only on a verified off-host
-snapshot, and that is the field this gate trusts.
+Evidence is DERIVED, never accepted from an editable file: the rollout runs
+``python -m nlw.backup evidence`` in the backup image with the operator's
+provider credentials, which reads the restic repository itself (newest
+``nlw-db`` snapshot, the manifest INSIDE that verified snapshot, the artifact
+names) plus the atomic metrics textfile the backup job writes on its own
+volume (no runtime container mounts it). The gate then binds that evidence to
+the live target: this instance and environment, this database cluster's
+system identifier, the expected source migration revision and the active
+source release. ``pg_dump`` success alone is never enough: the last-success
+timestamp advances only on a verified off-host snapshot.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -49,16 +52,18 @@ class BackupEvidence:
     metrics_text: str
     snapshot: SnapshotEvidence | None
     artifact_names: tuple[str, ...]  # files inside the latest snapshot (names only)
+    manifest: dict[str, Any] = field(default_factory=dict)  # manifest.json INSIDE the snapshot
 
-    def summary(self) -> dict[str, Any]:
-        return {
-            "repository_host": repository_host(self.repository),
-            "snapshot_id": self.snapshot.snapshot_id if self.snapshot else None,
-            "snapshot_time": self.snapshot.time.isoformat() if self.snapshot else None,
-            "snapshot_hostname": self.snapshot.hostname if self.snapshot else None,
-            "source_revision": self.snapshot.source_revision if self.snapshot else None,
-            "artifacts": list(self.artifact_names),
-        }
+
+@dataclass(frozen=True)
+class SourceBinding:
+    """What the evidence must be bound to (read live from the target)."""
+
+    instance_id: str
+    environment: str
+    db_system_identifier: str
+    source_revision: str
+    source_release: str | None  # active checkout SHA; None when unknown
 
 
 def redact_repository(repo: str) -> str:
@@ -130,8 +135,7 @@ def check_repository_is_off_host(repository: str) -> None:
 def evaluate_backup_evidence(
     ev: BackupEvidence,
     *,
-    expected_source_revision: str,
-    expected_hostname: str | None,
+    binding: SourceBinding,
     max_age: timedelta,
     now: datetime,
     allow_fixture_repository: bool = False,
@@ -158,26 +162,47 @@ def evaluate_backup_evidence(
         raise BackupEvidenceError("no restic snapshot listed in the repository")
     if abs((ev.snapshot.time - last).total_seconds()) > 3600:
         raise BackupEvidenceError("newest snapshot does not correspond to the verified backup")
-    if ev.snapshot.source_revision != expected_source_revision:
+    if ev.snapshot.source_revision != binding.source_revision:
         raise BackupEvidenceError(
             f"snapshot source revision {ev.snapshot.source_revision!r} != expected pre-deployment "
-            f"revision {expected_source_revision!r}"
+            f"revision {binding.source_revision!r}"
         )
     if "nlw-db" not in ev.snapshot.tags:
         raise BackupEvidenceError("snapshot is not tagged as an nlw database backup")
-    if expected_hostname and ev.snapshot.hostname and ev.snapshot.hostname != expected_hostname:
-        raise BackupEvidenceError("snapshot was taken on a different host/environment")
     for name in ev.artifact_names:
         if name.endswith(".key") or "ctx-keys" in name or name.endswith(".pem"):
             raise BackupEvidenceError(f"backup contains a key-like artifact: {name}")
+    # --- the manifest INSIDE the verified snapshot binds it to THIS target ------
+    man = ev.manifest
+    if not man:
+        raise BackupEvidenceError("snapshot carries no manifest.json (not a P2 backup)")
+    if man.get("alembic_revision") != binding.source_revision:
+        raise BackupEvidenceError("manifest alembic_revision != expected source revision")
+    raw_source = man.get("source")
+    source: dict[str, Any] = raw_source if isinstance(raw_source, dict) else {}
+    if source.get("instance_id") != binding.instance_id:
+        raise BackupEvidenceError("backup was taken for another host/instance")
+    if source.get("environment") != binding.environment:
+        raise BackupEvidenceError("backup belongs to another environment")
+    sysid = str(source.get("db_system_identifier") or "")
+    if not sysid or sysid != binding.db_system_identifier:
+        raise BackupEvidenceError(
+            "backup was taken from another database cluster (system identifier)"
+        )
+    if binding.source_release and source.get("release") != binding.source_release:
+        raise BackupEvidenceError("backup source release != the active checkout")
+    if not isinstance(man.get("artifacts"), dict) or not man["artifacts"]:
+        raise BackupEvidenceError("manifest lists no artifacts")
     return {
         "verified_at": last.isoformat(),
         "snapshot_id": ev.snapshot.snapshot_id,
         "snapshot_time": ev.snapshot.time.isoformat(),
         "source_revision": ev.snapshot.source_revision,
-        "hostname": ev.snapshot.hostname,
-        # Host only: the rollout state file refuses anything URL-shaped, and the
-        # host is all an operator needs to correlate with the provider console.
+        "source_release": source.get("release"),
+        "instance_id": source.get("instance_id"),
+        "environment": source.get("environment"),
+        "db_system_identifier": sysid,
         "repository_host": repository_host(ev.repository),
         "artifacts": list(ev.artifact_names),
+        "manifest_completed_at": man.get("completed_at"),
     }

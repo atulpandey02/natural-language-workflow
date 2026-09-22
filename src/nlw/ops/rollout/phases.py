@@ -1,27 +1,37 @@
-"""The rollout state machine (M12A-Prep §C/§H): explicit phases, every
-mutation re-gated, fail closed with runtimes stopped after migration.
+"""The rollout state machine (M12A-Prep §C/§D/§H): explicit phases, every
+mutation re-gated, no database mutation before the verified off-host backup,
+fail closed with runtimes stopped after migration.
 
 Phase order for the ``M11 runtime + schema 0010 -> P3B runtime + schema 0016``
-boundary:
+boundary (``state.PHASES``):
 
     preflight            read-only (the default)
+    verify-release       pull the manifest digests; prove the exact image carries
+                         the release SHA, the required commands, migrations, head
     prepare-keys         generate the three key files on the host (0700/0400)
     verify-escrow        operator attestation fingerprints == host key files
-    pin-release          check out the release SHA in the app dir; pin digests + key ids
-    prepare-roles        create nlw_membership_admin / nlw_ctx_verifier if absent (release
-                         image via the migrate service — the M11 compose has none)
-    verify-backup        verified, off-host, pre-upgrade-revision snapshot (new backup image)
-    drain                maintenance mode; stop scheduler; stop worker+api; no sessions
-    migrate              pin release + key ids in .env.prod; 0010 -> 0016
+    stage-release        clone+checkout the release into <ops_root>/releases/<sha>
+                         with its own pinned .env.prod; build the backup image.
+                         The ACTIVE checkout, .env.prod and containers are untouched
+    backup               run the real off-host backup (owner credential, read-only)
+    verify-backup        evidence from the repository: off-host, verified, fresh,
+                         bound to this instance/environment/database/revision/release
+    ----- no database mutation above this line -----
+    drain                caddy on the release config + maintenance 503; stop
+                         scheduler; wait for zero work; stop worker+api; no sessions
+    prepare-roles        create nlw_membership_admin / nlw_ctx_verifier if absent
+    migrate              0010 -> 0016 (migrate service from the staged release)
     install-context-keys install + check the three registry keys
-    recreate-runtime     pull digests; force-recreate api/worker/scheduler; mounts
-    validate             signed_context readiness, policy cutover, adversarial smoke
-    reopen               leave maintenance mode
+    recreate-runtime     ACTIVATE: <ops_root>/current -> staged release; recreate
+                         api/worker/scheduler/web (+ monitoring) from it
+    validate             signed_context readiness, cutover, mounts, forgery,
+                         health, alert rules/connectivity (delivery kept separate)
+    reopen               leave maintenance mode; record open launch gates
 
 Every command runs through the ``Remote`` (SSH to the host or local rehearsal).
 Secrets never appear on argv: the installer reads files mounted into a
-throwaway container; ``.env.prod`` is edited in place on the host with
-``sed``/heredocs that carry only image digests and key ids.
+throwaway container; the staged ``.env.prod`` is written with a temp-file
+rewrite that carries only image digests, key ids and paths.
 """
 
 from __future__ import annotations
@@ -34,7 +44,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from nlw.ops.rollout import gates, keyfiles, state
+from nlw.ops.rollout import alerting, gates, keyfiles, state
 from nlw.ops.rollout.attestation import (
     AttestationError,
     load_attestation,
@@ -43,6 +53,7 @@ from nlw.ops.rollout.attestation import (
 from nlw.ops.rollout.backup_evidence import (
     BackupEvidence,
     BackupEvidenceError,
+    SourceBinding,
     evaluate_backup_evidence,
     parse_snapshots_json,
 )
@@ -56,6 +67,16 @@ EXPECTED_SIGNED_POLICIES = 51
 MAINTENANCE_FLAG = "/srv/maint/MAINTENANCE"
 RUNTIME_SERVICES = ("api", "worker", "scheduler")
 DRAIN_WAIT_S = 120
+REVISION_LABEL = "org.opencontainers.image.revision"
+# Commands the release image must be able to execute (M12A-Prep §B).
+REQUIRED_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("-m", "nlw.ops.rollout", "--help"),
+    ("-m", "nlw.ops.roles", "--help"),
+    ("-m", "nlw.ctxkeys", "prepare", "--help"),
+    ("-m", "nlw.ctxkeys", "fingerprint", "--help"),
+    ("-m", "nlw.ctxkeys", "verify-files", "--help"),
+    ("-m", "nlw.backup", "evidence", "--help"),
+)
 Log = Callable[[str], None]
 
 
@@ -94,7 +115,9 @@ class Rollout:
         self.op = operator
         self.log = log
         self.now = now
-        self.dc = target.dc
+        self.staged = target.release_dir(release.release_sha)
+        self.dc = target.dc  # ACTIVE checkout: exec / ps / stop only
+        self.dc_staged = target.dc_in(self.staged)
 
     # ---- helpers -----------------------------------------------------------
     def _run(self, cmd: str, *, stdin: str | None = None, timeout: int = 300) -> str:
@@ -107,17 +130,27 @@ class Rollout:
         return self._run(f"{self.dc} exec -T postgres psql -U nlw -d nlw -tAc {shlex.quote(sql)}")
 
     def _state(self) -> dict[str, Any]:
-        return state.load_state(self.remote, self.target.remote_app, self.release.release_sha)
+        return state.load_state(self.remote, self.target, self.release.release_sha)
 
     def _save(self, doc: dict[str, Any]) -> None:
-        state.save_state(self.remote, self.target.remote_app, self.release.release_sha, doc)
+        state.save_state(self.remote, self.target, self.release.release_sha, doc)
 
     def _migrate_run(self, extra: str, cmd: str, *, timeout: int = 600) -> str:
-        """Run a one-shot command in the migrate profile service (owner credential),
-        container removed afterwards. ``extra`` adds docker run flags (mounts)."""
+        """One-shot command in the STAGED release's migrate profile service (owner
+        credential), container removed afterwards. ``extra`` adds run flags."""
         return self._run(
-            f"{self.dc} --profile migration run --rm -T {extra} migrate {cmd}", timeout=timeout
+            f"{self.dc_staged} --profile migration run --rm -T {extra} migrate {cmd}",
+            timeout=timeout,
         )
+
+    def _image_python(self, image: str, args: str, *, extra: str = "", timeout: int = 120) -> str:
+        return self._run(
+            f"docker run --rm --network none {extra} --entrypoint python {image} {args}",
+            timeout=timeout,
+        )
+
+    def _require_mutation_authority(self) -> None:
+        gates.check_authorization(self.op.authorization)
 
     # ---- gates (read-only) --------------------------------------------------
     def check_identity(self) -> dict[str, str]:
@@ -134,18 +167,26 @@ class Rollout:
         )
         if self.target.instance_id != self.release.instance_id:
             raise GateError("target config instance id != release instance id")
+        if self.target.compose_project != self.release.compose_project:
+            raise GateError("target config compose project != release compose project")
         gates.check_public_ip_matches_hostname(imds.get("public-ipv4", ""), self.release)
         return imds
 
-    def read_pins(self) -> dict[str, str]:
+    def read_pins(self, directory: str) -> dict[str, str]:
         text = self._run(
             f"grep -E '^(NLW_IMAGE|NLW_WEB_IMAGE|PUBLIC_HOSTNAME|NLW_CTX_KEYS_DIR|"
-            f"NLW_CTX_(API|WORKER|SCHEDULER)_KEY_ID)=' '{self.target.remote_app}/.env.prod'"
+            f"NLW_CTX_(API|WORKER|SCHEDULER)_KEY_ID)=' '{directory}/.env.prod'"
         )
         return gates.parse_env_pins(text)
 
     def read_revision(self) -> str:
         return self._psql("SELECT version_num FROM alembic_version")
+
+    def read_db_system_identifier(self) -> str:
+        return self._psql("SELECT system_identifier::text FROM pg_control_system()")
+
+    def read_active_sha(self) -> str:
+        return self._run(f"git -C '{self.target.remote_app}' rev-parse HEAD")
 
     def read_roles(self) -> dict[str, str]:
         text = self._psql(
@@ -176,21 +217,35 @@ class Rollout:
         )
 
     def read_running_images(self) -> dict[str, str]:
+        """service -> repository digest of the image each runtime container is
+        ACTUALLY running (container -> image id -> RepoDigests), found by the
+        Compose project label — never by what a compose file says it should be."""
+        proj = self.target.compose_project
         out = self._run(
-            f"{self.dc} ps --format '{{{{.Service}}}} {{{{.Image}}}}' 2>/dev/null; "
-            f"for s in api worker scheduler web; do c=$({self.dc} ps -q $s 2>/dev/null | head -1); "
-            '[ -n "$c" ] && echo "$s $(docker inspect '
-            '--format \'{{index .RepoDigests 0}}\' "$c")"; done'
+            "for s in api worker scheduler web; do "
+            f"c=$(docker ps -q --filter label=com.docker.compose.project={proj} "
+            "--filter label=com.docker.compose.service=$s | head -1); "
+            '[ -n "$c" ] && echo "$s $(docker inspect --format \'{{join .RepoDigests " "}}\' '
+            '"$(docker inspect --format \'{{.Image}}\' "$c")")"; done; true'
         )
         images: dict[str, str] = {}
         for line in out.splitlines():
             parts = line.split()
-            if len(parts) == 2 and "@sha256:" in parts[1]:
-                images[parts[0]] = parts[1]
+            digests = [d for d in parts[1:] if "@sha256:" in d]
+            if len(parts) >= 2 and digests:
+                wanted = self.release.web_image if parts[0] == "web" else self.release.backend_image
+                images[parts[0]] = wanted if wanted in digests else digests[0]
         return images
 
-    def _require_mutation_authority(self) -> None:
-        gates.check_authorization(self.op.authorization)
+    def verify_checkout(self, directory: str) -> None:
+        """``directory`` must be a clean checkout of the release SHA."""
+        sha = self._run(f"git -C '{directory}' rev-parse HEAD")
+        if sha != self.release.release_sha:
+            raise GateError(
+                f"{directory} is at {sha[:12]}, release is {self.release.release_sha[:12]}"
+            )
+        if self._run(f"git -C '{directory}' status --porcelain"):
+            raise GateError(f"{directory} checkout is not clean")
 
     # ---- phases -------------------------------------------------------------
     def preflight(self) -> dict[str, Any]:
@@ -198,40 +253,74 @@ class Rollout:
         self.log(f"target: {self.remote.describe()}")
         imds = self.check_identity()
         self.log(f"instance ok: {imds.get('instance-id')} {imds.get('placement/region')}")
-        pins = self.read_pins()
+        pins = self.read_pins(self.target.remote_app)
         gates.check_release_pins(pins, self.release, post_pin=False)
         rev = self.read_revision()
         roles = self.read_roles()
         gates.check_roles(roles, require_provisioned=False)
         drain = self.read_drain()
         doc = self._state()
-        pinned = pins.get("NLW_IMAGE") == self.release.backend_image
-        if not pinned:
+        if not state.phase_done(doc, "migrate"):
             gates.check_current_revision(rev, self.release.expected_current_revision)
         report = {
+            "manifest_sha256": self.release.sha256,
+            "release_sha": self.release.release_sha,
             "instance_id": imds.get("instance-id"),
             "region": imds.get("placement/region"),
+            "active_checkout": self.read_active_sha(),
             "current_revision": rev,
             "roles": roles,
-            "pinned_to_release": pinned,
             "drain": drain.__dict__,
             "phases_done": sorted(doc["phases"]),
         }
         self.log("preflight: " + json.dumps(report, sort_keys=True))
         return report
 
-    def prepare_roles(self) -> None:
+    def verify_release(self) -> dict[str, Any]:
+        """Prove the EXACT pinned images are pullable, carry the release SHA, and
+        (backend) expose every command the rollout needs plus the target migration
+        head. Pulling is host staging only — nothing running changes."""
         self._require_mutation_authority()
         self.check_identity()
         doc = self._state()
-        state.require_phases(doc, "pin-release")  # the migrate service exists only in the release
-        self.verify_checkout()
-        out = self._migrate_run("", "python -m nlw.ops.roles ensure")
-        self.log(out)
-        roles = self.read_roles()
-        gates.check_roles(roles, require_provisioned=True)
-        state.mark_phase(doc, "prepare-roles", roles=roles)
+        for image in (self.release.backend_image, self.release.web_image):
+            self._run(f"docker pull -q {image} >/dev/null", timeout=900)
+            label = self._run(
+                f"docker inspect --format '{{{{index .Config.Labels \"{REVISION_LABEL}\"}}}}' "
+                f"{image}"
+            )
+            if label != self.release.release_sha:
+                raise GateError(
+                    f"image {image.split('@')[0]} revision label {label!r} != release "
+                    f"{self.release.release_sha[:12]} (older or foreign build)"
+                )
+        raw = self._image_python(self.release.backend_image, "-m nlw.ops.rollout.image_info")
+        try:
+            info = json.loads(raw.splitlines()[-1])
+        except (json.JSONDecodeError, IndexError) as exc:
+            raise GateError(
+                "backend image cannot report its release identity (missing M12A tooling)"
+            ) from exc
+        gates.check_image_info(info, self.release)
+        for args in REQUIRED_COMMANDS:
+            res = self.remote.run(
+                f"docker run --rm --network none --entrypoint python {self.release.backend_image} "
+                + " ".join(args),
+                timeout=120,
+            )
+            if not res.ok:
+                raise GateError(f"backend image lacks required command: python {' '.join(args)}")
+        record = {
+            "backend_digest": self.release.backend_digest,
+            "web_digest": self.release.web_digest,
+            "image_git_sha": info.get("git_sha"),
+            "alembic_head": info.get("alembic_head"),
+            "migrations": info.get("migrations"),
+            "commands_verified": [" ".join(a) for a in REQUIRED_COMMANDS],
+        }
+        state.mark_phase(doc, "verify-release", **record)
         self._save(doc)
+        return record
 
     def prepare_keys(self, *, keys_dir: str) -> None:
         """Generate the three production key files ON THE HOST via the release
@@ -240,14 +329,15 @@ class Rollout:
         self._require_mutation_authority()
         self.check_identity()
         doc = self._state()
+        state.require_phases(doc, "verify-release")
         parent = str(Path(keys_dir).parent)
-        image = self.release.backend_image
         fps: dict[str, str] = {}
         for cls in KEY_CLASSES:
-            out = self._run(
-                f"docker run --rm --user 0:0 --network none -v '{parent}:/host{parent}' {image} "
-                f"python -m nlw.ctxkeys prepare --dir '/host{keys_dir}' --class {cls} "
-                f"--owner {keyfiles.CONTAINER_UID}:{keyfiles.CONTAINER_UID}"
+            out = self._image_python(
+                self.release.backend_image,
+                f"-m nlw.ctxkeys prepare --dir '/host{keys_dir}' --class {cls} "
+                f"--owner {keyfiles.CONTAINER_UID}:{keyfiles.CONTAINER_UID}",
+                extra=f"--user 0:0 -v '{parent}:/host{parent}'",
             )
             parts = out.split()
             if len(parts) != 3 or parts[0] != "prepared" or parts[1] != cls:
@@ -260,10 +350,10 @@ class Rollout:
     def _stat_in_container(self, keys_dir: str, name: str) -> keyfiles.StatLine:
         """stat through a throwaway container: the CONTAINER's view of owner/mode
         is what the runtime will see (and what a bind mount actually presents)."""
-        image = self.release.backend_image
         line = self._run(
             f"docker run --rm --user 0:0 --network none --entrypoint stat "
-            f"-v '{keys_dir}:/keys:ro' {image} -c '{keyfiles.STAT_FORMAT}' '/keys/{name}'"
+            f"-v '{keys_dir}:/keys:ro' {self.release.backend_image} "
+            f"-c '{keyfiles.STAT_FORMAT}' '/keys/{name}'"
         )
         return keyfiles.parse_stat_line(line)
 
@@ -272,10 +362,10 @@ class Rollout:
         for cls in KEY_CLASSES:
             keyfiles.check_key_file(self._stat_in_container(keys_dir, f"{cls}.key"))
         ids = " ".join(f"--key-id-{c} {self.release.key_ids[c]}" for c in KEY_CLASSES)
-        image = self.release.backend_image
-        out = self._run(
-            f"docker run --rm --user 0:0 --network none -v '{keys_dir}:/keys:ro' {image} "
-            f"python -m nlw.ctxkeys fingerprint --dir /keys {ids} --owner {keyfiles.CONTAINER_UID}"
+        out = self._image_python(
+            self.release.backend_image,
+            f"-m nlw.ctxkeys fingerprint --dir /keys {ids} --owner {keyfiles.CONTAINER_UID}",
+            extra=f"--user 0:0 -v '{keys_dir}:/keys:ro'",
         )
         return keyfiles.parse_fingerprint_lines(out)
 
@@ -295,28 +385,118 @@ class Rollout:
         state.mark_phase(doc, "verify-escrow", attestation=att.summary())
         self._save(doc)
 
+    # ---- host staging (no database, no active config, no running container) ---
+    def stage_release(self, *, keys_dir: str) -> None:
+        """Clone + check out the release SHA into <ops_root>/releases/<sha>, write
+        ITS .env.prod (a copy of the active one with the pins rewritten), build
+        the backup image from the pinned digest. The active checkout, its
+        .env.prod, Caddy and every running container are untouched."""
+        self._require_mutation_authority()
+        doc = self._state()
+        state.require_phases(doc, "verify-release", "verify-escrow")
+        self.check_identity()
+        active = self.target.remote_app
+        active_env_hash_before = self._run(f"sha256sum '{active}/.env.prod' | cut -d' ' -f1")
+        self._run(
+            f"set -e; git -C '{active}' fetch -q origin 2>/dev/null || true; "
+            f"mkdir -p '{self.target.ops_root}/releases'; "
+            f"if [ ! -d '{self.staged}/.git' ]; then git clone -q '{active}' '{self.staged}'; fi; "
+            f"git -C '{self.staged}' fetch -q '{active}' 2>/dev/null || true; "
+            f"git -C '{self.staged}' checkout -q --detach {self.release.release_sha}",
+            timeout=600,
+        )
+        self.verify_checkout(self.staged)
+        self._write_staged_env(keys_dir=keys_dir)
+        self._run(f"{self.dc_staged} config >/dev/null")
+        self._run(f"{self.target.dc_backup_in(self.staged)} build -q backup", timeout=900)
+        active_env_hash_after = self._run(f"sha256sum '{active}/.env.prod' | cut -d' ' -f1")
+        if active_env_hash_before != active_env_hash_after:
+            raise RolloutStop("active .env.prod changed during staging — aborting")
+        gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
+        state.mark_phase(
+            doc, "stage-release", staged_dir=self.staged, active_checkout=self.read_active_sha()
+        )
+        self._save(doc)
+
+    def _write_staged_env(self, *, keys_dir: str) -> None:
+        """Staged .env.prod = active .env.prod with ONLY the pins rewritten
+        (digests/ids/paths); portable temp-file rewrite, never `sed -i`."""
+        lines = {
+            "NLW_IMAGE": self.release.backend_image,
+            "NLW_WEB_IMAGE": self.release.web_image,
+            "NLW_CTX_KEYS_DIR": keys_dir,
+            **{f"NLW_CTX_{c.upper()}_KEY_ID": self.release.key_ids[c] for c in KEY_CLASSES},
+        }
+        src, dst = f"{self.target.remote_app}/.env.prod", f"{self.staged}/.env.prod"
+        pattern = "|".join(lines)
+        script = f"set -e; umask 077; grep -Ev '^({pattern})=' '{src}' > '{dst}.tmp' || true; "
+        for k, v in lines.items():
+            script += f"printf '%s=%s\\n' '{k}' '{v}' >> '{dst}.tmp'; "
+        script += f"chmod 600 '{dst}.tmp'; mv '{dst}.tmp' '{dst}'"
+        self._run(script)
+
+    def backup(self) -> None:
+        """Run the REAL off-host backup of the pre-upgrade database from the staged
+        release (new backup image, owner credential, read-only dump). Binds the
+        manifest to this instance/environment/source release."""
+        self._require_mutation_authority()
+        doc = self._state()
+        state.require_phases(doc, "stage-release")
+        self.check_identity()
+        self.verify_checkout(self.staged)
+        gates.check_current_revision(self.read_revision(), self.release.expected_current_revision)
+        env = (
+            f"-e NLW_BACKUP_SOURCE_INSTANCE_ID={self.release.instance_id} "
+            f"-e NLW_BACKUP_ENVIRONMENT={self.release.environment} "
+            f"-e NLW_BACKUP_SOURCE_RELEASE={self.read_active_sha()}"
+        )
+        self._run(
+            f"{self.target.dc_backup_in(self.staged)} run --rm --no-deps -T {env} backup",
+            timeout=1800,
+        )
+        state.mark_phase(doc, "backup", source_revision=self.release.expected_current_revision)
+        self._save(doc)
+
     def verify_backup(self) -> None:
         self._require_mutation_authority()
         doc = self._state()
-        state.require_phases(doc, "verify-escrow", "pin-release", "prepare-roles")
-        self.verify_checkout()
-        raw = self._run(f"{self.target.dc_backup} run --rm -T backup evidence", timeout=600)
+        state.require_phases(doc, "stage-release")
+        self.verify_checkout(self.staged)
+        res = self.remote.run(
+            f"{self.target.dc_backup_in(self.staged)} run --rm --no-deps -T backup evidence",
+            timeout=600,
+        )
+        if not res.ok:
+            # stderr is deliberately not echoed (it may name the repository).
+            raise GateError(
+                "pre-deployment backup gate failed: no backup evidence could be produced "
+                "(repository unreachable or uninitialized, or no backup has been taken yet)"
+            )
+        raw = res.text
         try:
-            ev_doc = json.loads(raw)
-        except json.JSONDecodeError as exc:
+            ev_doc = json.loads(raw[raw.index("{") :])
+        except (json.JSONDecodeError, ValueError) as exc:
             raise GateError("backup evidence is not valid JSON") from exc
+        manifest = ev_doc.get("manifest") if isinstance(ev_doc.get("manifest"), dict) else {}
         ev = BackupEvidence(
             repository=str(ev_doc.get("repository", "")),
             metrics_text=str(ev_doc.get("metrics_text", "")),
             snapshot=parse_snapshots_json(ev_doc.get("snapshots")),
             artifact_names=tuple(str(n) for n in ev_doc.get("artifact_names", [])),
+            manifest=manifest,
         )
-        fixture_ok = self.op.allow_fixture_repository and self.remote.describe().startswith("LOCAL")
+        fixture_ok = self.op.allow_fixture_repository and self.remote.is_local
+        binding = SourceBinding(
+            instance_id=self.release.instance_id,
+            environment=self.release.environment,
+            db_system_identifier=self.read_db_system_identifier(),
+            source_revision=self.release.expected_current_revision,
+            source_release=self.read_active_sha(),
+        )
         try:
             record = evaluate_backup_evidence(
                 ev,
-                expected_source_revision=self.release.expected_current_revision,
-                expected_hostname=None,
+                binding=binding,
                 max_age=self.op.backup_max_age,
                 now=self.now(),
                 allow_fixture_repository=fixture_ok,
@@ -331,21 +511,20 @@ class Rollout:
         state.mark_phase(doc, "verify-backup", **record)
         self._save(doc)
 
+    # ---- mutation (only after the verified backup) ----------------------------
     def drain(self) -> None:
         self._require_mutation_authority()
         doc = self._state()
-        state.require_phases(doc, "verify-escrow", "pin-release", "verify-backup")
+        state.require_phases(doc, "verify-backup")
         self.check_identity()
-        self.verify_checkout()
-        gates.check_release_pins(self.read_pins(), self.release, post_pin=True)
+        self.verify_checkout(self.staged)
+        gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
         gates.check_current_revision(self.read_revision(), self.release.expected_current_revision)
         # The edge must run the RELEASE config (maintenance matcher + caddy_maint
         # volume) before the flag means anything: recreate caddy alone, no deps.
-        self._run(f"{self.dc} up -d --no-deps --force-recreate caddy", timeout=300)
-        # Maintenance mode: Caddy serves 503 while the flag exists (Caddyfile
-        # `@maintenance` file matcher on the caddy_maint volume — no reload needed).
-        self._run(f"{self.dc} exec -T caddy touch {MAINTENANCE_FLAG}")
-        self._run(f"{self.dc} stop scheduler")
+        self._run(f"{self.dc_staged} up -d --no-deps --force-recreate caddy", timeout=300)
+        self._run(f"{self.dc_staged} exec -T caddy touch {MAINTENANCE_FLAG}")
+        self._run(f"{self.dc_staged} stop scheduler")
         deadline = self.now() + timedelta(seconds=DRAIN_WAIT_S)
         snap = self.read_drain()
         for _ in range(DRAIN_WAIT_S // 5):  # bounded by attempts AND wall clock
@@ -354,80 +533,39 @@ class Rollout:
             self._run("sleep 5")
             snap = self.read_drain()
         gates.check_drained(snap)
-        self._run(f"{self.dc} stop worker api")
+        self._run(f"{self.dc_staged} stop worker api")
         sessions = self.read_runtime_sessions()
         gates.check_no_runtime_sessions(sessions)
         state.mark_phase(doc, "drain", **snap.__dict__, runtime_sessions=sessions)
         self._save(doc)
 
-    def verify_checkout(self) -> None:
-        """The app dir must be a clean checkout of the release SHA."""
-        app = self.target.remote_app
-        sha = self._run(f"git -C '{app}' rev-parse HEAD")
-        if sha != self.release.release_sha:
-            raise GateError(f"app dir is at {sha[:12]}, release is {self.release.release_sha[:12]}")
-        # The rollout's own state dir is not tracked by the OLD checkout's .gitignore.
-        dirty = self._run(f"git -C '{app}' status --porcelain -- . ':(exclude).rollout'")
-        if dirty:
-            raise GateError("app dir checkout is not clean")
-
-    def pin_release(self, *, keys_dir: str) -> None:
-        """PHASE: check out the release SHA in the app dir (reviewed compose files
-        travel with the code), write the immutable pins + key ids into .env.prod
-        (digests/ids only, backup copy kept) and build the backup image from the
-        pinned digest. Running containers are untouched: pins only take effect
-        when a service is recreated."""
+    def prepare_roles(self) -> None:
+        """First database mutation of the rollout — only after drain (which itself
+        requires the verified backup)."""
         self._require_mutation_authority()
         doc = self._state()
-        state.require_phases(doc, "verify-escrow")
+        state.require_phases(doc, "verify-backup", "drain")
         self.check_identity()
-        app = self.target.remote_app
-        self._run(
-            f"set -e; cd '{app}'; git fetch -q origin 2>/dev/null || true; "
-            "test -z \"$(git status --porcelain -- . ':(exclude).rollout')\" "
-            "|| { echo 'app dir not clean' >&2; exit 3; }; "
-            f"git checkout -q --detach {self.release.release_sha}",
-            timeout=300,
-        )
-        self.verify_checkout()
-        self._write_env_pins(keys_dir=keys_dir)
-        self._run(f"{self.target.dc_backup} build -q backup", timeout=900)
-        state.mark_phase(doc, "pin-release", release=self.release.summary())
+        self.verify_checkout(self.staged)
+        gates.check_no_runtime_sessions(self.read_runtime_sessions())
+        gates.check_current_revision(self.read_revision(), self.release.expected_current_revision)
+        out = self._migrate_run("", "python -m nlw.ops.roles ensure")
+        self.log(out)
+        roles = self.read_roles()
+        gates.check_roles(roles, require_provisioned=True)
+        state.mark_phase(doc, "prepare-roles", roles=roles)
         self._save(doc)
 
-    def _write_env_pins(self, *, keys_dir: str) -> None:
-        """Write the immutable pins + key ids into .env.prod (digests/ids only)."""
-        lines = {
-            "NLW_IMAGE": self.release.backend_image,
-            "NLW_WEB_IMAGE": self.release.web_image,
-            "NLW_CTX_KEYS_DIR": keys_dir,
-            **{f"NLW_CTX_{c.upper()}_KEY_ID": self.release.key_ids[c] for c in KEY_CLASSES},
-        }
-        app, tag = self.target.remote_app, self.release.release_sha[:12]
-        # Portable (GNU + BSD): rewrite through a temp file instead of `sed -i`.
-        # Only digests/ids/paths are written; every other line is preserved.
-        script = f'set -e; f=\'{app}/.env.prod\'; umask 077; cp "$f" "$f.bak.{tag}"; '
-        pattern = "|".join(lines)
-        script += f'grep -Ev \'^({pattern})=\' "$f" > "$f.tmp" || true; '
-        for k, v in lines.items():
-            script += f"printf '%s=%s\\n' '{k}' '{v}' >> \"$f.tmp\"; "
-        script += 'chmod 600 "$f.tmp"; mv "$f.tmp" "$f"'
-        self._run(script)
-        gates.check_release_pins(self.read_pins(), self.release, post_pin=True)
-
-    def migrate(self, *, keys_dir: str) -> None:
+    def migrate(self) -> None:
         self._require_mutation_authority()
         doc = self._state()
-        state.require_phases(
-            doc, "prepare-roles", "verify-escrow", "pin-release", "verify-backup", "drain"
-        )
+        state.require_phases(doc, "verify-backup", "drain", "prepare-roles")
         self.check_identity()
+        self.verify_checkout(self.staged)
         gates.check_no_runtime_sessions(self.read_runtime_sessions())
         gates.check_current_revision(self.read_revision(), self.release.expected_current_revision)
         gates.check_roles(self.read_roles(), require_provisioned=True)
-        self.verify_checkout()
-        gates.check_release_pins(self.read_pins(), self.release, post_pin=True)
-        self._run(f"{self.dc} pull -q migrate api worker scheduler web", timeout=900)
+        gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
         self._migrate_run("", "", timeout=900)  # the service's own command: alembic upgrade head
         rev = self.read_revision()
         gates.check_current_revision(rev, self.release.target_revision)
@@ -466,9 +604,7 @@ class Rollout:
                 f"python -m nlw.ctxkeys install --class {cls} --key-id {kid} "
                 f"--secret-file /run/nlw/keys/{cls}.key",
             )
-            # The installer logs (structlog, stdout) before its result line.
-            verdict = [ln for ln in out.splitlines() if ln.startswith(("installed:", "unchanged:"))]
-            if not verdict:
+            if not [ln for ln in out.splitlines() if ln.startswith(("installed:", "unchanged:"))]:
                 raise RolloutStop(f"unexpected installer output for {cls}")
         for cls in KEY_CLASSES:
             kid = self.release.key_ids[cls]
@@ -492,33 +628,37 @@ class Rollout:
         self._save(doc)
 
     def recreate_runtime(self, *, keys_dir: str) -> None:
+        """ACTIVATION: point <ops_root>/current at the staged release and recreate
+        the runtimes (and monitoring) from it. Only after keys are installed."""
         self._require_mutation_authority()
         doc = self._state()
         state.require_phases(doc, "install-context-keys")
+        self.verify_checkout(self.staged)
         gates.check_current_revision(self.read_revision(), self.release.target_revision)
-        gates.check_release_pins(self.read_pins(), self.release, post_pin=True)
-        self._run(f"{self.dc} config >/dev/null")
+        gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
+        self._run(f"{self.dc_staged} config >/dev/null")
+        self._run(f"ln -sfn '{self.staged}' '{self.target.current_link}'")
         self._run(
-            f"{self.dc} up -d --force-recreate --no-deps api worker scheduler web", timeout=600
+            f"{self.dc_staged} up -d --force-recreate --no-deps api worker scheduler web",
+            timeout=600,
         )
-        # Monitoring is part of the release config too (rule mounts, Alertmanager);
-        # recreate whatever the active overlay defines.
-        services = self._run(f"{self.dc} config --services").split()
+        services = self._run(f"{self.dc_staged} config --services").split()
         monitoring = [s for s in ("prometheus", "alertmanager") if s in services]
         if monitoring:
             self._run(
-                f"{self.dc} up -d --force-recreate --no-deps {' '.join(monitoring)}", timeout=300
+                f"{self.dc_staged} up -d --force-recreate --no-deps {' '.join(monitoring)}",
+                timeout=300,
             )
         images = self.read_running_images()
         gates.check_running_images(images, self.release)
         self.verify_mount_isolation(keys_dir)
-        state.mark_phase(doc, "recreate-runtime", images=images)
+        state.mark_phase(doc, "recreate-runtime", images=images, current=self.staged)
         self._save(doc)
 
     def verify_mount_isolation(self, keys_dir: str) -> None:
         out = self._run(
-            f"for s in api worker scheduler web postgres redis caddy prometheus; do "
-            f'c=$({self.dc} ps -q $s 2>/dev/null | head -1); [ -z "$c" ] && continue; '
+            f"for s in api worker scheduler web postgres redis caddy prometheus alertmanager; do "
+            f'c=$({self.dc_staged} ps -q $s 2>/dev/null | head -1); [ -z "$c" ] && continue; '
             'echo "$s $(docker inspect --format '
             "'{{range .Mounts}}{{.Source}}:{{.Destination}}:{{.RW}} {{end}}"
             '|{{range .Config.Env}}{{.}} {{end}}\' "$c")"; done'
@@ -533,19 +673,21 @@ class Rollout:
                     raise GateError(f"{svc} key mounts are {key_mounts}, want [{want}]")
             elif key_mounts:
                 raise GateError(f"{svc} must not mount a key file: {key_mounts}")
+            if (
+                any("backup_textfile" in m or "/textfile" in m for m in mounts.split())
+                and svc != "backup"
+            ):
+                raise GateError(f"{svc} must not mount the backup evidence volume")
+            allowed = ("NLW_CTX_KEY_ID", "NLW_CTX_KEY_FILE", "NLW_CTX_TTL_S")
             for item in env.split():
                 name = item.split("=", 1)[0]
-                if name.startswith("NLW_CTX_") and name not in (
-                    "NLW_CTX_KEY_ID",
-                    "NLW_CTX_KEY_FILE",
-                    "NLW_CTX_TTL_S",
-                ):
+                if name.startswith("NLW_CTX_") and name not in allowed:
                     raise GateError(f"{svc} environment carries an unexpected NLW_CTX_* variable")
             if svc in RUNTIME_SERVICES:
                 # Inside the container: its own key material must not appear in its
                 # environment (only the file path/id may). Prints a verdict, never the key.
                 verdict = self._run(
-                    f"{self.dc} exec -T {svc} sh -c "
+                    f"{self.dc_staged} exec -T {svc} sh -c "
                     f'\'k=$(cat /run/nlw/keys/{svc}.key | tr -d "\\n"); '
                     'if env | grep -qF "$k"; then echo LEAK; else echo clean; fi\''
                 )
@@ -558,7 +700,7 @@ class Rollout:
         if leftovers:
             raise GateError(f"installer/migration container(s) still present: {leftovers}")
 
-    def validate(self, *, keys_dir: str) -> None:
+    def validate(self, *, keys_dir: str) -> alerting.AlertingStatus:
         self._require_mutation_authority()
         doc = self._state()
         state.require_phases(doc, "recreate-runtime")
@@ -580,15 +722,68 @@ class Rollout:
             for _ in range(45):
                 health = self._run(
                     "docker inspect --format '{{.State.Health.Status}}' "
-                    f"$({self.dc} ps -q {svc})"
+                    f"$({self.dc_staged} ps -q {svc})"
                 )
                 if health in ("healthy", "unhealthy"):
                     break
                 self._run("sleep 2")
             if health != "healthy":
                 raise GateError(f"{svc} is {health!r}, not healthy (signer/readiness check)")
-        state.mark_phase(doc, "validate", readiness="signed_context ok")
+        status = self.alerting_status()
+        alerting.check_rules_and_connectivity(status)
+        state.mark_phase(doc, "validate", readiness="signed_context ok", alerting=status.evidence())
         self._save(doc)
+        return status
+
+    def alerting_status(self) -> alerting.AlertingStatus:
+        """Rules loaded / Alertmanager reachable / delivery verified — three
+        separate facts, never conflated (M12A-Prep §E)."""
+        rules_raw = self.remote.run(
+            f"{self.dc_staged} exec -T prometheus wget -qO- http://127.0.0.1:9090/api/v1/rules"
+        )
+        try:
+            groups = alerting.parse_rule_groups(json.loads(rules_raw.text or "{}"))
+        except json.JSONDecodeError:
+            groups = ()
+        am_raw = self.remote.run(
+            f"{self.dc_staged} exec -T prometheus wget -qO- http://127.0.0.1:9090/api/v1/alertmanagers"
+        )
+        try:
+            active = (json.loads(am_raw.text or "{}").get("data") or {}).get(
+                "activeAlertmanagers"
+            ) or []
+        except json.JSONDecodeError:
+            active = []
+        healthy = self.remote.run(
+            f"{self.dc_staged} exec -T alertmanager wget -qO- http://127.0.0.1:9093/-/healthy"
+        )
+        reachable = bool(active) and healthy.ok
+        cfg_text = self._run(f"cat '{self.staged}/docker/alertmanager/alertmanager.yml'")
+        default, receivers = alerting.parse_alertmanager_config(cfg_text)
+        secrets_dir = f"{self.target.ops_root}/alertmanager.secrets"
+        present = set(
+            f"/etc/alertmanager/secrets/{n}"
+            for n in self._run(f"ls -1 '{secrets_dir}' 2>/dev/null || true").split()
+        )
+        record_raw = self.remote.run(
+            f"cat '{self.target.state_dir}/alert-delivery.json' 2>/dev/null"
+        )
+        record: dict[str, Any] | None = None
+        if record_raw.ok and record_raw.text:
+            try:
+                loaded = json.loads(record_raw.text)
+                record = loaded if isinstance(loaded, dict) else None
+            except json.JSONDecodeError:
+                record = None
+        return alerting.build_status(
+            rule_groups=groups,
+            alertmanager_reachable=reachable,
+            default_receiver=default,
+            receivers=receivers,
+            present_files=present,
+            delivery_record=record,
+            now=self.now(),
+        )
 
     def verify_unsigned_forgery_denied(self) -> None:
         """As the REAL nlw_app login role (local-socket auth inside the postgres
@@ -608,11 +803,24 @@ class Rollout:
         if not counts or counts[-1].strip() != "0":
             raise GateError(f"unsigned forged context could see tenant rows: {counts or out}")
 
-    def reopen(self) -> None:
+    def reopen(self) -> list[str]:
         self._require_mutation_authority()
         doc = self._state()
         state.require_phases(doc, "validate")
         gates.check_readiness_body(self._run("curl -sS -m 5 http://127.0.0.1:8000/health/ready"))
-        self._run(f"{self.dc} exec -T caddy rm -f {MAINTENANCE_FLAG}")
-        state.mark_phase(doc, "reopen")
+        status = self.alerting_status()
+        alerting.check_rules_and_connectivity(status)
+        open_gates = alerting.launch_gates_for(status, environment=self.release.environment)
+        self._run(f"{self.dc_staged} exec -T caddy rm -f {MAINTENANCE_FLAG}")
+        state.mark_phase(doc, "reopen", launch_gates_open=open_gates, alerting=status.evidence())
         self._save(doc)
+        for g in open_gates:
+            self.log(f"LAUNCH GATE OPEN: {g} — technical deployment only, NOT an M12 GO")
+        return open_gates
+
+    def go_check(self) -> None:
+        """Read-only M12 GO evaluation of the recorded evidence + live alerting."""
+        doc = self._state()
+        state.require_phases(doc, "reopen")
+        status = self.alerting_status()
+        alerting.check_go(status, environment=self.release.environment)

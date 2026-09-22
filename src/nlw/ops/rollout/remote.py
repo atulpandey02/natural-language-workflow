@@ -1,16 +1,24 @@
-"""Command execution against the rollout target (M12A-Prep §B/§C).
+"""Command execution against the rollout target (M12A-Prep §B/§D).
 
 ``SshRemote`` runs commands on the staging host as the operator user (docker
 group; no sudo). ``LocalRemote`` runs the same commands locally for the
 disposable rehearsal. Both return sanitized results; callers never place
 secrets on the command line — anything sensitive travels on stdin or stays in
 host-side files.
+
+Host layout (``TargetConfig``): ``<ops_root>/app`` is the ACTIVE checkout the
+running services were started from; a release is STAGED in
+``<ops_root>/releases/<sha>`` with its own ``.env.prod`` and is only activated
+(``<ops_root>/current`` symlink + container recreation) after the verified
+backup and the migration; rollout state lives in ``<ops_root>/rollout``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,26 +43,51 @@ class TargetConfig:
     ssh_host: str
     ssh_user: str
     ssh_key: Path
-    remote_app: str
+    remote_app: str  # the ACTIVE checkout (M11 today)
     compose_project: str
+    ops_root: str = "/opt/nlw"
     compose_files: tuple[str, ...] = ("docker-compose.prod.yml", "docker-compose.staging.yml")
     # The backup job's env file (restic repository + credentials) — the SAME file
     # the systemd timer uses; never merged into .env.prod.
     backup_env_file: str = "/opt/nlw/.env.backup"
 
+    # ---- layout ---------------------------------------------------------------
+    def release_dir(self, sha: str) -> str:
+        return f"{self.ops_root}/releases/{sha}"
+
     @property
-    def dc_backup(self) -> str:
-        """The backup profile invocation, mirroring docker/systemd/nlw-backup.service."""
+    def current_link(self) -> str:
+        return f"{self.ops_root}/current"
+
+    @property
+    def state_dir(self) -> str:
+        return f"{self.ops_root}/rollout"
+
+    def state_path(self, sha: str) -> str:
+        return f"{self.state_dir}/{sha}.json"
+
+    # ---- compose invocations --------------------------------------------------
+    def dc_in(self, directory: str) -> str:
+        """The reviewed Compose invocation from ``directory`` (explicit project
+        name so a staged release joins the running project; never e2e)."""
+        files = " ".join(f"-f {f}" for f in self.compose_files)
         return (
-            f"cd '{self.remote_app}' && docker compose --env-file .env.prod "
-            f"--env-file '{self.backup_env_file}' -f docker-compose.prod.yml --profile backup"
+            f"cd '{directory}' && docker compose -p {self.compose_project} "
+            f"--env-file .env.prod {files}"
         )
 
     @property
     def dc(self) -> str:
-        """The reviewed Compose invocation (explicit --env-file; never e2e)."""
-        files = " ".join(f"-f {f}" for f in self.compose_files)
-        return f"cd '{self.remote_app}' && docker compose --env-file .env.prod {files}"
+        """Compose against the ACTIVE checkout (read/stop/exec only)."""
+        return self.dc_in(self.remote_app)
+
+    def dc_backup_in(self, directory: str) -> str:
+        """Backup profile from ``directory``, mirroring docker/systemd/nlw-backup.service."""
+        return (
+            f"cd '{directory}' && docker compose -p {self.compose_project} "
+            f"--env-file .env.prod --env-file '{self.backup_env_file}' "
+            f"-f docker-compose.prod.yml --profile backup"
+        )
 
 
 def parse_target_env(text: str) -> dict[str, str]:
@@ -90,15 +123,18 @@ def load_target(path: Path, *, ssh_key: Path | None = None) -> TargetConfig:
     )
     if any("e2e" in f for f in compose_files):
         raise TargetConfigError("the e2e overlay must never be part of a real/rehearsal target")
+    remote_app = values["NLW_STAGING_REMOTE_APP"]
+    ops_root = values.get("NLW_STAGING_OPS_ROOT") or str(Path(remote_app).parent)
     return TargetConfig(
         instance_id=values["NLW_STAGING_INSTANCE_ID"],
         ssh_host=values["NLW_STAGING_SSH_HOST"],
         ssh_user=values["NLW_STAGING_SSH_USER"],
         ssh_key=key.expanduser(),
-        remote_app=values["NLW_STAGING_REMOTE_APP"],
+        remote_app=remote_app,
         compose_project=values["NLW_STAGING_COMPOSE_PROJECT"],
+        ops_root=ops_root,
         compose_files=compose_files,
-        backup_env_file=values.get("NLW_STAGING_BACKUP_ENV_FILE") or "/opt/nlw/.env.backup",
+        backup_env_file=values.get("NLW_STAGING_BACKUP_ENV_FILE") or f"{ops_root}/.env.backup",
     )
 
 
@@ -124,8 +160,13 @@ class Remote(Protocol):
 
     def describe(self) -> str: ...
 
+    @property
+    def is_local(self) -> bool: ...
+
 
 class SshRemote:
+    is_local = False
+
     def __init__(self, target: TargetConfig) -> None:
         self._t = target
 
@@ -154,7 +195,9 @@ class SshRemote:
 class LocalRemote:
     """Rehearsal executor: the same shell commands, run locally with bash."""
 
-    def __init__(self, label: str = "local rehearsal") -> None:
+    is_local = True
+
+    def __init__(self, label: str = "LOCAL REHEARSAL (not the VPS)") -> None:
         self._label = label
 
     def describe(self) -> str:
@@ -167,15 +210,21 @@ class LocalRemote:
         canned = os.environ.get("NLW_REHEARSAL_IDENTITY")
         if "169.254.169.254" in command and canned:
             return CommandResult(0, canned + "\n", "")
+        # Own process group so a timeout kills `docker compose run` and every
+        # child too (never an orphaned one-shot container after a STOP).
+        proc = subprocess.Popen(  # noqa: S603
+            ["bash", "-c", command],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            p = subprocess.run(  # noqa: S603
-                ["bash", "-c", command],
-                input=stdin,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
+            out, err = proc.communicate(input=stdin, timeout=timeout)
         except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
             return CommandResult(124, "", "timed out")
-        return CommandResult(p.returncode, p.stdout, p.stderr)
+        return CommandResult(proc.returncode, out, err)

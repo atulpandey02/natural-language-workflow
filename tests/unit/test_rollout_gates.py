@@ -23,6 +23,7 @@ from nlw.ops.rollout.backup_evidence import (
     BackupEvidence,
     BackupEvidenceError,
     SnapshotEvidence,
+    SourceBinding,
     check_repository_is_off_host,
     evaluate_backup_evidence,
     parse_snapshots_json,
@@ -39,7 +40,16 @@ W = "sha256:" + "b" * 64
 
 def _release_doc(**over: object) -> dict[str, object]:
     doc: dict[str, object] = {
-        "format_version": 1,
+        "format_version": 2,
+        "kind": "release",
+        "deployable": True,
+        "generated_by": "ci",
+        "created_at": "2026-09-22T10:00:00+00:00",
+        "ci": {
+            "workflow": "Delivery",
+            "run_id": "1",
+            "run_url": "https://github.com/o/r/actions/runs/1",
+        },
         "environment": "staging",
         "release_sha": "1eebf2ef19c0286c83bfe8768c908bfd2f40178d",
         "backend_image": f"ghcr.io/o/r@{D}",
@@ -60,15 +70,13 @@ REL = parse_release(_release_doc())
 
 
 # --- release identity (§B) ---------------------------------------------------
-def test_committed_release_and_target_agree() -> None:
-    rel = load_release(ROOT / "deploy" / "staging" / "release.json")
+def test_committed_example_is_rejected_and_target_env_is_consistent() -> None:
+    with pytest.raises(ReleaseSpecError, match="not a deployable"):
+        load_release(ROOT / "deploy" / "staging" / "release.example.json")
     tgt = parse_target_env((ROOT / "deploy" / "staging" / "target.env").read_text())
-    assert rel.instance_id == tgt["NLW_STAGING_INSTANCE_ID"]
-    assert rel.public_hostname == tgt["NLW_STAGING_PUBLIC_HOSTNAME"]
-    assert rel.compose_project == tgt["NLW_STAGING_COMPOSE_PROJECT"]
-    assert rel.expected_current_revision == "0010_readiness_schema_grant"
-    assert rel.target_revision == "0016_signed_database_context"
-    assert "@sha256:" in rel.backend_image and "@sha256:" in rel.web_image
+    assert tgt["NLW_STAGING_INSTANCE_ID"] == REL.instance_id
+    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0010_readiness_schema_grant"
+    assert tgt["NLW_STAGING_OPS_ROOT"] == "/opt/nlw"
 
 
 @pytest.mark.parametrize(
@@ -81,7 +89,7 @@ def test_committed_release_and_target_agree() -> None:
         {"expected_current_revision": "0016_signed_database_context"},  # nothing to roll
         {"key_ids": {"api": "k", "worker": "k", "scheduler": "k"}},  # not unique
         {"key_ids": {"api": "stg-api-1", "worker": "stg-worker-1"}},
-        {"format_version": 2},
+        {"format_version": 1},
     ],
 )
 def test_release_rejects_mutable_or_malformed_identity(over: dict[str, object]) -> None:
@@ -249,18 +257,33 @@ def _ev(**over: object) -> BackupEvidence:
         "metrics_text": GOOD_METRICS,
         "snapshot": SNAP,
         "artifact_names": ("nlw.dump", "globals.sql", "manifest.json"),
+        "manifest": {
+            "alembic_revision": "0010_readiness_schema_grant",
+            "artifacts": {"nlw.dump": {"bytes": 1, "sha256": "x"}},
+            "completed_at": (NOW - timedelta(hours=1)).isoformat(),
+            "source": {
+                "instance_id": "i-0d1e65cdc9401dbb9",
+                "environment": "staging",
+                "db_system_identifier": "7311111111111111111",
+                "release": "5151a2cc54cfb63b276bd3b30cf0e683263525ac",
+            },
+        },
     }
     kw.update(over)
     return BackupEvidence(**kw)  # type: ignore[arg-type]
 
 
+BINDING = SourceBinding(
+    instance_id="i-0d1e65cdc9401dbb9",
+    environment="staging",
+    db_system_identifier="7311111111111111111",
+    source_revision="0010_readiness_schema_grant",
+    source_release="5151a2cc54cfb63b276bd3b30cf0e683263525ac",
+)
+
+
 def _eval(ev: BackupEvidence, **over: object) -> dict[str, object]:
-    kw: dict[str, object] = {
-        "expected_source_revision": "0010_readiness_schema_grant",
-        "expected_hostname": None,
-        "max_age": timedelta(hours=26),
-        "now": NOW,
-    }
+    kw: dict[str, object] = {"binding": BINDING, "max_age": timedelta(hours=26), "now": NOW}
     kw.update(over)
     return evaluate_backup_evidence(ev, **kw)  # type: ignore[arg-type]
 
@@ -307,8 +330,52 @@ def test_missing_old_or_unverified_backup_fails() -> None:
         _eval(
             _ev(snapshot=SnapshotEvidence("x", SNAP.time, SNAP.hostname, ("nlw-db", "rev-0015_x")))
         )
-    with pytest.raises(BackupEvidenceError, match="different host"):
-        _eval(_ev(), expected_hostname="ip-10-0-0-9")
+    with pytest.raises(BackupEvidenceError, match="another host"):
+        _eval(
+            _ev(),
+            binding=SourceBinding(
+                "i-0000000000000001",
+                "staging",
+                "7311111111111111111",
+                "0010_readiness_schema_grant",
+                None,
+            ),
+        )
+    with pytest.raises(BackupEvidenceError, match="another database"):
+        _eval(
+            _ev(),
+            binding=SourceBinding(
+                "i-0d1e65cdc9401dbb9",
+                "staging",
+                "7399999999999999999",
+                "0010_readiness_schema_grant",
+                None,
+            ),
+        )
+    with pytest.raises(BackupEvidenceError, match="another environment"):
+        _eval(
+            _ev(),
+            binding=SourceBinding(
+                "i-0d1e65cdc9401dbb9",
+                "production",
+                "7311111111111111111",
+                "0010_readiness_schema_grant",
+                None,
+            ),
+        )
+    with pytest.raises(BackupEvidenceError, match="active checkout"):
+        _eval(
+            _ev(),
+            binding=SourceBinding(
+                "i-0d1e65cdc9401dbb9",
+                "staging",
+                "7311111111111111111",
+                "0010_readiness_schema_grant",
+                "f" * 40,
+            ),
+        )
+    with pytest.raises(BackupEvidenceError, match="no manifest"):
+        _eval(_ev(manifest={}))
     with pytest.raises(BackupEvidenceError, match="key-like"):
         _eval(_ev(artifact_names=("nlw.dump", "api.key")))
     # A local pg_dump with no repository snapshot never counts.

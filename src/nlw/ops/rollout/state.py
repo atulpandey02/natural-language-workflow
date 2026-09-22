@@ -1,10 +1,10 @@
-"""Rollout state: per-release, host-side, metadata only (M12A-Prep §C).
+"""Rollout state: per-release, host-side, metadata only (M12A-Prep §C/§D).
 
-The state file lives on the target (``<remote_app>/.rollout/<release_sha>.json``)
-so a restarted phase sees what already happened on THAT host. It records phase
-completion times and non-secret evidence (snapshot ids, fingerprints, digests,
-counts). It never records credentials, key material, phrases, or URLs with
-credentials, and the writer rejects anything that looks like one.
+The state file lives OUTSIDE every git checkout (``<ops_root>/rollout/<sha>.json``)
+so it can never dirty a release directory. It records phase completion times
+and non-secret evidence (manifest hash, snapshot ids, fingerprints, digests,
+counts). It never records credentials, key material, phrases, or URLs, and the
+writer refuses anything that looks like one.
 """
 
 from __future__ import annotations
@@ -13,31 +13,31 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from nlw.ops.rollout.remote import Remote
+from nlw.ops.rollout.remote import Remote, TargetConfig
 
 PHASES: tuple[str, ...] = (
     "preflight",
+    "verify-release",
     "prepare-keys",
     "verify-escrow",
-    "pin-release",
-    "prepare-roles",
+    "stage-release",
+    "backup",
     "verify-backup",
     "drain",
+    "prepare-roles",
     "migrate",
     "install-context-keys",
     "recreate-runtime",
     "validate",
     "reopen",
 )
+# Phases that may run before the verified backup: none of them touches the database.
+PRE_BACKUP_PHASES = PHASES[: PHASES.index("verify-backup") + 1]
 _FORBIDDEN = ("password", "passphrase", "secret", "token", "://", "AUTHORIZE_", "ESCROWED_")
 
 
 class StateError(RuntimeError):
     pass
-
-
-def _path(remote_app: str, release_sha: str) -> str:
-    return f"{remote_app}/.rollout/{release_sha}.json"
 
 
 def assert_state_is_secret_free(doc: dict[str, Any]) -> None:
@@ -47,8 +47,9 @@ def assert_state_is_secret_free(doc: dict[str, Any]) -> None:
             raise StateError(f"rollout state must not contain {needle!r}")
 
 
-def load_state(remote: Remote, remote_app: str, release_sha: str) -> dict[str, Any]:
-    res = remote.run(f"cat '{_path(remote_app, release_sha)}' 2>/dev/null || echo '{{}}'")
+def load_state(remote: Remote, target: TargetConfig, release_sha: str) -> dict[str, Any]:
+    path = target.state_path(release_sha)
+    res = remote.run(f"cat '{path}' 2>/dev/null || echo '{{}}'")
     if not res.ok:
         raise StateError("could not read rollout state")
     try:
@@ -62,12 +63,12 @@ def load_state(remote: Remote, remote_app: str, release_sha: str) -> dict[str, A
     return doc
 
 
-def save_state(remote: Remote, remote_app: str, release_sha: str, doc: dict[str, Any]) -> None:
+def save_state(remote: Remote, target: TargetConfig, release_sha: str, doc: dict[str, Any]) -> None:
     assert_state_is_secret_free(doc)
     payload = json.dumps(doc, indent=2, sort_keys=True, default=str)
-    path = _path(remote_app, release_sha)
+    path = target.state_path(release_sha)
     res = remote.run(
-        f"mkdir -p '{remote_app}/.rollout' && umask 077 && "
+        f"mkdir -p '{target.state_dir}' && umask 077 && "
         f"cat > '{path}.tmp' && mv '{path}.tmp' '{path}'",
         stdin=payload,
     )

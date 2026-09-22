@@ -8,7 +8,7 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
-| Current milestone | **M12A-Prep** — signed-context deployment tooling: phased, gated `python -m nlw.ops.rollout` (read-only by default; instance-id + digest identity; escrow attestation; verified off-host backup gate; atomic stop → migrate 0010→0016 → install keys → recreate), idempotent role provisioning for existing databases, production key preparation (`nlw.ctxkeys prepare/fingerprint`), Prometheus rule mounting + Alertmanager skeleton, disposable 0010→0016 rehearsal. M11.5 P3B (migration `0016`, ADR-024) is **merged** (`1eebf2e`). |
+| Current milestone | **M12A-Prep** — signed-context deployment tooling: CI-generated release manifest (`nlw.ops.release_manifest`; the run artifact is the only deployable authority, the committed example is rejected), phased, gated `python -m nlw.ops.rollout` (read-only by default; instance-id + digest identity; `verify-release` proves the exact image; escrow attestation; release staged inactive under `/opt/nlw/releases/<sha>`; **real off-host backup taken and verified before any database mutation**; drain → roles → migrate 0010→0016 → install keys → activate/recreate → validate → reopen; `go-check`), idempotent role provisioning, production key preparation (`nlw.ctxkeys prepare/fingerprint`), Prometheus rule mounting + Alertmanager skeleton with the null receiver recorded as an **open launch gate** (`nlw.ops.rollout.alerting`), backup evidence bound to instance/db/release (`nlw.ops.rollout.backup_evidence`), disposable 0010→0016 rehearsal. M11.5 P3B (migration `0016`, ADR-024) is **merged** (`1eebf2e`). |
 | Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
 | Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
 | Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
@@ -427,7 +427,7 @@ Planned: ADR-008 Deployment strategy.
 
 ## Runbooks
 
-- [staging-signed-context-rollout](runbooks/staging-signed-context-rollout.md) — **M12A**: the phased, gated upgrade of the staging VPS from schema `0010` to `0016` (`python -m nlw.ops.rollout`; read-only default; authorization + escrow + backup gates; `deploy/staging/release.json` + `target.env` are the single identity source). Rehearsal: `scripts/ops/rehearse-0010-to-0016.sh`. Alerting: [docs/ops/alerting](ops/alerting.md).
+- [staging-signed-context-rollout](runbooks/staging-signed-context-rollout.md) — **M12A**: the phased, gated upgrade of the staging VPS from schema `0010` to `0016` (`python -m nlw.ops.rollout --release <CI manifest>`; read-only default; verify-release, authorization, escrow and backup-before-mutation gates; the CI-generated `release-manifest-<sha>` artifact + `deploy/staging/target.env` are the identity source — `deploy/staging/release.example.json` is a rejected template). Rehearsal: `scripts/ops/rehearse-0010-to-0016.sh`. Alerting boundary: [docs/ops/alerting](ops/alerting.md).
 
 [`docs/runbooks/`](runbooks/) — see its [README](runbooks/README.md) for the
 index. Security-sensitive: [signed-context-keys.md](runbooks/signed-context-keys.md)

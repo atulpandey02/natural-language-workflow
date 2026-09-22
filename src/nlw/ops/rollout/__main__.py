@@ -1,14 +1,18 @@
-"""``python -m nlw.ops.rollout [phase] [options]`` — see ``nlw.ops.rollout``.
+"""``python -m nlw.ops.rollout [phase] --release MANIFEST [options]``.
 
-The default phase is ``preflight`` and is READ-ONLY. Mutating phases require:
+The default phase is ``preflight`` and is READ-ONLY. ``--release`` is required
+and must be the CI-generated manifest downloaded for the exact release commit
+(``deploy/staging/release.example.json`` is rejected in every mode). Mutating
+phases require:
 
 * ``--authorize <exact phrase>``  (AUTHORIZE_M12A_SIGNED_CONTEXT_STAGING_DEPLOYMENT)
 * ``--escrow-confirm <exact phrase>`` + ``--attestation FILE`` for verify-escrow
-* a verified off-host backup (verify-backup) and a clean drain (drain)
+* a verified off-host backup (verify-backup) before drain and any DB change
 
 No ``--yes``; an empty or partial phrase is a hard stop. Phrases are compared
-only, never persisted. The rehearsal (scripts/ops/rehearse-0010-to-0016.sh) uses
-``--local`` to execute the same phases against a disposable local stack.
+only, never persisted. ``go-check`` is a read-only M12 GO evaluation. The
+rehearsal (scripts/ops/rehearse-0010-to-0016.sh) uses ``--local`` to execute the
+same phases against a disposable local stack.
 """
 
 from __future__ import annotations
@@ -32,9 +36,9 @@ from nlw.ops.rollout.remote import (
 )
 from nlw.ops.rollout.state import PHASES, StateError
 
-DEFAULT_RELEASE = Path("deploy/staging/release.json")
 DEFAULT_TARGET = Path("deploy/staging/target.env")
 DEFAULT_KEYS_DIR = "/srv/nlw/ctx-keys"
+COMMANDS = (*PHASES, "go-check")
 
 
 def _log(msg: str) -> None:
@@ -43,8 +47,8 @@ def _log(msg: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m nlw.ops.rollout")
-    p.add_argument("phase", nargs="?", default="preflight", choices=PHASES)
-    p.add_argument("--release", type=Path, default=DEFAULT_RELEASE)
+    p.add_argument("phase", nargs="?", default="preflight", choices=COMMANDS)
+    p.add_argument("--release", type=Path, required=True, help="CI-generated release manifest")
     p.add_argument("--target", type=Path, default=DEFAULT_TARGET)
     p.add_argument("--ssh-key", type=Path, default=None)
     p.add_argument("--keys-dir", default=DEFAULT_KEYS_DIR, help="host directory of the key files")
@@ -68,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        release = load_release(args.release)
+        release = load_release(args.release, local=bool(args.local))
         target: TargetConfig = load_target(args.target, ssh_key=args.ssh_key)
     except (ReleaseSpecError, TargetConfigError) as exc:
         print(f"[rollout] configuration error: {exc}", file=sys.stderr)
@@ -79,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    remote = LocalRemote("LOCAL REHEARSAL (not the VPS)") if args.local else SshRemote(target)
+    remote = LocalRemote() if args.local else SshRemote(target)
     op = Operator(
         authorization=args.authorize,
         escrow_confirmation=args.escrow_confirm,
@@ -92,20 +96,24 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.phase == "preflight":
             r.preflight()
-        elif args.phase == "prepare-roles":
-            r.prepare_roles()
+        elif args.phase == "verify-release":
+            r.verify_release()
         elif args.phase == "prepare-keys":
             r.prepare_keys(keys_dir=keys_dir)
         elif args.phase == "verify-escrow":
             r.verify_escrow(keys_dir=keys_dir)
-        elif args.phase == "pin-release":
-            r.pin_release(keys_dir=keys_dir)
+        elif args.phase == "stage-release":
+            r.stage_release(keys_dir=keys_dir)
+        elif args.phase == "backup":
+            r.backup()
         elif args.phase == "verify-backup":
             r.verify_backup()
         elif args.phase == "drain":
             r.drain()
+        elif args.phase == "prepare-roles":
+            r.prepare_roles()
         elif args.phase == "migrate":
-            r.migrate(keys_dir=keys_dir)
+            r.migrate()
         elif args.phase == "install-context-keys":
             r.install_context_keys(keys_dir=keys_dir)
         elif args.phase == "recreate-runtime":
@@ -114,6 +122,9 @@ def main(argv: list[str] | None = None) -> int:
             r.validate(keys_dir=keys_dir)
         elif args.phase == "reopen":
             r.reopen()
+        elif args.phase == "go-check":
+            r.go_check()
+            _log("M12 GO check: PASS")
     except (GateError, RolloutStop, StateError, AttestationError, BackupEvidenceError) as exc:
         print(f"[rollout] STOP ({args.phase}): {exc}", file=sys.stderr)
         return 3

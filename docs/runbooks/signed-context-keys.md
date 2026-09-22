@@ -132,7 +132,7 @@ Attestation format (`format_version` 1; **contains no material or credential**):
 ```
 
 The gate compares every fingerprint with the files on the host, requires the
-same key ids as `deploy/staging/release.json`, and rejects attestations older
+same key ids as the CI-generated release manifest, and rejects attestations older
 than 30 days, from another release/environment, or containing anything that
 looks like a credential. Pasting material into the fingerprint field cannot
 pass (sha256(material) ≠ material). Key preparation never writes this file —

@@ -50,6 +50,10 @@ jobs:
           context: .
           push: true
           tags: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          # Release identity baked into the artifact (OCI revision label + NLW_GIT_SHA);
+          # the rollout refuses an image whose SHA differs from the manifest.
+          build-args: |
+            NLW_GIT_SHA=${{ github.sha }}
       - name: Build and push frontend by digest
         id: build_web
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -57,10 +61,38 @@ jobs:
           context: ./web
           push: true
           tags: ghcr.io/${{ github.repository }}/web:sha-${{ github.sha }}
+          build-args: |
+            NLW_GIT_SHA=${{ github.sha }}
           # No public Supabase build-args: the browser-safe URL + anon key are
           # supplied at RUNTIME (server-injected), so this ONE digest is promoted
           # unchanged from staging to production and targets each environment's
           # Supabase project via runtime env.
+      # Release manifest (M12A-Prep §A/§H): generated AFTER the builds from the
+      # real manifest digests, for the exact commit built, validated, and uploaded
+      # as the run artifact `release-manifest-<sha>`. Never committed to git.
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: "0.12"
+      - name: Generate + validate the release manifest for this exact commit
+        run: |
+          uv sync --frozen
+          uv run python -m nlw.ops.release_manifest generate \
+            --target-env deploy/staging/target.env \
+            --release-sha "${{ github.sha }}" \
+            --backend-image "ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}" \
+            --web-image "ghcr.io/${{ github.repository }}/web@${{ steps.build_web.outputs.digest }}" \
+            --generated-by ci --out release-manifest.json
+          uv run python -m nlw.ops.release_manifest validate release-manifest.json
+          # The artifact must carry no credential/material: only ids, digests, SHAs.
+          ! grep -Eiq 'password|secret|token|aws_' release-manifest.json
+          echo "### Release manifest for ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "sha256: $(sha256sum release-manifest.json | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4 # TODO pin to a commit SHA before go-live (ADR-018)
+        with:
+          name: release-manifest-${{ github.sha }}
+          path: release-manifest.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Scan pushed image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -82,17 +114,42 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@v4 # TODO pin to a commit SHA before go-live (ADR-018)
+        with:
+          name: release-manifest-${{ github.sha }}
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: "0.12"
+      - name: Prove the artifact matches the images (schema, SHA, digests, labels)
+        env:
+          NLW_IMAGE: ${{ needs.build-push.outputs.image }}@${{ needs.build-push.outputs.digest }}
+          NLW_WEB_IMAGE: ${{ needs.build-push.outputs.web_image }}@${{ needs.build-push.outputs.web_digest }}
+        run: |
+          uv sync --frozen
+          uv run python -m nlw.ops.release_manifest validate release-manifest.json > summary.json
+          grep -q "\"release_sha\": \"${{ github.sha }}\"" summary.json
+          grep -q "\"backend_digest\": \"${{ needs.build-push.outputs.digest }}\"" summary.json
+          grep -q "\"web_digest\": \"${{ needs.build-push.outputs.web_digest }}\"" summary.json
+          docker pull -q "$NLW_IMAGE" && docker pull -q "$NLW_WEB_IMAGE"
+          for img in "$NLW_IMAGE" "$NLW_WEB_IMAGE"; do
+            label=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$img")
+            [ "$label" = "${{ github.sha }}" ] || { echo "revision label $label != ${{ github.sha }} for $img"; exit 1; }
+          done
+          docker run --rm --network none --entrypoint python "$NLW_IMAGE" -m nlw.ops.rollout.image_info | grep -q "\"git_sha\": \"${{ github.sha }}\""
+          # The committed template must be REJECTED by the same loader.
+          ! uv run python -m nlw.ops.release_manifest validate deploy/staging/release.example.json
+          echo "manifest <-> images proof OK (this is a CI proof of the artifact, not a deployment)"
       - name: Print the operator rollout commands for this digest (no host contacted)
         env:
           NLW_IMAGE: ${{ needs.build-push.outputs.image }}@${{ needs.build-push.outputs.digest }}
           NLW_WEB_IMAGE: ${{ needs.build-push.outputs.web_image }}@${{ needs.build-push.outputs.web_digest }}
         run: |
           echo "SIMULATION ONLY — no SSH, no VPS, no deployment performed by CI."
-          echo "Release candidate digests for deploy/staging/release.json:"
+          echo "Release manifest artifact: release-manifest-${{ github.sha }} (download it; never commit it)"
           echo "  backend: $NLW_IMAGE"
           echo "  web:     $NLW_WEB_IMAGE"
           echo "Operator rollout (read-only by default):"
-          echo "  uv run python -m nlw.ops.rollout preflight"
+          echo "  uv run python -m nlw.ops.rollout preflight --release release-manifest.json"
           echo "Mutating phases require the exact authorization phrase, an escrow attestation,"
           echo "and a verified off-host backup — see docs/runbooks/staging-signed-context-rollout.md."
       - name: Simulated smoke (placeholder; not evidence)

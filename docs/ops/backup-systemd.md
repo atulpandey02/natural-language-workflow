@@ -25,8 +25,12 @@ sudo install -m 0600 /dev/null /opt/nlw/.env.backup
 sudo editor /opt/nlw/.env.backup     # fill from .env.backup.example
 
 # 2. Install the units.
-sudo cp /opt/nlw/app/docker/systemd/nlw-backup.service /etc/systemd/system/
-sudo cp /opt/nlw/app/docker/systemd/nlw-backup.timer   /etc/systemd/system/
+# The unit runs Compose from /opt/nlw/current (the ACTIVE release symlink the
+# rollout's recreate-runtime phase points at /opt/nlw/releases/<sha>); on a host
+# that has never been through the rollout, create it first:
+#   sudo ln -sfn /opt/nlw/app /opt/nlw/current
+sudo cp /opt/nlw/current/docker/systemd/nlw-backup.service /etc/systemd/system/
+sudo cp /opt/nlw/current/docker/systemd/nlw-backup.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 
 # 3. Enable the timer (not the service).

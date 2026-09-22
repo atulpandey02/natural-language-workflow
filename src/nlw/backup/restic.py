@@ -110,6 +110,27 @@ class Restic:
             if isinstance(s, dict)
         ]
 
+    def snapshot_manifest(self, snapshot_id: str) -> dict[str, Any] | None:
+        """The ``manifest.json`` INSIDE a snapshot (parsed), or None if absent.
+        Read straight from the repository — never from a host file."""
+        res = self._restic_checked("ls", snapshot_id, what="ls")
+        path = ""
+        for line in res.stdout.splitlines():
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("struct_type") == "node" and obj.get("name") == "manifest.json":
+                path = str(obj.get("path", ""))
+        if not path:
+            return None
+        dumped = self._restic_checked("dump", snapshot_id, path, what="dump")
+        try:
+            doc = json.loads(dumped.stdout)
+        except ValueError as exc:
+            raise ResticError("manifest.json inside the snapshot is not valid JSON") from exc
+        return doc if isinstance(doc, dict) else None
+
     def snapshot_file_names(self, snapshot_id: str) -> list[str]:
         """Base names of the files inside a snapshot (no contents)."""
         res = self._restic_checked("ls", snapshot_id, what="ls")

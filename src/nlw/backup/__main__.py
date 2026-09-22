@@ -133,6 +133,7 @@ def _cmd_evidence() -> int:
     restic = Restic(settings.restic_env())
     snaps = restic.latest_snapshots()
     names = restic.snapshot_file_names(snaps[0]["id"]) if snaps else []
+    manifest = restic.snapshot_manifest(snaps[0]["id"]) if snaps else None
     metrics_text = ""
     with contextlib.suppress(OSError):
         metrics_text = Path(settings.metrics_file).read_text()
@@ -143,6 +144,7 @@ def _cmd_evidence() -> int:
         "metrics_text": metrics_text,
         "snapshots": snaps,
         "artifact_names": names,
+        "manifest": manifest,
     }
     for needle in ("password", "secret", "token"):
         if needle in json.dumps(doc).lower():

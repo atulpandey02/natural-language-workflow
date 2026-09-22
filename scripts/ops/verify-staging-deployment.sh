@@ -11,14 +11,25 @@ set -euo pipefail
 # Host + release identity from the ONE reviewed source (deploy/staging/*).
 # shellcheck source=lib/staging-target.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/staging-target.sh"
-RELEASE_FILE="${NLW_STAGING_RELEASE_FILE:-${NLW_REPO_ROOT}/deploy/staging/release.json}"
-release_field() {
-  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$RELEASE_FILE" "$1"
+# The release manifest is the CI-generated artifact for the exact commit
+# (download it; deploy/staging/release.example.json is a REJECTED template).
+# It is REQUIRED when this script runs; sourcing it (unit tests of its pure
+# functions) loads no release identity.
+load_release_identity() {
+  RELEASE_FILE="${NLW_STAGING_RELEASE_FILE:?set NLW_STAGING_RELEASE_FILE to the downloaded release manifest}"
+  (cd "$NLW_REPO_ROOT" && uv run python -m nlw.ops.release_manifest validate "$RELEASE_FILE" >/dev/null) \
+    || { echo "release manifest rejected: $RELEASE_FILE" >&2; exit 3; }
+  release_field() {
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$RELEASE_FILE" "$1"
+  }
+  DEPLOY_SHA="$(release_field release_sha)"
+  BACKEND_IMAGE="$(release_field backend_image)"
+  WEB_IMAGE="$(release_field web_image)"
+  EXPECTED_HEAD="$(release_field target_revision)"
 }
-DEPLOY_SHA="$(release_field release_sha)"
-BACKEND_IMAGE="$(release_field backend_image)"
-WEB_IMAGE="$(release_field web_image)"
-EXPECTED_HEAD="$(release_field target_revision)"
+if [ "${BASH_SOURCE[0]}" = "${0}" ] || [ -n "${NLW_STAGING_RELEASE_FILE:-}" ]; then
+  load_release_identity
+fi
 SUPABASE_JWKS_URL="https://uqjqdfshuwcjftdvxbrm.supabase.co/auth/v1/.well-known/jwks.json"
 COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.staging.yml"
 DC="cd '$REMOTE_APP' && docker compose --env-file .env.prod $COMPOSE_FILES"

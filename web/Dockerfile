@@ -16,6 +16,8 @@ COPY . .
 RUN npm run build
 
 FROM node:22-slim AS runner
+ARG NLW_GIT_SHA=unknown
+LABEL org.opencontainers.image.revision=${NLW_GIT_SHA}
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \

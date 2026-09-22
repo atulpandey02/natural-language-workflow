@@ -115,6 +115,8 @@ jobs:
           push: false
           load: true
           tags: nlw:ci
+          build-args: |
+            NLW_GIT_SHA=${{ github.sha }}
       - name: Trivy image vulnerability scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

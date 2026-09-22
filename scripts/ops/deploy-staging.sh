@@ -28,8 +28,9 @@
 set -euo pipefail
 
 # --- Release identity (immutable; ONE reviewed source) -----------------------
-# Pins come from deploy/staging/release.json (git SHA + image DIGESTS + expected
-# migration head + instance id) and the host from deploy/staging/target.env via
+# Pins come from the CI-generated release manifest (git SHA + image DIGESTS +
+# expected migration head + instance id; NLW_STAGING_RELEASE_FILE) and the host from
+# deploy/staging/target.env via
 # scripts/ops/lib/staging-target.sh. Nothing is hard-coded here any more.
 #
 # SCOPE (M12A-Prep §H): this script is the FIRST-DEPLOY / bootstrap path for a
@@ -40,18 +41,29 @@ set -euo pipefail
 # signed-context keys are installed and verified (see require_context_keys).
 # shellcheck source=lib/staging-target.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/staging-target.sh"
-RELEASE_FILE="${NLW_STAGING_RELEASE_FILE:-${NLW_REPO_ROOT}/deploy/staging/release.json}"
-release_field() {  # pure: read one top-level string field from release.json
-  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d[sys.argv[2]]; print(v["api"]+" "+v["worker"]+" "+v["scheduler"] if isinstance(v,dict) else v)' "$RELEASE_FILE" "$1"
+# The release manifest is the CI-generated artifact for the exact commit
+# (download it; deploy/staging/release.example.json is a REJECTED template).
+# It is REQUIRED when this script runs; sourcing it (unit tests of its pure
+# functions) loads no release identity.
+load_release_identity() {
+  RELEASE_FILE="${NLW_STAGING_RELEASE_FILE:?set NLW_STAGING_RELEASE_FILE to the downloaded release manifest}"
+  (cd "$NLW_REPO_ROOT" && uv run python -m nlw.ops.release_manifest validate "$RELEASE_FILE" >/dev/null) \
+    || { echo "release manifest rejected: $RELEASE_FILE" >&2; exit 3; }
+  release_field() {  # pure: read one top-level field from the release manifest
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d[sys.argv[2]]; print(v["api"]+" "+v["worker"]+" "+v["scheduler"] if isinstance(v,dict) else v)' "$RELEASE_FILE" "$1"
+  }
+  DEPLOY_SHA="$(release_field release_sha)"
+  BACKEND_IMAGE="$(release_field backend_image)"
+  WEB_IMAGE="$(release_field web_image)"
+  EXPECTED_MIGRATION_HEAD="$(release_field target_revision)"
+  [ "$(release_field instance_id)" = "$EXPECTED_INSTANCE_ID" ] \
+    || { echo "the release manifest instance_id != target.env instance id — STOP" >&2; exit 3; }
+  [ "$(release_field public_hostname)" = "$STAGING_HOST" ] \
+    || { echo "the release manifest public_hostname != target.env hostname — STOP" >&2; exit 3; }
 }
-DEPLOY_SHA="$(release_field release_sha)"
-BACKEND_IMAGE="$(release_field backend_image)"
-WEB_IMAGE="$(release_field web_image)"
-EXPECTED_MIGRATION_HEAD="$(release_field target_revision)"
-[ "$(release_field instance_id)" = "$EXPECTED_INSTANCE_ID" ] \
-  || { echo "release.json instance_id != target.env instance id — STOP" >&2; exit 3; }
-[ "$(release_field public_hostname)" = "$STAGING_HOST" ] \
-  || { echo "release.json public_hostname != target.env hostname — STOP" >&2; exit 3; }
+if [ "${BASH_SOURCE[0]}" = "${0}" ] || [ -n "${NLW_STAGING_RELEASE_FILE:-}" ]; then
+  load_release_identity
+fi
 SUPABASE_URL="https://uqjqdfshuwcjftdvxbrm.supabase.co"
 SUPABASE_JWKS_URL="${SUPABASE_URL}/auth/v1/.well-known/jwks.json"
 SUPABASE_ISSUER="${SUPABASE_URL}/auth/v1"
@@ -367,7 +379,7 @@ verify_migration() {
   current_rev="$(printf '%s' "$raw_cur" | parse_current)"
   assert_revisions "$expected_head" "$current_rev" || die "migration verification failed (current='$current_rev' head='$expected_head')."
   # The release document must agree with the image it pins (defence in depth).
-  assert_revisions "$EXPECTED_MIGRATION_HEAD" "$current_rev" || die "release.json target_revision != schema head."
+  assert_revisions "$EXPECTED_MIGRATION_HEAD" "$current_rev" || die "release manifest target_revision != schema head."
   log "Schema at head: $current_rev"
   mark migrations_verified
 }

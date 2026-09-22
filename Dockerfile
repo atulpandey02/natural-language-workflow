@@ -4,6 +4,14 @@
 
 FROM python:3.12-slim AS base
 
+# Release identity baked into the artifact (M12A-Prep): CI passes the exact git
+# SHA it built; the rollout's capability preflight reads it back from the image
+# (`python -m nlw.ops.rollout.image_info`) and from the OCI revision label and
+# refuses any image whose SHA differs from the release manifest.
+ARG NLW_GIT_SHA=unknown
+ENV NLW_GIT_SHA=${NLW_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NLW_GIT_SHA}
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \

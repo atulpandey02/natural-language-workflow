@@ -207,3 +207,32 @@ def check_readiness_body(body: str) -> None:
         raise GateError("API readiness is not 'ready'")
     if '"signed_context":"ok"' not in body.replace(" ", ""):
         raise GateError("API readiness does not report signed_context: ok")
+
+
+def check_image_info(info: dict[str, object], release: ReleaseSpec) -> None:
+    """The backend image must BE the release: same git SHA, the target migration
+    head, every migration between expected+1 and target present, and the M12A
+    modules importable (an older image fails here, before any mutation)."""
+    if info.get("git_sha") != release.release_sha:
+        raise GateError(
+            f"image reports git sha {str(info.get('git_sha'))[:12]!r}, release is "
+            f"{release.release_sha[:12]} — not the release artifact"
+        )
+    if info.get("alembic_head") != release.target_revision:
+        raise GateError(
+            f"image migration head {info.get('alembic_head')!r} != target "
+            f"{release.target_revision!r}"
+        )
+    migrations = info.get("migrations")
+    names = [str(m) for m in migrations] if isinstance(migrations, list) else []
+    lo = int(release.expected_current_revision[:4]) + 1
+    hi = int(release.target_revision[:4])
+    have = {n[:4] for n in names}
+    missing = [f"{n:04d}" for n in range(lo, hi + 1) if f"{n:04d}" not in have]
+    if missing:
+        raise GateError(f"image lacks migration file(s) {missing}")
+    modules = info.get("modules")
+    mods = modules if isinstance(modules, dict) else {}
+    absent = [m for m, ok in mods.items() if not ok] or (["<none reported>"] if not mods else [])
+    if absent:
+        raise GateError(f"image lacks required module(s): {absent}")
