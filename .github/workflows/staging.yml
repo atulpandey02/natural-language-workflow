@@ -7,8 +7,9 @@
 # one-off before switching traffic; image rollback NEVER auto-downgrades the DB.
 #
 # NOTE: third-party actions here should be pinned to immutable commit SHAs before
-# go-live. Server deploy steps are placeholders — wire them to your VPS (SSH +
-# `docker compose -f docker-compose.prod.yml up -d` with NLW_IMAGE=<digest>).
+# go-live. The "staging" and "production" jobs below are PLACEHOLDER SIMULATIONS:
+# CI holds no VPS credentials and contacts no host. Real deployments are
+# operator-driven (`python -m nlw.ops.rollout`) and produce separate evidence.
 
 name: Delivery
 
@@ -69,32 +70,39 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL
 
-  deploy-staging:
-    name: Deploy digest to staging + smoke test
+  # NOT A DEPLOYMENT. This job never connects to, mutates, or verifies the real
+  # staging VPS: it only prints the commands an operator would run. The real
+  # rollout is driven from an operator machine with `python -m nlw.ops.rollout`
+  # (see docs/runbooks/staging-signed-context-rollout.md) and produces its own
+  # evidence. A green run here must never be cited as "deployed to staging".
+  ci-staging-simulation:
+    name: CI staging SIMULATION (prints commands; NOT the real VPS)
     needs: build-push
     runs-on: ubuntu-latest
     environment: staging
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Deploy the exact digest to staging
+      - name: Print the operator rollout commands for this digest (no host contacted)
         env:
           NLW_IMAGE: ${{ needs.build-push.outputs.image }}@${{ needs.build-push.outputs.digest }}
           NLW_WEB_IMAGE: ${{ needs.build-push.outputs.web_image }}@${{ needs.build-push.outputs.web_digest }}
         run: |
-          echo "Deploy $NLW_IMAGE to staging."
-          echo "Run migrations first (dedicated migrate service; owner cred not in runtime services):"
-          echo "  docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.staging.yml --profile migration run --rm migrate"
-          echo "Then: docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.staging.yml up -d"
-          # TODO: wire to the staging host (SSH / compose). Placeholder for M9.
-      - name: Smoke test staging
+          echo "SIMULATION ONLY — no SSH, no VPS, no deployment performed by CI."
+          echo "Release candidate digests for deploy/staging/release.json:"
+          echo "  backend: $NLW_IMAGE"
+          echo "  web:     $NLW_WEB_IMAGE"
+          echo "Operator rollout (read-only by default):"
+          echo "  uv run python -m nlw.ops.rollout preflight"
+          echo "Mutating phases require the exact authorization phrase, an escrow attestation,"
+          echo "and a verified off-host backup — see docs/runbooks/staging-signed-context-rollout.md."
+      - name: Simulated smoke (placeholder; not evidence)
         run: |
-          echo "curl -fsS https://staging.example.com/health"
-          echo "curl -fsS https://staging.example.com/health/ready"
-          # TODO: real smoke checks against the staging endpoint.
+          echo "No staging endpoint is contacted by CI."
+          echo "Real evidence comes from scripts/ops/verify-staging-deployment.sh on an operator machine."
 
   promote-production:
-    name: Promote the SAME digest to production (manual approval)
-    needs: [build-push, deploy-staging]
+    name: Promote the SAME digest to production (manual approval; placeholder, no host contacted)
+    needs: [build-push, ci-staging-simulation]
     runs-on: ubuntu-latest
     environment: production # requires a manual reviewer approval in GitHub
     steps:
