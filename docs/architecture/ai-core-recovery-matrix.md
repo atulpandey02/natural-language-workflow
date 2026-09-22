@@ -10,6 +10,12 @@ what to enqueue from SQL). Completed (`SUCCESS`) steps are never re-run
 (step claim, step terminal, retry scheduling, approval resolution, run terminal),
 each committed under `SELECT … FOR UPDATE` on the run row.
 
+All ten boundaries are also demonstrated as one consolidated, executed
+evidence suite in `tests/integration/test_recovery_boundaries.py` (M12B-A
+addendum, Part 3), which asserts the durable before/after state, whether the
+tool was invoked/re-invoked, the attempt count, and the final status per
+scenario.
+
 ## Failure-boundary matrix
 
 Behavior categories: **retry** (re-attempt), **resume** (continue from persisted
