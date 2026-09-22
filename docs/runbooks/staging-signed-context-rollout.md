@@ -12,38 +12,74 @@ re-verifies the target instance, the release manifest, the current migration
 revision and every earlier gate recorded on that host. **No database mutation
 of any kind happens before an off-host backup has been taken and verified.**
 
-## Release authority: the CI-generated manifest (never a committed file)
+## Release authority: schema + images + provenance (ADR-025)
 
-Nothing in git is deployable release authority. The `Delivery` workflow
-(`.github/workflows/staging.yml`) builds and pushes both images by digest for
-the exact commit, then **generates** the manifest from those digests with
-`python -m nlw.ops.release_manifest generate --generated-by ci`, validates it,
-and uploads it as the run artifact `release-manifest-<sha>` (never committed).
-It carries only identity: format version, `kind: release`, `deployable: true`,
-git SHA, backend/web manifest digests, expected current + target migration
-revisions, instance id / region / compose project / hostname, key ids,
-creation time, the CI workflow/run id/run URL, an optional attestation
-reference — and no secrets (the workflow greps for credential-like keys).
+Nothing in git is deployable release authority, and **structural validity is
+not authority either**: a JSON written by hand with `kind: release`,
+`deployable: true`, `generated_by: ci`, a real SHA and real digests passes the
+schema check, and can pass the image check when it names real images. Three
+independent checks are therefore all mandatory before any host is contacted:
 
-| file | role |
-|---|---|
-| `release-manifest-<sha>` (GitHub Actions artifact) | **the only deployable authority**; download it for the exact merged commit you intend to deploy — a PR-build digest is never the merged-main digest |
-| `deploy/staging/release.example.json` | committed **template only**: `kind: example`, `deployable: false`, zero SHA/digests; every loader rejects it |
-| `deploy/staging/target.env` | host identity + expected current revision + key ids (the generator's input; reviewed in git) |
+| check | tool | what it prevents |
+|---|---|---|
+| **Schema validity** | `python -m nlw.ops.release_manifest validate` | malformed, non-deployable, secret-bearing or inconsistent manifests (the committed `deploy/staging/release.example.json` is rejected) |
+| **Image capability / identity** | rollout `verify-release` | incompatible or mismatched images: revision labels, `image_info` SHA, migrations 0011–0016, head `0016`, required commands (the old `1eebf2e` image is refused) |
+| **Provenance / authenticity** | `python -m nlw.ops.release_provenance verify` (run automatically by every rollout invocation) | any manifest not produced by the trusted Delivery workflow for the exact merged-main commit; substituted digests; edited bytes; PR/fork/non-main/other-workflow/other-repository/other-commit provenance; failed or artifact-less runs |
 
-`load_release` refuses: any `kind` other than `release`, `deployable != true`,
-mutable tags, short SHAs, a manifest whose `generated_by` is `local-rehearsal`
-unless `--local` is given (a rehearsal manifest is never authority for a real
-target), and any credential-like key. **A locally edited JSON file cannot
-silently become release authority**: without `--local` the loader only accepts
-`generated_by: ci` with the run identity present, and `verify-release` then
-proves the pulled images are that commit.
+The Delivery workflow (`.github/workflows/staging.yml`; trigger: `push` to
+`main` **only**) builds both images by digest, generates the manifest from
+those digests, **attests** the manifest bytes and both image digests
+(GitHub artifact attestations: Sigstore keyless signing with the workflow's
+OIDC identity, SLSA v1 provenance), and uploads `release-manifest-<sha>`. A
+separate proof job downloads it and runs the same verifier the operator runs.
 
-```
-gh run download <run-id> -n release-manifest-<sha>     # or the Actions UI
-uv run python -m nlw.ops.release_manifest validate release-manifest.json
-uv run python -m nlw.ops.rollout preflight --release release-manifest.json
-```
+Provenance policy enforced by the verifier (code, not only CLI flags):
+repository `atulpandey02/natural-language-workflow`; signer workflow
+`.github/workflows/staging.yml@refs/heads/main`; ref `refs/heads/main`; event
+`push`; GitHub-hosted runner; OIDC issuer `token.actions.githubusercontent.com`;
+source commit == `release_sha`; attested run == the run named in the manifest,
+for the manifest **and** both images; that run completed successfully and
+uploaded `release-manifest-<sha>`; subject digest == sha256 of the manifest
+bytes / == each image digest.
+
+**Trust boundary.** Verification needs network access to GitHub (attestation
+API, Sigstore trust root, Actions API) and an authenticated `gh` with read
+access to the repository and its packages; it is not offline-verifiable, and
+without it the rollout fails closed. GitHub itself and the repository's
+administration (the trusted workflow file, `main` branch protection, Actions
+settings) are inside the trust boundary: a compromise there is outside what
+this check can detect. Rehearsals use a separate unsigned fixture mechanism
+(`--local --provenance-fixture`) that carries a different identity and never
+satisfies the staging/production policy.
+
+### Operator artifact-selection flow (exact)
+
+1. Identify the **successful Delivery run for the merged-main commit** you
+   intend to deploy (`gh run list --workflow Delivery --branch main`; never a
+   PR run, never a re-run of a different commit). Note its run id.
+2. Download the artifact for that run:
+   `gh run download <run-id> -n release-manifest-<full-sha>`.
+3. Provenance is fetched by the verifier from GitHub/Sigstore; nothing else to
+   download. Confirm `gh auth status` on the operator machine.
+4. Verify provenance against the policy and write the receipt:
+   `uv run python -m nlw.ops.release_provenance verify release-manifest.json --receipt receipt.json`
+   (exit 3 = not release authority; stop).
+5. The same command verified the **manifest digest** (subject sha256 == the
+   downloaded bytes) — the receipt records it; record the sha256 in the change
+   log.
+6. Image identities and capabilities are verified on the host by
+   `verify-release` (labels, `image_info`, migrations, commands) — and their
+   attestations were already checked in step 4 for the same commit and run.
+7. Only now run the read-only preflight:
+   `uv run python -m nlw.ops.rollout preflight --release release-manifest.json`
+   (every rollout invocation repeats step 4 before touching the target).
+8. `verify-release` stores the verified manifest bytes and the receipt under
+   `/opt/nlw/rollout/<sha>.manifest.json` / `<sha>.receipt.json` (the evidence
+   directory, outside every checkout).
+9. Rollout state is bound to the **manifest digest**, not the file name: if the
+   manifest file is replaced later (even by a whitespace change), every phase
+   stops with "recorded for a different release manifest" and the earlier
+   evidence is invalid.
 
 ## Identity model
 
@@ -101,8 +137,9 @@ uv run python -m nlw.ops.rollout go-check              --release M   # READ-ONLY
 
 | phase | mutates | gates re-checked | what it does |
 |---|---|---|---|
+| *(every invocation)* | no | manifest schema; **provenance** (GitHub attestation policy; fixture only under `--local`) | stops before any host contact when the manifest is not release authority |
 | `preflight` | no | manifest schema/kind/deployability; instance id + region; hostname ↔ public IPv4; active `.env.prod` hostname; roles model (M11 set acceptable); drain counters; current revision = expected | prints a sanitized report (manifest sha256, active checkout SHA); run it as often as you like |
-| `verify-release` | host image cache | authorization; identity | `docker pull` both digests; `org.opencontainers.image.revision` label == release SHA on both; runs `nlw.ops.rollout.image_info` in the backend image and checks reported git SHA, migrations 0011–0016 present, Alembic head == target; runs `--help` of `nlw.ops.rollout`, `nlw.ops.roles`, `nlw.ctxkeys prepare/fingerprint/verify-files`, `nlw.backup evidence` inside the exact image. An older image (e.g. `1eebf2e`, no label, no tooling) is refused |
+| `verify-release` | host image cache, evidence dir | authorization; provenance receipt for this exact manifest digest; identity | `docker pull` both digests; `org.opencontainers.image.revision` label == release SHA on both; runs `nlw.ops.rollout.image_info` in the backend image and checks reported git SHA, migrations 0011–0016 present, Alembic head == target; runs `--help` of `nlw.ops.rollout`, `nlw.ops.roles`, `nlw.ctxkeys prepare/fingerprint/verify-files`, `nlw.backup evidence` inside the exact image. An older image (e.g. `1eebf2e`, no label, no tooling) is refused |
 | `prepare-keys` | host files | authorization; identity | generates three independent 32-byte keys **on the host** through the release image running as root (`nlw.ctxkeys prepare`): dir `0700` root, files `0400` uid 10001, never overwrites, prints fingerprints only |
 | `verify-escrow` | state only | authorization; **escrow phrase**; attestation fingerprints == host fingerprints; release SHA/env; ≤ 30 days old | the operator must have escrowed the files first — see the escrow section of [signed-context-keys](signed-context-keys.md) |
 | `stage-release` | `releases/<sha>` only | authorization; verify-release + verify-escrow done; identity | clone the active checkout into `releases/<sha>`, `git checkout --detach <release_sha>` (clean), write the staged `.env.prod` (active copy with only digests/key ids/key dir rewritten; temp-file rewrite, 0600), render `config`, build the backup image from the pinned digest; verifies the active `.env.prod` hash is unchanged afterwards |
@@ -167,8 +204,13 @@ database and stops without one regardless of what the operator types.
 flow against a disposable local stack: throwaway registry; an OLD backend
 image built from the M11 pin and NEW images built with the release SHA; an ops
 root laid out like `/opt/nlw`; manifests produced by the same generator
-(`--generated-by local-rehearsal`, accepted only with `--local`); proofs that
-the committed example is rejected, that a manifest naming the old image fails
+(`--generated-by local-rehearsal`, accepted only with `--local`) with unsigned
+fixture provenance (`nlw.ops.release_provenance fixture`; no GitHub trust claim);
+proofs that the committed example is rejected, that a hand-written
+`generated_by: ci` manifest passes schema validation but is not authority,
+that an unattested manifest, a fixture outside `--local` and a manifest edited
+after attestation are rejected, that a replaced manifest invalidates the
+recorded state, that a manifest naming the old image fails
 `verify-release`, that two forced backup failures (no evidence; broken
 repository credential) leave roles / schema / active config / old runtime
 untouched and `drain`/`prepare-roles`/`migrate` refused; then the real P2
@@ -180,7 +222,7 @@ downgrade proof, and cleanup of keys, manifests, volumes and the registry.
 
 ## Evidence to keep
 
-`preflight` output, the manifest artifact name + sha256, the rollout state
-file, `scripts/ops/verify-staging-deployment.sh` output after `reopen`, the
+`preflight` output, the manifest artifact name + sha256, the provenance
+receipt, the rollout state file, `scripts/ops/verify-staging-deployment.sh` output after `reopen`, the
 `go-check` result, and the attestation file (fingerprints only). Record
 digests and the instance id, never credentials.

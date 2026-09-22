@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from typing import Any
 import pytest
 
 from nlw.ops import release_manifest as rm
+from nlw.ops.release_provenance import ProvenanceReceipt
 from nlw.ops.rollout.gates import AUTHORIZATION_PHRASE, ESCROW_PHRASE, GateError
 from nlw.ops.rollout.phases import Operator, Rollout, RolloutStop
 from nlw.ops.rollout.remote import CommandResult, TargetConfig
@@ -27,30 +29,34 @@ SHA = "1eebf2ef19c0286c83bfe8768c908bfd2f40178d"
 OLD_SHA = "5151a2cc54cfb63b276bd3b30cf0e683263525ac"
 D = "sha256:" + "a" * 64
 W = "sha256:" + "b" * 64
-REL = rm.parse_manifest(
-    {
-        "format_version": 2,
-        "kind": "release",
-        "deployable": True,
-        "generated_by": "ci",
-        "created_at": "2026-09-22T10:00:00+00:00",
-        "release_sha": SHA,
-        "backend_image": f"ghcr.io/o/r@{D}",
-        "web_image": f"ghcr.io/o/r/web@{W}",
-        "expected_current_revision": "0010_readiness_schema_grant",
-        "target_revision": "0016_signed_database_context",
-        "environment": "staging",
-        "instance_id": "i-0d1e65cdc9401dbb9",
-        "region": "us-east-1",
-        "compose_project": "app",
-        "public_hostname": "32-197-83-193.sslip.io",
-        "key_ids": {"api": "stg-api-1", "worker": "stg-worker-1", "scheduler": "stg-sched-1"},
-        "ci": {
-            "workflow": "Delivery",
-            "run_id": "1",
-            "run_url": "https://github.com/o/r/actions/runs/1",
-        },
-    }
+REL_DOC: dict[str, Any] = {
+    "format_version": 2,
+    "kind": "release",
+    "deployable": True,
+    "generated_by": "ci",
+    "created_at": "2026-09-22T10:00:00+00:00",
+    "release_sha": SHA,
+    "backend_image": f"ghcr.io/o/r@{D}",
+    "web_image": f"ghcr.io/o/r/web@{W}",
+    "expected_current_revision": "0010_readiness_schema_grant",
+    "target_revision": "0016_signed_database_context",
+    "environment": "staging",
+    "instance_id": "i-0d1e65cdc9401dbb9",
+    "region": "us-east-1",
+    "compose_project": "app",
+    "public_hostname": "32-197-83-193.sslip.io",
+    "key_ids": {"api": "stg-api-1", "worker": "stg-worker-1", "scheduler": "stg-sched-1"},
+    "ci": {
+        "workflow": "Delivery",
+        "run_id": "1",
+        "run_url": "https://github.com/o/r/actions/runs/1",
+    },
+}
+REL_RAW = json.dumps(REL_DOC, indent=2, sort_keys=True) + "\n"
+REL = replace(
+    rm.parse_manifest(REL_DOC, raw_bytes=REL_RAW.encode()),
+    raw=REL_RAW,
+    source_path="release-manifest.json",
 )
 TGT = TargetConfig(
     instance_id=REL.instance_id,
@@ -146,6 +152,7 @@ class FakeRemote:
         self.table = table
         self.commands: list[str] = []
         self.state_doc: dict[str, Any] = state or {"phases": {}, "evidence": {}}
+        self.files: dict[str, str] = {}  # other evidence files written under rollout/
 
     def describe(self) -> str:
         return "fake"
@@ -154,7 +161,12 @@ class FakeRemote:
         self.commands.append(command)
         if "/opt/nlw/rollout/" in command and "cat >" in command:
             assert stdin is not None
-            self.state_doc = json.loads(stdin)
+            m = re.search(r"cat > '([^']+)\.tmp'", command)
+            assert m is not None
+            if m.group(1).endswith(f"/{SHA}.json"):
+                self.state_doc = json.loads(stdin)
+            else:
+                self.files[m.group(1)] = stdin
             return CommandResult(0, "", "")
         if command.startswith("cat '/opt/nlw/rollout/"):
             if "alert-delivery" in command:
@@ -198,7 +210,27 @@ def _done(*phases: str) -> dict[str, Any]:
     return {"phases": {p: {} for p in phases}, "evidence": {}}
 
 
-def _rollout(remote: FakeRemote, **op: object) -> Rollout:
+RECEIPT = ProvenanceReceipt(
+    manifest_sha256=REL.sha256,
+    release_sha=SHA,
+    backend_digest=REL.backend_digest,
+    web_digest=REL.web_digest,
+    repository="atulpandey02/natural-language-workflow",
+    workflow=".github/workflows/staging.yml",
+    ref="refs/heads/main",
+    event="push",
+    run_id="1234567890",
+    artifact_name=f"release-manifest-{SHA}",
+    verifier="gh attestation verify",
+    verified_at=NOW.isoformat(),
+    fixture=False,
+    subjects={"manifest": REL.sha256},
+)
+
+
+def _rollout(
+    remote: FakeRemote, receipt: ProvenanceReceipt | None = RECEIPT, **op: object
+) -> Rollout:
     return Rollout(
         release=REL,
         target=TGT,
@@ -206,6 +238,7 @@ def _rollout(remote: FakeRemote, **op: object) -> Rollout:
         operator=Operator(**op),  # type: ignore[arg-type]
         log=lambda _m: None,
         now=lambda: NOW,
+        receipt=receipt,
     )
 
 
@@ -652,3 +685,47 @@ def test_go_check_passes_only_with_real_receiver_credentials_and_confirmed_deliv
     assert r.reopen() == ["alert delivery unverified"]  # credentials present, no confirmed test yet
     with pytest.raises(GateError, match="no verified controlled test"):
         r.go_check()
+
+
+# --- provenance receipt + manifest-digest binding (ADR-025) ---------------------------
+def test_verify_release_refuses_without_a_provenance_receipt_for_this_manifest() -> None:
+    fake = FakeRemote(_base_table())
+    with pytest.raises(GateError, match="provenance was not verified"):
+        _rollout(fake, receipt=None, authorization=AUTHORIZATION_PHRASE).verify_release()
+    other = replace(RECEIPT, manifest_sha256="0" * 64)
+    with pytest.raises(GateError, match="provenance was not verified"):
+        _rollout(fake, receipt=other, authorization=AUTHORIZATION_PHRASE).verify_release()
+    assert not any("docker pull" in c for c in fake.commands)  # nothing was staged
+
+
+def test_verify_release_stores_manifest_and_receipt_as_evidence() -> None:
+    fake = FakeRemote(_pre_backup_table())
+    _rollout(fake, authorization=AUTHORIZATION_PHRASE).verify_release()
+    assert fake.files[f"/opt/nlw/rollout/{SHA}.manifest.json"] == REL_RAW
+    receipt = json.loads(fake.files[f"/opt/nlw/rollout/{SHA}.receipt.json"])
+    assert receipt["manifest_sha256"] == REL.sha256 and receipt["fixture"] is False
+    saved = fake.state_doc
+    assert saved["manifest_sha256"] == REL.sha256
+    assert saved["evidence"]["verify-release"]["provenance"]["run_id"] == "1234567890"
+    assert "://" not in json.dumps(saved)
+
+
+def test_state_recorded_for_another_manifest_invalidates_every_phase() -> None:
+    """Replacing the manifest file after phases ran (same release SHA, different
+    bytes) must not let the earlier evidence carry over."""
+    stale = _done("verify-backup")
+    stale["manifest_sha256"] = "1" * 64  # recorded for different bytes
+    fake = FakeRemote(_base_table(), state=stale)
+    r = _rollout(
+        fake,
+        authorization=AUTHORIZATION_PHRASE,
+        escrow_confirmation=ESCROW_PHRASE,
+        attestation_path=Path("/nonexistent/attestation.json"),
+    )
+    with pytest.raises(StateError, match="different release manifest"):
+        r.preflight()
+    for call in _all_phase_calls(r).values():
+        with pytest.raises(StateError, match="different release manifest"):
+            call()
+    assert not any("ctxkeys prepare" in c for c in fake.commands)  # no host files either
+    assert not any(DB_MUTATION.search(c) or ACTIVE_MUTATION.search(c) for c in fake.commands)

@@ -61,9 +61,13 @@ CI "staging simulation" job, which contacts no host). Decision = GO only when
 all boxes are ticked.
 
 - [ ] Release manifest artifact `release-manifest-<sha>` downloaded from the
-      `Delivery` run of the **merged main** commit (never a PR build, never a
-      locally edited file; `deploy/staging/release.example.json` is a rejected
-      template); `nlw.ops.release_manifest validate` passes; sha256 recorded.
+      successful `Delivery` run of the **merged main** commit (never a PR build;
+      `deploy/staging/release.example.json` is a rejected template);
+      `nlw.ops.release_manifest validate` passes (schema) **and**
+      `nlw.ops.release_provenance verify` passes (GitHub attestation: this
+      repository, `staging.yml@refs/heads/main`, `push`, exact commit, manifest
+      bytes + both image digests, successful run + artifact); receipt and sha256
+      recorded. Schema validity alone is never authority (ADR-025).
 - [ ] `python -m nlw.ops.rollout preflight --release <manifest>` clean against
       the intended instance (`i-0d1e65cdc9401dbb9`): revision
       `0010_readiness_schema_grant`, M11 roles, zero non-terminal work.

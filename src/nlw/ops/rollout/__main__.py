@@ -22,11 +22,12 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
+from nlw.ops.release_provenance import ProvenanceError, verify_manifest_file
 from nlw.ops.rollout.attestation import AttestationError
 from nlw.ops.rollout.backup_evidence import BackupEvidenceError
 from nlw.ops.rollout.gates import GateError
 from nlw.ops.rollout.phases import Operator, Rollout, RolloutStop
-from nlw.ops.rollout.release import ReleaseSpecError, load_release
+from nlw.ops.rollout.release import ReleaseSpecError
 from nlw.ops.rollout.remote import (
     LocalRemote,
     SshRemote,
@@ -62,6 +63,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="rehearsal only: run the phases with bash on THIS machine instead of SSH",
     )
     p.add_argument(
+        "--provenance-fixture",
+        type=Path,
+        default=None,
+        help="rehearsal only (requires --local): the unsigned fixture provenance envelope",
+    )
+    p.add_argument(
         "--allow-fixture-repository",
         action="store_true",
         help="rehearsal only (requires --local): accept the disposable MinIO backup fixture",
@@ -71,10 +78,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.provenance_fixture is not None and not args.local:
+        print(
+            "[rollout] --provenance-fixture is rehearsal-only (requires --local)", file=sys.stderr
+        )
+        return 2
     try:
-        release = load_release(args.release, local=bool(args.local))
+        # Schema, then PROVENANCE (GitHub attestation policy; fixture only under
+        # --local) — before the target config is even read: no host is contacted
+        # for a manifest that is not verified release authority.
+        release, receipt = verify_manifest_file(
+            args.release, local=bool(args.local), fixture=args.provenance_fixture
+        )
+        _log(
+            f"provenance verified by {receipt.verifier}: {receipt.repository} "
+            f"{receipt.workflow}@{receipt.ref} run {receipt.run_id} "
+            f"(manifest sha256 {receipt.manifest_sha256[:12]}"
+            f"{', REHEARSAL FIXTURE — not GitHub provenance' if receipt.fixture else ''})"
+        )
         target: TargetConfig = load_target(args.target, ssh_key=args.ssh_key)
-    except (ReleaseSpecError, TargetConfigError) as exc:
+    except (ReleaseSpecError, ProvenanceError) as exc:
+        print(f"[rollout] release provenance REJECTED: {exc}", file=sys.stderr)
+        return 2
+    except TargetConfigError as exc:
         print(f"[rollout] configuration error: {exc}", file=sys.stderr)
         return 2
     if args.allow_fixture_repository and not args.local:
@@ -91,7 +117,9 @@ def main(argv: list[str] | None = None) -> int:
         backup_max_age=timedelta(hours=args.backup_max_age_hours),
         allow_fixture_repository=bool(args.allow_fixture_repository and args.local),
     )
-    r = Rollout(release=release, target=target, remote=remote, operator=op, log=_log)
+    r = Rollout(
+        release=release, target=target, remote=remote, operator=op, log=_log, receipt=receipt
+    )
     keys_dir = args.keys_dir
     try:
         if args.phase == "preflight":

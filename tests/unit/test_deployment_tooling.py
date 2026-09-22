@@ -199,8 +199,8 @@ def test_ci_staging_job_is_labelled_simulation_and_contacts_no_host() -> None:
     wf = _load(".github/workflows/staging.yml")
     names = {j["name"] for j in wf["jobs"].values()}
     assert not any(re.search(r"^Deploy digest to staging", n) for n in names), names
-    sim = wf["jobs"]["ci-staging-simulation"]
-    assert "SIMULATION" in sim["name"] and "NOT the real VPS" in sim["name"]
+    sim = wf["jobs"]["release-authority-proof"]
+    assert "PROOF" in sim["name"] and "NOT the real VPS" in sim["name"]
     text = (ROOT / ".github/workflows/staging.yml").read_text()
     for needle in ("ssh ", "ssh-", "SSH_KEY", "nlw-staging-key", "nlwops@", "32.197.83.193"):
         assert needle not in text, needle

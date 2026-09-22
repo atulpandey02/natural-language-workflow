@@ -44,6 +44,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from nlw.ops.release_provenance import ProvenanceReceipt
 from nlw.ops.rollout import alerting, gates, keyfiles, state
 from nlw.ops.rollout.attestation import (
     AttestationError,
@@ -108,6 +109,7 @@ class Rollout:
         operator: Operator,
         log: Log,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        receipt: ProvenanceReceipt | None = None,
     ) -> None:
         self.release = release
         self.target = target
@@ -115,6 +117,10 @@ class Rollout:
         self.op = operator
         self.log = log
         self.now = now
+        # The provenance receipt for THIS manifest (schema + image checks are not
+        # authority). The CLI always verifies before constructing the rollout; the
+        # receipt is stored on the host at verify-release as evidence.
+        self.receipt = receipt
         self.staged = target.release_dir(release.release_sha)
         self.dc = target.dc  # ACTIVE checkout: exec / ps / stop only
         self.dc_staged = target.dc_in(self.staged)
@@ -130,7 +136,9 @@ class Rollout:
         return self._run(f"{self.dc} exec -T postgres psql -U nlw -d nlw -tAc {shlex.quote(sql)}")
 
     def _state(self) -> dict[str, Any]:
-        return state.load_state(self.remote, self.target, self.release.release_sha)
+        doc = state.load_state(self.remote, self.target, self.release.release_sha)
+        state.bind_manifest(doc, self.release.sha256)
+        return doc
 
     def _save(self, doc: dict[str, Any]) -> None:
         state.save_state(self.remote, self.target, self.release.release_sha, doc)
@@ -281,6 +289,8 @@ class Rollout:
         (backend) expose every command the rollout needs plus the target migration
         head. Pulling is host staging only — nothing running changes."""
         self._require_mutation_authority()
+        if self.receipt is None or self.receipt.manifest_sha256 != self.release.sha256:
+            raise GateError("release provenance was not verified for this manifest — STOP")
         self.check_identity()
         doc = self._state()
         for image in (self.release.backend_image, self.release.web_image):
@@ -310,6 +320,19 @@ class Rollout:
             )
             if not res.ok:
                 raise GateError(f"backend image lacks required command: python {' '.join(args)}")
+        # Evidence directory (outside every checkout): the verified manifest bytes
+        # and the provenance receipt, next to the state file.
+        sha = self.release.release_sha
+        for name, payload in (
+            (f"{sha}.manifest.json", self.release.raw),
+            (f"{sha}.receipt.json", json.dumps(self.receipt.summary(), indent=2, sort_keys=True)),
+        ):
+            path = f"{self.target.state_dir}/{name}"
+            self._run(
+                f"mkdir -p '{self.target.state_dir}' && umask 077 && "
+                f"cat > '{path}.tmp' && mv '{path}.tmp' '{path}'",
+                stdin=payload,
+            )
         record = {
             "backend_digest": self.release.backend_digest,
             "web_digest": self.release.web_digest,
@@ -317,6 +340,7 @@ class Rollout:
             "alembic_head": info.get("alembic_head"),
             "migrations": info.get("migrations"),
             "commands_verified": [" ".join(a) for a in REQUIRED_COMMANDS],
+            "provenance": self.receipt.summary(),
         }
         state.mark_phase(doc, "verify-release", **record)
         self._save(doc)

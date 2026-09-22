@@ -76,6 +76,22 @@ def save_state(remote: Remote, target: TargetConfig, release_sha: str, doc: dict
         raise StateError("could not write rollout state")
 
 
+def bind_manifest(doc: dict[str, Any], manifest_sha256: str) -> None:
+    """Rollout state belongs to ONE manifest (by content digest, never by file
+    name). State recorded for a different manifest is invalid for every later
+    phase; it is never silently reused or overwritten."""
+    if not manifest_sha256:
+        raise StateError("manifest digest unknown; cannot bind rollout state")
+    bound = doc.get("manifest_sha256")
+    if bound and bound != manifest_sha256:
+        raise StateError(
+            "rollout state on this host was recorded for a different release manifest "
+            f"(digest {str(bound)[:12]}… != {manifest_sha256[:12]}…): all earlier phase "
+            "evidence is invalid for this manifest — STOP"
+        )
+    doc["manifest_sha256"] = manifest_sha256
+
+
 def mark_phase(doc: dict[str, Any], phase: str, **evidence: Any) -> None:
     if phase not in PHASES:
         raise StateError(f"unknown phase {phase}")

@@ -12,10 +12,17 @@
 #   2  an ops root laid out like /opt/nlw: `app` = the ACTIVE M11 checkout with
 #      its .env.prod; `.env.backup`; releases/ + current + rollout/ do not exist yet;
 #   3  release manifests produced by the SAME generator CI uses
-#      (`nlw.ops.release_manifest generate --generated-by local-rehearsal`):
-#      the committed example is REJECTED; a local-rehearsal manifest is NOT
-#      authority without --local; a manifest pointing at the OLD image is REJECTED
-#      by verify-release (no label / no tooling) — the current image passes;
+#      (`nlw.ops.release_manifest generate --generated-by local-rehearsal`) with
+#      FIXTURE provenance (`nlw.ops.release_provenance fixture`: an UNSIGNED
+#      envelope with a non-GitHub identity, accepted only under --local; it makes
+#      NO GitHub trust claim). Proofs: the committed example is REJECTED; a
+#      hand-written `generated_by: ci` manifest passes SCHEMA validation but is
+#      rejected as release authority (no provenance); an unattested rehearsal
+#      manifest is rejected; the fixture is rejected without --local; a manifest
+#      modified after its fixture was issued is rejected; a manifest pointing at
+#      the OLD image is REJECTED by verify-release (no label / no tooling) — the
+#      current image passes; replacing the manifest after phases ran invalidates
+#      the recorded state (digest binding);
 #   4  a Postgres bootstrapped by the M11 role script (5 roles) and migrated to
 #      0010 by the M11 image; representative disposable data; OLD runtimes serving;
 #   5  rollout phases (--local): preflight -> verify-release -> prepare-keys ->
@@ -50,10 +57,11 @@ chmod 700 "$TMP"
 OPS="$TMP/ops"; APP="$OPS/app"; OLD="$TMP/old"; SRC="$TMP/src"
 KEYS_PARENT="$TMP/keys"; KEYS="$KEYS_PARENT/ctx-keys"
 MANIFEST="$TMP/release-manifest.json"; OLD_IMAGE_MANIFEST="$TMP/release-old-image.json"
+PROV="$TMP/provenance-fixture.json"; OLD_IMAGE_PROV="$TMP/provenance-old-image.json"
 REG="127.0.0.1:5000"; REGNAME="${PROJ}-registry"
 AUTH="AUTHORIZE_M12A_SIGNED_CONTEXT_STAGING_DEPLOYMENT"
 ESC="SIGNED_CONTEXT_KEYS_ESCROWED_AND_RECOVERY_TESTED"
-ROLLOUT=(uv run python -m nlw.ops.rollout --local --release "$MANIFEST" --target "$TMP/target.env" --keys-dir "$KEYS")
+ROLLOUT=(uv run python -m nlw.ops.rollout --local --release "$MANIFEST" --provenance-fixture "$PROV" --target "$TMP/target.env" --keys-dir "$KEYS")
 
 log() { printf '\n\033[1;34m=== %s ===\033[0m\n' "$*"; }
 ok()  { printf '  \033[1;32m[ok]\033[0m %s\n' "$*"; }
@@ -195,10 +203,37 @@ grep -q "local-rehearsal" <<<"$LAST_OUT" || die "local manifest rejected for the
 "${GEN[@]}" validate --local "$MANIFEST" | grep -q "\"release_sha\": \"$NEW_SHA\"" || die "manifest does not carry the release sha"
 ! grep -Eiq 'password|secret|token|aws_' "$MANIFEST" || die "manifest carries a secret-like key"
 ok "local-rehearsal manifest validates ONLY with --local (never authority for a real target); no secrets inside"
-must_fail "rollout accepted the example" uv run python -m nlw.ops.rollout --local --release deploy/staging/release.example.json --target "$TMP/target.env" preflight
+must_fail "rollout accepted the example" uv run python -m nlw.ops.rollout --local --release deploy/staging/release.example.json --provenance-fixture "$PROV" --target "$TMP/target.env" preflight
 must_fail "rollout accepted a local manifest for a non-local target" uv run python -m nlw.ops.rollout --release "$MANIFEST" --target "$TMP/target.env" preflight
 grep -q "local-rehearsal" <<<"$LAST_OUT" || die "non-local rollout rejected for the wrong reason: $LAST_OUT"
 ok "rollout refuses the example, and refuses a local-rehearsal manifest without --local (before touching any target)"
+# --- PROVENANCE (ADR-025): schema validity is not authority -----------------------
+PV=(uv run python -m nlw.ops.release_provenance)
+# A hand-written `generated_by: ci` manifest: full SHA, real digests, expected
+# identity, a plausible ci block. SCHEMA-valid — and nothing more.
+python3 - "$MANIFEST" "$TMP/hand-written-ci.json" <<'PYEOF2'
+import json, sys
+d = json.load(open(sys.argv[1])); d["generated_by"] = "ci"
+d["ci"] = {"workflow": "Delivery", "run_id": "424242", "run_url": "https://github.com/atulpandey02/natural-language-workflow/actions/runs/424242", "actor": "someone"}
+json.dump(d, open(sys.argv[2], "w"), indent=2, sort_keys=True)
+PYEOF2
+"${GEN[@]}" validate "$TMP/hand-written-ci.json" >/dev/null || die "hand-written ci manifest should pass SCHEMA validation (that is the point)"
+must_fail "hand-written ci manifest accepted as authority (--local)" uv run python -m nlw.ops.rollout --local --release "$TMP/hand-written-ci.json" --provenance-fixture "$PROV" --target "$TMP/target.env" preflight
+must_fail "hand-written ci manifest accepted as authority (real target path)" uv run python -m nlw.ops.rollout --release "$TMP/hand-written-ci.json" --target "$TMP/target.env" preflight
+grep -q "provenance REJECTED" <<<"$LAST_OUT" || die "hand-written manifest rejected for the wrong reason: $LAST_OUT"
+ok "a hand-written generated_by=ci manifest passes SCHEMA validation but is NOT release authority (provenance rejected; no host contacted)"
+must_fail "unattested rehearsal manifest accepted" uv run python -m nlw.ops.rollout --local --release "$MANIFEST" --target "$TMP/target.env" preflight
+grep -q "requires --provenance-fixture" <<<"$LAST_OUT" || die "unattested manifest rejected for the wrong reason: $LAST_OUT"
+"${PV[@]}" fixture "$MANIFEST" --out "$PROV" >/dev/null
+"${PV[@]}" fixture "$OLD_IMAGE_MANIFEST" --out "$OLD_IMAGE_PROV" >/dev/null
+"${PV[@]}" verify "$MANIFEST" --local --fixture "$PROV" | grep -q '"fixture": true' || die "fixture provenance did not verify under --local"
+must_fail "fixture provenance accepted without --local" "${PV[@]}" verify "$MANIFEST" --fixture "$PROV"
+must_fail "rollout accepted fixture provenance without --local" uv run python -m nlw.ops.rollout --release "$MANIFEST" --provenance-fixture "$PROV" --target "$TMP/target.env" preflight
+grep -q "rehearsal-only" <<<"$LAST_OUT" || die "fixture rejected for the wrong reason: $LAST_OUT"
+cp "$MANIFEST" "$TMP/modified.json"; printf '\n' >> "$TMP/modified.json"
+must_fail "manifest modified after attestation accepted" "${PV[@]}" verify "$TMP/modified.json" --local --fixture "$PROV"
+grep -q "does not match the manifest bytes" <<<"$LAST_OUT" || die "modified manifest rejected for the wrong reason: $LAST_OUT"
+ok "PROVENANCE: unattested manifest rejected; fixture accepted ONLY under --local (never a GitHub trust claim); a byte changed after attestation is rejected"
 
 log "5/10 OLD stack: datastores -> migrate to 0010 with the M11 image -> old runtimes -> seed"
 $DC up -d postgres redis minio >/dev/null
@@ -234,13 +269,28 @@ ok "seeded user/workspace/workflow/terminal run"
 log "6/10 ROLLOUT: preflight -> verify-release (OLD image REJECTED, current image OK) -> prepare-keys -> verify-escrow"
 "${ROLLOUT[@]}" preflight
 must_fail "verify-release accepted the OLD image" uv run python -m nlw.ops.rollout --local \
-  --release "$OLD_IMAGE_MANIFEST" --target "$TMP/target.env" --keys-dir "$KEYS" verify-release --authorize "$AUTH"
+  --release "$OLD_IMAGE_MANIFEST" --provenance-fixture "$OLD_IMAGE_PROV" --target "$TMP/target.env" --keys-dir "$KEYS" verify-release --authorize "$AUTH"
 grep -q "revision label" <<<"$LAST_OUT" || die "old image rejected for the wrong reason: $LAST_OUT"
 ok "verify-release: a manifest naming the OLD (unlabelled, pre-tooling) image is REJECTED"
 "${ROLLOUT[@]}" verify-release --authorize "$AUTH"
 grep -q '"verify-release"' "$OPS/rollout/$NEW_SHA.json" || die "verify-release not recorded"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["evidence"]["verify-release"]; assert d["image_git_sha"]==sys.argv[2], d; assert len(d["commands_verified"])==6, d' "$OPS/rollout/$NEW_SHA.json" "$NEW_SHA"
 ok "verify-release: current image carries the release SHA, migrations 0011-0016, head 0016, all 6 required commands"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["manifest_sha256"]==sys.argv[2], d; assert d["evidence"]["verify-release"]["provenance"]["fixture"] is True' "$OPS/rollout/$NEW_SHA.json" "$(shasum -a 256 "$MANIFEST" | cut -d" " -f1)"
+[ -f "$OPS/rollout/$NEW_SHA.receipt.json" ] && cmp -s "$OPS/rollout/$NEW_SHA.manifest.json" "$MANIFEST" || die "verified manifest + receipt not stored as evidence"
+ok "state bound to the manifest digest; verified manifest + provenance receipt stored under $OPS/rollout (evidence dir, outside checkouts)"
+# Replacing the manifest (same release SHA, different bytes) invalidates the recorded state.
+cp "$MANIFEST" "$TMP/original.json"
+python3 - "$MANIFEST" <<'PYEOF2'
+import json, sys
+d = json.load(open(sys.argv[1])); d["created_at"] = "2026-01-01T00:00:00+00:00"
+open(sys.argv[1], "w").write(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PYEOF2
+"${PV[@]}" fixture "$MANIFEST" --out "$TMP/provenance-replaced.json" >/dev/null
+must_fail "replaced manifest reused earlier phase evidence" uv run python -m nlw.ops.rollout --local --release "$MANIFEST" --provenance-fixture "$TMP/provenance-replaced.json" --target "$TMP/target.env" --keys-dir "$KEYS" prepare-keys --authorize "$AUTH"
+grep -q "different release manifest" <<<"$LAST_OUT" || die "replaced manifest rejected for the wrong reason: $LAST_OUT"
+cp "$TMP/original.json" "$MANIFEST"; rm -f "$TMP/provenance-replaced.json"
+ok "a replaced manifest (new digest) invalidates all earlier phase evidence on the host — STOP"
 "${ROLLOUT[@]}" prepare-keys --authorize "$AUTH"
 # The OPERATOR writes the escrow attestation after copying the files off-host.
 # Here the rehearsal plays the operator: fingerprints only, never material.

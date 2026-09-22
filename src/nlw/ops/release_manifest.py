@@ -16,6 +16,13 @@ required commands and hold the expected migration head.
 ``deploy/staging/release.example.json`` is a committed, NON-DEPLOYABLE template
 (``kind: example``); the loader rejects it in every mode. A rehearsal manifest
 (``generated_by: local-rehearsal``) is accepted only by a ``--local`` rollout.
+
+SCOPE: this module is STRUCTURAL validation only. A hand-written document can
+satisfy every check here (``kind: release``, ``deployable: true``,
+``generated_by: ci``, a real SHA, real digests). Release AUTHORITY additionally
+requires image verification (rollout ``verify-release``) and PROVENANCE
+verification (``nlw.ops.release_provenance``: GitHub artifact attestation bound
+to these exact bytes, repository, workflow, ``refs/heads/main``, ``push``, commit).
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ import os
 import re
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -69,6 +76,8 @@ class ReleaseManifest:
     ci: dict[str, str]
     attestation: str | None
     sha256: str  # of the manifest bytes as loaded (integrity for the state file)
+    raw: str = ""  # the exact bytes (utf-8) the provenance subject digest covers
+    source_path: str = ""  # where it was loaded from (gh verifies that file)
 
     @property
     def backend_digest(self) -> str:
@@ -205,7 +214,8 @@ def load_manifest(path: Path, *, local: bool = False) -> ReleaseManifest:
         raise ReleaseManifestError("release manifest is not valid JSON") from exc
     if not isinstance(doc, dict):
         raise ReleaseManifestError("release manifest must be a JSON object")
-    return parse_manifest(doc, raw_bytes=raw, local=local)
+    m = parse_manifest(doc, raw_bytes=raw, local=local)
+    return replace(m, raw=raw.decode("utf-8"), source_path=str(path))
 
 
 # --- generation (CI or the local rehearsal) --------------------------------------

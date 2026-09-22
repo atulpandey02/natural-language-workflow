@@ -1,0 +1,29 @@
+{
+  "attestation": "github-artifact-attestation/slsa-provenance-v1",
+  "backend_image": "ghcr.io/atulpandey02/natural-language-workflow@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "ci": {
+    "actor": "ci",
+    "run_id": "1234567890",
+    "run_url": "https://github.com/atulpandey02/natural-language-workflow/actions/runs/1234567890",
+    "workflow": "Delivery"
+  },
+  "compose_project": "app",
+  "created_at": "2026-09-22T10:00:00+00:00",
+  "deployable": true,
+  "environment": "staging",
+  "expected_current_revision": "0010_readiness_schema_grant",
+  "format_version": 2,
+  "generated_by": "ci",
+  "instance_id": "i-0d1e65cdc9401dbb9",
+  "key_ids": {
+    "api": "stg-api-2026-09",
+    "scheduler": "stg-scheduler-2026-09",
+    "worker": "stg-worker-2026-09"
+  },
+  "kind": "release",
+  "public_hostname": "32-197-83-193.sslip.io",
+  "region": "us-east-1",
+  "release_sha": "1eebf2ef19c0286c83bfe8768c908bfd2f40178d",
+  "target_revision": "0016_signed_database_context",
+  "web_image": "ghcr.io/atulpandey02/natural-language-workflow/web@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}
