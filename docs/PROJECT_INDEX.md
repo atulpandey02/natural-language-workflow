@@ -422,8 +422,42 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-022 — Encrypted off-host backup & disaster recovery (M11.5 P2)](adr/ADR-022-encrypted-offhost-backup-dr.md)
 - [ADR-023 — Membership, invitations & approval separation of duties (M11.5 P3A)](adr/ADR-023-membership-approval-sod.md)
 - [ADR-024 — Signed database context (M11.5 P3B, migration `0016`)](adr/ADR-024-signed-database-context.md)
+- [ADR-025 — Release-manifest provenance (M12A-Prep)](adr/ADR-025-release-manifest-provenance.md)
+- [ADR-026 — AI execution architecture (M12B-A): deterministic engine with an LLM planner](adr/ADR-026-ai-execution-architecture.md)
 
 Planned: ADR-008 Deployment strategy.
+
+## M12B-A — AI core production readiness (evidence-first audit + bounded corrections)
+
+Evidence-first audit and bounded hardening of the applied-AI core (the LLM
+planner → deterministic feasibility → durable execution → grounded result path).
+The architecture is a **deterministic workflow engine with an LLM planner**
+(ADR-026): the model proposes one structured plan; deterministic code owns every
+verdict and re-validates tools/args/connectors/approval at execution. Delivered:
+
+- **Audit + findings**: [AI-core architecture & failure-mode audit](architecture/ai-core-audit.md)
+  (severity-ranked, reproduced) and the [checkpoint/recovery matrix](architecture/ai-core-recovery-matrix.md).
+- **Deterministic evaluation harness** (`nlw.eval`): a 34-case, versioned,
+  synthetic corpus across all 20 planning/policy categories, graded against the
+  real registry + feasibility engine; deterministic replay in CI + an optional
+  credential-gated live-model mode. See [ai-evaluation](development/ai-evaluation.md).
+- **Planner/feasibility hardening**: serialized plan/arg **byte bounds**
+  (`PLAN_TOO_LARGE`/`ARGS_TOO_LARGE`), a deterministic **prompt/context budget**
+  (`nlw.planner.budget`), and run/step **transition guards**
+  (`assert_transition_*`) wired into the engine (which surfaced and fixed a
+  missing `PENDING → FAILED` edge).
+- **Prompt-injection & untrusted-data boundary**: an explicit
+  [prompt-construction contract](security/planner-prompt-contract.md) plus
+  adversarial tests proving untrusted content cannot add tools, alter
+  authorization, bypass approval, or substitute a tenant/connector.
+- **Grounded result synthesis** (`nlw.engine.summary`, `GET /runs/{id}/summary`
+  + a run-detail UI panel): a deterministic, non-LLM summary that never reports
+  FAILED/SKIPPED/UNKNOWN as success.
+- **AI observability**: low-cardinality planner/feasibility/summary metrics.
+
+Boundaries respected: no VPS/provider access, no production keys, no deployment,
+restore, reboot, or real Slack/webhook delivery. No conversation memory was
+added (single-shot planning is deliberate).
 
 ## Runbooks
 
