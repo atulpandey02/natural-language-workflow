@@ -60,7 +60,8 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   [ADR-014](../adr/ADR-014-outbound-http-ssrf.md): `webhook.send` / `slack.send_message` are
   approval-gated side-effecting tools. An approval-gated action parks the run at
   `WAITING_APPROVAL`; admin/owner decide via `POST /approvals/{id}/approve|reject` (role +
-  RLS admin/owner + `decided_by = app.user_id`), CAS and recovery-safe. Side effects run
+  RLS admin/owner + `decided_by = public.ctx_user_id()`, the signed context of
+  [ADR-024](../adr/ADR-024-signed-database-context.md)), CAS and recovery-safe. Side effects run
   **outside** the run lock via a two-transaction pattern (claim + stable idempotency key +
   atomic lease → COMMIT → external call → lease-guarded finalize), with bounded retry and a
   secret-free `external_actions` audit. Outbound HTTP is HTTPS-only, redirect-disabled, and
@@ -89,10 +90,14 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   selected by `X-Workspace-Id` but **membership is authoritative**; role gates
   actions. First-sight user provisioning is idempotent/race-safe.
 - Isolation is enforced by the **database** (M2b): the app connects as a
-  restricted `nlw_app` role (no `BYPASSRLS`); RLS policies on `workspaces` and
-  `memberships` are keyed on two transaction-local GUCs (`app.user_id` set at
-  auth, `app.tenant_id` set only after membership is confirmed). Migrations run
-  as the `nlw` owner. See [ADR-003](../adr/ADR-003-multi-tenant-isolation.md).
+  restricted `nlw_app` role (no `BYPASSRLS`); RLS policies are keyed on a
+  **signed, purpose-bound, expiring transaction-local context** (`app.ctx_*`,
+  M11.5 P3B): the API applies an `api_identity` context after auth and an
+  `api_request` context only after membership is confirmed, PostgreSQL verifies
+  the HMAC in `app_ctx_claims()`, and policies trust only `ctx_user_id()` /
+  `ctx_tenant_id()`. Migrations run as the `nlw` owner. See
+  [ADR-003](../adr/ADR-003-multi-tenant-isolation.md) (history) and
+  [ADR-024](../adr/ADR-024-signed-database-context.md) (current mechanism).
 
 ## Built so far (through M1b)
 

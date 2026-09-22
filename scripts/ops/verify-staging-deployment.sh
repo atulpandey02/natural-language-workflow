@@ -38,6 +38,7 @@ EXPECTED_ROLES=(
   "nlw_rls_bypass:fft"
   "nlw_workspace_bootstrap:fft"
   "nlw_membership_admin:fft"
+  "nlw_ctx_verifier:fff"
 )
 # True iff the normalized roles block contains a line EXACTLY equal to $1.
 assert_role() { printf '%s\n' "$2" | grep -qx "$1"; }

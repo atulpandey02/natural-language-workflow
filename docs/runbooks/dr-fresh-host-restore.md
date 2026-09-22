@@ -20,9 +20,16 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
 2. The **repository encryption passphrase** (`RESTIC_PASSWORD`) and the object-store
    credentials — stored **separately** from each other and off the failed VPS.
 3. A **fresh** database whose roles are bootstrapped from IaC
-   (`docker/postgres/initdb`) — the app/worker/scheduler/rls-bypass/workspace
-   roles must exist (ownership is reinstated onto them during restore) — but with
+   (`docker/postgres/initdb`) — the app/worker/scheduler/rls-bypass/workspace/
+   membership-admin roles **and `nlw_ctx_verifier`** (P3B signed-context owner)
+   must exist (ownership is reinstated onto them during restore) — but with
    **no application tables** yet.
+3a. The runtime **signed-context key files** (`/srv/nlw/ctx-keys/*.key`), kept
+   separately from the backup like the restic passphrase. The `ctx_keys` registry
+   is restored with the database, but it only verifies contexts signed with the
+   same material; without the files, install fresh keys after the restore per
+   [signed-context-keys](signed-context-keys.md) (owner credential) before
+   starting any runtime.
 4. `/opt/nlw/.env.restore` filled from [`.env.restore.example`](../../.env.restore.example)
    (mode 0600). Set `NLW_RESTORE_TARGET_ID` to the exact fresh target and
    `NLW_RESTORE_CONFIRM` to the same value to authorize the destructive restore.
@@ -66,8 +73,10 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
 
 4. **Review the validation summary.** Every check must be `[ok]`, including
    `security_definer_owners_and_search_path`, `rls_enabled_and_forced`,
-   `runtime_roles_nosuperuser_nobypassrls`, `non_terminal_runs_quiesced`, and
-   `dr_restore_event_recorded`. A single failure means **do not go live** —
+   `runtime_roles_nosuperuser_nobypassrls`, `non_terminal_runs_quiesced`,
+   `dr_restore_event_recorded`, and the P3B checks `pgcrypto_present`,
+   `ctx_keys_registry_protected`, `ctx_verifier_functions_hardened`,
+   `no_policy_trusts_unsigned_context`. A single failure means **do not go live** —
    see [backup-failure-troubleshooting](backup-failure-troubleshooting.md).
 
 5. **Understand what quiescence did** (see
@@ -104,7 +113,9 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    records the server-side enablement time + operator, and is idempotent for the
    same already-enabled generation. It does **not** start any container.
 
-8. **Start the runtime.** Bring up api → worker → scheduler. Worker/scheduler check
+8. **Start the runtime** with each service's signed-context key file mounted
+   (`python -m nlw.ctxkeys check --class ...` first if in doubt; readiness reports
+   `signed_context`). Bring up api → worker → scheduler. Worker/scheduler check
    the lock once at boot and start only when enabled. The **API** may already be
    running (it stays alive for liveness): it carries a **live** recovery gate that
    re-reads `dr_restore_events` on a short bounded cache

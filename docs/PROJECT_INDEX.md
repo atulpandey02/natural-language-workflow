@@ -8,7 +8,7 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
-| Current milestone | **M11.5 P3A** — membership invitations + approval separation of duties: hashed single-use invites, owner-preservation invariant, DB-enforced four-eyes approvals, immutable requester provenance (migration `0015`, ADR-023). P3B (signed context) in progress. |
+| Current milestone | **M11.5 P3B** — signed database context (migration `0016`, ADR-024): RLS trusts only HMAC-verified, purpose-bound, expiring `app.ctx_*` claims; the forgeable `app.user_id`/`app.tenant_id` GUCs grant nothing. **Implemented on local branch `feat/pre-m12-signed-database-context`, unmerged.** P3A (migration `0015`, ADR-023) is complete. |
 | Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
 | Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
 | Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
@@ -35,17 +35,20 @@ a *minimal* `SECURITY DEFINER` bootstrap `resolve_or_create_user` (owned by
 PUBLIC) that returns **only the internal `uuid`** — never a row/email/provider id
 — inserts a missing identity race-safely and does nothing to an existing one, so
 it cannot read or rewrite another user's record. Email sync is a separate
-self-scoped step after `app.user_id` is established (verified provider email only).
+self-scoped step after the identity context is established (verified provider
+email only; since `0016` the self policy keys on the signed `ctx_user_id()`).
 The stable `auth_provider_id` is never writable by the app role. So the runtime
-role can no longer enumerate or rewrite unrelated identities. (Honest boundary: a
-caller able to forge complete DB context stays in the deferred signed-GUC scope.)
+role can no longer enumerate or rewrite unrelated identities. (Honest boundary at
+the time: a caller able to forge complete DB context stayed in the signed-GUC
+scope — now closed by P3B/ADR-024.)
 **connectors:** creation + credential-alias attachment is now admin/owner-only in
 both the API (`require_role(ADMIN)`) and RLS (`connectors_app_insert` now checks
 `is_current_user_admin_or_owner`); members keep read-only, secret-free access.
 `secret_ref` remains absent from all member-facing responses, planner context,
-plans, step state, approvals, logs and errors. Deferred: signed/non-forgeable DB
-context, cloud/encrypted secret storage, self-service secret onboarding,
-connector→credential-entity binding, team invitations (see ADR-003/006/011).
+plans, step state, approvals, logs and errors. Deferred at the time: signed DB
+context (delivered by P3B, ADR-024), team invitations (delivered by P3A,
+ADR-023); still deferred: cloud/encrypted secret storage, self-service secret
+onboarding, connector→credential-entity binding (see ADR-003/006/011).
 
 M11.5 P1B (PostgreSQL connector trust boundary, no migration) closes the verified
 SQL-safety and network-egress defects. **SQL:** the single `validate_select`
@@ -90,8 +93,8 @@ truncate-and-approve); approval binds the immutable spec AND connector identity
 (a post-approval connector swap fails "re-approval required"). The stable
 `external_action_key`/`Idempotency-Key` is unchanged (still at-least-once, no
 exactly-once claim). Operator recovery: runbooks/action-outcome-unknown.md.
-Deferred (unchanged): signed GUC, HttpOnly sessions, invites, cloud secrets,
-DR/PITR, M12.
+Deferred at the time: signed GUC (delivered by P3B), invites (P3A), DR (P2);
+still deferred: HttpOnly sessions, cloud secrets, PITR, M12.
 
 M11.5 P1D (scheduler & reconciler correctness, migration `0013`, ADR-021) closes
 six verified defects. **Scheduled-run idempotency:** a scheduled run's uniqueness
@@ -151,10 +154,47 @@ membership / approval events (requested/approved/rejected) in the same transacti
 each committed transition, with no tokens/secrets and no UPDATE/DELETE for runtime
 roles (verified by the P2 restore validation). A minimal Next.js product flow
 (members roster + role/remove, invitation create/revoke/accept, requester-aware
-approvals) rides on top. Honest boundary: this does not yet close the
-**forgeable-GUC** threat (an SQL attacker as `nlw_app` forging `app.user_id`) — that
-is **P3B (signed context)**, a launch gate. Docs: runbooks/invitation-operations,
-approval-operations.
+approvals) rides on top. Honest boundary at the time: P3A did not close the
+**forgeable-GUC** threat (an SQL attacker as `nlw_app` forging `app.user_id`) —
+that was **P3B (signed context)**, a launch gate, now implemented (next paragraph).
+Docs: runbooks/invitation-operations, approval-operations.
+
+M11.5 P3B (signed database context, migration `0016`, ADR-024) closes the
+forgeable-GUC launch gate. Every tenant-aware transaction now carries a
+**signed, purpose-bound, expiring** transaction-local context (`app.ctx_v`,
+`ctx_kid`, `ctx_role`, `ctx_purpose`, `ctx_user`, `ctx_tenant`, `ctx_run`,
+`ctx_iat`, `ctx_exp`, `ctx_nonce`, `ctx_mac`) whose HMAC-SHA256 tag PostgreSQL
+recomputes inside the single SECURITY DEFINER verifier `app_ctx_claims()`
+(owner: the NOLOGIN NOSUPERUSER NOBYPASSRLS `nlw_ctx_verifier`; pgcrypto;
+canonical length-prefixed message; constant-time compare; checks version, active
+key of the right class, `ctx_role = session_user`, purpose ↔ login role, claim
+shape, ≤ 60 s skew, expiry, 1–600 s lifetime). RLS trusts **only** the verified
+accessors `ctx_user_id()` / `ctx_tenant_id()` / `ctx_run_id()` / `ctx_purpose()`:
+all 51 policies and the membership/bootstrap helpers were rewritten atomically,
+scheduler policies require `ctx_purpose() = 'scheduler_reconcile'` (no more
+`USING (true)`), worker policies bind tenant **and** run, `manage_membership`
+also requires an `api_request` context for that workspace, and the dead
+`is_current_user_owner` oracle was dropped. Four purposes bind each runtime to
+one login role: `api_identity`/`api_request` → `nlw_app`, `worker_execution` →
+`nlw_worker`, `scheduler_reconcile` → `nlw_scheduler`. Keys live in the
+`ctx_keys` registry (owned by the verifier role, **no grants to any login
+role**, lifecycle audited in `ctx_key_events` without material) and are
+installed from mounted files by `python -m nlw.ctxkeys install|revoke|list|check`
+with the owner credential; runtimes load their own key file (`NLW_CTX_KEY_ID`,
+`NLW_CTX_KEY_FILE`, `NLW_CTX_TTL_S` ≤ 600, default 120) and prove at readiness
+(`signed_context`) that the database verifies their key — fail closed in
+staging/production. Pool reset clears context; there is no unsigned fallback
+(until keys are installed every tenant query is denied). Backup validation
+gained `pgcrypto_present`, `ctx_keys_registry_protected`,
+`ctx_verifier_functions_hardened`, `no_policy_trusts_unsigned_context`. Honest
+boundary: HMAC is **symmetric** — the registry material is signing-capable, and
+"verify-only" describes the helper interface, not the key. Protected: SQL
+injection or a stolen runtime DB credential *without* the key file. **Not**
+protected: a runtime compromised together with its key, the owner/migration
+credential, bypass roles, superuser, host root. Downgrading below `0016`
+re-opens forgery; a runtime/DB version mismatch fails closed (outage, never open).
+Tests: 27 adversarial integration tests + golden vectors + Compose key isolation.
+Docs: ADR-024, runbooks/signed-context-keys.md.
 
 M11.5 P2 (encrypted off-host backup & disaster recovery, migration `0014`,
 ADR-022) replaces the M9 gpg+`pg_dump` scripts (now deprecation stubs) with a
@@ -228,8 +268,9 @@ streamed request-body cap, CORS/TrustedHost/security headers, production docs
 gating, a schema-compat readiness check, a bounded reconciler recovery horizon
 (poisoned-run guard), non-root hardened containers, a Caddy-fronted production
 compose with GHCR immutable-digest delivery + Trivy, and backup/restore +
-runbooks (ADR-018). Non-forgeable DB context, a cloud secret manager, and
-OTel/Langfuse remain explicit pre-production items.
+runbooks (ADR-018). Non-forgeable DB context (since delivered by M11.5 P3B,
+ADR-024), a cloud secret manager, and OTel/Langfuse were recorded as explicit
+pre-production items.
 
 M8 makes the scheduler a durable, restart-safe system of record for recurrence.
 Structured schedules (IANA timezone + hourly/daily/weekly, no cron) pin an
@@ -254,7 +295,8 @@ M7 adds the first real external ACTION tools — `webhook.send` and
 `slack.send_message` — with human approval and safe, bounded, idempotent
 delivery. Approval-gated actions park the run at **WAITING_APPROVAL** and create
 one durable approval; admin/owner decide via `POST /approvals/{id}/approve|reject`
-(gated by role **and** an RLS admin/owner + `decided_by = app.user_id` check),
+(gated by role **and** an RLS admin/owner + `decided_by = app.user_id` check —
+since `0016`: `decided_by = public.ctx_user_id()`, the signed context, ADR-024),
 which is compare-and-set and recovery-safe (idempotent re-enqueue; enqueue
 failure → 503). Side effects run **outside** the M3 run lock via a two-transaction
 pattern (claim + durable stable idempotency key + atomic lease → COMMIT → external
@@ -315,9 +357,10 @@ M2 is delivered in two reviewable PRs: **M2a** (Supabase `AuthProvider`
 [JWKS-first], `users`/`workspaces`/`memberships`, `X-Workspace-Id` tenant
 context, membership-authoritative authorization, app-layer isolation tests —
 ADR-007) and **M2b** (restricted `nlw_app` runtime role, role provisioning
-bootstrap, two transaction-local GUCs `app.user_id`/`app.tenant_id`, RLS
-policies, and a raw-SQL cross-tenant probe — ADR-003). With M2b, tenant
-isolation is enforced by the database, not just the application.
+bootstrap, two transaction-local GUCs `app.user_id`/`app.tenant_id` [replaced
+in M11.5 P3B by the signed `app.ctx_*` context, ADR-024], RLS policies, and a
+raw-SQL cross-tenant probe — ADR-003). With M2b, tenant isolation is enforced by
+the database, not just the application.
 
 ## Milestone roadmap (revised ordering)
 
@@ -378,14 +421,16 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-021 — Scheduler & reconciler correctness (M11.5 P1D)](adr/ADR-021-scheduler-reconciler-correctness.md)
 - [ADR-022 — Encrypted off-host backup & disaster recovery (M11.5 P2)](adr/ADR-022-encrypted-offhost-backup-dr.md)
 - [ADR-023 — Membership, invitations & approval separation of duties (M11.5 P3A)](adr/ADR-023-membership-approval-sod.md)
+- [ADR-024 — Signed database context (M11.5 P3B, migration `0016`)](adr/ADR-024-signed-database-context.md)
 
 Planned: ADR-008 Deployment strategy.
 
 ## Runbooks
 
-[`docs/runbooks/`](runbooks/) — none yet; added alongside the failure modes they
-cover (Redis down, Postgres down, worker not consuming, scheduler stopped,
-provider 429, credentials expired, workflow stuck RUNNING, migration failed).
+[`docs/runbooks/`](runbooks/) — see its [README](runbooks/README.md) for the
+index. Security-sensitive: [signed-context-keys.md](runbooks/signed-context-keys.md)
+(P3B key provisioning, deployment order, rotation, emergency revocation, rollback
+warning).
 
 ## Incidents
 
@@ -393,11 +438,14 @@ provider 429, credentials expired, workflow stuck RUNNING, migration failed).
 
 ## Open risks
 
-- **Forgeable GUC context (pre-production hardening).** RLS enforces isolation
-  against mis-scoped app queries, but `app.user_id`/`app.tenant_id` are
-  forgeable by arbitrary SQL under the shared runtime role. A non-forgeable /
-  signed DB context (or per-request DB identity) is required for resistance to
-  full request-identity forgery. Evaluate before public production. See ADR-003.
+- **Forgeable GUC context — closed by M11.5 P3B (migration `0016`, ADR-024;
+  local branch, unmerged).** RLS now trusts only the signed `app.ctx_*` claims;
+  `app.user_id`/`app.tenant_id` grant nothing. Residual (documented, not claimed
+  away): a runtime compromised together with its key file, the owner/migration
+  credential, bypass roles, superuser, or host root can still mint or bypass
+  context (HMAC is symmetric). Operational: keys must be installed before the
+  runtimes start, and downgrading below `0016` re-opens forgery — see
+  runbooks/signed-context-keys.md.
 - Action connectors (M7) have an unavoidable at-least-once send window on a
   crash between "side effect sent" and "state written." Mitigated with
   idempotency keys and required approvals; documented as a known limitation.

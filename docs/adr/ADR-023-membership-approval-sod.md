@@ -83,7 +83,8 @@ no provider-specific dot/plus stripping that could merge distinct identities).
   approval for the waiting `(run_id, step_id)`, with the connector binding still
   matching the approved preview (P1C). The rule is enforced in the **RLS
   `WITH CHECK`** (`decided_by = app.user_id AND requested_by_user_id IS NOT NULL AND
-  decided_by <> requested_by_user_id`), not only at the API — a direct
+  decided_by <> requested_by_user_id` [since `0016`: `decided_by =
+  public.ctx_user_id()` — signed context, ADR-024]), not only at the API — a direct
   self-approval UPDATE as `nlw_app` is rejected. The API pre-checks for clean errors
   (403 self-approval, 409 unknown-requester).
 - A legacy approval whose requester is unknown (`NULL`) **fails closed** for
@@ -108,9 +109,11 @@ attacker-controlled volume).
   RLS so direct SQL cannot bypass it.
 
 ## Consequences
-- The forgeable-GUC boundary is unchanged here: an SQL attacker running as
-  `nlw_app` who forges `app.user_id` to another admin could still self-approve.
-  Closing that is **P3B (signed context)** and remains a launch gate.
+- The forgeable-GUC boundary was unchanged here: an SQL attacker running as
+  `nlw_app` who forged `app.user_id` to another admin could still self-approve.
+  [Closed since migration `0016` by **P3B / ADR-024**: the decider is
+  `public.ctx_user_id()` from a signed, verified context, so this residual risk
+  no longer applies to an attacker without the API's key file.]
 - Downgrade of migration `0015` re-opens self-approval and final-owner removal —
   flagged in the migration and requiring operator review.
 - New tables/functions/trigger must survive a DR restore — added to the restore

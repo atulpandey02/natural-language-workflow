@@ -26,12 +26,18 @@ cryptographically authenticate its own arguments: arbitrary SQL running as
 Its guaranteed protection is against **cross-user reads/updates and cross-user
 mutation through the bootstrap function**, not against arbitrary `nlw_app` SQL.
 Defending against a **forged complete request/identity context** (arbitrary
-arguments or `app.user_id`) is deferred to the signed/non-forgeable-context
-milestone (below).
+arguments or `app.user_id`) was deferred to the signed-context milestone — now
+**delivered by M11.5 P3B / ADR-024** (below).
 
 Deferred (explicitly not provided by P1A):
 
-- signed/non-forgeable DB request context (GUCs remain forgeable by the app role);
+- signed DB request context — **delivered by P3B (migration `0016`,
+  [ADR-024](../adr/ADR-024-signed-database-context.md))**: RLS trusts only
+  HMAC-verified, purpose-bound, expiring `app.ctx_*` claims; bare
+  `app.user_id`/`app.tenant_id` grant nothing. Not protected: a runtime
+  compromised together with its key file, the owner credential, bypass roles or
+  the superuser (HMAC is symmetric). Operator procedure:
+  [runbooks/signed-context-keys.md](../runbooks/signed-context-keys.md);
 - cloud/envelope-encrypted secret storage and rotation;
 - self-service secret onboarding;
 - connector destination binding to a durable credential entity;

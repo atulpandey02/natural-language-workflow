@@ -1,7 +1,7 @@
 # ADR-003 — Multi-tenant isolation strategy
 
-- Status: Accepted
-- Date: 2026-09-18 (revised 2026-09-19 — role-specific, membership-bound policies; see “Update (M3 / migration 0005)”)
+- Status: Accepted — **superseded in part by [ADR-024](ADR-024-signed-database-context.md) (M11.5 P3B, migration `0016`, 2026-09-22)**: the `app.user_id`/`app.tenant_id` GUC mechanism and the "Non-guarantee" below are historical; RLS now trusts only signed `app.ctx_*` claims. See the final section.
+- Date: 2026-09-18 (revised 2026-09-19 — role-specific, membership-bound policies; see “Update (M3 / migration 0005)”; 2026-09-22 — P3B supersession note)
 
 ## Context
 
@@ -24,7 +24,8 @@ Defense in depth, enforced below the application:
    environment (docker `initdb` script locally; an explicit step in CI/infra),
    never by Alembic. Alembic (migration `0003`) owns table grants, `ENABLE` +
    `FORCE ROW LEVEL SECURITY`, and the policies.
-3. **Row-Level Security keyed on two transaction-local GUCs.**
+3. **Row-Level Security keyed on two transaction-local GUCs** *(pre-`0016`
+   history — see "Superseded in part" at the end)*.
    - `app.user_id` — set right after authentication (identity).
    - `app.tenant_id` — set only after membership is confirmed (active tenant).
    Both are set with `SET LOCAL` (`set_config(..., true)`) inside a per-request
@@ -108,7 +109,8 @@ current user is a member of that tenant, and `nlw_app` cannot self-escalate into
 a tenant (no membership-write path, and workspace creation cannot target an
 existing workspace).
 
-**Non-guarantee.** `app.user_id` and `app.tenant_id` are transaction-local GUCs
+**Non-guarantee** *(historical — closed by migration `0016` / ADR-024; see the
+final section)*. `app.user_id` and `app.tenant_id` are transaction-local GUCs
 and are **forgeable by arbitrary SQL executing under the shared runtime role**.
 This design does **not** claim resistance to an attacker who can run arbitrary
 SQL as `nlw_app`/`nlw_worker` and forge the full request identity/context (e.g.,
@@ -117,10 +119,10 @@ stronger guarantee requires **non-forgeable / signed DB context** or a
 per-request DB identity model. This is recorded as a **pre-production
 security-hardening item** and is intentionally **not** implemented in M3.
 
-## M9 update — staging decision on the forgeable-GUC risk
+## M9 update — staging decision on the forgeable-GUC risk *(historical, pre-`0016`)*
 
 For M9 (staging), the GUC-based request context (`app.user_id` / `app.tenant_id`)
-is **kept as-is** and the residual risk above is **explicitly accepted for
+was **kept as-is** and the residual risk above was **explicitly accepted for
 staging**, on the following honest basis:
 
 - **No untrusted-SQL path currently targets platform DB roles.** All platform
@@ -152,8 +154,10 @@ closes that:
   `INSERT/UPDATE/DELETE` grant, so identity writes fail at the privilege level
   even before RLS. `nlw_worker`/`nlw_scheduler` get **no** access to `users`.
 - First login cannot rely on a self-scoped policy (the row does not exist yet and
-  `app.user_id` is not established at `get_or_create` time — the resolution runs
-  *before* `set_current_user`). Resolution therefore uses one **minimal**
+  the identity context is not established at `get_or_create` time — the
+  resolution runs *before* the signed context is applied; since `0016` that is
+  `set_identity_context` / `set_request_context` in `nlw.tenancy.session`,
+  formerly `set_current_user`). Resolution therefore uses one **minimal**
   `SECURITY DEFINER` function, **`resolve_or_create_user(text, text) RETURNS
   uuid`**, owned by the existing write-only `BYPASSRLS` non-login role
   `nlw_workspace_bootstrap` (granted only `SELECT, INSERT` on `users`),
@@ -194,3 +198,37 @@ closes that:
   If a safe self-scoped email sync were not achievable, deferring automatic email
   sync would be preferred over leaving a privileged arbitrary-email-update
   primitive.
+
+## Superseded in part by ADR-024 (M11.5 P3B, migration `0016`, 2026-09-22)
+
+Everything above that names `app.user_id` / `app.tenant_id`, `SET LOCAL app.*`,
+`set_current_user`, or the "Non-guarantee" paragraph documents the `0003`–`0015`
+history and is kept for that reason — but it is **pre-`0016`**. Since migration
+`0016_signed_database_context`:
+
+- No live RLS policy or SECURITY DEFINER helper reads `app.user_id` /
+  `app.tenant_id`; a bare `set_config('app.user_id', ...)` grants nothing. All 51
+  policies and the helpers (`is_current_user_member`,
+  `is_current_user_admin_or_owner`, `create_workspace_for_current_user`,
+  `accept_workspace_invitation`, `manage_membership`) key on the verified
+  accessors `public.ctx_user_id()` / `public.ctx_tenant_id()` /
+  `public.ctx_run_id()` / `public.ctx_purpose()`; `is_current_user_owner(uuid)`
+  was dropped.
+- The transaction-local context is now the signed, purpose-bound, expiring
+  `app.ctx_*` claim set (HMAC-SHA256, verified by `public.app_ctx_claims()`,
+  owner `nlw_ctx_verifier`, key registry `ctx_keys` unreadable by every login
+  role). The application applies it via `set_identity_context` (`api_identity`)
+  and `set_request_context` (`api_request`) in `nlw.tenancy.session`, and the
+  worker/scheduler via `set_worker_context_sync` / `set_scheduler_context_sync`.
+- The forgeable-GUC "Non-guarantee" is therefore **closed** for SQL injection or a
+  stolen runtime credential without the runtime's key file. It is **not** closed
+  for a runtime compromised together with its key, the owner/migration credential,
+  the bypass roles, or the superuser — ADR-024 states that boundary honestly (HMAC
+  is symmetric; the registry material is signing-capable).
+- Everything else in this ADR still holds: restricted runtime roles, role
+  provisioning as bootstrap, `FORCE` RLS, role-specific membership-bound
+  policies, function-only membership writes, the `users` self-scope + bootstrap
+  boundary of P1A.
+
+Design and threat model: [ADR-024](ADR-024-signed-database-context.md). Operator
+procedure: [runbooks/signed-context-keys.md](../runbooks/signed-context-keys.md).
