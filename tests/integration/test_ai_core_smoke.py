@@ -22,7 +22,14 @@ from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.domain.workflow import RunStatus, StepStatus, WorkflowPlan
 from nlw.engine.execution import execute_advancement
 from nlw.engine.runs import create_run, create_workflow_with_version
-from nlw.engine.summary import ActionView, RunOutcome, StepOutcome, StepView, summarize_run
+from nlw.engine.summary import (
+    ActionView,
+    RunOutcome,
+    RunSummary,
+    StepOutcome,
+    StepView,
+    summarize_run,
+)
 from nlw.tenancy.keys import process_signer
 from nlw.tenancy.session import apply_signed_context_sync
 from nlw.tenancy.signing import Purpose
@@ -61,7 +68,7 @@ def _seed(
 
 
 def _drive(sms: SimpleNamespace, run_id: uuid.UUID, limit: int = 8) -> list[str]:
-    results = []
+    results: list[str] = []
     for _ in range(limit):
         outcome = execute_advancement(sms.worker, run_id)
         results.append(outcome.result)
@@ -70,11 +77,11 @@ def _drive(sms: SimpleNamespace, run_id: uuid.UUID, limit: int = 8) -> list[str]
     return results
 
 
-def _summary(owner_libpq: str, run_id: uuid.UUID, plan: WorkflowPlan) -> object:
+def _summary(owner_libpq: str, run_id: uuid.UUID, plan: WorkflowPlan) -> RunSummary:
     with psycopg.connect(owner_libpq) as c:
-        run_status = c.execute(
-            "SELECT status FROM workflow_runs WHERE id=%s", (run_id,)
-        ).fetchone()[0]
+        status_row = c.execute("SELECT status FROM workflow_runs WHERE id=%s", (run_id,)).fetchone()
+        assert status_row is not None
+        run_status = status_row[0]
         step_rows = c.execute(
             "SELECT step_id, tool, status, error, output FROM step_runs WHERE run_id=%s", (run_id,)
         ).fetchall()
@@ -133,10 +140,11 @@ def test_smoke_failure_resume_grounded_no_repeat(
     assert execute_advancement(sms.worker, run_id).result == "noop"
 
     with psycopg.connect(pg_stack.owner_libpq) as c:
-        a_attempt = c.execute(
+        attempt_row = c.execute(
             "SELECT attempt FROM step_runs WHERE run_id=%s AND step_id='a'", (run_id,)
-        ).fetchone()[0]
-    assert a_attempt == 1  # completed step not re-run
+        ).fetchone()
+        assert attempt_row is not None
+    assert attempt_row[0] == 1  # completed step not re-run
 
     summary = _summary(pg_stack.owner_libpq, run_id, plan)
     assert summary.outcome == RunOutcome.FAILED
