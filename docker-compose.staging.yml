@@ -32,8 +32,15 @@ services:
   prometheus:
     image: prom/prometheus:v3.1.0
     restart: unless-stopped
+    # Runs as the image's non-root `nobody` user; both mounts are read-only.
+    user: "65534:65534"
     volumes:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Every rule file referenced by prometheus.yml (`rule_files: alerts/*.yml`)
+      # lives in this directory — mounted whole so a new rule file cannot be
+      # referenced without being present (validated by tests + promtool).
+      - ./docker/prometheus/alerts:/etc/prometheus/alerts:ro
+      - prometheus_data:/prometheus
     # Internal only — not published; queried from the drill/load tooling on the
     # internal network. (Publish 9090 locally only for manual inspection.)
     expose:
@@ -44,3 +51,26 @@ services:
       - api
       - worker
       - scheduler
+      - alertmanager
+
+  # Alertmanager (M12A-Prep §K): internal only, null receiver until an operator
+  # wires a real infrastructure channel (docs/ops/alerting.md). No public port.
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    restart: unless-stopped
+    user: "65534:65534"
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.listen-address=:9093
+    volumes:
+      - ./docker/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    expose:
+      - "9093"
+    networks:
+      - internal
+
+volumes:
+  prometheus_data:
+  alertmanager_data:

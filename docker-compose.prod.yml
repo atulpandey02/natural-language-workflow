@@ -75,6 +75,8 @@ services:
       - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      # Maintenance flag volume (rollout drain/reopen touches /srv/maint/MAINTENANCE).
+      - caddy_maint:/srv/maint
     environment:
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
     depends_on:
@@ -388,6 +390,7 @@ volumes:
   pgdata:
   caddy_data:
   caddy_config:
+  caddy_maint:
   backup_textfile:
   backup_run:
   restore_gate:

@@ -25,8 +25,8 @@ sudo install -m 0600 /dev/null /opt/nlw/.env.backup
 sudo editor /opt/nlw/.env.backup     # fill from .env.backup.example
 
 # 2. Install the units.
-sudo cp /opt/nlw/docker/systemd/nlw-backup.service /etc/systemd/system/
-sudo cp /opt/nlw/docker/systemd/nlw-backup.timer   /etc/systemd/system/
+sudo cp /opt/nlw/app/docker/systemd/nlw-backup.service /etc/systemd/system/
+sudo cp /opt/nlw/app/docker/systemd/nlw-backup.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 
 # 3. Enable the timer (not the service).
