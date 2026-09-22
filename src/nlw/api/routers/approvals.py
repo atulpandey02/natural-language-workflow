@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nlw.api.deps import get_session, get_tenant_context, rate_limit, require_role
 from nlw.api.schemas import ApprovalDecisionOut, ApprovalOut
 from nlw.db.models import Approval, WorkflowVersion
-from nlw.db.repositories import ApprovalRepository
+from nlw.db.repositories import ApprovalRepository, AuditRepository
 from nlw.domain.workflow import WorkflowPlan
 from nlw.tenancy.context import Role, TenantContext, role_at_least
 from nlw.tenancy.session import set_current_tenant, set_current_user
@@ -156,6 +156,15 @@ async def _decide(
         outcome, run_id = await ApprovalRepository(session).decide(
             approval_id, ctx.tenant_id, ctx.user_id, target
         )
+        # Append-only audit, in the SAME transaction as the decision and ONLY on a
+        # genuine terminal transition (idempotent re-drives add no event).
+        if outcome == "transitioned":
+            await AuditRepository(session).emit(
+                tenant_id=ctx.tenant_id,
+                event_type=f"approval.{target}",
+                actor_user_id=ctx.user_id,
+                subject_id=approval_id,
+            )
     if outcome == "not_found":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "approval not found")
     if outcome == "self_approval":

@@ -55,8 +55,10 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   }
 
   // Authenticated but no workspace selected: force selection (except on the
-  // selection page itself and public pages).
-  if (user && !isPublic && pathname !== "/select-workspace") {
+  // selection page itself and public pages). The invitation-accept page is also
+  // exempt: an invitee may be authenticated with no workspace yet, and forcing
+  // selection would drop the token from the URL before it can be redeemed.
+  if (user && !isPublic && pathname !== "/select-workspace" && pathname !== "/invitations/accept") {
     const hasWorkspace = Boolean(request.cookies.get(WORKSPACE_COOKIE_NAME)?.value);
     if (!hasWorkspace) {
       const url = request.nextUrl.clone();

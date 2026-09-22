@@ -43,6 +43,14 @@ const RULES: Rule[] = [
   { method: "POST", pattern: /^\/schedules$/ },
   { method: "PATCH", pattern: new RegExp(`^/schedules/${UUID}$`) },
   { method: "DELETE", pattern: new RegExp(`^/schedules/${UUID}$`) },
+  // Members / invitations (M11.5 P3A)
+  { method: "GET", pattern: /^\/members$/ },
+  { method: "PATCH", pattern: new RegExp(`^/members/${UUID}$`) },
+  { method: "DELETE", pattern: new RegExp(`^/members/${UUID}$`) },
+  { method: "GET", pattern: /^\/invitations$/ },
+  { method: "POST", pattern: /^\/invitations$/ },
+  { method: "POST", pattern: new RegExp(`^/invitations/${UUID}/revoke$`) },
+  { method: "POST", pattern: /^\/invitations\/accept$/ },
 ];
 
 /** True only when the exact method+path is explicitly allowed. */

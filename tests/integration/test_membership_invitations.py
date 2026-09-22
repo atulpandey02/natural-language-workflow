@@ -300,8 +300,10 @@ def test_concurrent_owner_removal_keeps_one_owner(
         == 200
     )
 
-    # Concurrently: A removes B, B removes A. The owner trigger + workspace lock
-    # must let at most one succeed (a workspace always keeps an owner).
+    # Concurrently: A removes B, B removes A — via the function-only mutation path
+    # (nlw_app has NO direct DELETE). The advisory-lock-first serialization inside
+    # manage_membership must let at most one succeed (a workspace always keeps an
+    # owner). See test_owner_race.py for the full deterministic barrier suite.
     results: list[str] = []
     barrier = threading.Barrier(2)
 
@@ -310,9 +312,7 @@ def test_concurrent_owner_removal_keeps_one_owner(
             _set_ctx(conn, actor, tid)
             barrier.wait()
             try:
-                conn.execute(
-                    "DELETE FROM memberships WHERE workspace_id=%s AND user_id=%s", (tid, target)
-                )
+                conn.execute("SELECT manage_membership(%s,%s,'remove',NULL)", (tid, target))
                 conn.commit()
                 results.append("ok")
             except Exception:

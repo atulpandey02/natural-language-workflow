@@ -9,7 +9,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -126,25 +126,25 @@ class MembershipRepository:
     async def set_role(
         self, user_id: uuid.UUID, workspace_id: uuid.UUID, role: str
     ) -> Membership | None:
-        """Change a member's role. RLS gates admin/owner + owner-only owner rows;
-        the owner-preservation trigger blocks demoting the final owner. Returns the
-        updated row, or None if no writable row matched (RLS/absent)."""
+        """Change a member's role via the ``manage_membership`` SECURITY DEFINER
+        function — the ONLY membership-mutation path (nlw_app has no direct
+        UPDATE/DELETE). The function locks the workspace row FIRST (owner-race safe),
+        authorizes the actor from app.user_id, enforces owner-only owner rows and the
+        >=1 owner invariant, and writes the append-only audit — all atomically. It
+        RAISES on any denial (SQLSTATE 42501) or final-owner violation (23514)."""
         await self.session.execute(
-            update(Membership)
-            .where(Membership.user_id == user_id, Membership.workspace_id == workspace_id)
-            .values(role=role, updated_at=func.now())
+            text("SELECT manage_membership(:ws, :target, 'set_role', :role)"),
+            {"ws": workspace_id, "target": user_id, "role": role},
         )
         return await self.get(user_id, workspace_id)
 
-    async def remove(self, user_id: uuid.UUID, workspace_id: uuid.UUID) -> int:
-        """Remove a member. RLS gates admin/owner + owner-only owner rows; the
-        owner-preservation trigger blocks removing the final owner. Returns rowcount."""
-        result = await self.session.execute(
-            delete(Membership).where(
-                Membership.user_id == user_id, Membership.workspace_id == workspace_id
-            )
+    async def remove(self, user_id: uuid.UUID, workspace_id: uuid.UUID) -> None:
+        """Remove a member via ``manage_membership`` (see ``set_role``). RAISES on
+        denial (42501) or a final-owner violation (23514); returns on success."""
+        await self.session.execute(
+            text("SELECT manage_membership(:ws, :target, 'remove', NULL)"),
+            {"ws": workspace_id, "target": user_id},
         )
-        return int(result.rowcount)  # type: ignore[attr-defined]
 
 
 class AuditRepository:

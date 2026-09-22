@@ -27,14 +27,23 @@ _FORCED_RLS_TABLES = (
     "approvals",
     "schedules",
     "connectors",
+    "workspace_invitations",
+    "authz_audit_events",
 )
 _SECURITY_DEFINER_FUNCS = {
     "resolve_run_tenant": "nlw_rls_bypass",
     "is_current_user_member": "nlw_rls_bypass",
     "is_current_user_admin_or_owner": "nlw_rls_bypass",
+    "is_current_user_owner": "nlw_rls_bypass",
+    "enforce_workspace_owner_present": "nlw_rls_bypass",
     "resolve_or_create_user": "nlw_workspace_bootstrap",
     "create_workspace_for_current_user": "nlw_workspace_bootstrap",
+    "accept_workspace_invitation": "nlw_workspace_bootstrap",
+    "manage_membership": "nlw_workspace_bootstrap",
 }
+# The authorization audit must remain append-only for runtime roles after a
+# restore: neither nlw_app nor nlw_worker may hold UPDATE or DELETE on it.
+_APPEND_ONLY_AUDIT_ROLES = ("nlw_app", "nlw_worker")
 
 
 @dataclass
@@ -197,6 +206,26 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
             "no_public_execute_on_secdef",
             not public_exec,
             f"public_exec={[r[0] for r in public_exec]}",
+        )
+
+        # --- authorization audit is append-only for runtime roles (P3A) ---
+        audit_writable = [
+            f"{role}:{priv}"
+            for role in _APPEND_ONLY_AUDIT_ROLES
+            for priv in ("UPDATE", "DELETE")
+            if bool(
+                _q(
+                    conn,
+                    "SELECT has_table_privilege(:r, 'authz_audit_events', :p)",
+                    r=role,
+                    p=priv,
+                ).scalar_one_or_none()
+            )
+        ]
+        add(
+            "authz_audit_append_only_for_runtime_roles",
+            not audit_writable,
+            f"writable={audit_writable}",
         )
 
         # --- application invariants ---

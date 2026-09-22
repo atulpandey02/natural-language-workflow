@@ -14,6 +14,10 @@ const API = process.env.NLW_API_BASE ?? "http://localhost:8000";
 
 const ADMIN = { email: "e2e-admin@example.com", password: "E2e-admin-pass-123!" };
 const MEMBER = { email: "e2e-member@example.com", password: "E2e-member-pass-123!" };
+// A third real Supabase user, provisioned as an app-user but deliberately NOT
+// added to any workspace, so the M11.5 invitation-accept E2E can join a fresh
+// membership through the real invite flow (no direct DB membership seed).
+const INVITED = { email: "e2e-invited@example.com", password: "E2e-invited-pass-123!" };
 
 async function createUser(user) {
   const res = await fetch(`${SUPABASE}/auth/v1/admin/users`, {
@@ -74,6 +78,7 @@ function psql(sql) {
 async function main() {
   await createUser(ADMIN);
   await createUser(MEMBER);
+  await createUser(INVITED);
 
   const adminToken = await signIn(ADMIN);
 
@@ -125,6 +130,12 @@ async function main() {
       `ON CONFLICT DO NOTHING`,
   );
 
+  // Provision the invited user's app-user row (via /me) WITHOUT any membership,
+  // so it is a real identity that can accept an invitation but currently belongs
+  // to no workspace. No DB membership is seeded for it.
+  const invitedToken = await signIn(INVITED);
+  await apiGet("/me", invitedToken);
+
   // Emit credentials for the Playwright job.
   process.stdout.write(
     [
@@ -132,6 +143,8 @@ async function main() {
       `E2E_ADMIN_PASSWORD=${ADMIN.password}`,
       `E2E_MEMBER_EMAIL=${MEMBER.email}`,
       `E2E_MEMBER_PASSWORD=${MEMBER.password}`,
+      `E2E_INVITED_EMAIL=${INVITED.email}`,
+      `E2E_INVITED_PASSWORD=${INVITED.password}`,
       "",
     ].join("\n"),
   );

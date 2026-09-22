@@ -109,24 +109,13 @@ def upgrade() -> None:
         """
     )
 
-    # --- membership administration by admin/owner (RLS-gated nlw_app writes) ---
-    # An admin may manage MEMBER/ADMIN rows; only an OWNER may touch an owner row
-    # (promote-to-owner, demote/remove an owner). The trigger above still guards
-    # the final owner. Creating a membership stays function-only (bootstrap/accept).
-    op.execute("GRANT UPDATE (role, updated_at), DELETE ON memberships TO nlw_app")
-    # memberships has no tenant_id column — its workspace_id IS the tenant.
-    _MEM_ADMIN = "(public.is_current_user_admin_or_owner(workspace_id))"
-    _MEM_TARGET = "(role <> 'owner' OR public.is_current_user_owner(workspace_id))"
-    op.execute(
-        f"CREATE POLICY memberships_app_admin_update ON memberships FOR UPDATE TO nlw_app "
-        f"USING ({_MEM_ADMIN} AND {_MEM_TARGET}) "
-        f"WITH CHECK ({_MEM_ADMIN} AND {_MEM_TARGET})"
-    )
-    op.execute(
-        f"CREATE POLICY memberships_app_admin_delete ON memberships FOR DELETE TO nlw_app "
-        f"USING ({_MEM_ADMIN} AND {_MEM_TARGET})"
-    )
-    # Co-members may see the roster of their active workspace (product policy).
+    # --- membership administration is FUNCTION-ONLY (owner-race correctness) ---
+    # nlw_app is deliberately granted NO direct UPDATE/DELETE on memberships. Every
+    # role change / removal must go through ``manage_membership`` (created below,
+    # after authz_audit_events), which locks the stable workspace row FOR UPDATE
+    # FIRST and only then mutates — making the owner-preservation invariant correct
+    # by construction (no READ COMMITTED write skew), not merely trigger-guarded.
+    # Co-members may still SEE the roster of their active workspace (product policy).
     op.execute(
         "CREATE POLICY memberships_app_tenant_select ON memberships FOR SELECT TO nlw_app "
         f"USING (workspace_id = {_TENANT_GUC} AND public.is_current_user_member(workspace_id))"
@@ -202,7 +191,12 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_authz_audit_tenant_id", "authz_audit_events", ["tenant_id"])
+    # Append-only for runtime roles: nlw_app INSERTs + reads (admin); the worker
+    # INSERTs approval.requested at park (it sets app.tenant_id). NEITHER runtime
+    # role is granted UPDATE or DELETE — the audit trail cannot be rewritten or
+    # erased by nlw_app/nlw_worker.
     op.execute("GRANT SELECT, INSERT ON authz_audit_events TO nlw_app")
+    op.execute("GRANT INSERT ON authz_audit_events TO nlw_worker")
     op.execute("GRANT INSERT ON authz_audit_events TO nlw_workspace_bootstrap")
     op.execute("ALTER TABLE authz_audit_events ENABLE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE authz_audit_events FORCE ROW LEVEL SECURITY")
@@ -214,6 +208,111 @@ def upgrade() -> None:
         f"CREATE POLICY authz_audit_app_insert ON authz_audit_events FOR INSERT TO nlw_app "
         f"WITH CHECK (tenant_id = {_TENANT_GUC})"
     )
+    op.execute(
+        f"CREATE POLICY authz_audit_worker_insert ON authz_audit_events FOR INSERT TO nlw_worker "
+        f"WITH CHECK (tenant_id = {_TENANT_GUC})"
+    )
+
+    # --- correct-by-construction membership administration (owner-race safe) ---
+    # The ONLY path that changes a role or removes a member. It locks the stable
+    # workspace row FOR UPDATE as its FIRST action, so two concurrent calls for the
+    # same workspace fully serialize (the second blocks until the first commits and
+    # then re-reads ownership under the lock). This eliminates the READ COMMITTED
+    # write skew that an AFTER-trigger owner count alone cannot rule out. The actor
+    # is taken from app.user_id (never a parameter); authorization, owner-only owner
+    # rows, the >=1 owner invariant, and the append-only audit are all enforced here
+    # atomically. Errors are stable and non-enumerating.
+    op.execute(
+        """
+        CREATE FUNCTION manage_membership(
+            p_workspace_id uuid, p_target_user_id uuid, p_action text, p_new_role text
+        ) RETURNS void
+            LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog
+            AS $$
+            DECLARE
+                v_actor uuid := NULLIF(current_setting('app.user_id', true), '')::uuid;
+                v_actor_role text;
+                v_target_role text;
+                v_owners int;
+            BEGIN
+                IF v_actor IS NULL THEN
+                    RAISE EXCEPTION 'not authorized' USING ERRCODE = '42501';
+                END IF;
+                -- 1) Serialize on the stable workspace identity FIRST, before any
+                --    read of ownership. A transaction-scoped advisory lock keyed on
+                --    the workspace id is held to COMMIT, so a second concurrent call
+                --    for the same workspace blocks here and only proceeds once the
+                --    first commits — it then re-reads ownership under the lock. This
+                --    gives correct-by-construction serialization with NO write skew
+                --    at READ COMMITTED, and (unlike SELECT ... FOR UPDATE on the
+                --    workspaces row, which needs UPDATE privilege) keeps the definer
+                --    unable to modify the workspaces table at all.
+                PERFORM pg_catalog.pg_advisory_xact_lock(
+                    pg_catalog.hashtextextended(p_workspace_id::text, 0)
+                );
+                -- 2) Authorize the actor as an admin/owner member of THIS workspace.
+                SELECT role INTO v_actor_role FROM public.memberships
+                    WHERE workspace_id = p_workspace_id AND user_id = v_actor;
+                IF v_actor_role IS NULL OR v_actor_role NOT IN ('admin', 'owner') THEN
+                    RAISE EXCEPTION 'not authorized' USING ERRCODE = '42501';
+                END IF;
+                -- 3) Re-read the target under the lock.
+                SELECT role INTO v_target_role FROM public.memberships
+                    WHERE workspace_id = p_workspace_id AND user_id = p_target_user_id;
+                IF v_target_role IS NULL THEN
+                    RAISE EXCEPTION 'not authorized' USING ERRCODE = '42501';
+                END IF;
+                -- 4) Only an OWNER may touch an owner row or grant ownership.
+                IF (v_target_role = 'owner' OR p_new_role = 'owner')
+                        AND v_actor_role <> 'owner' THEN
+                    RAISE EXCEPTION 'not authorized' USING ERRCODE = '42501';
+                END IF;
+                -- 5) Apply the mutation.
+                IF p_action = 'remove' THEN
+                    DELETE FROM public.memberships
+                        WHERE workspace_id = p_workspace_id AND user_id = p_target_user_id;
+                ELSIF p_action = 'set_role' THEN
+                    IF p_new_role NOT IN ('owner', 'admin', 'member') THEN
+                        RAISE EXCEPTION 'invalid role' USING ERRCODE = '22023';
+                    END IF;
+                    UPDATE public.memberships SET role = p_new_role, updated_at = pg_catalog.now()
+                        WHERE workspace_id = p_workspace_id AND user_id = p_target_user_id;
+                ELSE
+                    RAISE EXCEPTION 'invalid action' USING ERRCODE = '22023';
+                END IF;
+                -- 6) Owner-preservation: the workspace still has >= 1 owner (under lock).
+                SELECT count(*) INTO v_owners FROM public.memberships
+                    WHERE workspace_id = p_workspace_id AND role = 'owner';
+                IF v_owners = 0 THEN
+                    RAISE EXCEPTION 'workspace must retain at least one owner'
+                        USING ERRCODE = 'check_violation';
+                END IF;
+                -- 7) Append-only audit, same transaction as the state change.
+                INSERT INTO public.authz_audit_events
+                        (id, tenant_id, event_type, actor_user_id, subject_id, detail, created_at)
+                    VALUES (pg_catalog.gen_random_uuid(), p_workspace_id,
+                            CASE WHEN p_action = 'remove' THEN 'membership.removed'
+                                 ELSE 'membership.role_changed' END,
+                            v_actor, p_target_user_id,
+                            CASE WHEN p_action = 'set_role' THEN p_new_role ELSE NULL END,
+                            pg_catalog.now());
+            END;
+            $$
+        """
+    )
+    # Owned by nlw_workspace_bootstrap — the existing NOLOGIN BYPASSRLS role that
+    # already performs privileged membership writes (invitation acceptance). This
+    # keeps nlw_rls_bypass (the read-only RLS-helper role) free of any write grant.
+    op.execute(
+        "ALTER FUNCTION manage_membership(uuid, uuid, text, text) OWNER TO nlw_workspace_bootstrap"
+    )
+    op.execute("REVOKE ALL ON FUNCTION manage_membership(uuid, uuid, text, text) FROM PUBLIC")
+    op.execute("GRANT EXECUTE ON FUNCTION manage_membership(uuid, uuid, text, text) TO nlw_app")
+    # The definer needs SELECT/UPDATE/DELETE on memberships (it already has INSERT
+    # for accept) and INSERT on authz_audit_events (already granted). It has NO
+    # privilege on workspaces (it only advisory-locks the workspace id, never
+    # touches that table). No LOGIN role can use these except through the function.
+    op.execute("GRANT SELECT, UPDATE, DELETE ON memberships TO nlw_workspace_bootstrap")
 
     # --- single-use atomic invitation acceptance (accepter is not yet a member) ---
     op.execute(
@@ -258,6 +357,13 @@ def upgrade() -> None:
                             (id, user_id, workspace_id, role, created_at, updated_at)
                         VALUES (pg_catalog.gen_random_uuid(), v_user, v_inv.tenant_id,
                                 v_inv.role, pg_catalog.now(), pg_catalog.now());
+                    -- Emit membership.added ONLY on a genuine new membership (a
+                    -- concurrent re-accept hits unique_violation and adds nothing).
+                    INSERT INTO public.authz_audit_events
+                            (id, tenant_id, event_type, actor_user_id, subject_id, detail,
+                             created_at)
+                        VALUES (pg_catalog.gen_random_uuid(), v_inv.tenant_id,
+                                'membership.added', v_user, v_user, v_inv.role, pg_catalog.now());
                 EXCEPTION WHEN unique_violation THEN
                     NULL;
                 END;
@@ -318,10 +424,99 @@ def upgrade() -> None:
         f"AND requested_by_user_id IS NOT NULL AND decided_by <> requested_by_user_id)"
     )
 
+    # --- provenance & decision immutability (defence in depth at the DB layer) ---
+    # Column grants already stop nlw_app from touching approvals.requested_by_user_id
+    # and workflow_runs.* it cannot write, but two gaps remain provable by direct SQL:
+    #   * nlw_worker holds table-level UPDATE on workflow_runs -> could rewrite
+    #     initiated_by_user_id (run provenance);
+    #   * nlw_app holds table-level UPDATE on schedules -> could rewrite created_by;
+    #   * the four-eyes WITH CHECK does not require the OLD status to be pending, so a
+    #     second eligible admin could flip an already-decided approval by direct SQL.
+    # These BEFORE-UPDATE triggers close all three for EVERY role (they are SECURITY
+    # INVOKER and only compare OLD/NEW, so they need no table privilege). Legitimate
+    # updates never touch these columns, so they are unaffected.
+    op.execute(
+        """
+        CREATE FUNCTION enforce_approval_immutability() RETURNS trigger
+            LANGUAGE plpgsql SET search_path = pg_catalog
+            AS $$
+            BEGIN
+                IF NEW.requested_by_user_id IS DISTINCT FROM OLD.requested_by_user_id THEN
+                    RAISE EXCEPTION 'approvals.requested_by_user_id is immutable'
+                        USING ERRCODE = 'check_violation';
+                END IF;
+                -- The FIRST terminal decision is final: once approved/rejected, the
+                -- decision fields cannot change (no APPROVED<->REJECTED / ->PENDING).
+                IF OLD.status IN ('approved', 'rejected')
+                   AND (NEW.status IS DISTINCT FROM OLD.status
+                        OR NEW.decided_by IS DISTINCT FROM OLD.decided_by
+                        OR NEW.decided_at IS DISTINCT FROM OLD.decided_at) THEN
+                    RAISE EXCEPTION 'a decided approval is immutable'
+                        USING ERRCODE = 'check_violation';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+        """
+    )
+    op.execute("REVOKE ALL ON FUNCTION enforce_approval_immutability() FROM PUBLIC")
+    op.execute(
+        "CREATE TRIGGER trg_approval_immutable BEFORE UPDATE ON approvals "
+        "FOR EACH ROW EXECUTE FUNCTION enforce_approval_immutability()"
+    )
+    op.execute(
+        """
+        CREATE FUNCTION enforce_run_initiator_immutability() RETURNS trigger
+            LANGUAGE plpgsql SET search_path = pg_catalog
+            AS $$
+            BEGIN
+                IF NEW.initiated_by_user_id IS DISTINCT FROM OLD.initiated_by_user_id THEN
+                    RAISE EXCEPTION 'workflow_runs.initiated_by_user_id is immutable'
+                        USING ERRCODE = 'check_violation';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+        """
+    )
+    op.execute("REVOKE ALL ON FUNCTION enforce_run_initiator_immutability() FROM PUBLIC")
+    op.execute(
+        "CREATE TRIGGER trg_run_initiator_immutable BEFORE UPDATE ON workflow_runs "
+        "FOR EACH ROW EXECUTE FUNCTION enforce_run_initiator_immutability()"
+    )
+    op.execute(
+        """
+        CREATE FUNCTION enforce_schedule_creator_immutability() RETURNS trigger
+            LANGUAGE plpgsql SET search_path = pg_catalog
+            AS $$
+            BEGIN
+                IF NEW.created_by IS DISTINCT FROM OLD.created_by THEN
+                    RAISE EXCEPTION 'schedules.created_by is immutable'
+                        USING ERRCODE = 'check_violation';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+        """
+    )
+    op.execute("REVOKE ALL ON FUNCTION enforce_schedule_creator_immutability() FROM PUBLIC")
+    op.execute(
+        "CREATE TRIGGER trg_schedule_creator_immutable BEFORE UPDATE ON schedules "
+        "FOR EACH ROW EXECUTE FUNCTION enforce_schedule_creator_immutability()"
+    )
+
 
 def downgrade() -> None:
-    # WARNING: this re-opens self-approval (drops the four-eyes WITH CHECK) and
-    # final-owner removal (drops the owner trigger). Operator review required.
+    # WARNING: this re-opens self-approval (drops the four-eyes WITH CHECK), the
+    # provenance/decision immutability triggers, and final-owner removal (drops the
+    # owner trigger + the function-only mutation path). Operator review required.
+    op.execute("DROP TRIGGER IF EXISTS trg_schedule_creator_immutable ON schedules")
+    op.execute("DROP FUNCTION IF EXISTS enforce_schedule_creator_immutability()")
+    op.execute("DROP TRIGGER IF EXISTS trg_run_initiator_immutable ON workflow_runs")
+    op.execute("DROP FUNCTION IF EXISTS enforce_run_initiator_immutability()")
+    op.execute("DROP TRIGGER IF EXISTS trg_approval_immutable ON approvals")
+    op.execute("DROP FUNCTION IF EXISTS enforce_approval_immutability()")
+
     _ADMIN_APPR = (
         f"(tenant_id = {_TENANT_GUC} AND public.is_current_user_admin_or_owner(tenant_id))"
     )
@@ -335,13 +530,12 @@ def downgrade() -> None:
     op.drop_column("workflow_runs", "initiated_by_user_id")
 
     op.execute("DROP FUNCTION IF EXISTS accept_workspace_invitation(text)")
+    op.execute("DROP FUNCTION IF EXISTS manage_membership(uuid, uuid, text, text)")
+    op.execute("REVOKE SELECT, UPDATE, DELETE ON memberships FROM nlw_workspace_bootstrap")
     op.execute("DROP TABLE IF EXISTS authz_audit_events")
     op.execute("DROP TABLE IF EXISTS workspace_invitations")
 
     op.execute("DROP POLICY IF EXISTS memberships_app_tenant_select ON memberships")
-    op.execute("DROP POLICY IF EXISTS memberships_app_admin_delete ON memberships")
-    op.execute("DROP POLICY IF EXISTS memberships_app_admin_update ON memberships")
-    op.execute("REVOKE UPDATE (role, updated_at), DELETE ON memberships FROM nlw_app")
 
     op.execute("DROP TRIGGER IF EXISTS trg_workspace_owner_present ON memberships")
     op.execute("DROP FUNCTION IF EXISTS enforce_workspace_owner_present()")

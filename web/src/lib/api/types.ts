@@ -57,6 +57,34 @@ export interface MaterializeOut {
   idempotent_hit: boolean;
 }
 
+export type MemberRole = "owner" | "admin" | "member";
+
+export interface MemberOut {
+  user_id: string;
+  role: MemberRole;
+}
+
+export interface InvitationOut {
+  id: string;
+  email: string;
+  role: "admin" | "member";
+  status: string;
+  expires_at: string;
+  created_at: string;
+}
+
+// The POST /invitations response ALSO carries the raw token, returned exactly
+// once. It is displayed for manual copying and never persisted (no localStorage,
+// no logging).
+export interface InvitationCreatedOut extends InvitationOut {
+  token: string;
+}
+
+export interface InvitationAcceptedOut {
+  workspace_id: string;
+  role: MemberRole;
+}
+
 export interface ApprovalOut {
   id: string;
   run_id: string;
@@ -66,6 +94,13 @@ export interface ApprovalOut {
   status: string;
   requested_at: string | null;
   decided_at: string | null;
+  // The user who requested the approved action (null when it cannot be
+  // resolved). Surfaced so a decider knows who is asking.
+  requested_by_user_id: string | null;
+  // Whether the current viewer is allowed to decide THIS approval. The backend
+  // is authoritative; the UI uses this only to enable/disable controls (e.g. a
+  // requester cannot approve their own action).
+  viewer_can_decide: boolean;
   // The effective, non-secret destination the side effect will reach (webhook
   // host / Slack channel), derived from the approved connector. null when it
   // cannot be safely resolved.

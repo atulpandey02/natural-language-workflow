@@ -52,11 +52,24 @@ the database is **not implementable within the constraints** — an honest
 architectural finding, not a preference.
 
 The implementable floor that still materially closes domains 1–3 is **HMAC-SHA256
-via pgcrypto**, with the verification key held in a table readable **only** by a
-privileged non-login role and a **verify-only** SECURITY DEFINER helper. `nlw_app`
-cannot read the key, cannot compute a MAC, and cannot use the helper as a signing
-oracle (it only *verifies* a MAC the caller already possesses). This is not security
-theater: it genuinely blocks a forged-GUC attack by an SQL-injected `nlw_app`.
+via pgcrypto**, with the key held in a table readable **only** by a privileged
+non-login role and a **verify-only** SECURITY DEFINER helper. `nlw_app` cannot read
+the key, cannot compute a MAC, and cannot use the helper as a signing oracle (it only
+*verifies* a MAC the caller already possesses). This is not security theater: it
+genuinely blocks a forged-GUC attack by an SQL-injected `nlw_app`.
+
+> **Correction — the `ctx_keys` secret is signing-capable, not a "public
+> verification key."** HMAC is **symmetric**: the exact same key both signs and
+> verifies. Anyone who can read a `ctx_keys` row can *mint* valid contexts for that
+> purpose, not merely check them. So the material we protect is **signing-capable
+> secret material**, and the whole design rests on `ctx_keys` being unreadable by
+> every runtime role — it must never be described, granted, or reasoned about as a
+> public key. The "verify-only" property belongs to the **SECURITY DEFINER helper's
+> interface** (it returns a boolean/typed id, never the key and never a fresh MAC),
+> not to the key itself. This is precisely why domain 4 (a runtime that legitimately
+> holds its purpose's key) is **not** protected: that runtime can forge. A design
+> where Postgres holds only truly non-signing (asymmetric public) material is the
+> stronger goal but, as above, is not implementable on stock PG16 + pgcrypto.
 
 ### Mechanism (validated by a spike — see §Status)
 - Keys live in `ctx_keys(purpose, key_id, secret bytea)` **owned by `nlw_rls_bypass`**
@@ -81,8 +94,8 @@ theater: it genuinely blocks a forged-GUC attack by an SQL-injected `nlw_app`.
 - **Revocation & lifetime** — sign per request/transaction with a **short expiry**;
   the RLS helper additionally confirms active membership/current role where needed,
   so a removed/demoted membership loses access within a request. `key_id` supports
-  rotation with an overlapping current+previous verification key; an unknown/revoked
-  `key_id` fails closed.
+  rotation with an overlapping current+previous key (each signing-capable, per the
+  correction above); an unknown/revoked `key_id` fails closed.
 - **Pool & transaction hygiene** — context is `set_config(..., true)`
   (transaction-local); a pool check-in listener also clears `app.*` as defense in
   depth; a missing/malformed/expired/wrong-purpose/wrong-role context fails closed.

@@ -132,11 +132,24 @@ four-eyes:** `approvals.requested_by_user_id` (immutable, derived from run
 provenance — manual creator or schedule creator, never request JSON) plus a DB
 `WITH CHECK` that the decider is an admin/owner, stamps themselves, and is **not**
 the requester; a legacy unknown-requester approval fails closed. Self-approval is
-rejected even by an owner and even via direct SQL. Append-only `authz_audit_events`
-records invite/membership/approval events without tokens/secrets. Honest boundary:
-this does not yet close the **forgeable-GUC** threat (an SQL attacker as `nlw_app`
-forging `app.user_id`) — that is **P3B (signed context)**, a launch gate. Docs:
-runbooks/invitation-operations, approval-operations.
+rejected even by an owner and even via direct SQL. **DB-level immutability
+(defence in depth):** `BEFORE UPDATE` triggers freeze `approvals.requested_by_user_id`,
+`workflow_runs.initiated_by_user_id`, `schedules.created_by`, and the first terminal
+approval decision — closing gaps where `nlw_worker`/`nlw_app` table-level UPDATE
+could otherwise rewrite provenance or flip a decided approval. **Membership mutation
+is function-only:** `nlw_app` has no direct UPDATE/DELETE on `memberships`; role
+changes/removals go through the `manage_membership` SECURITY DEFINER function, which
+serializes on the workspace identity FIRST then re-reads ownership under the lock —
+the owner invariant is correct by construction (no READ COMMITTED write skew), not
+merely trigger-guarded. **Append-only `authz_audit_events`** records invite /
+membership / approval events (requested/approved/rejected) in the same transaction as
+each committed transition, with no tokens/secrets and no UPDATE/DELETE for runtime
+roles (verified by the P2 restore validation). A minimal Next.js product flow
+(members roster + role/remove, invitation create/revoke/accept, requester-aware
+approvals) rides on top. Honest boundary: this does not yet close the
+**forgeable-GUC** threat (an SQL attacker as `nlw_app` forging `app.user_id`) — that
+is **P3B (signed context)**, a launch gate. Docs: runbooks/invitation-operations,
+approval-operations.
 
 M11.5 P2 (encrypted off-host backup & disaster recovery, migration `0014`,
 ADR-022) replaces the M9 gpg+`pg_dump` scripts (now deprecation stubs) with a

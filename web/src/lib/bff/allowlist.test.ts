@@ -13,6 +13,23 @@ describe("BFF allowlist", () => {
     expect(isAllowed("PATCH", `/schedules/${UUID}`)).toBe(true);
   });
 
+  it("allows the M11.5 members + invitations endpoints", () => {
+    expect(isAllowed("GET", "/members")).toBe(true);
+    expect(isAllowed("PATCH", `/members/${UUID}`)).toBe(true);
+    expect(isAllowed("DELETE", `/members/${UUID}`)).toBe(true);
+    expect(isAllowed("GET", "/invitations")).toBe(true);
+    expect(isAllowed("POST", "/invitations")).toBe(true);
+    expect(isAllowed("POST", `/invitations/${UUID}/revoke`)).toBe(true);
+    expect(isAllowed("POST", "/invitations/accept")).toBe(true);
+  });
+
+  it("does not over-allow members / invitations", () => {
+    expect(isAllowed("DELETE", "/members")).toBe(false); // collection is read-only
+    expect(isAllowed("POST", `/members/${UUID}`)).toBe(false);
+    expect(isAllowed("DELETE", `/invitations/${UUID}`)).toBe(false); // revoke, not delete
+    expect(isAllowed("POST", `/invitations/${UUID}`)).toBe(false);
+  });
+
   it("is not a generic tunnel", () => {
     expect(isAllowed("DELETE", `/workflows/${UUID}`)).toBe(false); // no such method
     expect(isAllowed("GET", "/admin")).toBe(false);

@@ -39,6 +39,7 @@ def test_validation_passes_on_a_clean_migrated_and_quiesced_db(pg_stack: SimpleN
         "tables_owned_by_privileged_owner",
         "security_definer_owners_and_search_path",
         "no_public_execute_on_secdef",
+        "authz_audit_append_only_for_runtime_roles",
         "critical_constraints_present",
         "p1d_recon_indexes_present",
         "external_action_unknown_status_allowed",

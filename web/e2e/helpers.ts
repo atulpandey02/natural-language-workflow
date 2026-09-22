@@ -8,6 +8,10 @@ export const env = {
   memberPassword: process.env.E2E_MEMBER_PASSWORD ?? "",
   adminEmail: process.env.E2E_ADMIN_EMAIL ?? "",
   adminPassword: process.env.E2E_ADMIN_PASSWORD ?? "",
+  // A real Supabase user that is NOT pre-membered in any workspace, used to
+  // accept a fresh invitation end-to-end (M11.5 P3A).
+  invitedEmail: process.env.E2E_INVITED_EMAIL ?? "",
+  invitedPassword: process.env.E2E_INVITED_PASSWORD ?? "",
 };
 
 // Required mode (M10 gate): when E2E_REQUIRED=1 the suite must NOT silently

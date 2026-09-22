@@ -44,6 +44,23 @@ def _iso(value: object) -> str | None:
     return value.isoformat() if value is not None else None  # type: ignore[attr-defined]
 
 
+def _sqlstate(exc: BaseException) -> str | None:
+    orig = getattr(exc, "orig", None)
+    return getattr(orig, "sqlstate", None) or getattr(exc, "sqlstate", None)
+
+
+def _membership_error(exc: Exception, verb: str) -> HTTPException:
+    """Map a ``manage_membership`` failure to a stable, non-enumerating HTTP error.
+    42501 (denied: not admin/owner, owner-only row, or target absent) -> 403;
+    23514 (final-owner invariant) -> 409. Anything else -> 409. No internals leak."""
+    state = _sqlstate(exc)
+    if state == "42501":
+        return HTTPException(status.HTTP_403_FORBIDDEN, f"{verb} not allowed")
+    return HTTPException(
+        status.HTTP_409_CONFLICT, f"{verb} not allowed (workspace must keep an owner)"
+    )
+
+
 async def _admin_ctx(ctx: TenantContext = Depends(get_tenant_context)) -> TenantContext:
     if not role_at_least(ctx.role, Role.ADMIN):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "insufficient role")
@@ -73,24 +90,11 @@ async def change_member_role(
         async with sessionmaker() as session, session.begin():
             await set_current_user(session, ctx.user_id)
             await set_current_tenant(session, ctx.tenant_id)
-            updated = await MembershipRepository(session).set_role(
-                user_id, ctx.tenant_id, body.role
-            )
-            if updated is None or updated.role != body.role:
-                raise HTTPException(status.HTTP_403_FORBIDDEN, "cannot change this member's role")
-            await AuditRepository(session).emit(
-                tenant_id=ctx.tenant_id,
-                event_type="membership.role_changed",
-                actor_user_id=ctx.user_id,
-                subject_id=user_id,
-                detail=body.role,
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:  # owner-preservation trigger / RLS -> sanitized conflict
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "role change not allowed (workspace must keep an owner)"
-        ) from exc
+            # manage_membership authorizes, mutates, preserves >=1 owner, and audits
+            # atomically. It RAISES on denial/final-owner; no separate emit here.
+            await MembershipRepository(session).set_role(user_id, ctx.tenant_id, body.role)
+    except Exception as exc:
+        raise _membership_error(exc, "role change") from exc
     return MemberOut(user_id=user_id, role=body.role)
 
 
@@ -105,21 +109,9 @@ async def remove_member(
         async with sessionmaker() as session, session.begin():
             await set_current_user(session, ctx.user_id)
             await set_current_tenant(session, ctx.tenant_id)
-            removed = await MembershipRepository(session).remove(user_id, ctx.tenant_id)
-            if removed != 1:
-                raise HTTPException(status.HTTP_403_FORBIDDEN, "cannot remove this member")
-            await AuditRepository(session).emit(
-                tenant_id=ctx.tenant_id,
-                event_type="membership.removed",
-                actor_user_id=ctx.user_id,
-                subject_id=user_id,
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:  # owner-preservation trigger -> sanitized conflict
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "removal not allowed (workspace must keep an owner)"
-        ) from exc
+            await MembershipRepository(session).remove(user_id, ctx.tenant_id)
+    except Exception as exc:
+        raise _membership_error(exc, "removal") from exc
 
 
 @router.get("/invitations", response_model=list[InvitationOut])

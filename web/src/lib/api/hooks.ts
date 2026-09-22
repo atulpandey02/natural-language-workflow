@@ -7,7 +7,12 @@ import type {
   ApprovalDecisionOut,
   ApprovalOut,
   ConnectorOut,
+  InvitationAcceptedOut,
+  InvitationCreatedOut,
+  InvitationOut,
   MaterializeOut,
+  MemberOut,
+  MemberRole,
   PlanProposalOut,
   RunCreateOut,
   RunOut,
@@ -229,5 +234,65 @@ export function useUpdateSchedule() {
     mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
       api.patch<ScheduleOut>(`/schedules/${id}`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
+  });
+}
+
+// --- Members & invitations (M11.5 P3A) ------------------------------------
+
+export function useMembers() {
+  return useQuery({ queryKey: ["members"], queryFn: () => api.get<MemberOut[]>("/members") });
+}
+
+export function useChangeMemberRole() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ userId, role }: { userId: string; role: MemberRole }) =>
+      api.patch<MemberOut>(`/members/${userId}`, { role }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["members"] }),
+  });
+}
+
+export function useRemoveMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: string) => api.del<void>(`/members/${userId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["members"] }),
+  });
+}
+
+// Invitation listing is admin/owner-only in the UI; `enabled` keeps a plain
+// member from firing the request (mirrors the `enabled` convention above).
+export function useInvitations(enabled = true) {
+  return useQuery({
+    queryKey: ["invitations"],
+    queryFn: () => api.get<InvitationOut[]>("/invitations"),
+    enabled,
+  });
+}
+
+export function useCreateInvitation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { email: string; role: "admin" | "member" }) =>
+      api.post<InvitationCreatedOut>("/invitations", body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["invitations"] }),
+  });
+}
+
+export function useRevokeInvitation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.post<void>(`/invitations/${id}/revoke`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["invitations"] }),
+  });
+}
+
+export function useAcceptInvitation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (token: string) =>
+      api.post<InvitationAcceptedOut>("/invitations/accept", { token }),
+    // Accepting creates a fresh membership → the caller's workspace list changes.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["workspaces"] }),
   });
 }
