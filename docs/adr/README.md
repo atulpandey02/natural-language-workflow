@@ -38,6 +38,7 @@ decision, numbered and never deleted (supersede instead of removing).
 | [021](ADR-021-scheduler-reconciler-correctness.md) | Scheduler & reconciler correctness (occurrence idempotency, fairness, progress, approval binding) | Accepted |
 | [022](ADR-022-encrypted-offhost-backup-dr.md) | Encrypted off-host backup & disaster recovery (restic, verified success, guarded restore, post-restore quiescence) | Accepted |
 | [023](ADR-023-membership-approval-sod.md) | Membership, invitations & approval separation of duties (hashed single-use invites, owner invariant, DB-enforced four-eyes) | Accepted |
+| [024](ADR-024-signed-database-context.md) | Tamper-evident (signed) database context — HMAC design + threat model | Proposed (implementation is a launch gate) |
 
 ## Template
 
