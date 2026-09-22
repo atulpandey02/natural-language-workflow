@@ -30,7 +30,12 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
 from nlw.db.models import ExternalAction, StepRun, WorkflowRun
-from nlw.domain.workflow import RunStatus, StepStatus
+from nlw.domain.workflow import (
+    RunStatus,
+    StepStatus,
+    assert_transition_run,
+    assert_transition_step,
+)
 from nlw.registry.registry import (
     REGISTRY,
     ActionAuthError,
@@ -53,6 +58,15 @@ _BACKOFF_BASE_S = 2.0
 _BACKOFF_CAP_S = 300.0
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+def _set_run_status(run: WorkflowRun, new: RunStatus) -> None:
+    """Guarded run-status assignment (M12B-A). Self-edge is legal (idempotent)."""
+    run.status = assert_transition_run(RunStatus(run.status), new)
+
+
+def _set_step_status(step: StepRun, new: StepStatus) -> None:
+    step.status = assert_transition_step(StepStatus(step.status), new)
 
 
 def _now() -> datetime:
@@ -207,7 +221,7 @@ def finalize_action(
             ea.lease_owner = None
             ea.lease_expires_at = None
             ea.next_attempt_at = None
-            step.status = StepStatus.SUCCESS
+            _set_step_status(step, StepStatus.SUCCESS)
             step.output = result.output
             step.finished_at = now
             run.last_progress_at = func.now()  # action outcome finalized (success)
@@ -224,10 +238,10 @@ def finalize_action(
             ea.lease_owner = None
             ea.lease_expires_at = None
             ea.next_attempt_at = None
-            step.status = StepStatus.FAILED
+            _set_step_status(step, StepStatus.FAILED)
             step.error = ACTION_OUTCOME_UNKNOWN
             step.finished_at = now
-            run.status = RunStatus.FAILED
+            _set_run_status(run, RunStatus.FAILED)
             run.finished_at = now
             run.last_progress_at = func.now()  # run terminal (UNKNOWN outcome)
             return FinalizeOutcome("failed")
@@ -252,10 +266,10 @@ def finalize_action(
         ea.lease_token = None
         ea.lease_owner = None
         ea.lease_expires_at = None
-        step.status = StepStatus.FAILED
+        _set_step_status(step, StepStatus.FAILED)
         step.error = f"action failed: {result.error_class}"
         step.finished_at = now
-        run.status = RunStatus.FAILED
+        _set_run_status(run, RunStatus.FAILED)
         run.finished_at = now
         run.last_progress_at = func.now()  # run terminal (deterministic/auth/cap)
         if result.kind == ActionKind.FAILED_AUTH:

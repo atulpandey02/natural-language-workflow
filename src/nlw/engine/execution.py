@@ -46,6 +46,8 @@ from nlw.domain.workflow import (
     WorkflowStep,
     all_succeeded,
     any_failed,
+    assert_transition_run,
+    assert_transition_step,
     select_next_step,
 )
 from nlw.engine.actions import (
@@ -87,6 +89,16 @@ class AdvanceOutcome:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _set_run_status(run: WorkflowRun, new: RunStatus) -> None:
+    """Assign a run status through the transition guard (M12B-A defense-in-depth).
+    A self-edge is a no-op-legal so idempotent re-drives never trip the guard."""
+    run.status = assert_transition_run(RunStatus(run.status), new)
+
+
+def _set_step_status(step: StepRun, new: StepStatus) -> None:
+    step.status = assert_transition_step(StepStatus(step.status), new)
 
 
 def _mark_progress(run: WorkflowRun) -> None:
@@ -226,10 +238,10 @@ def _fail_run_step(
     session: Session, run: WorkflowRun, step: StepRun, message: str
 ) -> AdvanceOutcome:
     now = _now()
-    step.status = StepStatus.FAILED
+    _set_step_status(step, StepStatus.FAILED)
     step.error = message
     step.finished_at = now
-    run.status = RunStatus.FAILED
+    _set_run_status(run, RunStatus.FAILED)
     run.finished_at = now
     _mark_progress(run)  # run terminal transition
     metrics.observe_run_completion("failed", (now - run.created_at).total_seconds())
@@ -252,10 +264,10 @@ def _action_unknown(
     ea.lease_owner = None
     ea.lease_expires_at = None
     ea.next_attempt_at = None
-    step.status = StepStatus.FAILED
+    _set_step_status(step, StepStatus.FAILED)
     step.error = ACTION_OUTCOME_UNKNOWN
     step.finished_at = now
-    run.status = RunStatus.FAILED
+    _set_run_status(run, RunStatus.FAILED)
     run.finished_at = now
     _mark_progress(run)  # run terminal transition (UNKNOWN action outcome)
     metrics.observe_run_completion("failed", (now - run.created_at).total_seconds())
@@ -288,7 +300,7 @@ def _claim_action(
     if expected_connector_id is not None and connector_id != expected_connector_id:
         raise ConnectorError("connector changed after approval; re-approval required")
     now = _now()
-    step.status = StepStatus.RUNNING
+    _set_step_status(step, StepStatus.RUNNING)
     step.started_at = now
     _mark_progress(run)  # step claim/start (durable in-flight action)
     ea = ExternalAction(
@@ -416,7 +428,7 @@ def _handle_waiting(
     plan_step = plan.step(step.step_id)
     spec = REGISTRY.get(step.tool)
     if run.status == RunStatus.WAITING_APPROVAL:
-        run.status = RunStatus.RUNNING
+        _set_run_status(run, RunStatus.RUNNING)
         _mark_progress(run)  # approval resolution unblocked execution
     try:
         return _claim_action(
@@ -447,7 +459,7 @@ def _park_for_approval(
     connector_id, _config, _secret = _load_action_connector(
         session, tenant_id, spec.connector_type, plan_step.connector, secret_store
     )
-    step.status = StepStatus.WAITING_APPROVAL
+    _set_step_status(step, StepStatus.WAITING_APPROVAL)
     existing = session.execute(
         select(Approval).where(Approval.run_id == run.id, Approval.step_id == plan_step.id)
     ).scalar_one_or_none()
@@ -483,7 +495,7 @@ def _park_for_approval(
                 subject_id=approval_id,
             )
         )
-    run.status = RunStatus.WAITING_APPROVAL
+    _set_run_status(run, RunStatus.WAITING_APPROVAL)
     _mark_progress(run)  # run advanced to needing approval (a genuine transition)
     return AdvanceOutcome("waiting", enqueue_next=False, step_id=plan_step.id)
 
@@ -523,12 +535,12 @@ def execute_advancement(
         states: dict[str, StepStatus] = {s.step_id: StepStatus(s.status) for s in step_rows}
 
         if run.status == RunStatus.PENDING:
-            run.status = RunStatus.RUNNING
+            _set_run_status(run, RunStatus.RUNNING)
             run.started_at = _now()
             _mark_progress(run)  # run entering execution
 
         if any_failed(states):
-            run.status = RunStatus.FAILED
+            _set_run_status(run, RunStatus.FAILED)
             run.finished_at = _now()
             _mark_progress(run)  # run terminal transition
             metrics.observe_run_completion(
@@ -555,7 +567,7 @@ def execute_advancement(
         nxt = select_next_step(plan, states)
         if nxt is None:
             if all_succeeded(plan, states):
-                run.status = RunStatus.COMPLETED
+                _set_run_status(run, RunStatus.COMPLETED)
                 run.finished_at = _now()
                 _mark_progress(run)  # run terminal transition
                 metrics.observe_run_completion(
@@ -589,7 +601,7 @@ def execute_advancement(
                 return _claim_action(session, run, tenant_id, nxt, step, spec, store)
 
             # Inline (M3/M5) path: execute in-lock.
-            step.status = StepStatus.RUNNING
+            _set_step_status(step, StepStatus.RUNNING)
             step.attempt = step.attempt + 1
             step.started_at = _now()
             connector_ctx = (
@@ -609,7 +621,7 @@ def execute_advancement(
                 _set_connector_status(session, connector_ctx.connector_id, "error")
             return _fail_run_step(session, run, step, str(exc))
 
-        step.status = StepStatus.SUCCESS
+        _set_step_status(step, StepStatus.SUCCESS)
         step.output = output
         step.finished_at = _now()
         _mark_progress(run)  # step terminal transition (inline success)
