@@ -622,7 +622,7 @@ def main() -> None:
     new_id, new_hex = f"{old_id}-rot", secrets.token_hex(32)
     new_path = Path(_KEYS_DIR, "api-rot.key")
     new_path.write_text(new_hex + "\n", encoding="ascii")
-    new_path.chmod(0o600)
+    new_path.chmod(0o644)  # dev/test key: container uid 10001 must read it (Linux hosts)
     ins = _compose(
         "run", "--rm", "--no-deps",
         "-v", f"{new_path.resolve()}:/run/nlw/keys/api-rot.key:ro",

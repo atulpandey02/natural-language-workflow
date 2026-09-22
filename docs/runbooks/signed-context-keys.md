@@ -97,6 +97,12 @@ door.
 ## Local / test provisioning
 
 `scripts/ops/ctx-keys-dev.sh` generates git-ignored dev keys under
-`docker/ctx-keys/` and installs them via the same installer. The integration test
-fixture installs fresh random keys per test database. **None of these are
-production keys.** Never reuse a test key outside its throwaway database.
+`docker/ctx-keys/` and installs them via the same installer. Run it with
+`--generate-only` **before** the first `docker compose run api …` (the migration)
+and again without flags after the migration to install: on Linux hosts Docker
+auto-creates a missing bind-mount source as a root-owned directory, which would
+break key provisioning. Dev key files are deliberately `0644` (container uid
+10001 must read them; the local runtime does not enforce strict key-file
+permissions — staging/production do). The integration test fixture installs
+fresh random keys per test database. **None of these are production keys.**
+Never reuse a test key outside its throwaway database.

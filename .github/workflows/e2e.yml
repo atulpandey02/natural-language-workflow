@@ -77,11 +77,15 @@ jobs:
           for i in $(seq 1 60); do
             $COMPOSE exec -T postgres pg_isready -U nlw -d nlw && break; sleep 2;
           done
+          # c0) signed-context TEST key FILES must exist before the first
+          #     `compose run api` — on Linux, Docker would otherwise auto-create the
+          #     bind-mount sources as root-owned directories.
+          scripts/ops/ctx-keys-dev.sh --generate-only -f docker-compose.yml -f docker-compose.e2e.yml
           # c) schema first — migrate before any runtime process starts
           $COMPOSE run --rm api alembic upgrade head
-          # c2) signed-context keys (P3B): generate throwaway TEST keys and install
-          #     them with the owner credential BEFORE any runtime starts; each
-          #     runtime then signs with ITS mounted key file (fail closed otherwise).
+          # c2) signed-context keys (P3B): install the throwaway TEST keys with the
+          #     owner credential BEFORE any runtime starts; each runtime then signs
+          #     with ITS mounted key file (fail closed otherwise).
           scripts/ops/ctx-keys-dev.sh -f docker-compose.yml -f docker-compose.e2e.yml
           # d) now start the runtime processes
           $COMPOSE up -d --build api worker scheduler web caddy

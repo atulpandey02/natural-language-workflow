@@ -74,15 +74,19 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 
+echo "--- generating TEST signed-context key files (P3B) before the first compose run ---"
+# Fresh throwaway keys for this run. Generated BEFORE any `compose run api` so
+# Docker never auto-creates the bind-mount sources as root-owned directories.
+rm -rf docker/ctx-keys
+scripts/ops/ctx-keys-dev.sh --generate-only -f docker-compose.yml
+
 echo "--- applying migrations (owner) ---"
 docker compose -f docker-compose.yml run --rm \
   -e DATABASE_MIGRATION_URL="${OWNER_MIGRATION_URL}" \
   api alembic upgrade head
 
-echo "--- provisioning TEST signed-context keys (P3B) before any runtime starts ---"
-# Fresh throwaway keys for this run; installed with the owner credential. The
-# host-side driver signs its direct-SQL probes with the same files.
-rm -rf docker/ctx-keys
+echo "--- installing the TEST keys (owner credential) before any runtime starts ---"
+# The host-side driver signs its direct-SQL probes with the same files.
 scripts/ops/ctx-keys-dev.sh -f docker-compose.yml
 export NLW_CTX_KEYS_DIR="docker/ctx-keys"
 
