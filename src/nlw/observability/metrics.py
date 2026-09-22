@@ -53,6 +53,46 @@ _PLANNER_LATENCY = Histogram(
     "nlw_planner_latency_seconds",
     "Planner (LLM + feasibility) latency (seconds).",
 )
+# --- AI-core behavior (M12B-A, Part I). All labels are bounded vocabularies:
+# never tenant/run/step ids, prompt text, or tool output. ---
+# Structurally invalid model output (unparseable / schema violation) -> a
+# deterministic PLANNER_INVALID_OUTPUT reject. A rising rate signals a model /
+# provider / schema-drift problem distinct from ordinary business rejects.
+_PLANNER_INVALID = Counter(
+    "nlw_planner_invalid_output_total",
+    "Planner responses rejected as structurally invalid (schema/parse failure).",
+)
+# Feasibility REJECT reasons by stable code (FeasibilityCode is a small fixed
+# vocabulary). One increment per reject finding.
+_FEASIBILITY_REJECT = Counter(
+    "nlw_feasibility_reject_total",
+    "Feasibility reject findings by stable code.",
+    labelnames=("code",),
+)
+# Proposed plan shape (accepted plans that reached feasibility).
+_PLAN_STEPS = Histogram(
+    "nlw_plan_steps",
+    "Number of steps in a proposed plan.",
+    buckets=(0, 1, 2, 3, 5, 10, 20, 50, 100),
+)
+_PLAN_BYTES = Histogram(
+    "nlw_plan_bytes",
+    "Serialized size of a proposed plan (bytes).",
+    buckets=(256, 1024, 4096, 16384, 65536, 262144),
+)
+# Planner token usage (direction is bounded: input|output). Cost/latency signal.
+_PLANNER_TOKENS = Histogram(
+    "nlw_planner_tokens",
+    "Planner token usage per request.",
+    labelnames=("direction",),
+    buckets=(64, 256, 1024, 2048, 4096, 8192),
+)
+# Deterministic grounded run summary outcomes (RunOutcome is a fixed vocabulary).
+_RUN_SUMMARY = Counter(
+    "nlw_run_summary_total",
+    "Grounded run summaries produced, by run outcome.",
+    labelnames=("outcome",),
+)
 
 # --- Tools / actions (worker) ---
 _TOOL_LATENCY = Histogram(
@@ -260,6 +300,31 @@ def record_plan(status: str) -> None:
 
 def observe_planner(seconds: float) -> None:
     _PLANNER_LATENCY.observe(seconds)
+
+
+def record_planner_invalid_output() -> None:
+    _PLANNER_INVALID.inc()
+
+
+def record_feasibility_reject(code: str) -> None:
+    """One reject finding by stable FeasibilityCode value (bounded vocabulary)."""
+    _FEASIBILITY_REJECT.labels(code=code).inc()
+
+
+def observe_plan_shape(steps: int, plan_bytes: int) -> None:
+    _PLAN_STEPS.observe(steps)
+    _PLAN_BYTES.observe(plan_bytes)
+
+
+def observe_planner_tokens(input_tokens: int | None, output_tokens: int | None) -> None:
+    if input_tokens is not None:
+        _PLANNER_TOKENS.labels(direction="input").observe(input_tokens)
+    if output_tokens is not None:
+        _PLANNER_TOKENS.labels(direction="output").observe(output_tokens)
+
+
+def record_run_summary(outcome: str) -> None:
+    _RUN_SUMMARY.labels(outcome=outcome).inc()
 
 
 def observe_tool(tool: str, outcome: str, seconds: float) -> None:

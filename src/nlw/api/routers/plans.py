@@ -139,6 +139,19 @@ async def create_plan(
 
     report = result.report
     metrics.record_plan(report.status.value)
+    # AI-core observability (M12B-A, Part I): token usage, invalid-output rate,
+    # reject reasons by stable code, and the proposed-plan shape. All bounded.
+    metrics.observe_planner_tokens(result.input_tokens, result.output_tokens)
+    if result.output is None:
+        metrics.record_planner_invalid_output()
+    else:
+        plan_obj = result.output.to_workflow_plan()
+        metrics.observe_plan_shape(
+            len(result.output.steps), len(plan_obj.model_dump_json().encode())
+        )
+    for finding in report.findings:
+        if finding.severity == "reject":
+            metrics.record_feasibility_reject(finding.code.value)
     proposed_plan = result.output.to_workflow_plan().model_dump() if result.output else None
     normalized_plan = (
         report.normalized_plan.model_dump() if report.normalized_plan is not None else None
