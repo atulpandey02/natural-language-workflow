@@ -83,6 +83,11 @@ test.describe("members + invitations (multi-user)", () => {
       // Route into the app (selects the joined workspace + hard-navigates).
       await pageB.getByRole("button", { name: /continue to workspace/i }).click();
       await pageB.waitForURL(/\/$/, { timeout: 15000 });
+
+      // Item 11: navigating BACK to the accept page must not resurface the raw
+      // token (it was stripped from the URL/history on redemption).
+      await pageB.goBack();
+      await expect(pageB).not.toHaveURL(/token=/);
     } finally {
       await contextB.close();
     }
@@ -93,6 +98,43 @@ test.describe("members + invitations (multi-user)", () => {
     await expect
       .poll(async () => countAdminCells(page), { timeout: 15000 })
       .toBeGreaterThan(adminBefore);
+
+    // --- Approval separation of duties in the browser (items 7-10) ---------
+    // seed.mjs parked an approval-gated run in this (primary) workspace whose
+    // immutable requester is the admin/owner = Context A. So Context A (the
+    // requester) must NOT be able to decide it, and the newly-invited admin must.
+    await page.goto("/approvals");
+    await expect(page.getByRole("heading", { name: "Pending approvals" })).toBeVisible();
+    const requesterCard = page.locator(".card", { hasText: "webhook.send" });
+    await expect(requesterCard).toBeVisible();
+    // Item 8: the requester sees the SoD note and NO approve/reject controls.
+    await expect(requesterCard.getByRole("note")).toContainText(/you requested this action/i);
+    await expect(requesterCard.getByRole("button", { name: /^approve$/i })).toHaveCount(0);
+
+    // Items 9-10: a genuinely different admin (the invited user) can decide it,
+    // and the decision is reflected (the approval leaves the pending list).
+    const contextC = await browser.newContext();
+    try {
+      const pageC = await contextC.newPage();
+      await signIn(pageC, env.invitedEmail, env.invitedPassword);
+      await pageC.goto("/approvals");
+      const approverCard = pageC.locator(".card", { hasText: "webhook.send" });
+      await expect(approverCard).toBeVisible();
+      const approve = approverCard.getByRole("button", { name: /^approve$/i });
+      await expect(approve).toBeEnabled();
+      await approve.click();
+      // Decision durable + reflected: the approval is no longer pending.
+      await expect(pageC.getByText(/no pending approvals/i)).toBeVisible({ timeout: 15000 });
+    } finally {
+      await contextC.close();
+    }
+
+    // The decision is also reflected for the requester on refresh.
+    await page.reload();
+    await expect(page.getByText(/no pending approvals/i)).toBeVisible({ timeout: 15000 });
+    // Item 12 (the worker advances the approved run exactly once) is proven with
+    // the REAL worker in the P3A Docker smoke + the integration suite; the web app
+    // has no runs-list surface to assert run status from the browser.
   });
 });
 

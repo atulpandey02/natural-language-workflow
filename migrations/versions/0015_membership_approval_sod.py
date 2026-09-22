@@ -300,19 +300,24 @@ def upgrade() -> None:
             $$
         """
     )
-    # Owned by nlw_workspace_bootstrap — the existing NOLOGIN BYPASSRLS role that
-    # already performs privileged membership writes (invitation acceptance). This
-    # keeps nlw_rls_bypass (the read-only RLS-helper role) free of any write grant.
+    # Owned by nlw_membership_admin — a DEDICATED NOLOGIN BYPASSRLS role that owns
+    # ONLY this function, so the identity-bootstrap owner (nlw_workspace_bootstrap)
+    # does not also become a general membership administrator. Its entire blast
+    # radius is the two grants below; a direct grant test asserts it can touch
+    # nothing else (no users email/auth id, connectors, workflows, actions, secrets,
+    # backup/recovery state). nlw_rls_bypass stays purely read-only.
     op.execute(
-        "ALTER FUNCTION manage_membership(uuid, uuid, text, text) OWNER TO nlw_workspace_bootstrap"
+        "ALTER FUNCTION manage_membership(uuid, uuid, text, text) OWNER TO nlw_membership_admin"
     )
     op.execute("REVOKE ALL ON FUNCTION manage_membership(uuid, uuid, text, text) FROM PUBLIC")
     op.execute("GRANT EXECUTE ON FUNCTION manage_membership(uuid, uuid, text, text) TO nlw_app")
-    # The definer needs SELECT/UPDATE/DELETE on memberships (it already has INSERT
-    # for accept) and INSERT on authz_audit_events (already granted). It has NO
+    # The definer's ONLY privileges: memberships DML (the mutation it performs) and
+    # authz_audit_events INSERT (the append-only event it writes). It has NO
     # privilege on workspaces (it only advisory-locks the workspace id, never
-    # touches that table). No LOGIN role can use these except through the function.
-    op.execute("GRANT SELECT, UPDATE, DELETE ON memberships TO nlw_workspace_bootstrap")
+    # touches the table) and nothing else. No LOGIN role can use these except
+    # through the SECURITY DEFINER function, which authorizes the actor first.
+    op.execute("GRANT SELECT, UPDATE, DELETE ON memberships TO nlw_membership_admin")
+    op.execute("GRANT INSERT ON authz_audit_events TO nlw_membership_admin")
 
     # --- single-use atomic invitation acceptance (accepter is not yet a member) ---
     op.execute(
@@ -531,7 +536,8 @@ def downgrade() -> None:
 
     op.execute("DROP FUNCTION IF EXISTS accept_workspace_invitation(text)")
     op.execute("DROP FUNCTION IF EXISTS manage_membership(uuid, uuid, text, text)")
-    op.execute("REVOKE SELECT, UPDATE, DELETE ON memberships FROM nlw_workspace_bootstrap")
+    op.execute("REVOKE INSERT ON authz_audit_events FROM nlw_membership_admin")
+    op.execute("REVOKE SELECT, UPDATE, DELETE ON memberships FROM nlw_membership_admin")
     op.execute("DROP TABLE IF EXISTS authz_audit_events")
     op.execute("DROP TABLE IF EXISTS workspace_invitations")
 

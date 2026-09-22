@@ -138,10 +138,15 @@ rejected even by an owner and even via direct SQL. **DB-level immutability
 approval decision — closing gaps where `nlw_worker`/`nlw_app` table-level UPDATE
 could otherwise rewrite provenance or flip a decided approval. **Membership mutation
 is function-only:** `nlw_app` has no direct UPDATE/DELETE on `memberships`; role
-changes/removals go through the `manage_membership` SECURITY DEFINER function, which
-serializes on the workspace identity FIRST then re-reads ownership under the lock —
-the owner invariant is correct by construction (no READ COMMITTED write skew), not
-merely trigger-guarded. **Append-only `authz_audit_events`** records invite /
+changes/removals go through the `manage_membership` SECURITY DEFINER function —
+owned by a dedicated NOLOGIN `nlw_membership_admin` role whose only privileges are
+memberships DML + audit INSERT (proven by direct grant tests) — which serializes on
+the workspace identity FIRST then re-reads ownership under the lock, so the owner
+invariant is correct by construction (no READ COMMITTED write skew), not merely
+trigger-guarded. The P2 restore validation additionally verifies these P3A objects
+(invitation/audit ownership + RLS + constraints + grants, provenance triggers, the
+membership-admin least-privilege owner, hardened `search_path`, no PUBLIC EXECUTE)
+survive an encrypted backup/restore. **Append-only `authz_audit_events`** records invite /
 membership / approval events (requested/approved/rejected) in the same transaction as
 each committed transition, with no tokens/secrets and no UPDATE/DELETE for runtime
 roles (verified by the P2 restore validation). A minimal Next.js product flow

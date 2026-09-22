@@ -18,7 +18,11 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 _RUNTIME_ROLES = ("nlw_app", "nlw_worker", "nlw_scheduler")
-_ALL_ROLES = _RUNTIME_ROLES + ("nlw_rls_bypass", "nlw_workspace_bootstrap")
+_ALL_ROLES = _RUNTIME_ROLES + (
+    "nlw_rls_bypass",
+    "nlw_workspace_bootstrap",
+    "nlw_membership_admin",
+)
 _FORCED_RLS_TABLES = (
     "users",
     "workflow_runs",
@@ -39,7 +43,7 @@ _SECURITY_DEFINER_FUNCS = {
     "resolve_or_create_user": "nlw_workspace_bootstrap",
     "create_workspace_for_current_user": "nlw_workspace_bootstrap",
     "accept_workspace_invitation": "nlw_workspace_bootstrap",
-    "manage_membership": "nlw_workspace_bootstrap",
+    "manage_membership": "nlw_membership_admin",
 }
 # The authorization audit must remain append-only for runtime roles after a
 # restore: neither nlw_app nor nlw_worker may hold UPDATE or DELETE on it.
@@ -226,6 +230,155 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
             "authz_audit_append_only_for_runtime_roles",
             not audit_writable,
             f"writable={audit_writable}",
+        )
+
+        # --- P3A membership/invitation/provenance objects survived the restore ---
+        cons = {
+            r[0]
+            for r in _q(
+                conn,
+                "SELECT conname FROM pg_constraint WHERE conrelid = "
+                "'public.workspace_invitations'::regclass",
+            ).all()
+        }
+        missing_inv_cons = {
+            "ck_invitation_role",
+            "ck_invitation_status",
+            "uq_invitation_token_hash",
+        } - cons
+        add(
+            "invitation_constraints_present",
+            not missing_inv_cons,
+            f"missing={sorted(missing_inv_cons)}",
+        )
+        has_pending_idx = bool(
+            _q(
+                conn,
+                "SELECT 1 FROM pg_indexes WHERE schemaname='public' "
+                "AND indexname='uq_invitation_pending_email'",
+            ).scalar_one_or_none()
+        )
+        add("invitation_pending_unique_index_present", has_pending_idx, "partial unique index")
+        # Invitations are least-privilege for nlw_app: SELECT+INSERT, column-scoped
+        # UPDATE, and crucially NO DELETE. Only the hash is stored (no raw column).
+        inv_delete = bool(
+            _q(
+                conn,
+                "SELECT has_table_privilege('nlw_app', 'workspace_invitations', 'DELETE')",
+            ).scalar_one()
+        )
+        inv_cols = {
+            r[0]
+            for r in _q(
+                conn,
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='workspace_invitations'",
+            ).all()
+        }
+        add(
+            "invitations_hash_only_and_no_app_delete",
+            (not inv_delete) and "token_hash" in inv_cols and "token" not in inv_cols,
+            f"app_delete={inv_delete} has_token_col={'token' in inv_cols}",
+        )
+
+        # nlw_membership_admin (manage_membership owner) blast radius: exactly
+        # memberships DML + audit INSERT, nothing on unrelated sensitive tables.
+        ma_ok = all(
+            bool(
+                _q(
+                    conn, "SELECT has_table_privilege('nlw_membership_admin', :t, :p)", t=t, p=p
+                ).scalar_one()
+            )
+            for t, p in (
+                ("memberships", "SELECT"),
+                ("memberships", "UPDATE"),
+                ("memberships", "DELETE"),
+                ("authz_audit_events", "INSERT"),
+            )
+        )
+        ma_leak = [
+            f"{t}:{p}"
+            for t in ("users", "workspaces", "connectors", "dr_restore_events", "approvals")
+            for p in ("SELECT", "INSERT", "UPDATE", "DELETE")
+            if bool(
+                _q(
+                    conn, "SELECT has_table_privilege('nlw_membership_admin', :t, :p)", t=t, p=p
+                ).scalar_one()
+            )
+        ]
+        add(
+            "membership_admin_least_privilege",
+            ma_ok and not ma_leak,
+            f"has_needed={ma_ok} leak={ma_leak}",
+        )
+        # PUBLIC cannot execute the privileged membership/invitation functions.
+        pub_exec = [
+            sig
+            for sig in (
+                "public.manage_membership(uuid, uuid, text, text)",
+                "public.accept_workspace_invitation(text)",
+            )
+            if bool(
+                _q(
+                    conn, "SELECT has_function_privilege('public', :s, 'EXECUTE')", s=sig
+                ).scalar_one()
+            )
+        ]
+        add("privileged_funcs_no_public_execute", not pub_exec, f"public_exec={pub_exec}")
+        # search_path is hardened to exactly pg_catalog for the P3A definers.
+        bad_search_path = [
+            r[0]
+            for r in _q(
+                conn,
+                "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+                "WHERE n.nspname='public' AND p.proname IN "
+                "('manage_membership','accept_workspace_invitation','is_current_user_owner',"
+                "'enforce_workspace_owner_present') "
+                "AND array_to_string(p.proconfig, ',') <> 'search_path=pg_catalog'",
+            ).all()
+        ]
+        add("p3a_definers_search_path_pg_catalog", not bad_search_path, f"bad={bad_search_path}")
+        # Approval requester provenance: column present, and immutable for nlw_app
+        # (no column-level UPDATE grant on requested_by_user_id).
+        req_col = bool(
+            _q(
+                conn,
+                "SELECT 1 FROM information_schema.columns WHERE table_schema='public' "
+                "AND table_name='approvals' AND column_name='requested_by_user_id'",
+            ).scalar_one_or_none()
+        )
+        req_writable = bool(
+            _q(
+                conn,
+                "SELECT has_column_privilege('nlw_app', 'approvals', 'requested_by_user_id', "
+                "'UPDATE')",
+            ).scalar_one()
+        )
+        add(
+            "approval_requester_present_and_immutable",
+            req_col and not req_writable,
+            f"col={req_col} app_can_write={req_writable}",
+        )
+        # Provenance/decision immutability triggers survived the restore.
+        trg = {
+            r[0]
+            for r in _q(
+                conn,
+                "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgname IN "
+                "('trg_approval_immutable','trg_run_initiator_immutable',"
+                "'trg_schedule_creator_immutable','trg_workspace_owner_present')",
+            ).all()
+        }
+        missing_trg = {
+            "trg_approval_immutable",
+            "trg_run_initiator_immutable",
+            "trg_schedule_creator_immutable",
+            "trg_workspace_owner_present",
+        } - trg
+        add(
+            "provenance_immutability_triggers_present",
+            not missing_trg,
+            f"missing={sorted(missing_trg)}",
         )
 
         # --- application invariants ---

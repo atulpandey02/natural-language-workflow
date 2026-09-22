@@ -136,6 +136,45 @@ async function main() {
   const invitedToken = await signIn(INVITED);
   await apiGet("/me", invitedToken);
 
+  // Seed a PARKED approval-gated run in the primary workspace whose immutable
+  // requester is the ADMIN (owner). This lets the P3A approval separation-of-duties
+  // E2E prove, in the browser: the requester (admin/owner) CANNOT decide it, but the
+  // newly-invited admin CAN — and the decision is reflected. The step_runs row is
+  // seeded directly (as a real park produces) so no worker timing is needed to
+  // reach WAITING_APPROVAL; the real worker still advances the run after approval.
+  const cid = randomUUID();
+  const awf = randomUUID();
+  const aver = randomUUID();
+  const arun = randomUUID();
+  const aplan = JSON.stringify({
+    steps: [{ id: "notify", tool: "webhook.send", args: {}, connector: "e2e-hook" }],
+  });
+  psql(
+    `INSERT INTO connectors (id, tenant_id, type, name, config, secret_ref, status) ` +
+      `VALUES ('${cid}','${ws1}','webhook','e2e-hook',` +
+      `'{"url":"https://s.example/h"}'::jsonb,NULL,'active')`,
+  );
+  psql(`INSERT INTO workflows (id, tenant_id, name) VALUES ('${awf}','${ws1}','E2E Approval WF')`);
+  psql(
+    `INSERT INTO workflow_versions (id, tenant_id, workflow_id, version, plan) ` +
+      `VALUES ('${aver}','${ws1}','${awf}',1,'${aplan}'::jsonb)`,
+  );
+  psql(
+    `INSERT INTO workflow_runs (id, tenant_id, workflow_id, workflow_version_id, status, ` +
+      `initiated_by_user_id) SELECT '${arun}','${ws1}','${awf}','${aver}','WAITING_APPROVAL', u.id ` +
+      `FROM users u WHERE u.email = '${ADMIN.email}'`,
+  );
+  psql(
+    `INSERT INTO step_runs (id, tenant_id, run_id, step_id, tool, status, attempt, input) ` +
+      `VALUES (gen_random_uuid(),'${ws1}','${arun}','notify','webhook.send',` +
+      `'WAITING_APPROVAL',0,'{}'::jsonb)`,
+  );
+  psql(
+    `INSERT INTO approvals (id, tenant_id, run_id, step_id, connector_id, connector_name, tool, ` +
+      `status, requested_by_user_id) SELECT gen_random_uuid(),'${ws1}','${arun}','notify','${cid}',` +
+      `'e2e-hook','webhook.send','pending', u.id FROM users u WHERE u.email = '${ADMIN.email}'`,
+  );
+
   // Emit credentials for the Playwright job.
   process.stdout.write(
     [
