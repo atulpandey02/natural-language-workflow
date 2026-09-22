@@ -52,3 +52,40 @@ readiness 503 -> repair). The TRUE live-interruption test — SIGKILL the proces
 mid-`alembic upgrade`, then observe transaction rollback / partial state /
 alembic_version and confirm readiness stays 503 until repaired — is performed
 here on the real host (not in ephemeral CI).
+
+## M12 GO/NO-GO checklist (signed-context rollout, M12A)
+
+The **code gate** closed with P3B (`1eebf2e`) and the M12A-Prep tooling; the
+**operational gate** is the list below. Every item needs real evidence (not the
+CI "staging simulation" job, which contacts no host). Decision = GO only when
+all boxes are ticked.
+
+- [ ] Off-host backup provider configured (`docs/ops/backup-providers.md`),
+      `/opt/nlw/.env.backup` in place, `nlw-backup.timer` active, and
+      **one verified backup** of the pre-upgrade database (`rev-0010…`) — the
+      `verify-backup` gate proves it; a MinIO/local fixture never counts.
+- [ ] `python -m nlw.ops.rollout preflight` clean against the intended instance
+      (`i-0d1e65cdc9401dbb9`): revision `0010_readiness_schema_grant`, M11 roles,
+      zero non-terminal work.
+- [ ] Production-grade keys prepared on the host (`prepare-keys`: 0700/0400,
+      uid 10001, fingerprints only) and **escrowed off-host** with a recovery
+      test; attestation written by the operator; `verify-escrow` passed with
+      `SIGNED_CONTEXT_KEYS_ESCROWED_AND_RECOVERY_TESTED`.
+- [ ] Operator authorization `AUTHORIZE_M12A_SIGNED_CONTEXT_STAGING_DEPLOYMENT`
+      given for this host + release (`deploy/staging/release.json`). Neither
+      phrase substitutes for the backup provider.
+- [ ] Rollout phases `drain → migrate → install-context-keys → recreate-runtime →
+      validate → reopen` completed; state file kept as evidence; `signed_context: ok`.
+- [ ] `scripts/ops/verify-staging-deployment.sh` green after reopen (instance id,
+      release digests, roles incl. `nlw_ctx_verifier`, schema `0016`, registry
+      posture, TLS).
+- [ ] Prometheus rule groups `nlw-backup` + `nlw-signed-context` loaded;
+      Alertmanager healthy; **a real alert receiver wired and a controlled test
+      alert delivered** (open until an operator chooses the channel —
+      `docs/ops/alerting.md`).
+- [ ] Non-destructive key-rotation drill on staging (API class, overlap, revoke).
+- [ ] k6 planner/API load profile + non-destructive failure drills (restart
+      api/worker/scheduler; wrong-key canary fails closed).
+- [ ] Real-provider fresh-host DR drill (not MinIO) — `dr-real-vps-checklist.md`.
+- [ ] Interactive reboot drill.
+- [ ] Real Slack/webhook delivery test — deliberately **last**.

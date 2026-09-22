@@ -8,7 +8,7 @@ this and know exactly where the project stands. Update it after each milestone.
 | Field | Value |
 |---|---|
 | Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
-| Current milestone | **M11.5 P3B** — signed database context (migration `0016`, ADR-024): RLS trusts only HMAC-verified, purpose-bound, expiring `app.ctx_*` claims; the forgeable `app.user_id`/`app.tenant_id` GUCs grant nothing. **Implemented on local branch `feat/pre-m12-signed-database-context`, unmerged.** P3A (migration `0015`, ADR-023) is complete. |
+| Current milestone | **M12A-Prep** — signed-context deployment tooling: phased, gated `python -m nlw.ops.rollout` (read-only by default; instance-id + digest identity; escrow attestation; verified off-host backup gate; atomic stop → migrate 0010→0016 → install keys → recreate), idempotent role provisioning for existing databases, production key preparation (`nlw.ctxkeys prepare/fingerprint`), Prometheus rule mounting + Alertmanager skeleton, disposable 0010→0016 rehearsal. M11.5 P3B (migration `0016`, ADR-024) is **merged** (`1eebf2e`). |
 | Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
 | Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
 | Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
@@ -426,6 +426,8 @@ See [`docs/adr/`](adr/). Accepted so far:
 Planned: ADR-008 Deployment strategy.
 
 ## Runbooks
+
+- [staging-signed-context-rollout](runbooks/staging-signed-context-rollout.md) — **M12A**: the phased, gated upgrade of the staging VPS from schema `0010` to `0016` (`python -m nlw.ops.rollout`; read-only default; authorization + escrow + backup gates; `deploy/staging/release.json` + `target.env` are the single identity source). Rehearsal: `scripts/ops/rehearse-0010-to-0016.sh`. Alerting: [docs/ops/alerting](ops/alerting.md).
 
 [`docs/runbooks/`](runbooks/) — see its [README](runbooks/README.md) for the
 index. Security-sensitive: [signed-context-keys.md](runbooks/signed-context-keys.md)
