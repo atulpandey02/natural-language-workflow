@@ -3,10 +3,10 @@ recovery invariants. Runs as the owner (bypasses FORCE RLS). No secrets printed.
 
     python -m scripts.ops.dr_drill_seed seed    --url <owner-url>
     python -m scripts.ops.dr_drill_seed verify   --url <owner-url>   # post-restore
-    python -m scripts.ops.dr_drill_seed newrun   --url <owner-url>   # execute a NEW run
+    python -m scripts.ops.dr_drill_seed newrun   --url <owner-url> \
+        --worker-url <nlw_worker-url> --key-id <id> --key-file <path>   # execute a NEW run
 """
 
-import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -163,22 +163,34 @@ def verify(url: str) -> None:
     )
 
 
-def newrun(url: str) -> None:
+def newrun(url: str, worker_url: str, key_id: str, key_file: str) -> None:
     """Create a BRAND-NEW post-restore workflow + run and EXECUTE it to COMPLETED
     through the real engine (in-process, no queue), proving the recovered database
     accepts and processes new work. Uses the connector-less fake.echo tool.
 
-    Also proves restored work is NOT replayed: no restored run advances here (they
-    are all terminal after quiescence), and only the brand-new run runs."""
+    The run is seeded as the owner but EXECUTED as the real ``nlw_worker`` login
+    role under a signed ``worker_execution`` context (P3B): the restored database
+    must verify the drill's worker key, or the engine is denied by RLS and the run
+    never completes. Also proves restored work is NOT replayed: no restored run
+    advances here (they are all terminal after quiescence), and only the
+    brand-new run runs."""
     import uuid as _uuid
+    from pathlib import Path
 
     from sqlalchemy import create_engine as _create_engine
     from sqlalchemy.orm import sessionmaker
 
     from nlw.backup.config import sa_engine_url
+    from nlw.db.session import _install_context_reset
     from nlw.engine.execution import process_advance
+    from nlw.tenancy.keys import set_process_signer, signer_from_material
+    from nlw.tenancy.signing import Purpose
 
-    engine = _create_engine(sa_engine_url(url))
+    set_process_signer(
+        signer_from_material(Purpose.WORKER_EXECUTION, key_id, Path(key_file).read_text().strip())
+    )
+    engine = _create_engine(sa_engine_url(worker_url))
+    _install_context_reset(engine)
     session_factory = sessionmaker(engine)
 
     with psycopg.connect(url, autocommit=True) as c:
@@ -222,11 +234,23 @@ def newrun(url: str) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) < 4 or sys.argv[2] != "--url":
-        print("usage: dr_drill_seed.py {seed|verify|newrun} --url <owner-url>", file=sys.stderr)
-        return 2
-    cmd, url = sys.argv[1], sys.argv[3]
-    {"seed": seed, "verify": verify, "newrun": newrun}[cmd](url)
+    import argparse
+
+    p = argparse.ArgumentParser(prog="dr_drill_seed.py")
+    p.add_argument("cmd", choices=("seed", "verify", "newrun"))
+    p.add_argument("--url", required=True, help="owner (nlw) libpq URL")
+    p.add_argument("--worker-url", help="newrun: nlw_worker libpq URL the engine executes under")
+    p.add_argument("--key-id", help="newrun: installed worker signing key id")
+    p.add_argument("--key-file", help="newrun: path to the worker key file (hex)")
+    a = p.parse_args()
+    if a.cmd == "newrun":
+        if not (a.worker_url and a.key_id and a.key_file):
+            p.error("newrun requires --worker-url, --key-id and --key-file")
+        newrun(a.url, a.worker_url, a.key_id, a.key_file)
+    elif a.cmd == "seed":
+        seed(a.url)
+    else:
+        verify(a.url)
     return 0
 
 

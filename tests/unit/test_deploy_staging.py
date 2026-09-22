@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "scripts" / "ops" / "deploy-staging.sh"
 VERIFY = ROOT / "scripts" / "ops" / "verify-staging-deployment.sh"
-NAMED_REV = "0015_membership_approval_sod"
+NAMED_REV = "0016_signed_database_context"
 
 
 def _sh(call: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
@@ -186,6 +186,7 @@ def test_deploy_verify_secrets_config_present() -> None:
 _ROLES_OK = "\n".join(
     [
         "nlw_app:tff",
+        "nlw_ctx_verifier:fff",
         "nlw_membership_admin:fft",
         "nlw_rls_bypass:fft",
         "nlw_scheduler:tff",
@@ -200,6 +201,7 @@ _EXPECTED_ROLE_LINES = [
     "nlw_rls_bypass:fft",
     "nlw_workspace_bootstrap:fft",
     "nlw_membership_admin:fft",
+    "nlw_ctx_verifier:fff",
 ]
 
 

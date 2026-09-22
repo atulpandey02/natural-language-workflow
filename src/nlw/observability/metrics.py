@@ -140,6 +140,26 @@ _SCHEDULER_LAG = Gauge(
     "Seconds by which the scheduler is behind the earliest overdue occurrence.",
 )
 
+# --- Signed database context (M11.5 P3B, ADR-024) ---
+# Application-side only: PostgreSQL's verifier (app_ctx_claims) stays side-effect
+# free and returns claims-or-NULL, never a reason. What the application CAN
+# observe is its own self-check — "the key this process holds verifies against
+# the database" — which is exactly the deployment / key-mismatch / rotation
+# signal operators need. Labels are bounded: purpose (4 values), result
+# (valid|invalid) and a fixed reason vocabulary. NEVER user, workspace, run,
+# nonce, tag or key id.
+_CTX_VERIFICATION = Counter(
+    "nlw_ctx_verification_total",
+    "Signed-context self-check verifications by purpose and result.",
+    labelnames=("purpose", "result", "reason"),
+)
+_CTX_SIGNER_CONFIGURED = Gauge(
+    "nlw_ctx_signer_configured",
+    "1 when this process holds a usable signing key for the purpose, else 0.",
+    labelnames=("purpose",),
+)
+_CTX_REASONS = frozenset({"none", "not_verified", "db_error", "signer_unavailable"})
+
 
 # Scrape-time providers for pool/queue gauges. These read live values at collect()
 # time so the numbers are current on every scrape. Providers are registered by the
@@ -303,3 +323,17 @@ def observe_run_completion(result: str, seconds: float) -> None:
 
 def set_scheduler_lag(seconds: float) -> None:
     _SCHEDULER_LAG.set(seconds)
+
+
+def record_ctx_verification(purpose: str, ok: bool, reason: str = "none") -> None:
+    """Record one signed-context self-check (P3B). ``reason`` is coerced into the
+    fixed vocabulary so a caller can never introduce an unbounded label value."""
+    if reason not in _CTX_REASONS:
+        reason = "not_verified"
+    _CTX_VERIFICATION.labels(
+        purpose=purpose, result="valid" if ok else "invalid", reason="none" if ok else reason
+    ).inc()
+
+
+def set_ctx_signer_configured(purpose: str, configured: bool) -> None:
+    _CTX_SIGNER_CONFIGURED.labels(purpose=purpose).set(1 if configured else 0)

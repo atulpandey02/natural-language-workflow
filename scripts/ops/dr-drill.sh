@@ -28,6 +28,11 @@ S3_SECRET="drillsecret123"
 REPO_PW="drill-repo-password"
 APP_IMG="nlw:drill"
 BAK_IMG="nlw-backup:drill"
+# TEST-ONLY signed-context keys for this drill (P3B): generated into a private
+# temp dir, installed into the SOURCE db (so backup/restore carries the registry),
+# mounted read-only into the api runtime, and removed at cleanup. Never real keys.
+KEYS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/${PROJ}-keys.XXXXXX")"
+chmod 700 "${KEYS_DIR}"
 
 # All resource names begin with ${PROJ}- so cleanup can never match anything else.
 cleanup() {
@@ -37,6 +42,7 @@ cleanup() {
   docker volume rm "${PROJ}-srcdata" "${PROJ}-destdata" "${PROJ}-destdata2" \
     "${PROJ}-miniodata" "${PROJ}-gate" >/dev/null 2>&1 || true
   docker network rm "${NET}" >/dev/null 2>&1 || true
+  rm -rf "${KEYS_DIR}" >/dev/null 2>&1 || true
 }
 
 CURL_IMG="curlimages/curl:8.11.1"
@@ -96,6 +102,19 @@ _run_owner_db "${PROJ}-srcdb" "${PROJ}-srcdata"; _wait_db "${PROJ}-srcdb"
 docker run --rm --network "${NET}" \
   -e "DATABASE_MIGRATION_URL=postgresql+psycopg://nlw:nlw@${PROJ}-srcdb:5432/nlw" \
   "${APP_IMG}" alembic upgrade head >/dev/null
+# Signed-context keys (P3B): fresh TEST keys, installed with the owner credential
+# from mounted files (never argv/env values). The registry rides along in the
+# encrypted backup, so the restored database verifies the same keys.
+for c in api worker scheduler; do
+  (umask 077; openssl rand -hex 32 > "${KEYS_DIR}/${c}.key")
+  chmod 644 "${KEYS_DIR}/${c}.key"   # readable by the container user (uid 10001)
+  docker run --rm --network "${NET}" -v "${KEYS_DIR}:/run/nlw/keys:ro" \
+    -e "DATABASE_MIGRATION_URL=postgresql+psycopg://nlw:nlw@${PROJ}-srcdb:5432/nlw" \
+    -e NLW_CTX_OPERATOR=dr-drill "${APP_IMG}" \
+    python -m nlw.ctxkeys install --class "${c}" --key-id "drill-${c}" \
+      --secret-file "/run/nlw/keys/${c}.key" --insecure-permissions >/dev/null
+done
+echo "  [ok] TEST signed-context keys installed (api/worker/scheduler)"
 docker run --rm --network "${NET}" -v "${REPO}/scripts:/scripts:ro" "${APP_IMG}" \
   python /scripts/ops/dr_drill_seed.py seed --url "postgresql://nlw:nlw@${PROJ}-srcdb:5432/nlw"
 
@@ -110,7 +129,7 @@ echo "=== BACKUP (encrypted, off-host to MinIO) ==="
 t0=$(date +%s)
 docker run --rm --network "${NET}" "${_restic_env[@]}" -e APP_ENV=local \
   -e "NLW_BACKUP_DATABASE_URL=postgresql://nlw:nlw@${PROJ}-srcdb:5432/nlw" \
-  -e "NLW_BACKUP_METRICS_FILE=/tmp/m.prom" "${BAK_IMG}" backup
+  -e "NLW_BACKUP_METRICS_FILE=/tmp/m.prom" "${BAK_IMG}" backup 2>&1 | tee "${KEYS_DIR}/backup.log"
 BACKUP_S=$(( $(date +%s) - t0 ))
 echo "  backup_duration_seconds=${BACKUP_S}"
 
@@ -158,7 +177,7 @@ docker run --rm --network "${NET}" "${_restic_env[@]}" "${_gate_env[@]}" -e APP_
   -e "NLW_RESTORE_TARGET_ID=${PROJ}" -e "NLW_RESTORE_CONFIRM=${PROJ}" \
   -e "NLW_RESTORE_RUNTIME_GUARD=off" \
   -e "NLW_RESTORE_SNAPSHOT=latest" -e "REDIS_URL=redis://${PROJ}-redis:6379/0" \
-  "${BAK_IMG}" restore
+  "${BAK_IMG}" restore 2>&1 | tee "${KEYS_DIR}/restore.log"
 RESTORE_S=$(( $(date +%s) - t0 ))
 echo "  restore_duration_seconds=${RESTORE_S} (includes decrypt + pg_restore + quiesce + validate + gate)"
 
@@ -180,6 +199,8 @@ echo "=== (G1-G3) API PROCESS starts against the LOCKED restored DB: alive but g
 docker run -d --name "${PROJ}-api" --network "${NET}" -e APP_ENV=local \
   -e "DATABASE_URL=postgresql+psycopg://nlw_app:nlw_app@${PROJ}-destdb:5432/nlw" \
   -e "REDIS_URL=redis://${PROJ}-redis:6379/0" -e "RECOVERY_GATE_TTL_S=1" \
+  -e NLW_CTX_KEY_ID=drill-api -e NLW_CTX_KEY_FILE=/run/nlw/keys/api.key \
+  -v "${KEYS_DIR}/api.key:/run/nlw/keys/api.key:ro" \
   "${APP_IMG}" python -m nlw.api >/dev/null
 for _ in $(seq 1 30); do [ "$(_api_code /health)" = "200" ] && break; sleep 1; done
 _expect_api /health 200 "liveness available while DB is locked"
@@ -198,7 +219,9 @@ echo "  [ok] ... but the AUTHORITATIVE DB lock blocks startup-check (exit 6), no
 set +e
 docker run --rm --network "${NET}" -e APP_ENV=local \
   -e "DATABASE_URL=postgresql+psycopg://nlw_scheduler:nlw_scheduler@${PROJ}-destdb:5432/nlw" \
-  -e "REDIS_URL=redis://${PROJ}-redis:6379/0" "${APP_IMG}" \
+  -e "REDIS_URL=redis://${PROJ}-redis:6379/0" \
+  -e NLW_CTX_KEY_ID=drill-scheduler -e NLW_CTX_KEY_FILE=/run/nlw/keys/scheduler.key \
+  -v "${KEYS_DIR}/scheduler.key:/run/nlw/keys/scheduler.key:ro" "${APP_IMG}" \
   sh -c 'timeout 25 python -m nlw.scheduler'
 sched_rc=$?; set -e
 [ "${sched_rc}" -ne 0 ] && echo "  [ok] real scheduler aborted at boot (rc=${sched_rc})" \
@@ -226,8 +249,47 @@ biz=$(_api_code /workflows)
   || { echo "FAIL: business route still gated after enable" >&2; exit 1; }
 
 echo "=== (F9/F10) start runtime: a BRAND-NEW post-restore run executes to COMPLETED ==="
-docker run --rm --network "${NET}" -v "${REPO}/scripts:/scripts:ro" "${APP_IMG}" \
-  python /scripts/ops/dr_drill_seed.py newrun --url "${DEST_URL}"
+# The run is driven by the real engine AS nlw_worker with a SIGNED worker_execution
+# context (P3B) verified against the RESTORED key registry — not as the owner.
+docker run --rm --network "${NET}" -v "${REPO}/scripts:/scripts:ro" \
+  -v "${KEYS_DIR}/worker.key:/run/nlw/keys/worker.key:ro" "${APP_IMG}" \
+  python /scripts/ops/dr_drill_seed.py newrun --url "${DEST_URL}" \
+    --worker-url "postgresql://nlw_worker:nlw_worker@${PROJ}-destdb:5432/nlw" \
+    --key-id drill-worker --key-file /run/nlw/keys/worker.key
+
+echo "=== (S1-S3) signed-context secrets survive restore CORRECTLY: protected, never exposed ==="
+# S1: the restored registry is owned by the verifier and unreadable to runtime roles.
+[ "$(_dest_psql "SELECT tableowner FROM pg_tables WHERE tablename='ctx_keys'")" = "nlw_ctx_verifier" ] \
+  && echo "  [ok] restored ctx_keys owned by nlw_ctx_verifier"
+for r in nlw_app nlw_worker nlw_scheduler; do
+  [ "$(_dest_psql "SELECT has_table_privilege('${r}','ctx_keys','SELECT')")" = "f" ] \
+    || { echo "FAIL: ${r} can read restored ctx_keys" >&2; exit 1; }
+done
+echo "  [ok] runtime roles cannot read restored ctx_keys"
+[ "$(_dest_psql "SELECT count(*) FROM ctx_keys WHERE status='active'")" = "3" ] \
+  && echo "  [ok] all three key rows restored and active"
+# S2: revocation behavior survives restore: revoke the scheduler key in the RESTORED
+# db; the verifier must refuse it while the api key still verifies (readiness ok).
+docker run --rm --network "${NET}" \
+  -e "DATABASE_MIGRATION_URL=postgresql+psycopg://nlw:nlw@${PROJ}-destdb:5432/nlw" \
+  -e NLW_CTX_OPERATOR=dr-drill "${APP_IMG}" python -m nlw.ctxkeys revoke --key-id drill-scheduler >/dev/null
+[ "$(_dest_psql "SELECT status FROM ctx_keys WHERE key_id='drill-scheduler'")" = "revoked" ] \
+  && echo "  [ok] revoked key state persisted in the restored registry (audited, no material)"
+[ "$(_dest_psql "SELECT count(*) FROM ctx_key_events WHERE event='revoked' AND key_id='drill-scheduler'")" = "1" ] \
+  && echo "  [ok] revocation audited without material"
+_expect_api /health/ready 200 "api (unrevoked key) still ready after another class was revoked"
+# S3: no plaintext key material in the encrypted repository objects or backup logs.
+API_KEY_HEX="$(cat "${KEYS_DIR}/api.key")"
+if docker run --rm --network "${NET}" --entrypoint sh minio/mc -c \
+  "mc alias set d http://${PROJ}-minio:9000 ${S3_KEY} ${S3_SECRET} >/dev/null && mc find d/${BUCKET} --exec 'mc cat {}'" \
+  | grep -q "${API_KEY_HEX}"; then
+  echo "FAIL: plaintext key material found in the encrypted repository" >&2; exit 1
+fi
+echo "  [ok] encrypted repository objects contain no plaintext key material"
+if grep -q "${API_KEY_HEX}" "${KEYS_DIR}/backup.log" "${KEYS_DIR}/restore.log" 2>/dev/null; then
+  echo "FAIL: key material appeared in backup/restore output" >&2; exit 1
+fi
+echo "  [ok] backup/restore logs contain no key material"
 
 echo "=== (F11/F12) a LATER restore generation re-locks runtime; old enable cannot authorize it ==="
 # Insert new non-terminal work + quiesce -> a new locked generation.

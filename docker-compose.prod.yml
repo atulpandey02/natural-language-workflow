@@ -120,6 +120,13 @@ services:
       NLW_LLM_PROVIDER: ${NLW_LLM_PROVIDER:-stub}
       NLW_LLM_MODEL: ${NLW_LLM_MODEL:-claude-haiku-4-5-20251001}
       NLW_LLM_API_KEY: ${NLW_LLM_API_KEY:-}
+      # Signed DB context (P3B): the API signs with the api-class key ONLY. The
+      # key is a host FILE mounted read-only (never an env value); a missing id
+      # fails the render, a missing/loose file fails startup (fail closed).
+      NLW_CTX_KEY_ID: ${NLW_CTX_API_KEY_ID:?NLW_CTX_API_KEY_ID is required (signed context)}
+      NLW_CTX_KEY_FILE: /run/nlw/keys/api.key
+    volumes:
+      - ${NLW_CTX_KEYS_DIR:?NLW_CTX_KEYS_DIR is required (signed context key files)}/api.key:/run/nlw/keys/api.key:ro
     # No host port: reachable only by the frontend BFF on the internal network.
     expose:
       - "8000"
@@ -146,6 +153,11 @@ services:
       # Required: the worker connects as its OWN least-privilege role. No silent
       # fallback to the app role — a missing value fails the prod render/start.
       DATABASE_URL: ${WORKER_DATABASE_URL:?WORKER_DATABASE_URL is required (nlw_worker)}
+      # Signed DB context (P3B): worker-class key ONLY (cannot mint api contexts).
+      NLW_CTX_KEY_ID: ${NLW_CTX_WORKER_KEY_ID:?NLW_CTX_WORKER_KEY_ID is required (signed context)}
+      NLW_CTX_KEY_FILE: /run/nlw/keys/worker.key
+    volumes:
+      - ${NLW_CTX_KEYS_DIR:?NLW_CTX_KEYS_DIR is required (signed context key files)}/worker.key:/run/nlw/keys/worker.key:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -166,6 +178,11 @@ services:
       # Required: the scheduler connects as its OWN least-privilege role. No
       # silent fallback to the app role — missing value fails the render/start.
       DATABASE_URL: ${SCHEDULER_DATABASE_URL:?SCHEDULER_DATABASE_URL is required (nlw_scheduler)}
+      # Signed DB context (P3B): scheduler-class key ONLY (no human authority).
+      NLW_CTX_KEY_ID: ${NLW_CTX_SCHEDULER_KEY_ID:?NLW_CTX_SCHEDULER_KEY_ID is required (signed context)}
+      NLW_CTX_KEY_FILE: /run/nlw/keys/scheduler.key
+    volumes:
+      - ${NLW_CTX_KEYS_DIR:?NLW_CTX_KEYS_DIR is required (signed context key files)}/scheduler.key:/run/nlw/keys/scheduler.key:ro
     depends_on:
       postgres:
         condition: service_healthy

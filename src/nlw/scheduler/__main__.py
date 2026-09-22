@@ -14,8 +14,11 @@ import structlog
 from nlw.core.config import get_settings
 from nlw.core.logging import configure_logging
 from nlw.db.session import create_sync_engine, create_sync_sessionmaker
-from nlw.observability.metrics import start_metrics_server
+from nlw.observability.metrics import set_ctx_signer_configured, start_metrics_server
 from nlw.scheduler.service import run
+from nlw.tenancy.keys import build_signer, set_process_signer
+from nlw.tenancy.readiness import check_signed_context_sync
+from nlw.tenancy.signing import Purpose
 
 log = structlog.get_logger(__name__)
 
@@ -33,6 +36,13 @@ def main() -> None:
 
     assert_startup_allowed_sync(engine)
     session_factory = create_sync_sessionmaker(engine)
+    # Signed scheduler_reconcile context (P3B): sign with THIS process's key file
+    # and prove the database verifies it before scanning anything. Fails closed.
+    signer = build_signer(settings, Purpose.SCHEDULER_RECONCILE)
+    set_process_signer(signer)
+    set_ctx_signer_configured(str(Purpose.SCHEDULER_RECONCILE), True)
+    with session_factory() as session:
+        check_signed_context_sync(session, signer)
 
     # Enqueue-only use of the queue; import here so the broker is configured once.
     from nlw.worker.actors import advance_run

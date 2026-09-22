@@ -107,6 +107,18 @@ class Settings(BaseSettings):
     invitation_expiry_hours: int = 72
     invitation_max_pending_per_workspace: int = 100
 
+    # --- Signed database context (M11.5 P3B, ADR-024) ---
+    # Each runtime class (api / worker / scheduler) signs its transaction-local DB
+    # context with ITS OWN key, read from a mounted secret FILE (never an env value,
+    # never a query parameter). The key id selects the registry row PostgreSQL
+    # verifies against. Purpose and expected DB role are fixed by the code path,
+    # never by configuration or callers. A missing key means every tenant query
+    # fails closed (RLS denies); in staging/production a missing key aborts startup.
+    ctx_key_id: str | None = Field(default=None, validation_alias="NLW_CTX_KEY_ID")
+    ctx_key_file: str | None = Field(default=None, validation_alias="NLW_CTX_KEY_FILE")
+    # Context lifetime in seconds. Hard-capped at 600 here AND in the database.
+    ctx_ttl_s: int = 120
+
     # --- Recovery-lock gate (M11.5 P2 addendum) ---
     # The API re-evaluates the authoritative DR recovery lock (dr_restore_events)
     # on a short bounded cache: a business request refreshes the state at most once
@@ -194,6 +206,8 @@ class Settings(BaseSettings):
             raise ValueError("invitation_expiry_hours must be >= 1")
         if self.invitation_max_pending_per_workspace < 1:
             raise ValueError("invitation_max_pending_per_workspace must be >= 1")
+        if not (1 <= self.ctx_ttl_s <= 600):
+            raise ValueError("ctx_ttl_s must be within 1..600 seconds")
         return self
 
     @property

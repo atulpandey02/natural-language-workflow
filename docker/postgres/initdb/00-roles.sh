@@ -58,6 +58,10 @@ CREATE ROLE nlw_workspace_bootstrap NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOC
 -- memberships/authz_audit_events are FORCE RLS and the function does its own
 -- authorization; its blast radius is bounded by the migration grants + tests.
 CREATE ROLE nlw_membership_admin NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE;
+-- Non-login role that OWNS the signed-context key registry (ctx_keys) and the
+-- verifier functions (P3B, ADR-024). NOBYPASSRLS: it reads only its own
+-- ctx_keys table (no RLS) and never tenant data. No login role may read keys.
+CREATE ROLE nlw_ctx_verifier NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
 
 GRANT CONNECT ON DATABASE nlw TO nlw_app;
 GRANT USAGE ON SCHEMA public TO nlw_app;
@@ -69,4 +73,5 @@ GRANT USAGE ON SCHEMA public TO nlw_scheduler;
 GRANT nlw_rls_bypass TO nlw;
 GRANT nlw_workspace_bootstrap TO nlw;
 GRANT nlw_membership_admin TO nlw;
+GRANT nlw_ctx_verifier TO nlw;
 SQL

@@ -1,0 +1,58 @@
+{
+  "_comment": "Cross-language golden vectors for the signed DB context (P3B). TEST key only. The Python signer (tests/unit) and PostgreSQL app_ctx_canon()/hmac (tests/integration) must both reproduce these exact messages and tags.",
+  "key_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+  "vectors": [
+    {
+      "key_id": "k-api-1",
+      "db_role": "nlw_app",
+      "purpose": "api_request",
+      "user_id": "8b2e4f5a-1111-4222-8333-444455556666",
+      "tenant_id": "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+      "run_id": "",
+      "issued_at": 1790000000,
+      "expires_at": 1790000120,
+      "nonce": "000102030405060708090a0b0c0d0e0f",
+      "message": "nlwctx11:17:k-api-17:nlw_app11:api_request36:8b2e4f5a-1111-4222-8333-44445555666636:0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f0:10:179000000010:179000012032:000102030405060708090a0b0c0d0e0f",
+      "mac": "46f74369e4b974862828a5a04325f01bcce054d94875fffe76959ecb1d61acf7"
+    },
+    {
+      "key_id": "k-api-1",
+      "db_role": "nlw_app",
+      "purpose": "api_identity",
+      "user_id": "8b2e4f5a-1111-4222-8333-444455556666",
+      "tenant_id": "",
+      "run_id": "",
+      "issued_at": 1790000000,
+      "expires_at": 1790000120,
+      "nonce": "ffeeddccbbaa99887766554433221100",
+      "message": "nlwctx11:17:k-api-17:nlw_app12:api_identity36:8b2e4f5a-1111-4222-8333-4444555566660:0:10:179000000010:179000012032:ffeeddccbbaa99887766554433221100",
+      "mac": "dbf18b09e68f492e3aad1c8e37bc2a9113cb9510a46854743bb8c764c88cb994"
+    },
+    {
+      "key_id": "k-worker-1",
+      "db_role": "nlw_worker",
+      "purpose": "worker_execution",
+      "user_id": "",
+      "tenant_id": "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+      "run_id": "a1a1a1a1-b2b2-4c3c-8d4d-e5e5e5e5e5e5",
+      "issued_at": 1790000000,
+      "expires_at": 1790000300,
+      "nonce": "0123456789abcdef0123456789abcdef",
+      "message": "nlwctx11:110:k-worker-110:nlw_worker16:worker_execution0:36:0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f36:a1a1a1a1-b2b2-4c3c-8d4d-e5e5e5e5e5e510:179000000010:179000030032:0123456789abcdef0123456789abcdef",
+      "mac": "685d08989dd8cf46bd887f5b38378a2a3cd100393bedd0e0f4efef65753edcd6"
+    },
+    {
+      "key_id": "k-sched-1",
+      "db_role": "nlw_scheduler",
+      "purpose": "scheduler_reconcile",
+      "user_id": "",
+      "tenant_id": "",
+      "run_id": "",
+      "issued_at": 1790000000,
+      "expires_at": 1790000060,
+      "nonce": "deadbeefdeadbeefdeadbeefdeadbeef",
+      "message": "nlwctx11:19:k-sched-113:nlw_scheduler19:scheduler_reconcile0:0:0:10:179000000010:179000006032:deadbeefdeadbeefdeadbeefdeadbeef",
+      "mac": "7bb7f7b27a95b117cf1f84c7d05fd96435337129300f8b3aee2ed4911600b93a"
+    }
+  ]
+}

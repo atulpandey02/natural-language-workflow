@@ -15,6 +15,9 @@ from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.engine.execution import execute_advancement
 from nlw.scheduler.due import scan_due
 from nlw.scheduler.service import due_scan_once
+from nlw.tenancy.keys import process_signer
+from nlw.tenancy.session import set_scheduler_context_sync
+from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
 
@@ -201,11 +204,16 @@ def test_concurrent_scan_skip_locked_creates_one_run(pg_stack: SimpleNamespace) 
     )
     sm = _scheduler_sm(pg_stack)
     # Two overlapping transactions; A holds the row lock, B SKIP LOCKED skips it.
+    # Each transaction carries its own SIGNED scheduler context (P3B); the due-scan
+    # policies verify the claim, so a bare nlw_scheduler session sees no schedules.
+    sched = process_signer(Purpose.SCHEDULER_RECONCILE)
     sa = sm()
     sa.begin()
+    set_scheduler_context_sync(sa, sched)
     created_a = scan_due(sa, now, catchup_window_s=3600, batch_limit=10)
     sb = sm()
     sb.begin()
+    set_scheduler_context_sync(sb, sched)
     created_b = scan_due(sb, now, catchup_window_s=3600, batch_limit=10)
     sa.commit()
     sb.commit()

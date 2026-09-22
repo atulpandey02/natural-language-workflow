@@ -6,8 +6,11 @@ init script / CI do, applies the real Alembic migrations as the owner, and hands
 back settings for both the API role (nlw_app) and the worker role (nlw_worker).
 """
 
+import shutil
+import tempfile
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 
 import psycopg
@@ -17,6 +20,9 @@ from alembic.config import Config
 from testcontainers.community.postgres import PostgresContainer
 
 from nlw.core.config import Settings
+from nlw.ctxkeys import install_key
+from nlw.tenancy.keys import clear_process_signers, set_process_signer, signer_from_material
+from nlw.tenancy.signing import Purpose, SecretBytes, SignedContext, generate_test_key
 
 _SUPABASE_URL = "https://proj.supabase.co"
 _SECRET = "dev-secret-for-tests-32bytes-min-length"
@@ -51,6 +57,9 @@ def _bootstrap_roles(owner_libpq: str, db: str) -> None:
             "NOCREATEDB NOCREATEROLE; END IF; "
             "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_membership_admin') THEN "
             "CREATE ROLE nlw_membership_admin NOLOGIN NOSUPERUSER BYPASSRLS "
+            "NOCREATEDB NOCREATEROLE; END IF; "
+            "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_ctx_verifier') THEN "
+            "CREATE ROLE nlw_ctx_verifier NOLOGIN NOSUPERUSER NOBYPASSRLS "
             "NOCREATEDB NOCREATEROLE; END IF; END $$;"
         )
         for role in ("nlw_app", "nlw_worker", "nlw_scheduler"):
@@ -59,6 +68,7 @@ def _bootstrap_roles(owner_libpq: str, db: str) -> None:
         conn.execute("GRANT nlw_rls_bypass TO CURRENT_USER")
         conn.execute("GRANT nlw_workspace_bootstrap TO CURRENT_USER")
         conn.execute("GRANT nlw_membership_admin TO CURRENT_USER")
+        conn.execute("GRANT nlw_ctx_verifier TO CURRENT_USER")
 
 
 @pytest.fixture
@@ -78,7 +88,50 @@ def pg_stack() -> Iterator[SimpleNamespace]:
         cfg.set_main_option("sqlalchemy.url", owner_sa)
         command.upgrade(cfg, "head")
 
-        def _settings(url: str) -> Settings:
+        # --- TEST-ONLY signed-context keys (M11.5 P3B) ---------------------
+        # One fresh random key per runtime class, installed into ctx_keys as the
+        # owner (exactly what `python -m nlw.ctxkeys install` does in deployment)
+        # and written to 0600 files so each role's Settings points at ITS key file.
+        # These keys exist only for this container's lifetime; nothing is committed.
+        keys_dir = Path(tempfile.mkdtemp(prefix="nlw-ctx-keys-"))
+        key_hex = {c: generate_test_key() for c in ("api", "worker", "scheduler")}
+        key_ids = {c: f"test-{c}-{uuid.uuid4().hex[:8]}" for c in key_hex}
+        key_files: dict[str, Path] = {}
+        with psycopg.connect(owner_libpq, autocommit=True) as conn:
+            for cls, hx in key_hex.items():
+                path = keys_dir / f"{cls}.key"
+                path.write_text(hx)
+                path.chmod(0o600)
+                key_files[cls] = path
+                install_key(
+                    conn,
+                    key_class=cls,
+                    key_id=key_ids[cls],
+                    secret=SecretBytes(bytes.fromhex(hx)),
+                    activate_at=None,
+                    actor="pg_stack",
+                )
+        signers = {
+            Purpose.API_IDENTITY: signer_from_material(
+                Purpose.API_IDENTITY, key_ids["api"], key_hex["api"]
+            ),
+            Purpose.API_REQUEST: signer_from_material(
+                Purpose.API_REQUEST, key_ids["api"], key_hex["api"]
+            ),
+            Purpose.WORKER_EXECUTION: signer_from_material(
+                Purpose.WORKER_EXECUTION, key_ids["worker"], key_hex["worker"]
+            ),
+            Purpose.SCHEDULER_RECONCILE: signer_from_material(
+                Purpose.SCHEDULER_RECONCILE, key_ids["scheduler"], key_hex["scheduler"]
+            ),
+        }
+        # Engine/scheduler code paths look up the process-wide signer (as the real
+        # worker/scheduler entrypoints register theirs at boot).
+        clear_process_signers()
+        for s in signers.values():  # api signers too: test seed helpers without pg_stack
+            set_process_signer(s)
+
+        def _settings(url: str, key_class: str = "api") -> Settings:
             return Settings(  # type: ignore[call-arg]
                 _env_file=None,
                 database_url=url,
@@ -88,7 +141,50 @@ def pg_stack() -> Iterator[SimpleNamespace]:
                 # Rate limiting needs Redis; the general API fixtures don't run one.
                 # Dedicated M9 tests build settings with it enabled + a real Redis.
                 rate_limit_enabled=False,
+                ctx_key_id=key_ids[key_class],
+                ctx_key_file=str(key_files[key_class]),
             )
+
+        def sign(purpose: Purpose, **ids: uuid.UUID | None) -> SignedContext:
+            """Mint a valid signed context for ``purpose`` (test helper)."""
+            return signers[purpose].sign(**ids)
+
+        def apply_ctx(conn: psycopg.Connection, ctx: SignedContext) -> None:
+            """Apply a signed context TRANSACTION-locally on a raw psycopg connection.
+            With autocommit=True each statement is its own transaction, so callers
+            must use autocommit=False (or a `with conn.transaction()` block)."""
+            for name, value in ctx.as_gucs().items():
+                conn.execute("SELECT set_config(%s, %s, true)", (name, value))
+
+        def run_as(
+            libpq: str,
+            purpose: Purpose,
+            sql: str,
+            params: tuple[object, ...] = (),
+            **ids: uuid.UUID | None,
+        ) -> list[tuple[object, ...]]:
+            """Execute ONE statement under a fresh signed context in its own
+            transaction (commit on success; rollback on error, which propagates).
+            The signed equivalent of the old autocommit+GUC single-statement shape
+            used by the direct-SQL tests."""
+            with psycopg.connect(libpq, autocommit=False) as conn:
+                apply_ctx(conn, sign(purpose, **ids))
+                try:
+                    cur = conn.execute(sql, params)
+                    rows = cur.fetchall() if cur.description else []
+                    conn.commit()
+                    return rows
+                except Exception:
+                    conn.rollback()
+                    raise
+
+        def ctx_conn(libpq: str, purpose: Purpose, **ids: uuid.UUID | None) -> psycopg.Connection:
+            """Open a NON-autocommit connection with a signed context already applied
+            in an open transaction (the common shape for direct-SQL tests). The
+            caller commits/rolls back and closes."""
+            conn = psycopg.connect(libpq, autocommit=False)
+            apply_ctx(conn, sign(purpose, **ids))
+            return conn
 
         def seed_user() -> uuid.UUID:
             """Insert a users row (as owner, bypassing RLS). Returns the user id."""
@@ -130,16 +226,29 @@ def pg_stack() -> Iterator[SimpleNamespace]:
                 )
             return uid
 
-        yield SimpleNamespace(
-            settings=_settings(app_sa),
-            worker_settings=_settings(worker_sa),
-            scheduler_settings=_settings(scheduler_sa),
-            owner_libpq=owner_libpq,
-            owner_sa=owner_sa,
-            app_libpq=_libpq("nlw_app", "nlw_app", host, port, db),
-            worker_libpq=_libpq("nlw_worker", "nlw_worker", host, port, db),
-            scheduler_libpq=_libpq("nlw_scheduler", "nlw_scheduler", host, port, db),
-            seed_user=seed_user,
-            seed_member=seed_member,
-            add_membership=add_membership,
-        )
+        try:
+            yield SimpleNamespace(
+                settings=_settings(app_sa, "api"),
+                worker_settings=_settings(worker_sa, "worker"),
+                scheduler_settings=_settings(scheduler_sa, "scheduler"),
+                owner_libpq=owner_libpq,
+                owner_sa=owner_sa,
+                app_libpq=_libpq("nlw_app", "nlw_app", host, port, db),
+                worker_libpq=_libpq("nlw_worker", "nlw_worker", host, port, db),
+                scheduler_libpq=_libpq("nlw_scheduler", "nlw_scheduler", host, port, db),
+                seed_user=seed_user,
+                seed_member=seed_member,
+                add_membership=add_membership,
+                # Signed-context test helpers (P3B)
+                signers=signers,
+                key_ids=key_ids,
+                key_hex=key_hex,
+                key_files=key_files,
+                sign=sign,
+                apply_ctx=apply_ctx,
+                ctx_conn=ctx_conn,
+                run_as=run_as,
+            )
+        finally:
+            clear_process_signers()
+            shutil.rmtree(keys_dir, ignore_errors=True)

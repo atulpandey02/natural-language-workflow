@@ -82,6 +82,9 @@ jobs:
                   "NOCREATEDB NOCREATEROLE; END IF; "
                   "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_membership_admin') THEN "
                   "CREATE ROLE nlw_membership_admin NOLOGIN NOSUPERUSER BYPASSRLS "
+                  "NOCREATEDB NOCREATEROLE; END IF; "
+                  "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_ctx_verifier') THEN "
+                  "CREATE ROLE nlw_ctx_verifier NOLOGIN NOSUPERUSER NOBYPASSRLS "
                   "NOCREATEDB NOCREATEROLE; END IF; END $$;"
               )
               for role in ("nlw_app", "nlw_worker", "nlw_scheduler"):
@@ -90,6 +93,7 @@ jobs:
               conn.execute("GRANT nlw_rls_bypass TO nlw")
               conn.execute("GRANT nlw_workspace_bootstrap TO nlw")
               conn.execute("GRANT nlw_membership_admin TO nlw")
+              conn.execute("GRANT nlw_ctx_verifier TO nlw")
           PY
       - name: Apply migrations (as owner)
         env:
@@ -161,12 +165,19 @@ jobs:
           NLW_APP_DB_PASSWORD: ci-app-pw
           NLW_WORKER_DB_PASSWORD: ci-worker-pw
           NLW_SCHEDULER_DB_PASSWORD: ci-scheduler-pw
+          # Signed-context (P3B) render-required values. Only ids and a directory
+          # path — no key FILES exist in CI; `config` never touches mount sources.
+          NLW_CTX_KEYS_DIR: /srv/nlw/ctx-keys
+          NLW_CTX_API_KEY_ID: ci-api
+          NLW_CTX_WORKER_KEY_ID: ci-worker
+          NLW_CTX_SCHEDULER_KEY_ID: ci-scheduler
         run: |
           # Render-required secrets: removing any ONE must fail the render with a
           # message naming that variable. (DATABASE_MIGRATION_URL is intentionally
           # NOT here: it is runtime-guarded in the one-shot migrate service so a
           # normal runtime `up` never needs it — see the separate check below.)
-          for var in POSTGRES_PASSWORD NLW_APP_DB_PASSWORD NLW_WORKER_DB_PASSWORD NLW_SCHEDULER_DB_PASSWORD WORKSPACE_COOKIE_SECRET; do
+          for var in POSTGRES_PASSWORD NLW_APP_DB_PASSWORD NLW_WORKER_DB_PASSWORD NLW_SCHEDULER_DB_PASSWORD WORKSPACE_COOKIE_SECRET \
+                     NLW_CTX_KEYS_DIR NLW_CTX_API_KEY_ID NLW_CTX_WORKER_KEY_ID NLW_CTX_SCHEDULER_KEY_ID; do
             if env -u "$var" docker compose -f docker-compose.prod.yml config >/dev/null 2>err.txt; then
               echo "FAIL: prod compose rendered without $var"; cat err.txt; exit 1
             fi
@@ -201,6 +212,10 @@ jobs:
           SUPABASE_URL: https://proj.supabase.co
           SUPABASE_ANON_KEY: ci-anon
           WORKSPACE_COOKIE_SECRET: ci-secret
+          NLW_CTX_KEYS_DIR: /srv/nlw/ctx-keys
+          NLW_CTX_API_KEY_ID: ci-api
+          NLW_CTX_WORKER_KEY_ID: ci-worker
+          NLW_CTX_SCHEDULER_KEY_ID: ci-scheduler
         run: docker compose -f docker-compose.prod.yml --profile migration config >/dev/null
 
   web:

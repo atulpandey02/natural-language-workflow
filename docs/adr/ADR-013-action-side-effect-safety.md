@@ -30,7 +30,8 @@ queries and must NOT be reused for side effects.
   (inline tools never persist `RUNNING`), which makes crash recovery detectable.
 - **Approvals.** An approval-gated action parks the run at **`WAITING_APPROVAL`**
   (run + step) and inserts one `PENDING` approval. Admin/owner decide via the API
-  (RLS also enforces admin/owner + `decided_by = app.user_id`); the API mutates
+  (RLS also enforces admin/owner + `decided_by = app.user_id` [since `0016`:
+  `decided_by = public.ctx_user_id()` — signed context, ADR-024]); the API mutates
   only the approvals row and enqueues a resume — **the worker is the sole run/step
   writer**. Decisions are compare-and-set: re-approving/re-rejecting is idempotent
   and re-enqueues (recovery-safe); the opposite decision on a decided approval is

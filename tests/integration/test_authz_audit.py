@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 
 import nlw.api.routers.approvals as approvals_mod
 from nlw.api.app import create_app
+from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
 
@@ -94,11 +95,10 @@ def test_audit_is_append_only_for_runtime_roles(pg_stack: SimpleNamespace) -> No
             "INSERT INTO authz_audit_events (id, tenant_id, event_type) VALUES (%s,%s,'seed')",
             (uuid.uuid4(), tid),
         )
-    for libpq, sets_user in ((pg_stack.app_libpq, True), (pg_stack.worker_libpq, False)):
+    # The denial is a GRANT-level fact (no UPDATE/DELETE privilege), independent of
+    # any context — signed or otherwise — so no context is established here.
+    for libpq in (pg_stack.app_libpq, pg_stack.worker_libpq):
         with psycopg.connect(libpq, autocommit=True) as c:
-            if sets_user:
-                c.execute("SELECT set_config('app.user_id', %s, false)", (str(uuid.uuid4()),))
-            c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 c.execute(
                     "UPDATE authz_audit_events SET event_type='tampered' WHERE tenant_id=%s", (tid,)
@@ -118,11 +118,18 @@ def test_audit_is_append_only_for_runtime_roles(pg_stack: SimpleNamespace) -> No
 def test_membership_admin_emits_one_event(pg_stack: SimpleNamespace) -> None:
     m = pg_stack.seed_member("owner")
     target = pg_stack.add_membership(m.tenant_id, "member")
-    with psycopg.connect(pg_stack.app_libpq, autocommit=True) as c:
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(m.user_id),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(m.tenant_id),))
-        c.execute("SELECT manage_membership(%s,%s,'set_role','admin')", (m.tenant_id, target))
-        c.execute("SELECT manage_membership(%s,%s,'remove',NULL)", (m.tenant_id, target))
+    for sql in (
+        "SELECT manage_membership(%s,%s,'set_role','admin')",
+        "SELECT manage_membership(%s,%s,'remove',NULL)",
+    ):
+        pg_stack.run_as(
+            pg_stack.app_libpq,
+            Purpose.API_REQUEST,
+            sql,
+            (m.tenant_id, target),
+            user_id=m.user_id,
+            tenant_id=m.tenant_id,
+        )
     evs = _events(pg_stack.owner_libpq, m.tenant_id)
     types = [e[0] for e in evs]
     assert types == ["membership.role_changed", "membership.removed"]
@@ -244,7 +251,7 @@ def test_accept_atomic_rollback_removes_state_and_audit(pg_stack: SimpleNamespac
     tid, invitee, token_hash = _seed_invitee_and_invitation(pg_stack)
     # Call the accept function as nlw_app WITHOUT committing, then roll back.
     with psycopg.connect(pg_stack.app_libpq, autocommit=False) as c:
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(invitee),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=invitee))
         c.execute("SELECT accept_workspace_invitation(%s)", (token_hash,))
         c.rollback()
     with psycopg.connect(pg_stack.owner_libpq) as c:
@@ -258,7 +265,7 @@ def test_accept_atomic_rollback_removes_state_and_audit(pg_stack: SimpleNamespac
     assert n_audit and n_audit[0] == 0, "rolled-back audit event persisted"
     # A committed accept then writes exactly one membership.added + invitation.accepted.
     with psycopg.connect(pg_stack.app_libpq, autocommit=False) as c:
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(invitee),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=invitee))
         c.execute("SELECT accept_workspace_invitation(%s)", (token_hash,))
         c.commit()
     types = [e[0] for e in _events(pg_stack.owner_libpq, tid)]
@@ -276,7 +283,7 @@ def test_concurrent_double_accept_one_transition_set(pg_stack: SimpleNamespace) 
 
     def accept() -> None:
         with psycopg.connect(pg_stack.app_libpq, autocommit=False) as c:
-            c.execute("SELECT set_config('app.user_id', %s, true)", (str(invitee),))
+            pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=invitee))
             barrier.wait()
             try:
                 c.execute("SELECT accept_workspace_invitation(%s)", (token_hash,))
@@ -305,7 +312,7 @@ def test_expired_token_accept_writes_no_audit(pg_stack: SimpleNamespace) -> None
         pg_stack, expires="now() - interval '1 hour'"
     )
     with psycopg.connect(pg_stack.app_libpq, autocommit=False) as c:
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(invitee),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=invitee))
         with pytest.raises(psycopg.errors.Error):
             c.execute("SELECT accept_workspace_invitation(%s)", (token_hash,))
         c.rollback()

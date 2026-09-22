@@ -19,6 +19,17 @@
 #   9  the audit trail cannot be rewritten/erased by nlw_app
 #  10  the P2 disaster-recovery validation is still green on the P3A schema
 #
+# P3B (signed database context, migration 0016) — with test-only key files:
+#  11  unsigned direct GUC forgery sees/modifies nothing (in step 5)
+#  12  the real scheduler creates a due run under scheduler_reconcile context and
+#      the real worker completes it under worker_execution context
+#  13  the API key cannot be used under the worker/scheduler DB roles
+#  14  worker/scheduler keys cannot authorize human administration
+#  15  rotate the API key with an overlap, move the API onto it, revoke the old key
+#  16  old-key contexts fail after revocation; the API works on the new key
+#  17  real quiescence records a locked generation; the P2 runtime recovery lock
+#      still blocks it (startup-check exit 6, API readiness/business 503)
+#
 # Usage:  scripts/ops/smoke-p3a-membership-approval.sh
 # Requires: docker compose, uv. Uses a throwaway pgdata volume.
 set -euo pipefail
@@ -29,25 +40,27 @@ OWNER_MIGRATION_URL="postgresql+psycopg://nlw:nlw@postgres:5432/nlw"
 export OWNER_LIBPQ="postgresql://nlw:nlw@localhost:5433/nlw"
 export APP_LIBPQ="postgresql://nlw_app:nlw_app@localhost:5433/nlw"
 export WORKER_LIBPQ="postgresql://nlw_worker:nlw_worker@localhost:5433/nlw"
+export SCHED_LIBPQ="postgresql://nlw_scheduler:nlw_scheduler@localhost:5433/nlw"
 export REDIS_URL="redis://localhost:6379/0"
 export API_URL="http://localhost:8000"
 
 # Dev HS256 auth for the API (never used in production, which verifies via JWKS).
 export SMOKE_JWT_SECRET="dev-secret-for-tests-32bytes-min-length"
 export SMOKE_ISSUER="https://proj.supabase.co/auth/v1"
-COMPOSE_ENV=(
-  -e SUPABASE_URL=https://proj.supabase.co
-  -e SUPABASE_JWT_SECRET="${SMOKE_JWT_SECRET}"
-)
+# Exported (not inline) so the Python driver's own `docker compose up -d api`
+# during the key-rotation step (15) renders the api service identically.
+export SUPABASE_URL=https://proj.supabase.co
+export SUPABASE_JWT_SECRET="${SMOKE_JWT_SECRET}"
 
 cleanup() {
   echo "--- tearing down ---"
   docker compose -f docker-compose.yml down -v --remove-orphans >/dev/null 2>&1 || true
+  rm -rf docker/ctx-keys  # throwaway smoke keys only
 }
 trap cleanup EXIT
 
-echo "--- building api + worker (P3A source) ---"
-docker compose -f docker-compose.yml build api worker
+echo "--- building api + worker + scheduler (branch source) ---"
+docker compose -f docker-compose.yml build api worker scheduler
 
 echo "--- starting postgres + redis (fresh volume) ---"
 docker compose -f docker-compose.yml down -v --remove-orphans >/dev/null 2>&1 || true
@@ -61,15 +74,26 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 
+echo "--- generating TEST signed-context key files (P3B) before the first compose run ---"
+# Fresh throwaway keys for this run. Generated BEFORE any `compose run api` so
+# Docker never auto-creates the bind-mount sources as root-owned directories.
+rm -rf docker/ctx-keys
+scripts/ops/ctx-keys-dev.sh --generate-only -f docker-compose.yml
+
 echo "--- applying migrations (owner) ---"
 docker compose -f docker-compose.yml run --rm \
   -e DATABASE_MIGRATION_URL="${OWNER_MIGRATION_URL}" \
   api alembic upgrade head
 
-echo "--- starting the real api + worker (dev HS256 auth) ---"
-# SUPABASE_URL + SUPABASE_JWT_SECRET make the api verify HS256 dev tokens.
-SUPABASE_URL=https://proj.supabase.co SUPABASE_JWT_SECRET="${SMOKE_JWT_SECRET}" \
-  docker compose -f docker-compose.yml up -d api worker
+echo "--- installing the TEST keys (owner credential) before any runtime starts ---"
+# The host-side driver signs its direct-SQL probes with the same files.
+scripts/ops/ctx-keys-dev.sh -f docker-compose.yml
+export NLW_CTX_KEYS_DIR="docker/ctx-keys"
+
+echo "--- starting the real api + worker + scheduler (dev HS256 auth) ---"
+# SUPABASE_URL + SUPABASE_JWT_SECRET (exported above) make the api verify HS256
+# dev tokens. Each runtime signs with ITS mounted key file only.
+docker compose -f docker-compose.yml up -d api worker scheduler
 sleep 6
 
 echo "--- waiting for the api to answer ---"

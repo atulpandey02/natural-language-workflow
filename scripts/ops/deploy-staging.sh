@@ -308,7 +308,7 @@ verify_roles() {
   local roles
   roles="$(rsh "$DC exec -T postgres psql -U nlw -d nlw -tAc \"SELECT string_agg(rolname, ',' ORDER BY rolname) FROM pg_roles WHERE rolname LIKE 'nlw\\_%'\"" | tr -d '\r')"
   local r
-  for r in nlw_app nlw_worker nlw_scheduler nlw_rls_bypass nlw_workspace_bootstrap nlw_membership_admin; do
+  for r in nlw_app nlw_worker nlw_scheduler nlw_rls_bypass nlw_workspace_bootstrap nlw_membership_admin nlw_ctx_verifier; do
     case ",$roles," in *",$r,"*) ;; *) die "expected role '$r' not found (roles: $roles). Not destroying anything." ;; esac
   done
   log "Roles present: $roles"

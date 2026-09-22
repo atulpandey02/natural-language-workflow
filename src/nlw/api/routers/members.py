@@ -19,7 +19,13 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nlw.api.deps import get_app_settings, get_current_user, get_session, get_tenant_context
+from nlw.api.deps import (
+    get_app_settings,
+    get_ctx_signer,
+    get_current_user,
+    get_session,
+    get_tenant_context,
+)
 from nlw.api.schemas import (
     InvitationAccept,
     InvitationAcceptedOut,
@@ -34,7 +40,8 @@ from nlw.core.config import Settings
 from nlw.db.models import User
 from nlw.db.repositories import AuditRepository, InvitationRepository, MembershipRepository
 from nlw.tenancy.context import Role, TenantContext, role_at_least
-from nlw.tenancy.session import set_current_tenant, set_current_user
+from nlw.tenancy.session import set_request_context
+from nlw.tenancy.signing import Purpose
 
 router = APIRouter()
 log = structlog.get_logger(__name__)
@@ -88,8 +95,7 @@ async def change_member_role(
     sessionmaker = request.app.state.sessionmaker
     try:
         async with sessionmaker() as session, session.begin():
-            await set_current_user(session, ctx.user_id)
-            await set_current_tenant(session, ctx.tenant_id)
+            await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
             # manage_membership authorizes, mutates, preserves >=1 owner, and audits
             # atomically. It RAISES on denial/final-owner; no separate emit here.
             await MembershipRepository(session).set_role(user_id, ctx.tenant_id, body.role)
@@ -107,8 +113,7 @@ async def remove_member(
     sessionmaker = request.app.state.sessionmaker
     try:
         async with sessionmaker() as session, session.begin():
-            await set_current_user(session, ctx.user_id)
-            await set_current_tenant(session, ctx.tenant_id)
+            await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
             await MembershipRepository(session).remove(user_id, ctx.tenant_id)
     except Exception as exc:
         raise _membership_error(exc, "removal") from exc
@@ -152,8 +157,7 @@ async def create_invitation(
     raw_token, token_hash = new_invitation_token()
     sessionmaker = request.app.state.sessionmaker
     async with sessionmaker() as session, session.begin():
-        await set_current_user(session, ctx.user_id)
-        await set_current_tenant(session, ctx.tenant_id)
+        await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
         repo = InvitationRepository(session)
         if await repo.count_pending(ctx.tenant_id) >= settings.invitation_max_pending_per_workspace:
             raise HTTPException(
@@ -200,8 +204,7 @@ async def revoke_invitation(
 ) -> None:
     sessionmaker = request.app.state.sessionmaker
     async with sessionmaker() as session, session.begin():
-        await set_current_user(session, ctx.user_id)
-        await set_current_tenant(session, ctx.tenant_id)
+        await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
         ok = await InvitationRepository(session).revoke(invitation_id, ctx.tenant_id)
         if not ok:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "no pending invitation to revoke")
@@ -219,9 +222,10 @@ async def accept_invitation(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> InvitationAcceptedOut:
-    # Use the REQUEST session: get_current_user provisioned this user (and set
-    # app.user_id) in THIS uncommitted transaction, so the atomic accept function
-    # must run here to see the just-created identity + verified email.
+    # Use the REQUEST session: get_current_user provisioned this user (and applied
+    # the signed identity context that public.ctx_user_id() verifies) in THIS
+    # uncommitted transaction, so the atomic accept function must run here to see
+    # the just-created identity + verified email.
     from nlw.authz.invitations import MAX_TOKEN_LENGTH
 
     if not body.token or len(body.token) > MAX_TOKEN_LENGTH:

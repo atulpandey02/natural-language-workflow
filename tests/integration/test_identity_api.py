@@ -24,7 +24,8 @@ from nlw.auth.supabase import SupabaseAuthProvider
 from nlw.db.models import User
 from nlw.db.repositories import UserRepository
 from nlw.db.session import create_engine, create_sessionmaker
-from nlw.tenancy.session import set_current_user
+from nlw.tenancy.session import set_identity_context
+from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
 
@@ -142,16 +143,20 @@ def test_user_provisioning_is_race_safe(pg_stack: SimpleNamespace) -> None:
         engine = create_engine(pg_stack.settings)
         sessionmaker = create_sessionmaker(engine)
 
+        identity_signer = pg_stack.signers[Purpose.API_IDENTITY]
+
         async def once() -> User:
             async with sessionmaker() as session, session.begin():
-                return await UserRepository(session).get_or_create("race-sub", "race@example.com")
+                return await UserRepository(session).get_or_create(
+                    "race-sub", "race@example.com", identity_signer
+                )
 
         first, second = await asyncio.gather(once(), once())
-        # users now enforces RLS (P1A): a read needs app.user_id. Both concurrent
-        # callers converge on the same id, so a self-scoped read for that id
-        # returns exactly the one row that must exist.
+        # users enforces RLS (P1A): a read needs a SIGNED identity context (P3B).
+        # Both concurrent callers converge on the same id, so a self-scoped read
+        # for that id returns exactly the one row that must exist.
         async with sessionmaker() as session, session.begin():
-            await set_current_user(session, first.id)
+            await set_identity_context(session, identity_signer, first.id)
             rows = (
                 (await session.execute(select(User).where(User.auth_provider_id == "race-sub")))
                 .scalars()

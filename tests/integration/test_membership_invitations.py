@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from nlw.api.app import create_app
 from nlw.authz.invitations import hash_token
+from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
 
@@ -222,10 +223,18 @@ def test_duplicate_membership_prevented(client: TestClient, pg_stack: SimpleName
 
 
 # --- 6 + 12: concurrency ---
-def _set_ctx(conn: psycopg.Connection, uid: uuid.UUID, tid: uuid.UUID | None = None) -> None:
-    conn.execute("SELECT set_config('app.user_id', %s, false)", (str(uid),))
-    if tid is not None:
-        conn.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
+def _set_ctx(
+    pg_stack: SimpleNamespace,
+    conn: psycopg.Connection,
+    uid: uuid.UUID,
+    tid: uuid.UUID | None = None,
+) -> None:
+    """SIGNED context (P3B): api_identity for a user with no workspace (the accept
+    path), api_request once a workspace is selected. Transaction-local."""
+    if tid is None:
+        pg_stack.apply_ctx(conn, pg_stack.sign(Purpose.API_IDENTITY, user_id=uid))
+    else:
+        pg_stack.apply_ctx(conn, pg_stack.sign(Purpose.API_REQUEST, user_id=uid, tenant_id=tid))
 
 
 def test_concurrent_double_acceptance_creates_one_membership(
@@ -243,7 +252,7 @@ def test_concurrent_double_acceptance_creates_one_membership(
 
     def worker() -> None:
         with psycopg.connect(pg_stack.app_libpq, autocommit=False) as conn:
-            _set_ctx(conn, uid)
+            _set_ctx(pg_stack, conn, uid)
             barrier.wait()
             try:
                 conn.execute("SELECT accept_workspace_invitation(%s)", (token_hash,))
@@ -309,7 +318,7 @@ def test_concurrent_owner_removal_keeps_one_owner(
 
     def remove(actor: uuid.UUID, target: uuid.UUID) -> None:
         with psycopg.connect(pg_stack.app_libpq, autocommit=False) as conn:
-            _set_ctx(conn, actor, tid)
+            _set_ctx(pg_stack, conn, actor, tid)
             barrier.wait()
             try:
                 conn.execute("SELECT manage_membership(%s,%s,'remove',NULL)", (tid, target))

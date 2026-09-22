@@ -11,13 +11,14 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
-from sqlalchemy import text
 from testcontainers.community.redis import RedisContainer
 
 from nlw.core.config import Settings
 from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.domain.workflow import WorkflowPlan
 from nlw.engine.runs import create_run, create_workflow_with_version
+from nlw.tenancy.session import apply_signed_context_sync
+from nlw.tenancy.signing import Purpose
 from nlw.worker.actors import advance_run
 from nlw.worker.broker import make_broker
 
@@ -40,11 +41,11 @@ def _seed(pg_stack: SimpleNamespace) -> uuid.UUID:
     try:
         sm = create_sync_sessionmaker(engine)
         with sm() as s, s.begin():
-            s.execute(
-                text("SELECT set_config('app.user_id', :u, true)"), {"u": str(member.user_id)}
-            )
-            s.execute(
-                text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(member.tenant_id)}
+            apply_signed_context_sync(
+                s,
+                pg_stack.sign(
+                    Purpose.API_REQUEST, user_id=member.user_id, tenant_id=member.tenant_id
+                ),
             )
             wf, ver = create_workflow_with_version(s, member.tenant_id, "wf", _PLAN)
             run = create_run(s, member.tenant_id, wf.id, ver.id)
@@ -74,6 +75,10 @@ def test_worker_subprocess_runs_to_completion(pg_stack: SimpleNamespace) -> None
                 "APP_ENV": "local",
                 "REDIS_URL": redis_url,
                 "DATABASE_URL": pg_stack.worker_settings.database_url,
+                # The real worker process signs its DB context with ITS key file
+                # (P3B); without these it fails closed and the run stays PENDING.
+                "NLW_CTX_KEY_ID": str(pg_stack.worker_settings.ctx_key_id),
+                "NLW_CTX_KEY_FILE": str(pg_stack.worker_settings.ctx_key_file),
             },
         )
         try:

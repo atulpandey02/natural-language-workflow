@@ -12,13 +12,15 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
-from sqlalchemy import text
 
 from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.domain.workflow import WorkflowPlan
 from nlw.engine import execution as execmod
 from nlw.engine.execution import execute_advancement, process_advance
 from nlw.engine.runs import create_run, create_workflow_with_version
+from nlw.tenancy.keys import process_signer
+from nlw.tenancy.session import apply_signed_context_sync
+from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
 
@@ -50,10 +52,12 @@ def _seed(
     app_sm: object, user_id: uuid.UUID, tenant_id: uuid.UUID, plan: WorkflowPlan
 ) -> uuid.UUID:
     # nlw_app creates workflow/version/run under membership-bound INSERT policies,
-    # so the caller must be a member of the tenant (app.user_id + app.tenant_id).
+    # so the caller must be a member of the tenant (SIGNED api_request context).
     with app_sm() as s, s.begin():  # type: ignore[operator]
-        s.execute(text("SELECT set_config('app.user_id', :u, true)"), {"u": str(user_id)})
-        s.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(tenant_id)})
+        apply_signed_context_sync(
+            s,
+            process_signer(Purpose.API_REQUEST).sign(user_id=user_id, tenant_id=tenant_id),
+        )
         wf, ver = create_workflow_with_version(s, tenant_id, "wf", plan)
         run = create_run(s, tenant_id, wf.id, ver.id)
         return run.id
@@ -206,9 +210,12 @@ def test_tenant_isolation_in_worker(pg_stack: SimpleNamespace, sms: SimpleNamesp
         row = c.execute("SELECT tenant_id FROM step_runs WHERE run_id=%s", (run_id,)).fetchone()
     assert row is not None and row[0] == tenant_a
 
-    # Under a different tenant context, the run/steps are invisible (RLS).
+    # Under a SIGNED worker context for a different tenant, the run/steps are
+    # invisible (RLS binds rows to the signed tenant + run).
     with psycopg.connect(pg_stack.worker_libpq) as c:
-        c.execute("SELECT set_config('app.tenant_id', %s, true)", (str(uuid.uuid4()),))
+        pg_stack.apply_ctx(
+            c, pg_stack.sign(Purpose.WORKER_EXECUTION, tenant_id=uuid.uuid4(), run_id=run_id)
+        )
         runs = c.execute("SELECT count(*) FROM workflow_runs WHERE id=%s", (run_id,)).fetchone()
         steps = c.execute("SELECT count(*) FROM step_runs WHERE run_id=%s", (run_id,)).fetchone()
         c.rollback()
@@ -219,16 +226,18 @@ def test_tenant_isolation_in_worker(pg_stack: SimpleNamespace, sms: SimpleNamesp
 def test_nonmember_cannot_read_tenant_by_forging_gucs(
     pg_stack: SimpleNamespace, sms: SimpleNamespace
 ) -> None:
-    """The real regression: user A forging app.user_id=A + app.tenant_id=B (the
-    actual tenant B, of which A is not a member) must read ZERO rows."""
+    """The real regression: user A presenting a SIGNED (A, tenant B) context (the
+    actual tenant B, of which A is not a member) must read ZERO rows — and an
+    UNSIGNED forgery yields no claims at all (test_signed_context)."""
     member = pg_stack.seed_member()  # userB, member of tenant B
     run_id = _seed(sms.app, member.user_id, member.tenant_id, _plan("a", "b", "c"))
     execute_advancement(sms.worker, run_id)  # create a step_run under B
     attacker = pg_stack.seed_user()  # userA, NOT a member of B
 
     with psycopg.connect(pg_stack.app_libpq) as c:
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(attacker),))
-        c.execute("SELECT set_config('app.tenant_id', %s, true)", (str(member.tenant_id),))
+        pg_stack.apply_ctx(
+            c, pg_stack.sign(Purpose.API_REQUEST, user_id=attacker, tenant_id=member.tenant_id)
+        )
         wf = c.execute(
             "SELECT count(*) FROM workflows WHERE tenant_id=%s", (member.tenant_id,)
         ).fetchone()

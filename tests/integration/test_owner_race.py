@@ -20,6 +20,8 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 
+from nlw.tenancy.signing import Purpose
+
 pytestmark = pytest.mark.integration
 
 
@@ -53,7 +55,7 @@ def _owner_count(owner_libpq: str, tid: uuid.UUID) -> int:
 
 
 def _run_pair(
-    app_libpq: str,
+    pg_stack: SimpleNamespace,
     tid: uuid.UUID,
     op_a: tuple[uuid.UUID, str, str | None, uuid.UUID],
     op_b: tuple[uuid.UUID, str, str | None, uuid.UUID],
@@ -65,9 +67,11 @@ def _run_pair(
     barrier = threading.Barrier(2)
 
     def worker(actor: uuid.UUID, action: str, new_role: str | None, target: uuid.UUID) -> None:
-        with psycopg.connect(app_libpq, autocommit=False) as conn:
-            conn.execute("SELECT set_config('app.user_id', %s, false)", (str(actor),))
-            conn.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
+        with psycopg.connect(pg_stack.app_libpq, autocommit=False) as conn:
+            # SIGNED api_request context for the actor (transaction-local).
+            pg_stack.apply_ctx(
+                conn, pg_stack.sign(Purpose.API_REQUEST, user_id=actor, tenant_id=tid)
+            )
             barrier.wait()
             try:
                 conn.execute(
@@ -94,7 +98,7 @@ def test_concurrent_mutual_owner_removal(pg_stack: SimpleNamespace) -> None:
     tid = _seed_ws(pg_stack.owner_libpq)
     a = _seed_user(pg_stack.owner_libpq, tid, "owner")
     b = _seed_user(pg_stack.owner_libpq, tid, "owner")
-    results = _run_pair(pg_stack.app_libpq, tid, (a, "remove", None, b), (b, "remove", None, a))
+    results = _run_pair(pg_stack, tid, (a, "remove", None, b), (b, "remove", None, a))
     assert results == ["fail", "ok"]  # deterministic: exactly one commits
     assert _owner_count(pg_stack.owner_libpq, tid) == 1
 
@@ -104,9 +108,7 @@ def test_concurrent_mutual_owner_demotion(pg_stack: SimpleNamespace) -> None:
     tid = _seed_ws(pg_stack.owner_libpq)
     a = _seed_user(pg_stack.owner_libpq, tid, "owner")
     b = _seed_user(pg_stack.owner_libpq, tid, "owner")
-    results = _run_pair(
-        pg_stack.app_libpq, tid, (a, "set_role", "member", b), (b, "set_role", "member", a)
-    )
+    results = _run_pair(pg_stack, tid, (a, "set_role", "member", b), (b, "set_role", "member", a))
     assert results == ["fail", "ok"]
     assert _owner_count(pg_stack.owner_libpq, tid) == 1
 
@@ -117,9 +119,7 @@ def test_delete_vs_demote_race(pg_stack: SimpleNamespace) -> None:
     a = _seed_user(pg_stack.owner_libpq, tid, "owner")
     b = _seed_user(pg_stack.owner_libpq, tid, "owner")
     # A removes B; B demotes A. Only one can win; an owner always survives.
-    results = _run_pair(
-        pg_stack.app_libpq, tid, (a, "remove", None, b), (b, "set_role", "member", a)
-    )
+    results = _run_pair(pg_stack, tid, (a, "remove", None, b), (b, "set_role", "member", a))
     assert results == ["fail", "ok"]
     assert _owner_count(pg_stack.owner_libpq, tid) == 1
 
@@ -132,9 +132,7 @@ def test_addition_racing_removal_keeps_owner(pg_stack: SimpleNamespace) -> None:
     # A promotes B to owner; concurrently the OTHER owner-removal cannot run because
     # there is only one owner (A) — A demoting itself while promoting B must still
     # leave an owner. Promote B, then (racing) demote A: serialized, owner remains.
-    results = _run_pair(
-        pg_stack.app_libpq, tid, (a, "set_role", "owner", b), (a, "set_role", "member", a)
-    )
+    results = _run_pair(pg_stack, tid, (a, "set_role", "owner", b), (a, "set_role", "member", a))
     # Promotion of B always succeeds; the self-demotion of A succeeds only after B is
     # an owner (serialized). Either way an owner remains and both may commit.
     assert "ok" in results
@@ -146,16 +144,19 @@ def test_direct_membership_mutation_denied(pg_stack: SimpleNamespace) -> None:
     tid = _seed_ws(pg_stack.owner_libpq)
     _a = _seed_user(pg_stack.owner_libpq, tid, "owner")
     victim = _seed_user(pg_stack.owner_libpq, tid, "member")
-    with psycopg.connect(pg_stack.app_libpq, autocommit=True) as c:
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(_a),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
+    for sql in (
+        "UPDATE memberships SET role='owner' WHERE workspace_id=%s AND user_id=%s",
+        "DELETE FROM memberships WHERE workspace_id=%s AND user_id=%s",
+    ):
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            c.execute(
-                "UPDATE memberships SET role='owner' WHERE workspace_id=%s AND user_id=%s",
+            pg_stack.run_as(
+                pg_stack.app_libpq,
+                Purpose.API_REQUEST,
+                sql,
                 (tid, victim),
+                user_id=_a,
+                tenant_id=tid,
             )
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            c.execute("DELETE FROM memberships WHERE workspace_id=%s AND user_id=%s", (tid, victim))
 
 
 # --- B6: an admin cannot mutate an owner row (owner-only) ---
@@ -163,15 +164,17 @@ def test_admin_cannot_mutate_owner(pg_stack: SimpleNamespace) -> None:
     tid = _seed_ws(pg_stack.owner_libpq)
     owner = _seed_user(pg_stack.owner_libpq, tid, "owner")
     admin = _seed_user(pg_stack.owner_libpq, tid, "admin")
-    with psycopg.connect(pg_stack.app_libpq, autocommit=True) as c:
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(admin),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
-        # Admin demoting the owner -> not authorized.
+    # Admin demoting the owner / promoting anyone to owner -> not authorized.
+    for target, role in ((owner, "member"), (admin, "owner")):
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            c.execute("SELECT manage_membership(%s,%s,'set_role','member')", (tid, owner))
-        # Admin promoting someone to owner -> not authorized.
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            c.execute("SELECT manage_membership(%s,%s,'set_role','owner')", (tid, admin))
+            pg_stack.run_as(
+                pg_stack.app_libpq,
+                Purpose.API_REQUEST,
+                "SELECT manage_membership(%s,%s,'set_role',%s)",
+                (tid, target, role),
+                user_id=admin,
+                tenant_id=tid,
+            )
     assert _owner_count(pg_stack.owner_libpq, tid) == 1
 
 
@@ -179,13 +182,19 @@ def test_admin_cannot_mutate_owner(pg_stack: SimpleNamespace) -> None:
 def test_final_owner_cannot_self_remove(pg_stack: SimpleNamespace) -> None:
     tid = _seed_ws(pg_stack.owner_libpq)
     owner = _seed_user(pg_stack.owner_libpq, tid, "owner")
-    with psycopg.connect(pg_stack.app_libpq, autocommit=True) as c:
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(owner),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
+    for sql in (
+        "SELECT manage_membership(%s,%s,'remove',NULL)",
+        "SELECT manage_membership(%s,%s,'set_role','member')",
+    ):
         with pytest.raises(psycopg.errors.CheckViolation):
-            c.execute("SELECT manage_membership(%s,%s,'remove',NULL)", (tid, owner))
-        with pytest.raises(psycopg.errors.CheckViolation):
-            c.execute("SELECT manage_membership(%s,%s,'set_role','member')", (tid, owner))
+            pg_stack.run_as(
+                pg_stack.app_libpq,
+                Purpose.API_REQUEST,
+                sql,
+                (tid, owner),
+                user_id=owner,
+                tenant_id=tid,
+            )
     assert _owner_count(pg_stack.owner_libpq, tid) == 1
 
 
@@ -195,12 +204,17 @@ def test_cross_tenant_mutation_denied(pg_stack: SimpleNamespace) -> None:
     victim = _seed_user(pg_stack.owner_libpq, tid_a, "member")
     tid_b = _seed_ws(pg_stack.owner_libpq)
     outsider = _seed_user(pg_stack.owner_libpq, tid_b, "owner")
-    with psycopg.connect(pg_stack.app_libpq, autocommit=True) as c:
-        # Owner of B presents B's tenant context but targets A's workspace/member.
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(outsider),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid_b),))
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            c.execute("SELECT manage_membership(%s,%s,'remove',NULL)", (tid_a, victim))
+    # Owner of B presents a SIGNED B context but targets A's workspace/member:
+    # manage_membership now also cross-checks the signed tenant against the arg.
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        pg_stack.run_as(
+            pg_stack.app_libpq,
+            Purpose.API_REQUEST,
+            "SELECT manage_membership(%s,%s,'remove',NULL)",
+            (tid_a, victim),
+            user_id=outsider,
+            tenant_id=tid_b,
+        )
     with psycopg.connect(pg_stack.owner_libpq) as c:
         row = c.execute(
             "SELECT count(*) FROM memberships WHERE workspace_id=%s AND user_id=%s",

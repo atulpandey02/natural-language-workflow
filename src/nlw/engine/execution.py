@@ -60,7 +60,9 @@ from nlw.engine.actions import (
 from nlw.observability import metrics
 from nlw.registry.registry import REGISTRY, ToolExecutionError, ToolSpec, UnknownToolError
 from nlw.secrets.store import SecretError, SecretStore, build_secret_store
-from nlw.tenancy.session import set_current_tenant_sync
+from nlw.tenancy.keys import process_signer
+from nlw.tenancy.session import set_worker_context_default, set_worker_context_sync
+from nlw.tenancy.signing import Purpose
 
 Result = Literal["advanced", "completed", "failed", "noop", "waiting", "retry", "deferred"]
 
@@ -497,7 +499,12 @@ def execute_advancement(
         tenant_id = _resolve_tenant(session, run_id)
         if tenant_id is None:
             return AdvanceOutcome("noop", enqueue_next=False)
-        set_current_tenant_sync(session, tenant_id)
+        # SIGNED worker_execution context (P3B): tenant from the run->tenant
+        # resolver, run id from the claimed message; RLS binds every row this
+        # transaction touches to exactly that run. No human identity is carried.
+        set_worker_context_sync(
+            session, process_signer(Purpose.WORKER_EXECUTION), tenant_id, run_id
+        )
 
         run = session.execute(
             select(WorkflowRun).where(WorkflowRun.id == run_id).with_for_update()
@@ -631,7 +638,7 @@ def process_advance(
         action_start = time.perf_counter()
         result = runner(outcome.action_task)
         final = finalize_action(
-            session_factory, outcome.action_task, result, set_current_tenant_sync
+            session_factory, outcome.action_task, result, set_worker_context_default
         )
         _outcome_label = {"advanced": "success", "retry": "retry", "failed": "failed"}.get(
             final.result, "noop"

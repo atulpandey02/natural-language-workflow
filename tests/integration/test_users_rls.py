@@ -13,6 +13,8 @@ from typing import Any
 import psycopg
 import pytest
 
+from nlw.tenancy.signing import Purpose
+
 pytestmark = pytest.mark.integration
 
 
@@ -36,7 +38,7 @@ def test_user_can_read_only_their_own_row(pg_stack: SimpleNamespace) -> None:
     a = _seed_user(pg_stack.owner_libpq, "sub-A", "a@example.com")
     _seed_user(pg_stack.owner_libpq, "sub-B", "b@example.com")
     with psycopg.connect(pg_stack.app_libpq) as c:
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(a),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=a))
         rows = c.execute("SELECT id FROM users").fetchall()
         c.rollback()
     assert rows == [(a,)]
@@ -46,7 +48,7 @@ def test_user_cannot_select_another_user(pg_stack: SimpleNamespace) -> None:
     a = _seed_user(pg_stack.owner_libpq, "sub-A", "a@example.com")
     b = _seed_user(pg_stack.owner_libpq, "sub-B", "b@example.com")
     with psycopg.connect(pg_stack.app_libpq) as c:
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(a),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=a))
         got = _one(c.execute("SELECT count(*) FROM users WHERE id = %s", (b,)))
         c.rollback()
     assert got[0] == 0
@@ -57,7 +59,7 @@ def test_user_cannot_enumerate_all_emails(pg_stack: SimpleNamespace) -> None:
     for i in range(5):
         _seed_user(pg_stack.owner_libpq, f"sub-{i}", f"user{i}@example.com")
     with psycopg.connect(pg_stack.app_libpq) as c:
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(a),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=a))
         emails = c.execute("SELECT email FROM users").fetchall()
         c.rollback()
     assert emails == [("a@example.com",)]  # only self, never the platform roster
@@ -69,7 +71,7 @@ def test_user_cannot_update_another_users_email(pg_stack: SimpleNamespace) -> No
     # nlw_app has a column-limited self-UPDATE(email); the self-only RLS policy
     # makes B's row invisible for update -> 0 rows affected, B unchanged.
     with psycopg.connect(pg_stack.app_libpq) as c:
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(a),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=a))
         cur = c.execute("UPDATE users SET email = 'hijack@evil.com' WHERE id = %s", (b,))
         assert cur.rowcount == 0
         c.rollback()
@@ -87,7 +89,7 @@ def test_user_can_sync_own_email_only_with_self_context(pg_stack: SimpleNamespac
         c.rollback()
     # With self-context established: the verified email sync applies to own row.
     with psycopg.connect(pg_stack.app_libpq) as c:
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(a),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=a))
         cur = c.execute(
             "UPDATE users SET email = 'new@example.com', updated_at = now() WHERE id = %s", (a,)
         )
@@ -105,7 +107,7 @@ def test_user_cannot_modify_another_users_auth_provider_id(pg_stack: SimpleNames
         psycopg.connect(pg_stack.app_libpq) as c,
         pytest.raises(psycopg.errors.InsufficientPrivilege),
     ):
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(a),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=a))
         c.execute("UPDATE users SET auth_provider_id = 'stolen' WHERE id = %s", (b,))
     with psycopg.connect(pg_stack.owner_libpq) as c:
         sub = _one(c.execute("SELECT auth_provider_id FROM users WHERE id = %s", (b,)))[0]
@@ -118,7 +120,7 @@ def test_user_cannot_modify_their_own_auth_provider_id(pg_stack: SimpleNamespace
         psycopg.connect(pg_stack.app_libpq) as c,
         pytest.raises(psycopg.errors.InsufficientPrivilege),
     ):
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(a),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=a))
         c.execute("UPDATE users SET auth_provider_id = 'renamed' WHERE id = %s", (a,))
     with psycopg.connect(pg_stack.owner_libpq) as c:
         sub = _one(c.execute("SELECT auth_provider_id FROM users WHERE id = %s", (a,)))[0]
@@ -128,7 +130,7 @@ def test_user_cannot_modify_their_own_auth_provider_id(pg_stack: SimpleNamespace
 def test_absent_context_fails_closed(pg_stack: SimpleNamespace) -> None:
     _seed_user(pg_stack.owner_libpq, "sub-A", "a@example.com")
     with psycopg.connect(pg_stack.app_libpq) as c:
-        # No app.user_id set -> NULLIF(...,'')::uuid is NULL -> deny.
+        # No signed context -> ctx_user_id() is NULL -> deny (fail closed).
         got = _one(c.execute("SELECT count(*) FROM users"))
         c.rollback()
     assert got[0] == 0
@@ -140,7 +142,7 @@ def test_user_cannot_insert_arbitrary_user(pg_stack: SimpleNamespace) -> None:
         psycopg.connect(pg_stack.app_libpq) as c,
         pytest.raises(psycopg.errors.InsufficientPrivilege),
     ):
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(a),))
+        pg_stack.apply_ctx(c, pg_stack.sign(Purpose.API_IDENTITY, user_id=a))
         c.execute(
             "INSERT INTO users (id, auth_provider_id, email) VALUES (%s,%s,%s)",
             (uuid.uuid4(), "forged", "forged@evil.com"),

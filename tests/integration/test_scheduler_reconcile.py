@@ -7,6 +7,8 @@ lease/next_attempt_at/approval, so re-enqueue is always safe.
 
 import json
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -17,6 +19,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.scheduler.reconcile import _CANDIDATES_SQL, ReconcileBatch, find_stuck_runs
 from nlw.scheduler.service import reconcile_once
+from nlw.tenancy.keys import process_signer
+from nlw.tenancy.session import set_scheduler_context_sync
+from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
 
@@ -28,6 +33,16 @@ FRESH = NOW - timedelta(seconds=5)
 
 def _sched_sm(pg_stack: SimpleNamespace) -> sessionmaker[Session]:
     return create_sync_sessionmaker(create_sync_engine(pg_stack.scheduler_settings))
+
+
+@contextmanager
+def _sched_txn(pg_stack: SimpleNamespace) -> Iterator[Session]:
+    """A scheduler transaction carrying a SIGNED scheduler_reconcile context (P3B):
+    the reconciler's cross-tenant read policies verify the claim, so a bare
+    nlw_scheduler session sees nothing."""
+    with _sched_sm(pg_stack)() as s, s.begin():
+        set_scheduler_context_sync(s, process_signer(Purpose.SCHEDULER_RECONCILE))
+        yield s
 
 
 def _seed_wf(owner: str, tenant: uuid.UUID) -> uuid.UUID:
@@ -178,7 +193,7 @@ def test_reconcile_eligibility_matrix(pg_stack: SimpleNamespace) -> None:
     completed = _run(o, t, ver, "COMPLETED", created=OLD, updated=OLD)  # no
     failed = _run(o, t, ver, "FAILED", created=OLD, updated=OLD)  # no
 
-    with _sched_sm(pg_stack)() as s, s.begin():
+    with _sched_txn(pg_stack) as s:
         # Large horizon so nothing is treated as beyond-horizon here.
         stuck = set(
             find_stuck_runs(
@@ -230,7 +245,7 @@ def test_reconcile_excludes_runs_with_unknown_actions(pg_stack: SimpleNamespace)
     resumable = _run(o, t, ver, "RUNNING", created=OLD, updated=OLD)
     _ext_action(o, t, resumable, lease_expires=NOW - timedelta(minutes=1), next_attempt=None)
 
-    with _sched_sm(pg_stack)() as s, s.begin():
+    with _sched_txn(pg_stack) as s:
         stuck = set(
             find_stuck_runs(
                 s,
@@ -294,7 +309,7 @@ def _batch(
     horizon_s: int = 10**9,
     pending_s: int = 60,
 ) -> ReconcileBatch:
-    with _sched_sm(pg_stack)() as s, s.begin():
+    with _sched_txn(pg_stack) as s:
         return find_stuck_runs(
             s,
             NOW,
@@ -519,7 +534,7 @@ def test_reconciler_candidate_query_avoids_full_table_scan(pg_stack: SimpleNames
         "batch": 100,
         "per_tenant_limit": 20,
     }
-    with _sched_sm(pg_stack)() as s, s.begin():
+    with _sched_txn(pg_stack) as s:
         plan = "\n".join(
             str(row[0]) for row in s.execute(_text("EXPLAIN " + _CANDIDATES_SQL.text), params).all()
         )

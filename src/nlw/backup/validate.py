@@ -22,6 +22,7 @@ _ALL_ROLES = _RUNTIME_ROLES + (
     "nlw_rls_bypass",
     "nlw_workspace_bootstrap",
     "nlw_membership_admin",
+    "nlw_ctx_verifier",
 )
 _FORCED_RLS_TABLES = (
     "users",
@@ -38,8 +39,9 @@ _SECURITY_DEFINER_FUNCS = {
     "resolve_run_tenant": "nlw_rls_bypass",
     "is_current_user_member": "nlw_rls_bypass",
     "is_current_user_admin_or_owner": "nlw_rls_bypass",
-    "is_current_user_owner": "nlw_rls_bypass",
     "enforce_workspace_owner_present": "nlw_rls_bypass",
+    # P3B: the single signed-context verifier (owned by the dedicated verifier role)
+    "app_ctx_claims": "nlw_ctx_verifier",
     "resolve_or_create_user": "nlw_workspace_bootstrap",
     "create_workspace_for_current_user": "nlw_workspace_bootstrap",
     "accept_workspace_invitation": "nlw_workspace_bootstrap",
@@ -332,7 +334,7 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
                 conn,
                 "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
                 "WHERE n.nspname='public' AND p.proname IN "
-                "('manage_membership','accept_workspace_invitation','is_current_user_owner',"
+                "('manage_membership','accept_workspace_invitation','app_ctx_claims',"
                 "'enforce_workspace_owner_present') "
                 "AND array_to_string(p.proconfig, ',') <> 'search_path=pg_catalog'",
             ).all()
@@ -379,6 +381,115 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
             "provenance_immutability_triggers_present",
             not missing_trg,
             f"missing={sorted(missing_trg)}",
+        )
+
+        # --- P3B signed database context survived the restore ------------------
+        add(
+            "pgcrypto_present",
+            bool(
+                _q(conn, "SELECT 1 FROM pg_extension WHERE extname='pgcrypto'").scalar_one_or_none()
+            ),
+            "HMAC verification extension",
+        )
+        # The key registry: present, owned by the dedicated verifier role, and NO
+        # privilege for any login role or PUBLIC (symmetric signing-capable
+        # material must be unreadable to every runtime role).
+        reg_owner = _q(
+            conn, "SELECT tableowner FROM pg_tables WHERE tablename='ctx_keys'"
+        ).scalar_one_or_none()
+        reg_leak = [
+            f"{role}:{priv}"
+            for role in (*_RUNTIME_ROLES, "public")
+            for priv in ("SELECT", "INSERT", "UPDATE", "DELETE")
+            if bool(
+                _q(
+                    conn, "SELECT has_table_privilege(:r, 'ctx_keys', :p)", r=role, p=priv
+                ).scalar_one_or_none()
+            )
+        ]
+        ev_leak = [
+            f"{role}:{priv}"
+            for role in (*_RUNTIME_ROLES, "public")
+            for priv in ("SELECT", "INSERT", "UPDATE", "DELETE")
+            if bool(
+                _q(
+                    conn,
+                    "SELECT has_table_privilege(:r, 'ctx_key_events', :p)",
+                    r=role,
+                    p=priv,
+                ).scalar_one_or_none()
+            )
+        ]
+        add(
+            "ctx_keys_registry_protected",
+            reg_owner == "nlw_ctx_verifier" and not reg_leak and not ev_leak,
+            f"owner={reg_owner} leak={reg_leak} events_leak={ev_leak}",
+        )
+        # Verifier + accessors: present, hardened search_path, no PUBLIC EXECUTE,
+        # verifier is SECURITY DEFINER owned by the verifier role.
+        vfn = {
+            r[0]: (r[1], r[2], r[3], r[4])
+            for r in _q(
+                conn,
+                "SELECT p.proname, r.rolname, p.prosecdef, "
+                "  array_to_string(p.proconfig, ','), "
+                "  has_function_privilege('public', p.oid, 'EXECUTE') "
+                "FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner "
+                "JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' "
+                "AND p.proname IN ('app_ctx_claims','app_ctx_canon','ctx_user_id',"
+                "'ctx_tenant_id','ctx_run_id','ctx_purpose')",
+            ).all()
+        }
+        vissues = []
+        for fn in (
+            "app_ctx_claims",
+            "app_ctx_canon",
+            "ctx_user_id",
+            "ctx_tenant_id",
+            "ctx_run_id",
+            "ctx_purpose",
+        ):
+            if fn not in vfn:
+                vissues.append(f"{fn}:absent")
+                continue
+            owner, secdef, cfg, pub = vfn[fn]
+            if owner != "nlw_ctx_verifier":
+                vissues.append(f"{fn}:owner={owner}")
+            if cfg != "search_path=pg_catalog":
+                vissues.append(f"{fn}:search_path={cfg}")
+            if pub:
+                vissues.append(f"{fn}:public-execute")
+            if fn == "app_ctx_claims" and not secdef:
+                vissues.append(f"{fn}:not-secdef")
+        add("ctx_verifier_functions_hardened", not vissues, f"issues={vissues}")
+        # THE cutover invariant: no live policy or helper trusts the unsigned GUCs,
+        # none is unconditional, and the full inventory is present.
+        pols = _q(
+            conn,
+            "SELECT policyname, coalesce(qual,''), coalesce(with_check,'') FROM pg_policies "
+            "WHERE schemaname='public'",
+        ).all()
+        legacy = [
+            p[0] for p in pols if "app.user_id" in p[1] + p[2] or "app.tenant_id" in p[1] + p[2]
+        ]
+        uncond = [
+            p[0]
+            for p in pols
+            if p[1].strip() in ("true", "(true)") or p[2].strip() in ("true", "(true)")
+        ]
+        helper_legacy = [
+            r[0]
+            for r in _q(
+                conn,
+                "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+                "WHERE n.nspname='public' AND (p.prosrc LIKE '%app.user_id%' "
+                "OR p.prosrc LIKE '%app.tenant_id%')",
+            ).all()
+        ]
+        add(
+            "no_policy_trusts_unsigned_context",
+            not legacy and not uncond and not helper_legacy and len(pols) == 51,
+            f"legacy={legacy} unconditional={uncond} helpers={helper_legacy} n={len(pols)}",
         )
 
         # --- application invariants ---

@@ -20,6 +20,7 @@ import os
 import random
 import socket
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -158,16 +159,21 @@ def finalize_action(
     session_factory: sessionmaker[Session],
     task: ActionTask,
     result: ActionExecResult,
-    set_tenant: Any,
+    set_context: Callable[[Session, uuid.UUID, uuid.UUID], None],
 ) -> FinalizeOutcome:
-    """Txn2: finalize the action idempotently, guarded by the lease token."""
+    """Txn2: finalize the action idempotently, guarded by the lease token.
+
+    ``set_context(session, tenant_id, run_id)`` establishes the SIGNED
+    ``worker_execution`` context for this transaction (P3B); the tenant is
+    re-resolved from the run row, never trusted from the task.
+    """
     from nlw.engine.execution import _resolve_tenant, _set_connector_status  # avoid cycle
 
     with session_factory() as session, session.begin():
         tenant_id = _resolve_tenant(session, task.run_id)
         if tenant_id is None:
             return FinalizeOutcome("noop")
-        set_tenant(session, tenant_id)
+        set_context(session, tenant_id, task.run_id)
 
         run = (
             session.query(WorkflowRun).filter(WorkflowRun.id == task.run_id).with_for_update().one()

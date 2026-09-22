@@ -91,6 +91,13 @@ services:
       NLW_LLM_PROVIDER: ${NLW_LLM_PROVIDER:-stub}
       NLW_LLM_MODEL: ${NLW_LLM_MODEL:-claude-sonnet-5}
       NLW_LLM_API_KEY: ${NLW_LLM_API_KEY:-}
+      # Signed DB context (P3B): the API signs with ITS key only (api class).
+      # Key material is a mounted FILE (never an env value); see
+      # scripts/ops/ctx-keys-dev.sh for local provisioning.
+      NLW_CTX_KEY_ID: ${NLW_CTX_API_KEY_ID:-dev-api}
+      NLW_CTX_KEY_FILE: /run/nlw/keys/api.key
+    volumes:
+      - ./docker/ctx-keys/api.key:/run/nlw/keys/api.key:ro
     ports:
       - "8000:8000"
     depends_on:
@@ -113,6 +120,11 @@ services:
     environment:
       <<: *app-env
       DATABASE_URL: postgresql+psycopg://nlw_worker:nlw_worker@postgres:5432/nlw
+      # Signed DB context (P3B): worker class key ONLY (cannot mint api contexts).
+      NLW_CTX_KEY_ID: ${NLW_CTX_WORKER_KEY_ID:-dev-worker}
+      NLW_CTX_KEY_FILE: /run/nlw/keys/worker.key
+    volumes:
+      - ./docker/ctx-keys/worker.key:/run/nlw/keys/worker.key:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -136,6 +148,11 @@ services:
     environment:
       <<: *app-env
       DATABASE_URL: postgresql+psycopg://nlw_scheduler:nlw_scheduler@postgres:5432/nlw
+      # Signed DB context (P3B): scheduler class key ONLY (no human authority).
+      NLW_CTX_KEY_ID: ${NLW_CTX_SCHEDULER_KEY_ID:-dev-scheduler}
+      NLW_CTX_KEY_FILE: /run/nlw/keys/scheduler.key
+    volumes:
+      - ./docker/ctx-keys/scheduler.key:/run/nlw/keys/scheduler.key:ro
     depends_on:
       postgres:
         condition: service_healthy

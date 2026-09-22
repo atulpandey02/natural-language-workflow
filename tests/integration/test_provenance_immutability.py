@@ -22,6 +22,8 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 
+from nlw.tenancy.signing import Purpose
+
 pytestmark = pytest.mark.integration
 
 
@@ -101,19 +103,22 @@ def test_app_cannot_rewrite_requester_column_grant(pg_stack: SimpleNamespace) ->
     a = _seed_user(pg_stack.owner_libpq, tid, "a1", "owner")
     b = _seed_user(pg_stack.owner_libpq, tid, "b1", "member")
     _run, appr = _seed_run_and_approval(pg_stack.owner_libpq, tid, a)
-    with psycopg.connect(pg_stack.app_libpq, autocommit=True) as c:
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(a),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
-        # Combined self-approve AND rewrite requester A->B in one UPDATE.
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            c.execute(
-                "UPDATE approvals SET status='approved', decided_by=%s, decided_at=now(), "
-                "requested_by_user_id=%s WHERE id=%s",
-                (a, b, appr),
-            )
-        # Nullify requester to defeat the four-eyes NOT NULL guard.
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            c.execute("UPDATE approvals SET requested_by_user_id=NULL WHERE id=%s", (appr,))
+
+    def run(sql: str, params: tuple[object, ...]) -> None:
+        pg_stack.run_as(
+            pg_stack.app_libpq, Purpose.API_REQUEST, sql, params, user_id=a, tenant_id=tid
+        )
+
+    # Combined self-approve AND rewrite requester A->B in one UPDATE.
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        run(
+            "UPDATE approvals SET status='approved', decided_by=%s, decided_at=now(), "
+            "requested_by_user_id=%s WHERE id=%s",
+            (a, b, appr),
+        )
+    # Nullify requester to defeat the four-eyes NOT NULL guard.
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        run("UPDATE approvals SET requested_by_user_id=NULL WHERE id=%s", (appr,))
     with psycopg.connect(pg_stack.owner_libpq) as c:
         row = c.execute(
             "SELECT status, requested_by_user_id FROM approvals WHERE id=%s", (appr,)
@@ -146,13 +151,17 @@ def test_worker_cannot_rewrite_run_initiator(pg_stack: SimpleNamespace) -> None:
     a = _seed_user(pg_stack.owner_libpq, tid, "a3", "owner")
     b = _seed_user(pg_stack.owner_libpq, tid, "b3", "member")
     run, _appr = _seed_run_and_approval(pg_stack.owner_libpq, tid, a)
-    with psycopg.connect(pg_stack.worker_libpq, autocommit=True) as c:
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
-        # A legitimate status update (no provenance change) is allowed.
-        c.execute("UPDATE workflow_runs SET status='RUNNING' WHERE id=%s", (run,))
-        # Rewriting the initiator is rejected by the immutability trigger.
-        with pytest.raises(psycopg.errors.CheckViolation):
-            c.execute("UPDATE workflow_runs SET initiated_by_user_id=%s WHERE id=%s", (b, run))
+
+    def as_worker(sql: str, params: tuple[object, ...]) -> None:
+        pg_stack.run_as(
+            pg_stack.worker_libpq, Purpose.WORKER_EXECUTION, sql, params, tenant_id=tid, run_id=run
+        )
+
+    # A legitimate status update (no provenance change) is allowed.
+    as_worker("UPDATE workflow_runs SET status='RUNNING' WHERE id=%s", (run,))
+    # Rewriting the initiator is rejected by the immutability trigger.
+    with pytest.raises(psycopg.errors.CheckViolation):
+        as_worker("UPDATE workflow_runs SET initiated_by_user_id=%s WHERE id=%s", (b, run))
     with psycopg.connect(pg_stack.owner_libpq) as c:
         row = c.execute(
             "SELECT status, initiated_by_user_id FROM workflow_runs WHERE id=%s", (run,)
@@ -166,14 +175,17 @@ def test_app_cannot_rewrite_schedule_creator(pg_stack: SimpleNamespace) -> None:
     a = _seed_user(pg_stack.owner_libpq, tid, "a4", "owner")
     b = _seed_user(pg_stack.owner_libpq, tid, "b4", "member")
     sid = _seed_schedule(pg_stack.owner_libpq, tid, a)
-    with psycopg.connect(pg_stack.app_libpq, autocommit=True) as c:
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(a),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
-        # A legitimate enable/disable update is allowed.
-        c.execute("UPDATE schedules SET enabled=false WHERE id=%s", (sid,))
-        # Rewriting the creator is rejected by the immutability trigger.
-        with pytest.raises(psycopg.errors.CheckViolation):
-            c.execute("UPDATE schedules SET created_by=%s WHERE id=%s", (b, sid))
+
+    def run(sql: str, params: tuple[object, ...]) -> None:
+        pg_stack.run_as(
+            pg_stack.app_libpq, Purpose.API_REQUEST, sql, params, user_id=a, tenant_id=tid
+        )
+
+    # A legitimate enable/disable update is allowed.
+    run("UPDATE schedules SET enabled=false WHERE id=%s", (sid,))
+    # Rewriting the creator is rejected by the immutability trigger.
+    with pytest.raises(psycopg.errors.CheckViolation):
+        run("UPDATE schedules SET created_by=%s WHERE id=%s", (b, sid))
     with psycopg.connect(pg_stack.owner_libpq) as c:
         row = c.execute("SELECT created_by FROM schedules WHERE id=%s", (sid,)).fetchone()
     assert row is not None and uuid.UUID(str(row[0])) == a
@@ -185,25 +197,26 @@ def test_terminal_decision_is_immutable(pg_stack: SimpleNamespace) -> None:
     req = _seed_user(pg_stack.owner_libpq, tid, "reqA5", "member")
     dec = _seed_user(pg_stack.owner_libpq, tid, "decA5", "owner")
     _run, appr = _seed_run_and_approval(pg_stack.owner_libpq, tid, req)
-    with psycopg.connect(pg_stack.app_libpq, autocommit=True) as c:
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(dec),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
-        # Legitimate first decision: pending -> approved.
-        c.execute(
-            "UPDATE approvals SET status='approved', decided_by=%s, decided_at=now() WHERE id=%s",
-            (dec, appr),
+
+    def run(sql: str, params: tuple[object, ...]) -> None:
+        pg_stack.run_as(
+            pg_stack.app_libpq, Purpose.API_REQUEST, sql, params, user_id=dec, tenant_id=tid
         )
-        # Flip approved -> rejected is rejected (terminal is final).
-        with pytest.raises(psycopg.errors.CheckViolation):
-            c.execute(
-                "UPDATE approvals SET status='rejected', decided_at=now() WHERE id=%s", (appr,)
-            )
-        # Re-open approved -> pending is rejected.
-        with pytest.raises(psycopg.errors.CheckViolation):
-            c.execute("UPDATE approvals SET status='pending' WHERE id=%s", (appr,))
-        # Rewriting decided_by after the decision is rejected.
-        with pytest.raises(psycopg.errors.CheckViolation):
-            c.execute("UPDATE approvals SET decided_by=%s WHERE id=%s", (req, appr))
+
+    # Legitimate first decision: pending -> approved.
+    run(
+        "UPDATE approvals SET status='approved', decided_by=%s, decided_at=now() WHERE id=%s",
+        (dec, appr),
+    )
+    # Flip approved -> rejected is rejected (terminal is final).
+    with pytest.raises(psycopg.errors.CheckViolation):
+        run("UPDATE approvals SET status='rejected', decided_at=now() WHERE id=%s", (appr,))
+    # Re-open approved -> pending is rejected.
+    with pytest.raises(psycopg.errors.CheckViolation):
+        run("UPDATE approvals SET status='pending' WHERE id=%s", (appr,))
+    # Rewriting decided_by after the decision is rejected.
+    with pytest.raises(psycopg.errors.CheckViolation):
+        run("UPDATE approvals SET decided_by=%s WHERE id=%s", (req, appr))
     with psycopg.connect(pg_stack.owner_libpq) as c:
         row = c.execute("SELECT status, decided_by FROM approvals WHERE id=%s", (appr,)).fetchone()
     assert row is not None and row[0] == "approved" and uuid.UUID(str(row[1])) == dec

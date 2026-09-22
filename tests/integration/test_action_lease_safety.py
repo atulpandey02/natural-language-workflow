@@ -27,7 +27,7 @@ from test_action_execution import (  # sibling module (pytest prepend import mod
 from nlw.engine.actions import effective_attempt_cap, finalize_action, run_action
 from nlw.engine.execution import execute_advancement, process_advance
 from nlw.secrets.store import EnvironmentSecretStore
-from nlw.tenancy.session import set_current_tenant_sync
+from nlw.tenancy.session import set_worker_context_default
 
 pytestmark = pytest.mark.integration
 
@@ -76,7 +76,7 @@ def test_duplicate_cannot_fail_or_steal_a_live_final_attempt(pg_stack: SimpleNam
 
     # Worker A's external request succeeds and A finalizes.
     result_a = run_action(task_a, transport=sink.transport())
-    final_a = finalize_action(sm, task_a, result_a, set_current_tenant_sync)
+    final_a = finalize_action(sm, task_a, result_a, set_worker_context_default)
 
     assert len(sink.calls) == 1  # exactly one external effect, and it succeeded
     assert final_a.result == "advanced"
@@ -176,10 +176,10 @@ def test_lease_overrun_two_transmissions_possible_without_state_corruption(
     assert sink.calls[1].headers["Idempotency-Key"] == key  # identical -> only receiver dedup helps
 
     # A's STALE-lease finalize arrives first -> CAS rejects it (noop), no corruption.
-    final_a = finalize_action(sm, task_a, result_a, set_current_tenant_sync)
+    final_a = finalize_action(sm, task_a, result_a, set_worker_context_default)
     assert final_a.result == "noop"
     # B (the current lease owner) finalizes -> success.
-    final_b = finalize_action(sm, task_b, result_b, set_current_tenant_sync)
+    final_b = finalize_action(sm, task_b, result_b, set_worker_context_default)
     assert final_b.result == "advanced"
 
     # State is consistent: exactly one action row and a recorded success.

@@ -41,6 +41,8 @@ def test_ready_when_all_dependencies_and_schema_ok(
         "postgres": "ok",
         "redis": "ok",
         "schema": "ok",
+        # P3B: the API's signer and the database's key registry agree.
+        "signed_context": "ok",
     }
 
 
