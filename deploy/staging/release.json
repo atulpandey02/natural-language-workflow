@@ -1,0 +1,19 @@
+{
+  "format_version": 1,
+  "environment": "staging",
+  "_comment": "Immutable release identity for the M12A signed-context rollout (M12A-Prep §B). Digests are the GHCR manifest digests of the images the Delivery workflow pushed for release_sha; mutable tags are never deployment authority. Key ids are labels only — material lives ONLY in the host key files and the ctx_keys registry.",
+  "release_sha": "1eebf2ef19c0286c83bfe8768c908bfd2f40178d",
+  "backend_image": "ghcr.io/atulpandey02/natural-language-workflow@sha256:ec5c2ee0a3b588908dce350fd9cd37eace2c72c8e66f513134ef2fdcaa09037a",
+  "web_image": "ghcr.io/atulpandey02/natural-language-workflow/web@sha256:bfc128d472fc4387d7fac0cbf0e5e394b15103bc7e365a8784f3243ef59cd5f3",
+  "expected_current_revision": "0010_readiness_schema_grant",
+  "target_revision": "0016_signed_database_context",
+  "instance_id": "i-0d1e65cdc9401dbb9",
+  "region": "us-east-1",
+  "compose_project": "app",
+  "public_hostname": "32-197-83-193.sslip.io",
+  "key_ids": {
+    "api": "stg-api-2026-09",
+    "worker": "stg-worker-2026-09",
+    "scheduler": "stg-scheduler-2026-09"
+  }
+}

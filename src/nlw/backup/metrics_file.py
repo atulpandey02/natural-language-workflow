@@ -66,6 +66,36 @@ def render(metrics: BackupMetrics, *, now: float, previous_last_success: float |
     return "\n".join(lines) + "\n"
 
 
+@dataclass(frozen=True)
+class ParsedBackupMetrics:
+    """The gauges a consumer (alerts, the rollout backup gate) reads back."""
+
+    success: bool | None
+    verify_success: bool | None
+    retention_success: bool | None
+    last_success: float | None
+
+
+def parse_metrics_text(text: str) -> ParsedBackupMetrics:
+    """Parse the exposition this module renders. Missing samples -> None (never
+    assumed true)."""
+
+    def gauge(name: str) -> float | None:
+        m = re.search(rf"^{re.escape(name)}\s+([0-9.eE+-]+)\s*$", text, re.MULTILINE)
+        return float(m.group(1)) if m else None
+
+    def flag(name: str) -> bool | None:
+        v = gauge(name)
+        return None if v is None else v == 1.0
+
+    return ParsedBackupMetrics(
+        success=flag("nlw_backup_success"),
+        verify_success=flag("nlw_backup_repository_verify_success"),
+        retention_success=flag("nlw_backup_retention_success"),
+        last_success=gauge("nlw_backup_last_success_timestamp_seconds"),
+    )
+
+
 def write_metrics(path_str: str, metrics: BackupMetrics, *, now: float | None = None) -> None:
     now = time.time() if now is None else now
     path = Path(path_str)

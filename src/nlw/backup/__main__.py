@@ -21,8 +21,10 @@ Exit codes:
 """
 
 import argparse
+import contextlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -122,6 +124,33 @@ def _cmd_prune() -> int:
     return 0
 
 
+def _cmd_evidence() -> int:
+    """Print NON-SECRET pre-deployment backup evidence as JSON (M12A-Prep §G):
+    the sanitized repository location, the metrics textfile contents, the newest
+    ``nlw-db`` snapshot (id/time/hostname/tags) and the artifact NAMES inside it.
+    The rollout gate evaluates this document; nothing here decides anything."""
+    settings = BackupSettings()
+    restic = Restic(settings.restic_env())
+    snaps = restic.latest_snapshots()
+    names = restic.snapshot_file_names(snaps[0]["id"]) if snaps else []
+    metrics_text = ""
+    with contextlib.suppress(OSError):
+        metrics_text = Path(settings.metrics_file).read_text()
+    repo = re.sub(r"://[^/@]+@", "://<redacted>@", settings.restic_repository)
+    doc = {
+        "format_version": 1,
+        "repository": repo,
+        "metrics_text": metrics_text,
+        "snapshots": snaps,
+        "artifact_names": names,
+    }
+    for needle in ("password", "secret", "token"):
+        if needle in json.dumps(doc).lower():
+            raise RuntimeError("evidence document would contain a secret-bearing value")
+    print(json.dumps(doc, indent=2, sort_keys=True))
+    return 0
+
+
 def _cmd_gate_check() -> int:
     """Verify the restore-ready gate against the live DB (runtime-start gate).
 
@@ -213,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
             "gate-check",
             "enable-runtime",
             "startup-check",
+            "evidence",
         ),
     )
     args = parser.parse_args(argv)
@@ -222,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         "quiesce": _cmd_quiesce,
         "validate": _cmd_validate,
         "prune": _cmd_prune,
+        "evidence": _cmd_evidence,
         "gate-check": _cmd_gate_check,
         "enable-runtime": _cmd_enable_runtime,
         "startup-check": _cmd_startup_check,

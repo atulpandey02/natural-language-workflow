@@ -27,23 +27,35 @@
 # script handles NO sb_secret_*, service_role, GitHub PAT, or LLM keys.
 set -euo pipefail
 
-# --- Pinned deployment references (immutable) -------------------------------
-DEPLOY_SHA="5151a2cc54cfb63b276bd3b30cf0e683263525ac"
-BACKEND_IMAGE="ghcr.io/atulpandey02/natural-language-workflow@sha256:fef5464b674695050ad4b1ca2e80ca7f03bfdd3b03a6519352e52c8377d7728e"
-WEB_IMAGE="ghcr.io/atulpandey02/natural-language-workflow/web@sha256:57276f04e27e350a8eb8044349346af0f426274e9d27750bec904c203a007228"
-STAGING_HOST="32-197-83-193.sslip.io"
-EXPECTED_IP="32.197.83.193"
+# --- Release identity (immutable; ONE reviewed source) -----------------------
+# Pins come from deploy/staging/release.json (git SHA + image DIGESTS + expected
+# migration head + instance id) and the host from deploy/staging/target.env via
+# scripts/ops/lib/staging-target.sh. Nothing is hard-coded here any more.
+#
+# SCOPE (M12A-Prep §H): this script is the FIRST-DEPLOY / bootstrap path for a
+# fresh host. Upgrading an EXISTING database across the 0010 -> 0016 signed-
+# context boundary is NOT done here — it is the phased, gated
+# `python -m nlw.ops.rollout` (docs/runbooks/staging-signed-context-rollout.md).
+# On a fresh host this script still refuses to start runtimes unless the three
+# signed-context keys are installed and verified (see require_context_keys).
+# shellcheck source=lib/staging-target.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/staging-target.sh"
+RELEASE_FILE="${NLW_STAGING_RELEASE_FILE:-${NLW_REPO_ROOT}/deploy/staging/release.json}"
+release_field() {  # pure: read one top-level string field from release.json
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d[sys.argv[2]]; print(v["api"]+" "+v["worker"]+" "+v["scheduler"] if isinstance(v,dict) else v)' "$RELEASE_FILE" "$1"
+}
+DEPLOY_SHA="$(release_field release_sha)"
+BACKEND_IMAGE="$(release_field backend_image)"
+WEB_IMAGE="$(release_field web_image)"
+EXPECTED_MIGRATION_HEAD="$(release_field target_revision)"
+[ "$(release_field instance_id)" = "$EXPECTED_INSTANCE_ID" ] \
+  || { echo "release.json instance_id != target.env instance id — STOP" >&2; exit 3; }
+[ "$(release_field public_hostname)" = "$STAGING_HOST" ] \
+  || { echo "release.json public_hostname != target.env hostname — STOP" >&2; exit 3; }
 SUPABASE_URL="https://uqjqdfshuwcjftdvxbrm.supabase.co"
 SUPABASE_JWKS_URL="${SUPABASE_URL}/auth/v1/.well-known/jwks.json"
 SUPABASE_ISSUER="${SUPABASE_URL}/auth/v1"
 REPO_URL="https://github.com/atulpandey02/natural-language-workflow.git"
-
-# --- Target (override via env) ---------------------------------------------
-SSH_HOST="${SSH_HOST:-32.197.83.193}"
-SSH_USER="${SSH_USER:-nlwops}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/nlw-staging-key.pem}"
-TARGET="${SSH_USER}@${SSH_HOST}"
-REMOTE_APP="/opt/nlw/app"
 COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.staging.yml"
 DC="cd '$REMOTE_APP' && docker compose --env-file .env.prod $COMPOSE_FILES"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
@@ -122,20 +134,38 @@ preflight() {
 }
 
 imdsv2_check() {
-  # The host's ACTUAL public IPv4 (EC2 IMDSv2) must equal the pinned IP, and the
-  # sslip.io hostname must encode that same IP. Runs BEFORE any secret gen, pull,
-  # migration, or startup. Mismatch => STOP (wrong identity).
-  log "Preflight: IMDSv2 public-ipv4 must equal $EXPECTED_IP …"
-  local host_pubip host_from_name
-  host_pubip="$(rsh 'set -e
-    T=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" --max-time 5)
-    curl -sS -H "X-aws-ec2-metadata-token: $T" --max-time 5 http://169.254.169.254/latest/meta-data/public-ipv4' | tr -d '\r')"
-  [ "$host_pubip" = "$EXPECTED_IP" ] \
-    || die "IMDSv2 public-ipv4 is '${host_pubip:-<none>}', expected $EXPECTED_IP — STOP (Elastic IP may have changed; do not deploy)."
+  # The connected host must BE the expected EC2 INSTANCE (IMDSv2 instance-id),
+  # and the sslip.io hostname must encode the instance's CURRENT public IPv4.
+  # Runs BEFORE any secret gen, pull, migration, or startup. Mismatch => STOP.
+  log "Preflight: IMDSv2 instance-id must equal $EXPECTED_INSTANCE_ID …"
+  local ident host_pubip host_from_name
+  ident="$(rsh "$(staging_remote_identity_cmd)" | tr -d '\r')"
+  staging_assert_instance "$ident" || die "wrong target instance — STOP."
+  host_pubip="$(printf '%s' "$ident" | awk '{print $3}')"
   host_from_name="$(printf '%s' "$STAGING_HOST" | sed 's/\.sslip\.io$//; s/-/./g')"
-  [ "$host_from_name" = "$EXPECTED_IP" ] \
-    || die "hostname $STAGING_HOST encodes '$host_from_name', not $EXPECTED_IP — STOP."
-  log "IMDSv2 public IP and hostname both resolve to $EXPECTED_IP."
+  [ "$host_from_name" = "$host_pubip" ] \
+    || die "hostname $STAGING_HOST encodes '$host_from_name' but the instance's public IPv4 is '${host_pubip:-<none>}' — the address changed; update deploy/staging/target.env + Supabase URL config first. STOP."
+  log "Instance $EXPECTED_INSTANCE_ID confirmed; hostname matches its public IPv4."
+}
+
+require_context_keys() {
+  # Signed context (P3B): a runtime started without an installed + verified key
+  # fails closed. Never start api/worker/scheduler unless ALL THREE registry keys
+  # verify against the mounted files (nlw.ctxkeys check, owner credential, files
+  # only). Key preparation/escrow is the rollout's job (prepare-keys/verify-escrow).
+  log "Verifying the three signed-context keys are installed (ctxkeys check) …"
+  local keys_dir cls kid ids
+  keys_dir="$(rsh "grep -m1 '^NLW_CTX_KEYS_DIR=' '$REMOTE_APP/.env.prod' | cut -d= -f2-" | tr -d '\r')"
+  [ -n "$keys_dir" ] || die "NLW_CTX_KEYS_DIR missing from .env.prod — prepare keys first (nlw.ops.rollout prepare-keys)."
+  ids="$(release_field key_ids)"
+  set -- $ids
+  for cls in api worker scheduler; do
+    kid="$1"; shift
+    rsh "$DC --profile migration run --rm -T -v '$keys_dir:/run/nlw/keys:ro' migrate \
+      python -m nlw.ctxkeys check --class $cls --key-id '$kid' --secret-file /run/nlw/keys/$cls.key" \
+      || die "signed-context key for $cls ($kid) is not installed/verified — runtimes NOT started."
+  done
+  mark context_keys_verified
 }
 
 confirm_manual_prereqs() {
@@ -336,6 +366,8 @@ verify_migration() {
   raw_cur="$(rsh "$DC exec -T postgres psql -U nlw -d nlw -tAc 'SELECT version_num FROM alembic_version'" 2>/dev/null || true)"
   current_rev="$(printf '%s' "$raw_cur" | parse_current)"
   assert_revisions "$expected_head" "$current_rev" || die "migration verification failed (current='$current_rev' head='$expected_head')."
+  # The release document must agree with the image it pins (defence in depth).
+  assert_revisions "$EXPECTED_MIGRATION_HEAD" "$current_rev" || die "release.json target_revision != schema head."
   log "Schema at head: $current_rev"
   mark migrations_verified
 }
@@ -392,6 +424,7 @@ main() {
   verify_roles
   run_migrations
   verify_migration
+  require_context_keys
   start_app_services
   verify_readiness
   verify_public_login

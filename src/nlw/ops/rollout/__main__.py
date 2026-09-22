@@ -1,0 +1,125 @@
+"""``python -m nlw.ops.rollout [phase] [options]`` — see ``nlw.ops.rollout``.
+
+The default phase is ``preflight`` and is READ-ONLY. Mutating phases require:
+
+* ``--authorize <exact phrase>``  (AUTHORIZE_M12A_SIGNED_CONTEXT_STAGING_DEPLOYMENT)
+* ``--escrow-confirm <exact phrase>`` + ``--attestation FILE`` for verify-escrow
+* a verified off-host backup (verify-backup) and a clean drain (drain)
+
+No ``--yes``; an empty or partial phrase is a hard stop. Phrases are compared
+only, never persisted. The rehearsal (scripts/ops/rehearse-0010-to-0016.sh) uses
+``--local`` to execute the same phases against a disposable local stack.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import timedelta
+from pathlib import Path
+
+from nlw.ops.rollout.attestation import AttestationError
+from nlw.ops.rollout.backup_evidence import BackupEvidenceError
+from nlw.ops.rollout.gates import GateError
+from nlw.ops.rollout.phases import Operator, Rollout, RolloutStop
+from nlw.ops.rollout.release import ReleaseSpecError, load_release
+from nlw.ops.rollout.remote import (
+    LocalRemote,
+    SshRemote,
+    TargetConfig,
+    TargetConfigError,
+    load_target,
+)
+from nlw.ops.rollout.state import PHASES, StateError
+
+DEFAULT_RELEASE = Path("deploy/staging/release.json")
+DEFAULT_TARGET = Path("deploy/staging/target.env")
+DEFAULT_KEYS_DIR = "/srv/nlw/ctx-keys"
+
+
+def _log(msg: str) -> None:
+    print(f"[rollout] {msg}", flush=True)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="python -m nlw.ops.rollout")
+    p.add_argument("phase", nargs="?", default="preflight", choices=PHASES)
+    p.add_argument("--release", type=Path, default=DEFAULT_RELEASE)
+    p.add_argument("--target", type=Path, default=DEFAULT_TARGET)
+    p.add_argument("--ssh-key", type=Path, default=None)
+    p.add_argument("--keys-dir", default=DEFAULT_KEYS_DIR, help="host directory of the key files")
+    p.add_argument("--authorize", default=None, metavar="PHRASE")
+    p.add_argument("--escrow-confirm", default=None, metavar="PHRASE")
+    p.add_argument("--attestation", type=Path, default=None)
+    p.add_argument("--backup-max-age-hours", type=float, default=26.0)
+    p.add_argument(
+        "--local",
+        action="store_true",
+        help="rehearsal only: run the phases with bash on THIS machine instead of SSH",
+    )
+    p.add_argument(
+        "--allow-fixture-repository",
+        action="store_true",
+        help="rehearsal only (requires --local): accept the disposable MinIO backup fixture",
+    )
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        release = load_release(args.release)
+        target: TargetConfig = load_target(args.target, ssh_key=args.ssh_key)
+    except (ReleaseSpecError, TargetConfigError) as exc:
+        print(f"[rollout] configuration error: {exc}", file=sys.stderr)
+        return 2
+    if args.allow_fixture_repository and not args.local:
+        print(
+            "[rollout] --allow-fixture-repository is rehearsal-only (requires --local)",
+            file=sys.stderr,
+        )
+        return 2
+    remote = LocalRemote("LOCAL REHEARSAL (not the VPS)") if args.local else SshRemote(target)
+    op = Operator(
+        authorization=args.authorize,
+        escrow_confirmation=args.escrow_confirm,
+        attestation_path=args.attestation,
+        backup_max_age=timedelta(hours=args.backup_max_age_hours),
+        allow_fixture_repository=bool(args.allow_fixture_repository and args.local),
+    )
+    r = Rollout(release=release, target=target, remote=remote, operator=op, log=_log)
+    keys_dir = args.keys_dir
+    try:
+        if args.phase == "preflight":
+            r.preflight()
+        elif args.phase == "prepare-roles":
+            r.prepare_roles()
+        elif args.phase == "prepare-keys":
+            r.prepare_keys(keys_dir=keys_dir)
+        elif args.phase == "verify-escrow":
+            r.verify_escrow(keys_dir=keys_dir)
+        elif args.phase == "pin-release":
+            r.pin_release(keys_dir=keys_dir)
+        elif args.phase == "verify-backup":
+            r.verify_backup()
+        elif args.phase == "drain":
+            r.drain()
+        elif args.phase == "migrate":
+            r.migrate(keys_dir=keys_dir)
+        elif args.phase == "install-context-keys":
+            r.install_context_keys(keys_dir=keys_dir)
+        elif args.phase == "recreate-runtime":
+            r.recreate_runtime(keys_dir=keys_dir)
+        elif args.phase == "validate":
+            r.validate(keys_dir=keys_dir)
+        elif args.phase == "reopen":
+            r.reopen()
+    except (GateError, RolloutStop, StateError, AttestationError, BackupEvidenceError) as exc:
+        print(f"[rollout] STOP ({args.phase}): {exc}", file=sys.stderr)
+        return 3
+    _log(f"phase {args.phase} complete")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
