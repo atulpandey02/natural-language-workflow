@@ -10,6 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nlw.domain.workflow import STEP_ID_PATTERN, WorkflowPlan, WorkflowStep
 
+# Version of the planner contract = the strict output schema (this module) + the
+# system prompt / prompt-construction contract (planner/prompt.py,
+# docs/security/planner-prompt-contract.md). Bump it whenever either changes so
+# stored provenance records which contract produced a plan. Not a wire version.
+PLANNER_CONTRACT_VERSION = "planner-1"
+
 # Bounds on the model's proposed plan (defense against pathological output).
 MAX_PROPOSED_STEPS = 100
 MAX_CLARIFICATION_QUESTIONS = 10

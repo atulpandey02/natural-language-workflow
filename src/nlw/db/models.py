@@ -346,8 +346,15 @@ class PlanProposal(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    # No raw prompt: only its length (bounded by the platform cap).
+    # Length of the request (bounded by the platform cap); kept for back-compat.
     prompt_len: Mapped[int] = mapped_column(Integer, nullable=False)
+    # M12B-A: durable request->plan provenance. The original NL request text
+    # (bounded before persistence), its sha256 digest (mutation detection), and
+    # the planner contract version. Immutable after INSERT (nlw_app has no UPDATE
+    # grant on these columns); never logged/metered; RLS/tenant-scoped.
+    request_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    planner_contract_version: Mapped[str | None] = mapped_column(String, nullable=True)
     provider: Mapped[str] = mapped_column(String, nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
     workflow_name: Mapped[str] = mapped_column(String, nullable=False)

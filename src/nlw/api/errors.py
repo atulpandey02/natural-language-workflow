@@ -53,8 +53,19 @@ def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(StarletteHTTPException)
     async def _http_exc(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         # The detail is author-controlled (we set it when raising) => safe to show.
-        message = exc.detail if isinstance(exc.detail, str) else "request failed"
+        # A dict detail may carry a stable, sanitized {code, message} (e.g. the
+        # STALE_PLAN outcome + its member-safe reason); a string detail is the
+        # message and the code is derived from the status.
         headers = dict(exc.headers) if exc.headers else None
+        if isinstance(exc.detail, dict):
+            code = str(exc.detail.get("code") or _CODE_BY_STATUS.get(exc.status_code, "error"))
+            message = str(exc.detail.get("message") or "request failed")
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"error": {"code": code, "message": message}},
+                headers=headers,
+            )
+        message = exc.detail if isinstance(exc.detail, str) else "request failed"
         return _error_response(exc.status_code, message, headers)
 
     @app.exception_handler(RequestValidationError)

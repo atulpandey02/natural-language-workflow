@@ -93,6 +93,26 @@ _RUN_SUMMARY = Counter(
     "Grounded run summaries produced, by run outcome.",
     labelnames=("outcome",),
 )
+# Stale-plan re-validation blocks (M12B-A addendum, Part 2). Both labels are fixed
+# vocabularies: outcome (STALE_PLAN/POLICY_DENIED/INVALID_PLAN) and reason (a
+# stable FeasibilityCode value). Never customer data.
+_STALE_PLAN = Counter(
+    "nlw_stale_plan_total",
+    "Re-validation blocks of a previously-accepted plan, by outcome and reason.",
+    labelnames=("outcome", "reason"),
+)
+# Queue-to-start latency: run creation -> first RUNNING transition (how long a run
+# waited before a worker picked it up). Observed once, at the actual start.
+_QUEUE_TO_START = Histogram(
+    "nlw_run_queue_to_start_seconds",
+    "Seconds from run creation to its first RUNNING transition.",
+)
+# Approval wait: request -> decision. Observed once, when a decision is recorded.
+_APPROVAL_WAIT = Histogram(
+    "nlw_approval_wait_seconds",
+    "Seconds a run waited for an approval decision.",
+    buckets=(1, 10, 60, 300, 1800, 7200, 86400),
+)
 
 # --- Tools / actions (worker) ---
 _TOOL_LATENCY = Histogram(
@@ -325,6 +345,21 @@ def observe_planner_tokens(input_tokens: int | None, output_tokens: int | None) 
 
 def record_run_summary(outcome: str) -> None:
     _RUN_SUMMARY.labels(outcome=outcome).inc()
+
+
+def record_stale_plan(outcome: str, reason: str) -> None:
+    """One re-validation block. ``reason`` is a stable FeasibilityCode value."""
+    _STALE_PLAN.labels(outcome=outcome, reason=reason).inc()
+
+
+def observe_queue_to_start(seconds: float) -> None:
+    """Observe run creation -> first RUNNING (once, at the actual start)."""
+    _QUEUE_TO_START.observe(max(0.0, seconds))
+
+
+def observe_approval_wait(seconds: float) -> None:
+    """Observe request -> decision (once, when a decision is recorded)."""
+    _APPROVAL_WAIT.observe(max(0.0, seconds))
 
 
 def observe_tool(tool: str, outcome: str, seconds: float) -> None:

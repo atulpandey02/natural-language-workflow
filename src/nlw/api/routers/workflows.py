@@ -17,6 +17,7 @@ import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nlw.api.capability import build_tenant_view
 from nlw.api.deps import (
     get_app_settings,
     get_ctx_signer,
@@ -28,10 +29,15 @@ from nlw.api.schemas import (
     RunCreateOut,
     WorkflowDetailOut,
     WorkflowOut,
+    WorkflowProvenanceOut,
     WorkflowVersionOut,
 )
 from nlw.core.config import Settings
-from nlw.db.repositories import RunRepository, WorkflowRepository
+from nlw.db.repositories import PlanProposalRepository, RunRepository, WorkflowRepository
+from nlw.domain.workflow import WorkflowPlan
+from nlw.feasibility.limits import DEFAULT_LIMITS
+from nlw.feasibility.revalidation import revalidate_plan
+from nlw.observability import metrics
 from nlw.tenancy.context import TenantContext
 from nlw.tenancy.session import set_request_context
 from nlw.tenancy.signing import Purpose
@@ -120,6 +126,33 @@ async def get_workflow_version(
     return _version_out(version)
 
 
+@router.get("/workflow-versions/{version_id}/provenance", response_model=WorkflowProvenanceOut)
+async def get_workflow_provenance(
+    version_id: uuid.UUID,
+    ctx: TenantContext = Depends(get_tenant_context),
+    session: AsyncSession = Depends(get_session),
+) -> WorkflowProvenanceOut:
+    """The original NL request + planner identity + feasibility decision that
+    produced this version (M12B-A). Read-only, tenant-scoped, authorized-member
+    only. Not a list endpoint; never logs the request text."""
+    version = await WorkflowRepository(session).get_version(version_id, ctx.tenant_id)
+    if version is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "workflow version not found")
+    proposal = await PlanProposalRepository(session).get_by_version(version_id, ctx.tenant_id)
+    if proposal is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no provenance for this version")
+    return WorkflowProvenanceOut(
+        workflow_version_id=version_id,
+        request_text=proposal.request_text,
+        request_sha256=proposal.request_sha256,
+        provider=proposal.provider,
+        model=proposal.model,
+        planner_contract_version=proposal.planner_contract_version,
+        status=proposal.status,
+        created_at=proposal.created_at.isoformat(),
+    )
+
+
 @router.post(
     "/workflows/{workflow_id}/runs",
     response_model=RunCreateOut,
@@ -163,6 +196,28 @@ async def create_run(
             raise HTTPException(
                 status.HTTP_409_CONFLICT, "workflow has no materialized version to run"
             )
+        # STALE_PLAN gate (M12B-A): re-validate the pinned plan against CURRENT
+        # authoritative state BEFORE creating a run, so execution fails closed
+        # before any tool is invoked when a referenced connector/tool changed.
+        version = await repo.get_version(workflow.current_version_id, ctx.tenant_id)
+        if version is not None:
+            view, all_tool_names = await build_tenant_view(session, ctx.tenant_id)
+            reval = revalidate_plan(
+                WorkflowPlan.model_validate(version.plan), view, DEFAULT_LIMITS, all_tool_names
+            )
+            if not reval.fresh:
+                metrics.record_stale_plan(reval.outcome.value, reval.reason_code)
+                log.info(
+                    "run.blocked_stale",
+                    tenant_id=str(ctx.tenant_id),
+                    workflow_id=str(workflow_id),
+                    outcome=reval.outcome.value,
+                    reason_code=reval.reason_code,
+                )
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail={"code": reval.outcome.value, "message": reval.message},
+                )
         run, created = await RunRepository(session).create_manual(
             tenant_id=ctx.tenant_id,
             workflow_id=workflow_id,

@@ -193,6 +193,18 @@ export interface RunCreateOut {
   idempotent_hit: boolean;
 }
 
+// Request→plan provenance (M12B-A): what caused a workflow version to exist.
+export interface WorkflowProvenanceOut {
+  workflow_version_id: string;
+  request_text: string | null;
+  request_sha256: string | null;
+  provider: string;
+  model: string;
+  planner_contract_version: string | null;
+  status: string;
+  created_at: string;
+}
+
 // Deterministic grounded run summary (M12B-A). No model output; step outcomes
 // are keyed to step ids and UNKNOWN/FAILED/SKIPPED are never reported as success.
 export interface StepSummaryOut {
