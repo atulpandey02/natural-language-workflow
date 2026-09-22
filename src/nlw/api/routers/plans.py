@@ -36,6 +36,7 @@ from nlw.domain.workflow import WorkflowPlan
 from nlw.feasibility.engine import FeasibilityReport, FeasibilityStatus, check_plan
 from nlw.feasibility.limits import DEFAULT_LIMITS
 from nlw.observability import metrics
+from nlw.planner.budget import PromptBudgetError
 from nlw.planner.capabilities import SafeConnector, build_capability_view
 from nlw.planner.planner import plan_and_check
 from nlw.planner.provider import (
@@ -134,6 +135,11 @@ async def create_plan(
         metrics.record_error("planner_auth")
         log.error("planner.provider_error", error_class="auth", provider=settings.llm_provider)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "planner provider misconfigured") from exc
+    except PromptBudgetError as exc:
+        # Deterministic: the assembled prompt/tool catalog exceeded its budget.
+        # Rejected before any provider call; never truncated (Part G).
+        metrics.record_error("planner_prompt_budget")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     finally:
         metrics.observe_planner(time.perf_counter() - planner_start)
 
