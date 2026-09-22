@@ -24,8 +24,28 @@ def test_new_ai_metrics_are_registered() -> None:
         "nlw_plan_bytes",
         "nlw_planner_tokens",
         "nlw_run_summary",
+        "nlw_stale_plan",
+        "nlw_run_queue_to_start_seconds",
+        "nlw_approval_wait_seconds",
     ):
         assert expected in names, f"missing metric family {expected}"
+
+
+def test_stale_and_latency_metrics_record() -> None:
+    metrics.record_stale_plan("STALE_PLAN", "TOOL_NOT_AVAILABLE")
+    metrics.observe_queue_to_start(1.5)
+    metrics.observe_approval_wait(42.0)
+    # stale label vocabulary is bounded (outcome + FeasibilityCode reason).
+    for family in REGISTRY.collect():
+        if family.name == "nlw_stale_plan":
+            for sample in family.samples:
+                assert sample.labels["outcome"] in {
+                    "STALE_PLAN",
+                    "POLICY_DENIED",
+                    "INVALID_PLAN",
+                }
+    assert _value("nlw_run_queue_to_start_seconds_count") >= 1
+    assert _value("nlw_approval_wait_seconds_count") >= 1
 
 
 def test_labels_are_bounded_vocabularies_only() -> None:

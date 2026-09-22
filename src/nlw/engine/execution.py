@@ -537,6 +537,7 @@ def execute_advancement(
         if run.status == RunStatus.PENDING:
             _set_run_status(run, RunStatus.RUNNING)
             run.started_at = _now()
+            metrics.observe_queue_to_start((run.started_at - run.created_at).total_seconds())
             _mark_progress(run)  # run entering execution
 
         if any_failed(states):
