@@ -32,3 +32,4 @@ supabase.env
 docker/ctx-keys/
 # Host-side rollout state (nlw.ops.rollout): non-secret metadata, per host
 .rollout/
+eval-artifacts/
