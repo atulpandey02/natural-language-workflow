@@ -20,6 +20,8 @@ import nlw.api.app as app_module
 from nlw.api.app import create_app
 from nlw.core.config import Settings
 from nlw.db.schema import SchemaMismatchError
+from nlw.tenancy.keys import signer_from_material
+from nlw.tenancy.signing import Purpose
 
 TIMEOUT_S = 0.2  # small, so a "hanging" probe is bounded well within the test
 
@@ -54,10 +56,17 @@ class _StubGate:
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     settings = Settings(readiness_probe_timeout_s=TIMEOUT_S)
+    # Signed context (P3B): give the app in-memory test signers and a fake
+    # verification probe — this file bounds probe TIMING, it does not need a DB.
+    monkeypatch.setattr(app_module, "check_signed_context", _ok)
     with TestClient(create_app(settings)) as c:
         c.app.state.recovery_gate = _StubGate("ALLOWED")  # type: ignore[attr-defined]
+        c.app.state.ctx_signers = {  # type: ignore[attr-defined]
+            p: signer_from_material(p, "unit", "22" * 32)
+            for p in (Purpose.API_IDENTITY, Purpose.API_REQUEST)
+        }
         yield c
 
 
@@ -106,6 +115,7 @@ def test_b_all_healthy_is_200(client: TestClient, monkeypatch: pytest.MonkeyPatc
         "postgres": "ok",
         "redis": "ok",
         "schema": "ok",
+        "signed_context": "ok",
     }
 
 
@@ -114,7 +124,13 @@ def test_c_redis_down_is_503(client: TestClient, monkeypatch: pytest.MonkeyPatch
     resp = client.get("/health/ready")
     assert resp.status_code == 503
     checks = resp.json()["checks"]
-    assert checks == {"recovery": "ok", "postgres": "ok", "redis": "down", "schema": "ok"}
+    assert checks == {
+        "recovery": "ok",
+        "postgres": "ok",
+        "redis": "down",
+        "schema": "ok",
+        "signed_context": "ok",
+    }
 
 
 def test_f_recovery_locked_is_not_ready(

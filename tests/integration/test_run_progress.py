@@ -25,7 +25,7 @@ from test_action_execution import (  # sibling module (pytest prepend import mod
 from nlw.engine.actions import finalize_action, run_action
 from nlw.engine.execution import execute_advancement, process_advance
 from nlw.secrets.store import EnvironmentSecretStore
-from nlw.tenancy.session import set_current_tenant_sync
+from nlw.tenancy.session import set_worker_context_default
 
 pytestmark = pytest.mark.integration
 
@@ -90,7 +90,7 @@ def test_stale_cas_finalize_does_not_manufacture_progress(pg_stack: SimpleNamesp
 
     # A finalizes with its STALE lease -> CAS no-op; progress must be unchanged.
     result_a = run_action(task_a, transport=sink.transport())
-    outcome = finalize_action(sm, task_a, result_a, set_current_tenant_sync)
+    outcome = finalize_action(sm, task_a, result_a, set_worker_context_default)
     assert outcome.result == "noop"
     assert _progress(pg_stack.owner_libpq, run_id) == progress_after_b  # no false progress
 

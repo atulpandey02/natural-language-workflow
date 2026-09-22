@@ -5,11 +5,12 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
-from sqlalchemy import text
 
 from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.domain.workflow import WorkflowPlan
 from nlw.engine.runs import create_run, create_workflow_with_version
+from nlw.tenancy.session import apply_signed_context_sync
+from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
 
@@ -23,11 +24,11 @@ def _seed_run(pg_stack: SimpleNamespace) -> SimpleNamespace:
     try:
         sm = create_sync_sessionmaker(engine)
         with sm() as s, s.begin():
-            s.execute(
-                text("SELECT set_config('app.user_id', :u, true)"), {"u": str(member.user_id)}
-            )
-            s.execute(
-                text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(member.tenant_id)}
+            apply_signed_context_sync(
+                s,
+                pg_stack.sign(
+                    Purpose.API_REQUEST, user_id=member.user_id, tenant_id=member.tenant_id
+                ),
             )
             wf, ver = create_workflow_with_version(s, member.tenant_id, "wf", _PLAN)
             run = create_run(s, member.tenant_id, wf.id, ver.id)
@@ -78,12 +79,14 @@ def test_execute_privileges(pg_stack: SimpleNamespace) -> None:
 
 
 def test_app_cannot_expose_other_tenant_via_gucs(pg_stack: SimpleNamespace) -> None:
-    """Forge app.user_id (non-member) + app.tenant_id = the REAL tenant -> 0 rows."""
+    """A SIGNED (non-member, REAL tenant) pair -> 0 rows: the signature is authentic,
+    the membership gate still denies. (An UNSIGNED pair yields NULL claims.)"""
     seeded = _seed_run(pg_stack)
     attacker = pg_stack.seed_user()
     with psycopg.connect(pg_stack.app_libpq) as c:
-        c.execute("SELECT set_config('app.user_id', %s, true)", (str(attacker),))
-        c.execute("SELECT set_config('app.tenant_id', %s, true)", (str(seeded.tenant_id),))
+        pg_stack.apply_ctx(
+            c, pg_stack.sign(Purpose.API_REQUEST, user_id=attacker, tenant_id=seeded.tenant_id)
+        )
         runs = c.execute(
             "SELECT count(*) FROM workflow_runs WHERE id=%s", (seeded.run_id,)
         ).fetchone()
@@ -94,11 +97,20 @@ def test_app_cannot_expose_other_tenant_via_gucs(pg_stack: SimpleNamespace) -> N
 def test_worker_remains_rls_restricted_after_bootstrap(pg_stack: SimpleNamespace) -> None:
     seeded = _seed_run(pg_stack)
     with psycopg.connect(pg_stack.worker_libpq) as c:
-        c.execute("SELECT set_config('app.tenant_id', %s, true)", (str(seeded.tenant_id),))
+        pg_stack.apply_ctx(
+            c,
+            pg_stack.sign(
+                Purpose.WORKER_EXECUTION, tenant_id=seeded.tenant_id, run_id=seeded.run_id
+            ),
+        )
         mine = c.execute(
             "SELECT count(*) FROM workflow_runs WHERE id=%s", (seeded.run_id,)
         ).fetchone()
-        c.execute("SELECT set_config('app.tenant_id', %s, true)", (str(uuid.uuid4()),))
+        # A signed context for ANOTHER tenant (same run id) sees nothing.
+        pg_stack.apply_ctx(
+            c,
+            pg_stack.sign(Purpose.WORKER_EXECUTION, tenant_id=uuid.uuid4(), run_id=seeded.run_id),
+        )
         other = c.execute(
             "SELECT count(*) FROM workflow_runs WHERE id=%s", (seeded.run_id,)
         ).fetchone()

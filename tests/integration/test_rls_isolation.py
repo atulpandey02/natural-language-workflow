@@ -12,6 +12,8 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 
+from nlw.tenancy.signing import Purpose
+
 pytestmark = pytest.mark.integration
 
 
@@ -40,7 +42,7 @@ def test_rls_scopes_reads_to_membership(pg_stack: SimpleNamespace) -> None:
 
     # As nlw_app acting as user A: sees A's workspace + own membership, never B's.
     with psycopg.connect(pg_stack.app_libpq) as conn:  # transaction (autocommit off)
-        conn.execute("SELECT set_config('app.user_id', %s, true)", (str(seeded.a_user),))
+        pg_stack.apply_ctx(conn, pg_stack.sign(Purpose.API_IDENTITY, user_id=seeded.a_user))
         ws_ids = {r[0] for r in conn.execute("SELECT id FROM workspaces").fetchall()}
         mem_ws = {r[0] for r in conn.execute("SELECT workspace_id FROM memberships").fetchall()}
         conn.rollback()

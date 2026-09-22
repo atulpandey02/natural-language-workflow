@@ -15,7 +15,6 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 import structlog
-from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 from testcontainers.community.postgres import PostgresContainer
 
@@ -38,6 +37,8 @@ from nlw.engine.execution import execute_advancement
 from nlw.engine.runs import create_run, create_workflow_with_version
 from nlw.feasibility.sql_safety import SqlSafetyError, validate_select
 from nlw.secrets.store import EnvironmentSecretStore, env_key_for
+from nlw.tenancy.session import apply_signed_context_sync
+from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
 
@@ -141,8 +142,9 @@ def _seed_run(
     try:
         sm = create_sync_sessionmaker(engine)
         with sm() as s, s.begin():
-            s.execute(text("SELECT set_config('app.user_id', :u, true)"), {"u": str(user_id)})
-            s.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(tenant_id)})
+            apply_signed_context_sync(
+                s, pg_stack.sign(Purpose.API_REQUEST, user_id=user_id, tenant_id=tenant_id)
+            )
             wf, ver = create_workflow_with_version(s, tenant_id, "wf", plan)
             run = create_run(s, tenant_id, wf.id, ver.id)
             return run.id

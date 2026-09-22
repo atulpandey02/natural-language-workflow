@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nlw.api.app import create_app
+from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
 
@@ -63,9 +64,14 @@ def _principal_in(pg_stack: SimpleNamespace, tenant_id: str, role: str) -> dict[
     return {**_auth(f"sub-{uid}", f"{uid}@example.com"), "X-Workspace-Id": tenant_id}
 
 
-def _set_ctx(conn: Any, user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
-    conn.execute("SELECT set_config('app.user_id', %s, true)", (str(user_id),))
-    conn.execute("SELECT set_config('app.tenant_id', %s, true)", (str(tenant_id),))
+def _set_ctx(
+    pg_stack: SimpleNamespace, conn: Any, user_id: uuid.UUID, tenant_id: uuid.UUID
+) -> None:
+    """SIGNED api_request context (P3B): the user/tenant pair is authenticated by
+    the fixture's api key; a forged pair simply verifies to no membership."""
+    pg_stack.apply_ctx(
+        conn, pg_stack.sign(Purpose.API_REQUEST, user_id=user_id, tenant_id=tenant_id)
+    )
 
 
 def _insert_connector_sql(
@@ -153,7 +159,7 @@ def test_db_blocks_member_insert_even_if_api_bypassed(pg_stack: SimpleNamespace)
         psycopg.connect(pg_stack.app_libpq) as c,
         pytest.raises(psycopg.errors.InsufficientPrivilege),
     ):
-        _set_ctx(c, member.user_id, member.tenant_id)
+        _set_ctx(pg_stack, c, member.user_id, member.tenant_id)
         c.execute(sql, params)  # RLS WITH CHECK requires admin/owner -> violation
 
 
@@ -161,7 +167,7 @@ def test_db_allows_admin_insert(pg_stack: SimpleNamespace) -> None:
     admin = pg_stack.seed_member(role="admin")
     sql, params = _insert_connector_sql(admin.tenant_id, "a", "ALIAS")
     with psycopg.connect(pg_stack.app_libpq) as c:
-        _set_ctx(c, admin.user_id, admin.tenant_id)
+        _set_ctx(pg_stack, c, admin.user_id, admin.tenant_id)
         c.execute(sql, params)  # admin/owner passes the RLS WITH CHECK
         c.commit()
     # Verify authoritatively as the owner (SET LOCAL GUCs reset at commit).
@@ -179,7 +185,7 @@ def test_member_cannot_mutate_or_disable_connector_no_grant(pg_stack: SimpleName
     admin = pg_stack.seed_member(role="admin")
     sql, params = _insert_connector_sql(admin.tenant_id, "a", "ALIAS")
     with psycopg.connect(pg_stack.app_libpq) as c:
-        _set_ctx(c, admin.user_id, admin.tenant_id)
+        _set_ctx(pg_stack, c, admin.user_id, admin.tenant_id)
         c.execute(sql, params)
         c.commit()
     with psycopg.connect(pg_stack.owner_libpq) as c:
@@ -195,7 +201,7 @@ def test_member_cannot_mutate_or_disable_connector_no_grant(pg_stack: SimpleName
             psycopg.connect(pg_stack.app_libpq) as c,
             pytest.raises(psycopg.errors.InsufficientPrivilege),
         ):
-            _set_ctx(c, admin.user_id, admin.tenant_id)
+            _set_ctx(pg_stack, c, admin.user_id, admin.tenant_id)
             c.execute(stmt, args)
 
 
@@ -205,13 +211,13 @@ def test_cross_tenant_read_and_mutation_fail(pg_stack: SimpleNamespace) -> None:
     # a's admin creates a connector in tenant A.
     sql, params = _insert_connector_sql(a.tenant_id, "a", "ALIAS")
     with psycopg.connect(pg_stack.app_libpq) as c:
-        _set_ctx(c, a.user_id, a.tenant_id)
+        _set_ctx(pg_stack, c, a.user_id, a.tenant_id)
         c.execute(sql, params)
         c.commit()
     # b (admin of B) cannot see A's connector even with A's tenant GUC forged,
     # and cannot insert into A.
     with psycopg.connect(pg_stack.app_libpq) as c:
-        _set_ctx(c, b.user_id, a.tenant_id)  # forged tenant = A
+        _set_ctx(pg_stack, c, b.user_id, a.tenant_id)  # forged tenant = A
         visible = _one(
             c.execute("SELECT count(*) FROM connectors WHERE tenant_id = %s", (a.tenant_id,))
         )[0]
@@ -222,7 +228,7 @@ def test_cross_tenant_read_and_mutation_fail(pg_stack: SimpleNamespace) -> None:
         psycopg.connect(pg_stack.app_libpq) as c,
         pytest.raises(psycopg.errors.InsufficientPrivilege),
     ):
-        _set_ctx(c, b.user_id, a.tenant_id)
+        _set_ctx(pg_stack, c, b.user_id, a.tenant_id)
         c.execute(sql2, params2)
 
 
@@ -232,14 +238,14 @@ def test_same_alias_string_isolated_across_tenants(pg_stack: SimpleNamespace) ->
     for principal in (a, b):
         sql, params = _insert_connector_sql(principal.tenant_id, "shared", "SHARED_ALIAS")
         with psycopg.connect(pg_stack.app_libpq) as c:
-            _set_ctx(c, principal.user_id, principal.tenant_id)
+            _set_ctx(pg_stack, c, principal.user_id, principal.tenant_id)
             c.execute(sql, params)
             c.commit()
     # Each tenant has exactly its own connector with the same alias string; a
     # tenant only ever resolves its own (SecretStore namespaces by tenant hex).
     for principal in (a, b):
         with psycopg.connect(pg_stack.app_libpq) as c:
-            _set_ctx(c, principal.user_id, principal.tenant_id)
+            _set_ctx(pg_stack, c, principal.user_id, principal.tenant_id)
             rows = c.execute(
                 "SELECT tenant_id, secret_ref FROM connectors WHERE name='shared'"
             ).fetchall()
@@ -252,11 +258,14 @@ def test_worker_can_still_read_connector_secret_ref(pg_stack: SimpleNamespace) -
     admin = pg_stack.seed_member(role="admin")
     sql, params = _insert_connector_sql(admin.tenant_id, "a", "ALIAS")
     with psycopg.connect(pg_stack.app_libpq) as c:
-        _set_ctx(c, admin.user_id, admin.tenant_id)
+        _set_ctx(pg_stack, c, admin.user_id, admin.tenant_id)
         c.execute(sql, params)
         c.commit()
     with psycopg.connect(pg_stack.worker_libpq) as c:
-        c.execute("SELECT set_config('app.tenant_id', %s, true)", (str(admin.tenant_id),))
+        pg_stack.apply_ctx(
+            c,
+            pg_stack.sign(Purpose.WORKER_EXECUTION, tenant_id=admin.tenant_id, run_id=uuid.uuid4()),
+        )
         got = _one(
             c.execute("SELECT secret_ref FROM connectors WHERE tenant_id = %s", (admin.tenant_id,))
         )

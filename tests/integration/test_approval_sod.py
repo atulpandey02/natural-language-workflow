@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 import nlw.api.routers.approvals as approvals_mod
 from nlw.api.app import create_app
+from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
 
@@ -241,15 +242,15 @@ def test_rls_blocks_direct_self_approval(pg_stack: SimpleNamespace) -> None:
     # As nlw_app, with the requester's own context, a direct self-approval UPDATE is
     # rejected by the RLS WITH CHECK (decided_by <> requested_by_user_id): a WITH
     # CHECK violation RAISES (SQLSTATE 42501), it does not silently update 0 rows.
-    with psycopg.connect(pg_stack.app_libpq, autocommit=True) as c:
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(req),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            c.execute(
-                "UPDATE approvals SET status='approved', decided_by=%s, decided_at=now() "
-                "WHERE id=%s",
-                (req, appr),
-            )
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        pg_stack.run_as(
+            pg_stack.app_libpq,
+            Purpose.API_REQUEST,
+            "UPDATE approvals SET status='approved', decided_by=%s, decided_at=now() WHERE id=%s",
+            (req, appr),
+            user_id=req,
+            tenant_id=tid,
+        )
     assert _status(pg_stack.owner_libpq, appr) == "pending"  # unchanged (fail closed)
 
 

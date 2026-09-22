@@ -17,7 +17,9 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-_HEAD = "0015_membership_approval_sod"
+_HEAD = "0016_signed_database_context"
+# The P3A revision just below the P3B head (for the 0016 up/down/up test).
+_P3A = "0015_membership_approval_sod"
 _P2 = "0014_dr_restore_events"
 _PREV = "0011_identity_connector_authz"
 # The P1C revision just below the P1D head (for the 0013 up/down/up test).
@@ -327,3 +329,54 @@ def test_membership_sod_migration_flips(pg_stack: SimpleNamespace) -> None:
             "SELECT 1 FROM pg_trigger WHERE tgname='trg_workspace_owner_present'"
         ).fetchone()
     assert trg is not None
+
+
+def _legacy_guc_policies(owner_libpq: str) -> list[str]:
+    with psycopg.connect(owner_libpq) as c:
+        rows = c.execute(
+            "SELECT policyname FROM pg_policies WHERE schemaname='public' AND ("
+            "coalesce(qual,'') LIKE '%app.user_id%' OR coalesce(qual,'') LIKE '%app.tenant_id%' "
+            "OR coalesce(with_check,'') LIKE '%app.user_id%' "
+            "OR coalesce(with_check,'') LIKE '%app.tenant_id%')"
+        ).fetchall()
+    return sorted(str(r[0]) for r in rows)
+
+
+def test_signed_context_migration_flips(pg_stack: SimpleNamespace) -> None:
+    """0016 (P3B) installs the key registry + signed verifiers and rewrites EVERY
+    policy/helper off the unsigned GUCs (up/down/up). Downgrade is reversible but
+    SECURITY SENSITIVE: it re-installs the legacy unsigned-GUC trust."""
+    cfg = _cfg(pg_stack.owner_sa)
+    assert _has_table(pg_stack.owner_libpq, "ctx_keys")
+    assert _legacy_guc_policies(pg_stack.owner_libpq) == []  # nothing trusts unsigned GUCs
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        fns = {
+            str(r[0])
+            for r in c.execute(
+                "SELECT proname FROM pg_proc WHERE proname IN "
+                "('app_ctx_claims','ctx_user_id','ctx_tenant_id','ctx_run_id','ctx_purpose',"
+                "'is_current_user_owner')"
+            )
+        }
+    assert fns == {"app_ctx_claims", "ctx_user_id", "ctx_tenant_id", "ctx_run_id", "ctx_purpose"}
+
+    command.downgrade(cfg, _P3A)
+    assert not _has_table(pg_stack.owner_libpq, "ctx_keys")
+    # The pre-P3B posture is restored exactly: 43 policies read the unsigned GUCs
+    # directly again (51 total minus the 7 scheduler USING(true) policies minus
+    # workspaces_app_select, which only calls a helper) — the documented,
+    # reviewed-only downgrade re-opens forgery.
+    assert len(_legacy_guc_policies(pg_stack.owner_libpq)) == 43
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        gone = _one(c.execute("SELECT count(*) FROM pg_proc WHERE proname='app_ctx_claims'"))[0]
+        back = _one(
+            c.execute("SELECT count(*) FROM pg_proc WHERE proname='is_current_user_owner'")
+        )[0]
+        assert (gone, back) == (0, 1)
+
+    command.upgrade(cfg, _HEAD)
+    assert _has_table(pg_stack.owner_libpq, "ctx_keys")
+    assert _legacy_guc_policies(pg_stack.owner_libpq) == []
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        n = c.execute("SELECT count(*) FROM pg_policies WHERE schemaname='public'").fetchone()
+        assert n is not None and n[0] == 51

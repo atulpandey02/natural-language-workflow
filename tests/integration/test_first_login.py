@@ -10,8 +10,9 @@ end-to-end path).
 Distinguish:
 - DIRECT function-call guarantee (proved here): a nlw_app caller cannot read or
   change another user's record through the function.
-- Deferred: protection against a caller that can FORGE a complete authenticated
-  DB context (arbitrary ``app.user_id``) — the signed-GUC item (ADR-003).
+- Delivered separately (M11.5 P3B, ADR-024, migration 0016): protection against a
+  caller that can FORGE a complete authenticated DB context — a bare
+  ``app.user_id`` now grants nothing; see ``test_signed_context``.
 """
 
 import threading

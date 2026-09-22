@@ -26,14 +26,21 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
+import subprocess
 import sys
 import threading
 import time
 import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 
 import jwt
 import psycopg
 import requests
+
+from nlw.tenancy.keys import signer_from_material
+from nlw.tenancy.signing import Purpose, SignedContext
 
 OWNER_LIBPQ = os.environ.get("OWNER_LIBPQ", "postgresql://nlw:nlw@localhost:5433/nlw")
 APP_LIBPQ = os.environ.get("APP_LIBPQ", "postgresql://nlw_app:nlw_app@localhost:5433/nlw")
@@ -41,6 +48,74 @@ WORKER_LIBPQ = os.environ.get(
     "WORKER_LIBPQ", "postgresql://nlw_worker:nlw_worker@localhost:5433/nlw"
 )
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+# Signed DB context (P3B): the host-side driver signs its direct-SQL probes with
+# the SAME dev keys the containers hold (docker/ctx-keys, provisioned by
+# scripts/ops/ctx-keys-dev.sh). Purpose/role are fixed per class.
+_KEYS_DIR = os.environ.get("NLW_CTX_KEYS_DIR", "docker/ctx-keys")
+
+
+_CLASS_OF = {
+    "api_identity": "api",
+    "api_request": "api",
+    "worker_execution": "worker",
+    "scheduler_reconcile": "scheduler",
+}
+_DEFAULT_IDS = {"api": "dev-api", "worker": "dev-worker", "scheduler": "dev-scheduler"}
+
+
+def _key(cls: str) -> tuple[str, str]:
+    """(key id, hex material) of a runtime class's CURRENT dev key file."""
+    key_id = os.environ.get(f"NLW_CTX_{cls.upper()}_KEY_ID", _DEFAULT_IDS[cls])
+    return key_id, Path(_KEYS_DIR, f"{cls}.key").read_text(encoding="ascii").strip()
+
+
+def _signer(purpose: Purpose, cls: str | None = None) -> object:
+    """A signer for ``purpose``. ``cls`` (default: the purpose's own class) lets the
+    negative probes deliberately sign with ANOTHER class's key material."""
+    key_id, key_hex = _key(cls or _CLASS_OF[str(purpose)])
+    return signer_from_material(purpose, key_id, key_hex)
+
+
+def _apply(conn: psycopg.Connection, ctx: SignedContext) -> None:
+    for name, value in ctx.as_gucs().items():
+        conn.execute("SELECT set_config(%s, %s, true)", (name, value))
+
+
+def _as_api(conn: psycopg.Connection, user: uuid.UUID, tenant: uuid.UUID) -> None:
+    _apply(conn, _signer(Purpose.API_REQUEST).sign(user_id=user, tenant_id=tenant))  # type: ignore[attr-defined]
+
+
+def _as_worker(conn: psycopg.Connection, tenant: uuid.UUID, run: uuid.UUID) -> None:
+    _apply(conn, _signer(Purpose.WORKER_EXECUTION).sign(tenant_id=tenant, run_id=run))  # type: ignore[attr-defined]
+
+
+SCHED_LIBPQ = os.environ.get(
+    "SCHED_LIBPQ", "postgresql://nlw_scheduler:nlw_scheduler@localhost:5433/nlw"
+)
+_COMPOSE = ["docker", "compose", "-f", "docker-compose.yml"]
+_ECHO_PLAN = '{"steps":[{"id":"a","tool":"fake.echo","args":{"hello":"smoke"}}]}'
+
+
+def _compose(*args: str, **env: str) -> subprocess.CompletedProcess[str]:
+    """Run a Compose command the way the smoke shell does (same env + overrides)."""
+    return subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [*_COMPOSE, *args],
+        env={**os.environ, **env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _count_as(libpq: str, ctx: SignedContext, sql: str, params: tuple[object, ...] = ()) -> int:
+    """Row count visible to a signed (or deliberately mis-signed) context."""
+    with psycopg.connect(libpq, autocommit=False) as c:
+        _apply(c, ctx)
+        row = c.execute(sql, params).fetchone()
+        c.rollback()
+    return int(row[0]) if row else 0
+
+
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 JWT_SECRET = os.environ.get("SMOKE_JWT_SECRET", "dev-secret-for-tests-32bytes-min-length")
 ISSUER = os.environ.get("SMOKE_ISSUER", "https://proj.supabase.co/auth/v1")
@@ -275,9 +350,8 @@ def main() -> None:
     r = requests.post(f"{API_URL}/approvals/{appr}/approve", headers=self_h, timeout=15)
     if r.status_code != 403:
         _fail(f"API self-approval not denied: {r.status_code} {r.text}")
-    with psycopg.connect(APP_LIBPQ, autocommit=True) as c:
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(requester),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
+    with psycopg.connect(APP_LIBPQ, autocommit=False) as c:
+        _as_api(c, requester, tid)  # SIGNED api_request context for the requester
         try:
             c.execute(
                 "UPDATE approvals SET status='approved', decided_by=%s, decided_at=now() "
@@ -286,7 +360,23 @@ def main() -> None:
             )
             _fail("direct-SQL self-approval succeeded (four-eyes bypass)")
         except psycopg.errors.InsufficientPrivilege:
-            pass
+            c.rollback()
+    # And an UNSIGNED forgery of the same context grants nothing at all: it can
+    # neither SEE the approval nor MODIFY it (the UPDATE matches zero rows).
+    with psycopg.connect(APP_LIBPQ, autocommit=False) as c:
+        c.execute("SELECT set_config('app.user_id', %s, true)", (str(admin),))
+        c.execute("SELECT set_config('app.tenant_id', %s, true)", (str(tid),))
+        seen = c.execute("SELECT count(*) FROM approvals WHERE id=%s", (appr,)).fetchone()
+        cur = c.execute(
+            "UPDATE approvals SET status='approved', decided_by=%s, decided_at=now() WHERE id=%s",
+            (admin, appr),
+        )
+        touched = cur.rowcount
+        c.rollback()
+    if seen is None or seen[0] != 0:
+        _fail("unsigned forged context could see tenant data")
+    if touched != 0:
+        _fail(f"unsigned forged context modified {touched} row(s)")
     if _scalar(OWNER_LIBPQ, "SELECT status FROM approvals WHERE id=%s", (appr,)) != "pending":
         _fail("self-approved approval changed status")
     _ok("API self-approval -> 403; direct-SQL self-approval -> denied; stays pending")
@@ -313,21 +403,20 @@ def main() -> None:
 
     # 7) Provenance rewrite denied for runtime roles.
     _step("provenance rewrite denied (worker run-initiator, app requester)")
-    with psycopg.connect(WORKER_LIBPQ, autocommit=True) as c:
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
+    with psycopg.connect(WORKER_LIBPQ, autocommit=False) as c:
+        _as_worker(c, tid, run)  # SIGNED worker_execution context, bound to this run
         try:
             c.execute("UPDATE workflow_runs SET initiated_by_user_id=%s WHERE id=%s", (admin, run))
             _fail("worker rewrote workflow_runs.initiated_by_user_id")
         except psycopg.errors.CheckViolation:
-            pass
-    with psycopg.connect(APP_LIBPQ, autocommit=True) as c:
-        c.execute("SELECT set_config('app.user_id', %s, false)", (str(admin),))
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
+            c.rollback()
+    with psycopg.connect(APP_LIBPQ, autocommit=False) as c:
+        _as_api(c, admin, tid)
         try:
             c.execute("UPDATE approvals SET requested_by_user_id=NULL WHERE id=%s", (appr,))
             _fail("app nullified approvals.requested_by_user_id")
         except psycopg.errors.InsufficientPrivilege:
-            pass
+            c.rollback()
     _ok("run-initiator + requester rewrites rejected (trigger / column grant)")
 
     # 8) A terminal decision is immutable.
@@ -350,8 +439,7 @@ def main() -> None:
 
     def rm(actor: uuid.UUID, target: uuid.UUID) -> None:
         with psycopg.connect(APP_LIBPQ, autocommit=False) as conn:
-            conn.execute("SELECT set_config('app.user_id', %s, false)", (str(actor),))
-            conn.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
+            _as_api(conn, actor, tid)  # SIGNED, transaction-local
             barrier.wait()
             try:
                 conn.execute("SELECT manage_membership(%s,%s,'remove',NULL)", (tid, target))
@@ -382,7 +470,6 @@ def main() -> None:
     # 10) The append-only audit cannot be rewritten/erased by a runtime role.
     _step("audit trail cannot be tampered by nlw_app")
     with psycopg.connect(APP_LIBPQ, autocommit=True) as c:
-        c.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tid),))
         for sql in (
             "UPDATE authz_audit_events SET event_type='x' WHERE tenant_id=%s",
             "DELETE FROM authz_audit_events WHERE tenant_id=%s",
@@ -394,22 +481,263 @@ def main() -> None:
                 pass
     _ok("nlw_app UPDATE/DELETE on authz_audit_events -> permission denied")
 
-    # 11) P2 disaster-recovery validation is still green on the P3A schema.
-    _step("P2 recovery validation is green on the P3A schema")
+    # 11) P2 disaster-recovery validation is still green on this schema (read-only
+    #     here; the quiescence + recovery-lock proof runs LAST, in step 17, because
+    #     quiescing records a restore generation that locks the database).
+    _step("P2 recovery validation is green on the P3B schema")
     from sqlalchemy import create_engine
 
-    from nlw.backup.quiescence import quiesce
     from nlw.backup.validate import validate_restore
 
     engine = create_engine(OWNER_LIBPQ.replace("postgresql://", "postgresql+psycopg://"))
-    quiesce(engine)
+    # Four checks describe POST-QUIESCENCE state and can only pass after step 17's
+    # quiesce; every schema/role/policy/helper check must already be green here.
+    _quiesce_only = {
+        "non_terminal_runs_quiesced",
+        "no_pending_external_actions",
+        "dr_restore_event_recorded",
+        "schedules_after_recovery_cutoff",
+    }
     report = validate_restore(engine)
+    failing = [
+        (c["name"], c["detail"])
+        for c in report["checks"]
+        if not c["ok"] and c["name"] not in _quiesce_only
+    ]
+    if failing:
+        _fail(f"DR validation failed: {failing}")
+    names = {c["name"] for c in report["checks"]}
+    for want in (
+        "pgcrypto_present",
+        "ctx_keys_registry_protected",
+        "ctx_verifier_functions_hardened",
+        "no_policy_trusts_unsigned_context",
+    ):
+        if want not in names:
+            _fail(f"validate_restore lacks the P3B check {want!r}")
+    _ok("validate_restore ok (incl. P3A membership + P3B signed-context checks)")
+
+    # ---- P3B signed-context steps (section R 12-17) ----------------------------
+
+    # 12) The REAL scheduler creates a due run under scheduler_reconcile context and
+    #     the REAL worker executes it under worker_execution context.
+    _step("real scheduler creates a due run (scheduler ctx); real worker completes it (worker ctx)")
+    wf, ver, sid = (uuid.uuid4() for _ in range(3))
+    with psycopg.connect(OWNER_LIBPQ, autocommit=True) as c:
+        c.execute("INSERT INTO workflows (id, tenant_id, name) VALUES (%s,%s,'sched')", (wf, tid))
+        c.execute(
+            "INSERT INTO workflow_versions (id, tenant_id, workflow_id, version, plan) "
+            "VALUES (%s,%s,%s,1,%s::jsonb)",
+            (ver, tid, wf, _ECHO_PLAN),
+        )
+        # The due occurrence is derived from the recurrence (latest hh:mm <= now), so
+        # pin hh:mm to the CURRENT UTC minute: that occurrence is seconds old and
+        # inside the catch-up window; a stale 09:00 would be skipped by design.
+        now_utc = datetime.now(UTC)
+        c.execute(
+            "INSERT INTO schedules (id, tenant_id, workflow_id, workflow_version_id, timezone, "
+            "frequency, minute, hour, enabled, next_run_at, created_by) "
+            "VALUES (%s,%s,%s,%s,'UTC','daily',%s,%s,true,%s,%s)",
+            (sid, tid, wf, ver, now_utc.minute, now_utc.hour, now_utc, admin),
+        )
+    # A bare (unsigned) scheduler session cannot even see the due schedule.
+    with psycopg.connect(SCHED_LIBPQ) as c:
+        bare = c.execute("SELECT count(*) FROM schedules WHERE id=%s", (sid,)).fetchone()
+    if bare is None or bare[0] != 0:
+        _fail("unsigned scheduler session could enumerate schedules")
+    sched_run = _wait(
+        OWNER_LIBPQ,
+        "SELECT status FROM workflow_runs WHERE schedule_id=%s AND status='COMPLETED'",
+        (sid,),
+        "COMPLETED",
+        secs=120,  # scan cadence is 30s; the worker then runs one inline step
+    )
+    if sched_run != "COMPLETED":
+        _fail(f"scheduled run not created/completed by the real scheduler+worker ({sched_run})")
+    n_runs = _scalar(OWNER_LIBPQ, "SELECT count(*) FROM workflow_runs WHERE schedule_id=%s", (sid,))
+    if n_runs != 1:
+        _fail(f"scheduler created {n_runs} runs for one occurrence (expected 1)")
+    _ok("unsigned scheduler sees nothing; signed scheduler created 1 run; worker COMPLETED it")
+
+    # 13) The API key cannot be used under the worker/scheduler DB roles (purpose ↔
+    #     login role AND key class ↔ purpose are both enforced).
+    _step("API key cannot authorize under worker/scheduler DB roles")
+    api_ctx = _signer(Purpose.API_REQUEST).sign(user_id=admin, tenant_id=tid)  # type: ignore[attr-defined]
+    for libpq, role in ((WORKER_LIBPQ, "nlw_worker"), (SCHED_LIBPQ, "nlw_scheduler")):
+        if _count_as(
+            libpq, api_ctx, "SELECT count(*) FROM workflow_runs WHERE tenant_id=%s", (tid,)
+        ):
+            _fail(f"api_request context accepted under {role}")
+    # api MATERIAL signing a worker/scheduler-purpose context (class mismatch).
+    w_with_api = _signer(Purpose.WORKER_EXECUTION, cls="api").sign(tenant_id=tid, run_id=run)  # type: ignore[attr-defined]
+    if _count_as(
+        WORKER_LIBPQ, w_with_api, "SELECT count(*) FROM workflow_runs WHERE id=%s", (run,)
+    ):
+        _fail("worker_execution context signed with the API key was accepted")
+    s_with_api = _signer(Purpose.SCHEDULER_RECONCILE, cls="api").sign()  # type: ignore[attr-defined]
+    if _count_as(SCHED_LIBPQ, s_with_api, "SELECT count(*) FROM schedules WHERE id=%s", (sid,)):
+        _fail("scheduler_reconcile context signed with the API key was accepted")
+    _ok("api_request rejected as nlw_worker/nlw_scheduler; api material rejected elsewhere")
+
+    # 14) Worker/scheduler keys cannot authorize human administration.
+    _step("worker/scheduler keys cannot authorize human administration")
+    for cls in ("worker", "scheduler"):
+        human = _signer(Purpose.API_REQUEST, cls=cls).sign(user_id=admin, tenant_id=tid)  # type: ignore[attr-defined]
+        if _count_as(
+            APP_LIBPQ, human, "SELECT count(*) FROM memberships WHERE workspace_id=%s", (tid,)
+        ):
+            _fail(f"api_request context signed with the {cls} key could read memberships")
+        with psycopg.connect(APP_LIBPQ, autocommit=False) as c:
+            _apply(c, human)
+            try:
+                c.execute("SELECT manage_membership(%s,%s,'change_role','member')", (tid, admin))
+                c.rollback()
+                _fail(f"manage_membership succeeded under a {cls}-key context")
+            except psycopg.Error:
+                c.rollback()
+    # And the genuine worker/scheduler contexts, under their OWN roles, cannot approve
+    # or manage membership either (no EXECUTE / no policy).
+    w_ctx = _signer(Purpose.WORKER_EXECUTION).sign(tenant_id=tid, run_id=run)  # type: ignore[attr-defined]
+    with psycopg.connect(WORKER_LIBPQ, autocommit=False) as c:
+        _apply(c, w_ctx)
+        for sql in (
+            "UPDATE approvals SET status='approved', decided_by=%s WHERE id=%s",
+            "SELECT manage_membership(%s,%s,'remove',NULL)",
+        ):
+            try:
+                cur = c.execute(sql, (admin, appr) if "approvals" in sql else (tid, admin))
+                if cur.rowcount and "UPDATE" in sql:
+                    _fail("worker context approved an approval")
+                if "manage_membership" in sql:
+                    _fail("worker context managed membership")
+            except psycopg.Error:
+                pass
+            c.rollback()
+    _ok("worker/scheduler material + roles grant no human-administration authority")
+
+    # 15) Rotate the API key with an overlap, move the API onto the new key, then
+    #     revoke the old one. (Test-only keys; the SAME installer as production.)
+    _step("rotate API key with overlap -> API on new key -> revoke old key")
+    old_id, old_hex = _key("api")
+    new_id, new_hex = f"{old_id}-rot", secrets.token_hex(32)
+    new_path = Path(_KEYS_DIR, "api-rot.key")
+    new_path.write_text(new_hex + "\n", encoding="ascii")
+    new_path.chmod(0o600)
+    ins = _compose(
+        "run", "--rm", "--no-deps",
+        "-v", f"{new_path.resolve()}:/run/nlw/keys/api-rot.key:ro",
+        "-e", "NLW_CTX_OPERATOR=smoke-rotation",
+        "api", "python", "-m", "nlw.ctxkeys", "install", "--class", "api", "--key-id", new_id,
+        "--secret-file", "/run/nlw/keys/api-rot.key", "--insecure-permissions",
+    )  # fmt: skip
+    if ins.returncode != 0:
+        _fail(f"install of rotated key failed: {ins.stderr[-400:]}")
+    if new_hex in ins.stdout + ins.stderr:
+        _fail("installer printed key material")
+    old_ctx = signer_from_material(Purpose.API_REQUEST, old_id, old_hex).sign(
+        user_id=admin, tenant_id=tid
+    )
+    new_ctx = signer_from_material(Purpose.API_REQUEST, new_id, new_hex).sign(
+        user_id=admin, tenant_id=tid
+    )
+    q = "SELECT count(*) FROM memberships WHERE workspace_id=%s"
+    if not (_count_as(APP_LIBPQ, old_ctx, q, (tid,)) and _count_as(APP_LIBPQ, new_ctx, q, (tid,))):
+        _fail("during the overlap BOTH keys must verify")
+    # Move the running API onto the new key: same mount path, new id + material.
+    Path(_KEYS_DIR, "api.key").write_text(new_hex + "\n", encoding="ascii")
+    up = _compose("up", "-d", "--no-deps", "api", NLW_CTX_API_KEY_ID=new_id)
+    if up.returncode != 0:
+        _fail(f"api restart on rotated key failed: {up.stderr[-400:]}")
+    ready_ok, last = False, "unreachable"
+    for _ in range(45):
+        try:
+            rr = requests.get(f"{API_URL}/health/ready", timeout=5)
+            last = f"{rr.status_code} {rr.text[:200]}"
+            if rr.status_code == 200 and rr.json().get("checks", {}).get("signed_context") == "ok":
+                ready_ok = True
+                break
+        except requests.RequestException:
+            pass
+        time.sleep(2)
+    if not ready_ok:
+        _fail(f"API not ready on the rotated key: {last}")
+    rev = _compose(
+        "run", "--rm", "--no-deps", "-e", "NLW_CTX_OPERATOR=smoke-rotation",
+        "api", "python", "-m", "nlw.ctxkeys", "revoke", "--key-id", old_id,
+    )  # fmt: skip
+    if rev.returncode != 0:
+        _fail(f"revocation failed: {rev.stderr[-400:]}")
+    ev = _scalar(
+        OWNER_LIBPQ,
+        "SELECT count(*) FROM ctx_key_events WHERE key_id=%s AND event='revoked'",
+        (old_id,),
+    )
+    if ev != 1:
+        _fail(f"revocation not audited (events={ev})")
+    if (
+        old_hex
+        in _scalar(OWNER_LIBPQ, "SELECT string_agg(actor||event||key_id, ',') FROM ctx_key_events")
+        or ""
+    ):  # type: ignore[operator]
+        _fail("key material in the key audit")
+    _ok(f"{new_id} installed (overlap verified) -> API ready on it -> {old_id} revoked + audited")
+
+    # 16) Contexts signed with the revoked key fail; the API keeps working on the new key.
+    _step("old-key context fails after revocation; API works on the new key")
+    if _count_as(APP_LIBPQ, old_ctx, q, (tid,)):
+        _fail("a context signed with the REVOKED key still verifies")
+    if not _count_as(APP_LIBPQ, new_ctx, q, (tid,)):
+        _fail("the new key stopped verifying")
+    r = requests.get(f"{API_URL}/workflows", headers=owner_h, timeout=15)
+    if r.status_code != 200:
+        _fail(f"API on the rotated key failed a tenant request: {r.status_code} {r.text[:200]}")
+    _ok("revoked key -> nothing visible; rotated key -> API tenant request 200")
+
+    # 17) P2 runtime recovery lock still blocks a locked database generation. The
+    #     REAL quiescence records a new restore generation (quiesced, NOT validated,
+    #     NOT operator-enabled) -> the authoritative DB lock engages for every
+    #     runtime, signed context or not.
+    _step("P2 quiescence + recovery lock still block a locked restore generation")
+    from nlw.backup.quiescence import quiesce
+
+    quiesce(engine)
+    report = validate_restore(engine)  # the FULL post-restore validation, now applicable
     if not report["ok"]:
         failing = [(c["name"], c["detail"]) for c in report["checks"] if not c["ok"]]
-        _fail(f"DR validation failed: {failing}")
-    _ok("validate_restore ok (incl. P3A membership/invitation/provenance checks)")
+        _fail(f"post-quiescence DR validation failed: {failing}")
+    ev_id = _scalar(
+        OWNER_LIBPQ, "SELECT id FROM dr_restore_events ORDER BY restored_at DESC LIMIT 1"
+    )
+    if ev_id is None:
+        _fail("quiesce recorded no restore generation")
+    try:
+        sc = _compose(
+            "run", "--rm", "--no-deps", "-e", "APP_ENV=local",
+            "-e", "NLW_RESTORE_DATABASE_URL=postgresql+psycopg://nlw_app:nlw_app@postgres:5432/nlw",
+            "api", "python", "-m", "nlw.backup", "startup-check",
+        )  # fmt: skip
+        if sc.returncode != 6:
+            _fail(f"startup-check should exit 6 (locked), got {sc.returncode}: {sc.stderr[-300:]}")
+        time.sleep(6)  # > the API's recovery-gate cache TTL (5s)
+        rr = requests.get(f"{API_URL}/health/ready", timeout=5)
+        if rr.status_code != 503 or rr.json().get("checks", {}).get("recovery") != "locked":
+            _fail(f"API not gated by the locked generation: {rr.status_code} {rr.text[:200]}")
+        biz = requests.get(f"{API_URL}/workflows", headers=owner_h, timeout=15)
+        if biz.status_code != 503:
+            _fail(f"business route not gated while locked: {biz.status_code}")
+    finally:
+        with psycopg.connect(OWNER_LIBPQ, autocommit=True) as c:
+            c.execute("DELETE FROM dr_restore_events WHERE id=%s", (ev_id,))
+    time.sleep(6)
+    rr = requests.get(f"{API_URL}/health/ready", timeout=5)
+    if rr.status_code != 200:
+        _fail(f"API did not recover after the locked generation was removed: {rr.status_code}")
+    _ok(
+        "quiesce + full validate_restore ok -> startup-check exit 6, readiness 503 "
+        "(recovery=locked), business 503; unlocked again after cleanup"
+    )
 
-    print("ALL P3A SMOKE CHECKS PASSED")
+    print("ALL P3A+P3B SMOKE CHECKS PASSED")
 
 
 if __name__ == "__main__":

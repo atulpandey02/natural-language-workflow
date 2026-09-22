@@ -1,6 +1,7 @@
 """Reconciler recovery-horizon behavior (M9, req 4), driven without a DB."""
 
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -9,6 +10,8 @@ import nlw.observability.metrics as metrics_mod
 import nlw.scheduler.service as service
 from nlw.core.config import Settings
 from nlw.scheduler.reconcile import ReconcileBatch
+from nlw.tenancy.keys import clear_process_signers, set_process_signer, signer_from_material
+from nlw.tenancy.signing import Purpose
 
 
 class _Ctx:
@@ -22,6 +25,18 @@ class _Ctx:
 class _Session(_Ctx):
     def begin(self) -> _Ctx:
         return _Ctx()
+
+    def execute(self, *_a: object, **_k: object) -> None:
+        return None  # absorbs the signed-context set_config round trip (P3B)
+
+
+@pytest.fixture(autouse=True)
+def _scheduler_signer() -> Iterator[None]:
+    """reconcile_once signs a scheduler_reconcile context first (P3B); register a
+    throwaway in-memory test key so the DB-less fake session path can proceed."""
+    set_process_signer(signer_from_material(Purpose.SCHEDULER_RECONCILE, "unit", "11" * 32))
+    yield
+    clear_process_signers()
 
 
 def _factory() -> _Session:
