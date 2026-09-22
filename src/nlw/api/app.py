@@ -49,8 +49,12 @@ from nlw.core.config import Settings, get_settings
 from nlw.core.logging import configure_logging
 from nlw.db.schema import check_schema
 from nlw.db.session import check_connection, create_engine, create_sessionmaker
+from nlw.observability import metrics
 from nlw.planner.provider import build_llm_provider
 from nlw.ratelimit.limiter import RateLimiter
+from nlw.tenancy.keys import build_signer
+from nlw.tenancy.readiness import check_signed_context
+from nlw.tenancy.signing import ContextSigningError, Purpose
 from nlw.worker.broker import check_redis
 
 log = structlog.get_logger(__name__)
@@ -77,6 +81,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     initial = await app.state.recovery_gate.check()
     log.info("api.recovery_gate_initial", state=initial)
     app.state.sessionmaker = create_sessionmaker(app.state.engine)
+    # Signed database context (P3B): the API signs api_identity / api_request
+    # contexts with ITS key file. Purpose + expected DB role are fixed here, never
+    # by callers. Missing/invalid key: staging/production abort boot (fail fast);
+    # elsewhere the process stays alive but every tenant query fails closed
+    # (deps raise 503) and readiness reports signed_context=down.
+    try:
+        app.state.ctx_signers = {
+            Purpose.API_IDENTITY: build_signer(settings, Purpose.API_IDENTITY),
+            Purpose.API_REQUEST: build_signer(settings, Purpose.API_REQUEST),
+        }
+    except ContextSigningError as exc:
+        if settings.app_env in ("staging", "production"):
+            raise
+        log.warning("api.signed_context_unconfigured", reason=str(exc))
+        app.state.ctx_signers = None
+    for p in (Purpose.API_IDENTITY, Purpose.API_REQUEST):
+        metrics.set_ctx_signer_configured(str(p), app.state.ctx_signers is not None)
     app.state.auth_provider = build_auth_provider(settings)
     # Planner provider (M6). Built once; the platform LLM key (if any) lives only
     # in the API process env, never in worker/scheduler.
@@ -200,8 +221,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # second full probe timeout. The expected head is cached in-process.
         if postgres_ok:
             await probe("schema", check_schema(app.state.engine))
+            # Signed context (P3B): the key this process holds must be the key the
+            # database verifies with, for BOTH API purposes. Otherwise every tenant
+            # query fails closed — that is NOT ready, not a soft degradation.
+            signers = app.state.ctx_signers
+            if signers is None:
+                checks["signed_context"] = "down"
+                healthy = False
+                for p in (Purpose.API_IDENTITY, Purpose.API_REQUEST):
+                    metrics.record_ctx_verification(str(p), False, "signer_unavailable")
+            else:
+                for s in signers.values():
+                    if not await probe("signed_context", check_signed_context(app.state.engine, s)):
+                        break
         else:
             checks["schema"] = "down"
+            checks["signed_context"] = "down"
             healthy = False
         return JSONResponse(
             status_code=200 if healthy else 503,

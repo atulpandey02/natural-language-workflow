@@ -24,6 +24,8 @@ from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.engine.execution import process_advance
 from nlw.observability import metrics
 from nlw.observability.correlation import bind_request_context, clear_request_context
+from nlw.tenancy.keys import build_signer, set_process_signer
+from nlw.tenancy.signing import Purpose
 from nlw.worker.broker import make_broker
 
 log = structlog.get_logger(__name__)
@@ -46,7 +48,12 @@ _sessionmaker: sessionmaker[Session] | None = None
 def _get_sessionmaker() -> sessionmaker[Session]:
     global _engine, _sessionmaker
     if _sessionmaker is None:
-        _engine = create_sync_engine(get_settings())
+        settings = get_settings()
+        # Signed worker_execution context (P3B): the worker signs with ITS key
+        # file; a missing/invalid key fails closed here (no engine, no work).
+        set_process_signer(build_signer(settings, Purpose.WORKER_EXECUTION))
+        metrics.set_ctx_signer_configured(str(Purpose.WORKER_EXECUTION), True)
+        _engine = create_sync_engine(settings)
         _sessionmaker = create_sync_sessionmaker(_engine)
     return _sessionmaker
 

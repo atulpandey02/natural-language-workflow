@@ -101,7 +101,21 @@ jobs:
             # Capacity phase: raise limits so k6 measures the knee, not 429s.
             echo "RATE_LIMIT_PLANS_PER_MIN=100000"
             echo "RATE_LIMIT_WRITES_PER_MIN=100000"
+            # Signed DB context (P3B): per-class TEST key FILES for this run only,
+            # readable by the container user (uid 10001), never printed.
+            echo "NLW_CTX_KEYS_DIR=${RUNNER_TEMP}/ctx-keys"
+            echo "NLW_CTX_API_KEY_ID=ci-api"
+            echo "NLW_CTX_WORKER_KEY_ID=ci-worker"
+            echo "NLW_CTX_SCHEDULER_KEY_ID=ci-scheduler"
           } >> "$GITHUB_ENV"
+          mkdir -p "${RUNNER_TEMP}/ctx-keys"
+          for c in api worker scheduler; do
+            k="$(openssl rand -hex 32)"; echo "::add-mask::$k"
+            (umask 077; printf '%s\n' "$k" > "${RUNNER_TEMP}/ctx-keys/$c.key")
+            sudo chown 10001:10001 "${RUNNER_TEMP}/ctx-keys/$c.key"
+            sudo chmod 400 "${RUNNER_TEMP}/ctx-keys/$c.key"
+          done
+          sudo chmod 755 "${RUNNER_TEMP}/ctx-keys"
 
       - name: Bring up staging profile (datastores -> migrate -> runtime; NO --build)
         run: |
@@ -110,6 +124,16 @@ jobs:
           # Migrations run in the dedicated one-shot migrate service (owner cred is
           # NOT in api/worker/scheduler). --profile migration includes that service.
           $COMPOSE --profile migration run --rm migrate
+          # Signed-context keys (P3B): install with the OWNER credential (only the
+          # migrate service holds it), secrets read from the mounted files, BEFORE
+          # any runtime starts. Runtimes then sign with their own mounted key.
+          for c in api worker scheduler; do
+            id_var="NLW_CTX_$(echo "$c" | tr a-z A-Z)_KEY_ID"
+            $COMPOSE --profile migration run --rm --no-deps \
+              -v "${NLW_CTX_KEYS_DIR}:/run/nlw/keys:ro" -e NLW_CTX_OPERATOR=staging-validation \
+              migrate python -m nlw.ctxkeys install --class "$c" --key-id "${!id_var}" \
+                --secret-file "/run/nlw/keys/$c.key"
+          done
           $COMPOSE up -d api worker scheduler web caddy prometheus
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8000/health/ready >/dev/null 2>&1 && break; sleep 2; done
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/login >/dev/null 2>&1 && break; sleep 2; done

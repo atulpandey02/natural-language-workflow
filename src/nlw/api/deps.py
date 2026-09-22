@@ -27,9 +27,22 @@ from nlw.observability import metrics
 from nlw.planner.provider import LLMProvider
 from nlw.ratelimit.limiter import RateLimitBackendError, RateLimiter, RateLimitExceeded
 from nlw.tenancy.context import Role, TenantContext, role_at_least
-from nlw.tenancy.session import set_current_tenant, set_current_user
+from nlw.tenancy.session import set_request_context
+from nlw.tenancy.signing import ContextSigner, Purpose
 
 _bearer = HTTPBearer(auto_error=False)
+
+
+def get_ctx_signer(request: Request, purpose: Purpose) -> ContextSigner:
+    """This process's signer for ``purpose``. Fails CLOSED (503) when the signed
+    database context is unconfigured: no tenant query may run unsigned."""
+    signers = request.app.state.ctx_signers
+    if signers is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "signed database context unavailable"
+        )
+    signer: ContextSigner = signers[purpose]
+    return signer
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -63,6 +76,7 @@ def get_llm_provider(request: Request) -> LLMProvider:
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     provider: AuthProvider = Depends(get_auth_provider),
     session: AsyncSession = Depends(get_session),
@@ -76,13 +90,17 @@ async def get_current_user(
         )
     except InvalidTokenError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token") from exc
-    user = await UserRepository(session).get_or_create(identity.sub, identity.email)
-    # Identity is established: set app.user_id so RLS "own row" policies apply.
-    await set_current_user(session, user.id)
-    return user
+    # Supabase authenticated the human OUTSIDE PostgreSQL. get_or_create resolves
+    # the internal id (P1A bootstrap, no context) and then establishes a SIGNED
+    # ``api_identity`` context for this transaction: self rows + membership
+    # discovery only, no tenant authority.
+    return await UserRepository(session).get_or_create(
+        identity.sub, identity.email, get_ctx_signer(request, Purpose.API_IDENTITY)
+    )
 
 
 async def get_tenant_context(
+    request: Request,
     x_workspace_id: str | None = Header(default=None),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
@@ -94,15 +112,18 @@ async def get_tenant_context(
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "X-Workspace-Id must be a UUID") from exc
 
-    # Membership is confirmed via the "own row" policy (app.user_id), NOT by
-    # trusting the requested workspace. Only after confirmation do we activate
-    # the tenant GUC, so a non-member can never widen their access by asking.
+    # Membership is confirmed under the SIGNED identity context (own-row policy),
+    # NOT by trusting the requested workspace. Only after confirmation do we sign
+    # an ``api_request`` context naming that workspace, so a non-member can never
+    # widen their access by asking — and nothing in the request JSON/headers can
+    # supply the user id, workspace id, role, purpose, expiry, nonce or tag.
     membership = await MembershipRepository(session).get(user.id, workspace_id)
     if membership is None:
         # Same response whether the workspace is foreign or nonexistent.
         raise HTTPException(status.HTTP_403_FORBIDDEN, "not a member of the workspace")
-    await set_current_tenant(session, workspace_id)
-    return TenantContext(user_id=user.id, tenant_id=workspace_id, role=Role(membership.role))
+    ctx = TenantContext(user_id=user.id, tenant_id=workspace_id, role=Role(membership.role))
+    await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
+    return ctx
 
 
 def require_role(minimum: Role) -> Callable[[TenantContext], Awaitable[TenantContext]]:

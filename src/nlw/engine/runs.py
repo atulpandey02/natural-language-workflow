@@ -1,8 +1,8 @@
 """Creation helpers for workflows, immutable versions, and runs.
 
-Sync (worker/engine side). Callers set the tenant GUC first (RLS INSERT checks
-tenant_id = app.tenant_id). No HTTP/API surface in M3; used by tests and, later,
-by the planner/API.
+Sync (worker/engine side). Callers apply a signed context first (RLS INSERT
+checks tenant_id = public.ctx_tenant_id()). No HTTP/API surface in M3; used by
+tests and, later, by the planner/API.
 """
 
 import uuid

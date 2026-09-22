@@ -1,0 +1,49 @@
+# Signed database context alerts (M11.5 P3B, ADR-024).
+#
+# Fed by each process's own self-check (nlw_ctx_verification_total, emitted on
+# API readiness probes and scheduler boot) and the per-process
+# nlw_ctx_signer_configured gauge. These describe DEPLOYMENT health — a key that
+# the database no longer verifies (mismatch, revoked, rotation half-done, or the
+# migration not applied) — not individual hostile requests: a forged context
+# from an attacker never reaches these counters, because PostgreSQL's verifier
+# returns NULL silently and the application only counts its OWN probes. Labels
+# are bounded (purpose / result / reason); never a user, workspace, run or key.
+groups:
+  - name: nlw-signed-context
+    rules:
+      # SUSTAINED: a runtime's self-check has been failing for 10 minutes with no
+      # success in between. Every tenant query from that runtime fails closed
+      # while this is true — it is an outage of that runtime class, never an
+      # open door. Isolated failures (one bad probe during a rotation) do not
+      # fire.
+      - alert: NlwSignedContextNotVerifiable
+        expr: |
+          sum by (role, purpose) (increase(nlw_ctx_verification_total{result="invalid"}[10m])) > 0
+          and
+          sum by (role, purpose) (increase(nlw_ctx_verification_total{result="valid"}[10m])) == 0
+        for: 10m
+        labels: { severity: critical, component: signed-context }
+        annotations:
+          summary: "{{ $labels.role }}: signed DB context for {{ $labels.purpose }} not verifiable"
+          description: >
+            The process's own signed-context self-check has failed continuously for
+            10 minutes. Likely a key mismatch (runtime key file vs. installed
+            registry key), a revoked/retired key, a half-finished rotation, or
+            migration 0016 not applied. RLS denies every tenant query from this
+            runtime until fixed (fail closed). Runbook:
+            docs/runbooks/signed-context-keys.md
+
+      # A runtime is up without a usable signing key at all (misconfigured
+      # NLW_CTX_KEY_ID / NLW_CTX_KEY_FILE, bad file permissions). Only possible
+      # outside staging/production, where boot aborts instead.
+      - alert: NlwSignedContextSignerMissing
+        expr: nlw_ctx_signer_configured == 0
+        for: 5m
+        labels: { severity: critical, component: signed-context }
+        annotations:
+          summary: "{{ $labels.role }}: no signing key configured for {{ $labels.purpose }}"
+          description: >
+            The process has no usable signing key for this purpose, so it cannot
+            set any tenant context and every tenant query fails closed. Check
+            NLW_CTX_KEY_ID / NLW_CTX_KEY_FILE and the mounted key file's mode.
+            Runbook: docs/runbooks/signed-context-keys.md

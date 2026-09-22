@@ -24,6 +24,9 @@ from nlw.db.models import Schedule
 from nlw.observability import metrics
 from nlw.scheduler.due import CreatedRun, scan_due
 from nlw.scheduler.reconcile import find_stuck_runs
+from nlw.tenancy.keys import process_signer
+from nlw.tenancy.session import set_scheduler_context_sync
+from nlw.tenancy.signing import Purpose
 
 log = structlog.get_logger(__name__)
 
@@ -55,6 +58,9 @@ def due_scan_once(
     """Claim due schedules, create runs (exactly-once) + advance, COMMIT, enqueue."""
     at = now or _now()
     with session_factory() as session, session.begin():
+        # SIGNED scheduler_reconcile context (P3B): cross-tenant due-scan is
+        # permitted ONLY under a valid signed scheduler context; no human, no tenant.
+        set_scheduler_context_sync(session, process_signer(Purpose.SCHEDULER_RECONCILE))
         created = scan_due(
             session,
             at,
@@ -86,6 +92,7 @@ def reconcile_once(
     """
     at = now or _now()
     with session_factory() as session, session.begin():
+        set_scheduler_context_sync(session, process_signer(Purpose.SCHEDULER_RECONCILE))
         batch = find_stuck_runs(
             session,
             at,

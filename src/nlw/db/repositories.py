@@ -1,8 +1,9 @@
 """Data-access repositories for identity and tenancy.
 
-Repositories are the only place queries are built. In M2b they gain tenant
-scoping via ``SET LOCAL app.tenant_id`` and RLS becomes the backstop; for M2a
-authorization is membership-based at the application layer.
+Repositories are the only place queries are built. Since M2b RLS is the backstop:
+policies key on the signed request context (``public.ctx_user_id()`` /
+``public.ctx_tenant_id()``, applied per transaction by ``nlw.tenancy.session``,
+ADR-024); authorization is also membership-based at the application layer.
 """
 
 import uuid
@@ -29,7 +30,8 @@ from nlw.db.models import (
     Workspace,
     WorkspaceInvitation,
 )
-from nlw.tenancy.session import set_current_user
+from nlw.tenancy.session import set_identity_context
+from nlw.tenancy.signing import ContextSigner
 
 DecisionOutcome = Literal[
     "transitioned", "idempotent", "conflict", "not_found", "self_approval", "requester_unknown"
@@ -40,7 +42,9 @@ class UserRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def get_or_create(self, auth_provider_id: str, email: str) -> User:
+    async def get_or_create(
+        self, auth_provider_id: str, email: str, identity_signer: ContextSigner
+    ) -> User:
         """Idempotent, race-safe first-sight identity resolution/provisioning.
 
         Three narrow steps (M11.5 P1A), so no single primitive can read or mutate
@@ -50,9 +54,11 @@ class UserRepository:
            SECURITY DEFINER bootstrap. It inserts a missing identity (race-safe via
            ``UNIQUE(auth_provider_id)``, ``ON CONFLICT DO NOTHING``) and returns
            ONLY the ``uuid`` — never a row, email, or ``auth_provider_id`` — and
-           does nothing to an existing row. This is required because at first login
-           the row does not exist yet and ``app.user_id`` is not established.
-        2. Establish ``app.user_id`` so the self-scoped RLS read/update apply.
+           does nothing to an existing row. It runs with NO context: at first login
+           the row does not exist yet, so there is nothing to sign for.
+        2. Establish a SIGNED ``api_identity`` context (P3B) for that verified user
+           so the self-scoped RLS read/update apply. The user id comes from step 1
+           (the DB), the signature from this process's key — never from the caller.
         3. Read the caller's own row and, only if the *verified provider* email
            changed, synchronize it through a self-scoped UPDATE (RLS restricts to
            the own row; the column grant restricts to ``email``/``updated_at`` — the
@@ -68,9 +74,7 @@ class UserRepository:
             )
         ).scalar_one()
 
-        # Establish self-context, then read/sync self-scoped (deps also sets this
-        # after us; a repeated SET LOCAL of the same value is a harmless no-op).
-        await set_current_user(self.session, user_id)
+        await set_identity_context(self.session, identity_signer, user_id)
         row = (
             await self.session.execute(
                 text("SELECT id, auth_provider_id, email FROM users WHERE id = :id"),
@@ -129,7 +133,8 @@ class MembershipRepository:
         """Change a member's role via the ``manage_membership`` SECURITY DEFINER
         function — the ONLY membership-mutation path (nlw_app has no direct
         UPDATE/DELETE). The function locks the workspace row FIRST (owner-race safe),
-        authorizes the actor from app.user_id, enforces owner-only owner rows and the
+        authorizes the actor from the signed request context (``public.ctx_user_id()``
+        with purpose api_request for THIS workspace), enforces owner-only owner rows and the
         >=1 owner invariant, and writes the append-only audit — all atomically. It
         RAISES on any denial (SQLSTATE 42501) or final-owner violation (23514)."""
         await self.session.execute(
@@ -371,7 +376,8 @@ class PlanProposalRepository:
 
 class ApprovalRepository:
     """Tenant-scoped approval access. Decisions are compare-and-set; RLS also
-    enforces admin/owner + decided_by = app.user_id on the UPDATE."""
+    enforces admin/owner + decided_by = public.ctx_user_id() (signed request
+    context) on the UPDATE."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session

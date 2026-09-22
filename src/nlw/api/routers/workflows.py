@@ -17,7 +17,13 @@ import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nlw.api.deps import get_app_settings, get_session, get_tenant_context, rate_limit
+from nlw.api.deps import (
+    get_app_settings,
+    get_ctx_signer,
+    get_session,
+    get_tenant_context,
+    rate_limit,
+)
 from nlw.api.schemas import (
     RunCreateOut,
     WorkflowDetailOut,
@@ -27,7 +33,8 @@ from nlw.api.schemas import (
 from nlw.core.config import Settings
 from nlw.db.repositories import RunRepository, WorkflowRepository
 from nlw.tenancy.context import TenantContext
-from nlw.tenancy.session import set_current_tenant, set_current_user
+from nlw.tenancy.session import set_request_context
+from nlw.tenancy.signing import Purpose
 
 router = APIRouter()
 log = structlog.get_logger(__name__)
@@ -147,8 +154,7 @@ async def create_run(
     # remains recoverable by M8 reconciliation.
     sessionmaker = request.app.state.sessionmaker
     async with sessionmaker() as session, session.begin():
-        await set_current_user(session, ctx.user_id)
-        await set_current_tenant(session, ctx.tenant_id)
+        await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
         repo = WorkflowRepository(session)
         workflow = await repo.get(workflow_id, ctx.tenant_id)
         if workflow is None:

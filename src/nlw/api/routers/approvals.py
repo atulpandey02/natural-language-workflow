@@ -8,7 +8,8 @@
 Decisions are compare-and-set and recovery-safe: repeating the same decision is
 idempotent and re-enqueues the run, so a lost enqueue can be re-driven. The API
 mutates ONLY the approvals row (RLS also requires admin/owner and
-``decided_by = app.user_id``); the worker remains the sole run/step writer.
+``decided_by = public.ctx_user_id()`` from the signed request context); the
+worker remains the sole run/step writer.
 """
 
 import json
@@ -19,13 +20,14 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nlw.api.deps import get_session, get_tenant_context, rate_limit, require_role
+from nlw.api.deps import get_ctx_signer, get_session, get_tenant_context, rate_limit, require_role
 from nlw.api.schemas import ApprovalDecisionOut, ApprovalOut
 from nlw.db.models import Approval, WorkflowVersion
 from nlw.db.repositories import ApprovalRepository, AuditRepository
 from nlw.domain.workflow import WorkflowPlan
 from nlw.tenancy.context import Role, TenantContext, role_at_least
-from nlw.tenancy.session import set_current_tenant, set_current_user
+from nlw.tenancy.session import set_request_context
+from nlw.tenancy.signing import Purpose
 from nlw.tools.action_schemas import MAX_REVIEWABLE_ACTION_PAYLOAD_BYTES
 
 router = APIRouter()
@@ -151,8 +153,7 @@ async def _decide(
     # enqueue; an enqueue failure then surfaces as 503 (resume not claimed).
     sessionmaker = request.app.state.sessionmaker
     async with sessionmaker() as session, session.begin():
-        await set_current_user(session, ctx.user_id)
-        await set_current_tenant(session, ctx.tenant_id)
+        await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
         outcome, run_id = await ApprovalRepository(session).decide(
             approval_id, ctx.tenant_id, ctx.user_id, target
         )
