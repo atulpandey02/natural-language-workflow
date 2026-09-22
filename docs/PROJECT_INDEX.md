@@ -459,6 +459,19 @@ Boundaries respected: no VPS/provider access, no production keys, no deployment,
 restore, reboot, or real Slack/webhook delivery. No conversation memory was
 added (single-shot planning is deliberate).
 
+**M12B-A final-evidence addendum**: durable request→plan provenance
+(`plan_proposals.request_text` + sha256 + contract version; RLS, immutable,
+never logged/listed; [provenance + STALE doc](architecture/ai-provenance-and-stale-plan.md)),
+a stable `STALE_PLAN`/`POLICY_DENIED`/`INVALID_PLAN` re-validation boundary
+(`nlw.feasibility.revalidation`) gating run-creation + materialize fail-closed,
+executed recovery-boundary evidence for all ten scenarios
+(`tests/integration/test_recovery_boundaries.py`), a credential-gated live-model
+benchmark (`nlw.eval.live_runner`; planning only), summary-endpoint
+confidentiality (no raw output, tenant-scoped, frontend injection-safe), and an
+[observability coverage matrix](architecture/ai-observability-matrix.md).
+Live-model benchmarking remains the one blocking evidence item (no app provider
+credential is configured).
+
 ## Runbooks
 
 - [staging-signed-context-rollout](runbooks/staging-signed-context-rollout.md) — **M12A**: the phased, gated upgrade of the staging VPS from schema `0010` to `0016` (`python -m nlw.ops.rollout --release <CI manifest>`; read-only default; verify-release, authorization, escrow and backup-before-mutation gates; the CI-generated, **attested** `release-manifest-<sha>` artifact + `deploy/staging/target.env` are the identity source — `deploy/staging/release.example.json` is a rejected template; provenance: [ADR-025](adr/ADR-025-release-manifest-provenance.md)). Rehearsal: `scripts/ops/rehearse-0010-to-0016.sh`. Alerting boundary: [docs/ops/alerting](ops/alerting.md).
