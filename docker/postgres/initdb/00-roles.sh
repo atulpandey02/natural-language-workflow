@@ -51,6 +51,13 @@ CREATE ROLE nlw_scheduler LOGIN PASSWORD :'scheduler_pw'
 CREATE ROLE nlw_rls_bypass NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE;
 -- Non-login role owning the workspace bootstrap write function only.
 CREATE ROLE nlw_workspace_bootstrap NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE;
+-- Non-login role owning ONLY the manage_membership function (P3A). Narrowly
+-- granted (memberships DML + authz audit INSERT); never a connection role. Kept
+-- separate from nlw_workspace_bootstrap so the identity-bootstrap owner does not
+-- also become a general membership administrator. BYPASSRLS is required because
+-- memberships/authz_audit_events are FORCE RLS and the function does its own
+-- authorization; its blast radius is bounded by the migration grants + tests.
+CREATE ROLE nlw_membership_admin NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE;
 
 GRANT CONNECT ON DATABASE nlw TO nlw_app;
 GRANT USAGE ON SCHEMA public TO nlw_app;
@@ -61,4 +68,5 @@ GRANT USAGE ON SCHEMA public TO nlw_scheduler;
 -- Let the owner/migration role reassign the helper functions' ownership.
 GRANT nlw_rls_bypass TO nlw;
 GRANT nlw_workspace_bootstrap TO nlw;
+GRANT nlw_membership_admin TO nlw;
 SQL

@@ -31,7 +31,14 @@ from nlw.connectors.base import (
     MissingConnectorSelectorError,
     get_connector_type,
 )
-from nlw.db.models import Approval, ExternalAction, StepRun, WorkflowRun, WorkflowVersion
+from nlw.db.models import (
+    Approval,
+    AuthzAuditEvent,
+    ExternalAction,
+    StepRun,
+    WorkflowRun,
+    WorkflowVersion,
+)
 from nlw.domain.workflow import (
     RunStatus,
     StepStatus,
@@ -443,8 +450,10 @@ def _park_for_approval(
         select(Approval).where(Approval.run_id == run.id, Approval.step_id == plan_step.id)
     ).scalar_one_or_none()
     if existing is None:
+        approval_id = uuid.uuid4()
         session.add(
             Approval(
+                id=approval_id,
                 tenant_id=tenant_id,
                 run_id=run.id,
                 step_id=plan_step.id,
@@ -452,7 +461,24 @@ def _park_for_approval(
                 connector_name=plan_step.connector or "",
                 tool=spec.name,
                 status="pending",
+                # P3A separation of duties: the immutable requester is the run's
+                # responsible human (manual creator or, for scheduled runs, the
+                # schedule creator — both denormalized onto initiated_by_user_id).
+                # NEVER derived from request JSON. A NULL requester fails closed for
+                # decision (four-eyes RLS).
+                requested_by_user_id=run.initiated_by_user_id,
                 requested_at=_now(),
+            )
+        )
+        # Append-only authorization audit, in the SAME transaction as the park and
+        # ONLY on first creation (a re-drive finds ``existing`` and adds no event).
+        # The actor is the run's responsible human (the requester); no secrets.
+        session.add(
+            AuthzAuditEvent(
+                tenant_id=tenant_id,
+                event_type="approval.requested",
+                actor_user_id=run.initiated_by_user_id,
+                subject_id=approval_id,
             )
         )
     run.status = RunStatus.WAITING_APPROVAL

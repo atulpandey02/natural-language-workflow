@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "scripts" / "ops" / "deploy-staging.sh"
 VERIFY = ROOT / "scripts" / "ops" / "verify-staging-deployment.sh"
-NAMED_REV = "0014_dr_restore_events"
+NAMED_REV = "0015_membership_approval_sod"
 
 
 def _sh(call: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
@@ -186,6 +186,7 @@ def test_deploy_verify_secrets_config_present() -> None:
 _ROLES_OK = "\n".join(
     [
         "nlw_app:tff",
+        "nlw_membership_admin:fft",
         "nlw_rls_bypass:fft",
         "nlw_scheduler:tff",
         "nlw_worker:tff",
@@ -198,6 +199,7 @@ _EXPECTED_ROLE_LINES = [
     "nlw_scheduler:tff",
     "nlw_rls_bypass:fft",
     "nlw_workspace_bootstrap:fft",
+    "nlw_membership_admin:fft",
 ]
 
 
@@ -216,12 +218,12 @@ def test_verifier_uses_case_not_boolean_concat() -> None:
     assert "rolname||':'||rolcanlogin||rolsuper||rolbypassrls" not in t
 
 
-def test_all_five_expected_roles_match() -> None:
+def test_all_expected_roles_match() -> None:
     for role in _EXPECTED_ROLE_LINES:
         assert _assert_role(role, _ROLES_OK) == 0, role
 
 
-def test_expected_roles_array_is_exactly_the_five() -> None:
+def test_expected_roles_array_is_exactly_the_expected_set() -> None:
     out = subprocess.run(
         ["bash", "-c", f'source "{VERIFY}"; printf "%s\\n" "${{EXPECTED_ROLES[@]}}"'],
         capture_output=True,

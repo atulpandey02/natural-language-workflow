@@ -204,6 +204,15 @@ def test_approval_park_then_approve_delivers(pg_stack: SimpleNamespace) -> None:
     assert _step(pg_stack.owner_libpq, run_id)[0] == "WAITING_APPROVAL"
     appr = _row(pg_stack.owner_libpq, "SELECT status FROM approvals WHERE run_id=%s", (run_id,))
     assert appr is not None and appr[0] == "pending"
+    # The worker emitted exactly one append-only approval.requested audit event in
+    # the SAME transaction as the park (no token/secret in it).
+    audit = _row(
+        pg_stack.owner_libpq,
+        "SELECT count(*), max(event_type) FROM authz_audit_events "
+        "WHERE subject_id=(SELECT id FROM approvals WHERE run_id=%s)",
+        (run_id,),
+    )
+    assert audit is not None and audit[0] == 1 and audit[1] == "approval.requested"
 
     # Approve, then resume -> delivers exactly once, step SUCCESS, run COMPLETED.
     _approve(pg_stack.owner_libpq, run_id, m.user_id)

@@ -24,3 +24,7 @@ dist/
 
 # Worker-only connector secrets (tenant-scoped)
 docker/worker.secrets.env
+
+# Local E2E artifacts (Supabase CLI generates these fresh; never committed)
+supabase/
+supabase.env

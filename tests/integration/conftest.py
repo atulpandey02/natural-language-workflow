@@ -48,6 +48,9 @@ def _bootstrap_roles(owner_libpq: str, db: str) -> None:
             "NOCREATEDB NOCREATEROLE; END IF; "
             "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_workspace_bootstrap') THEN "
             "CREATE ROLE nlw_workspace_bootstrap NOLOGIN NOSUPERUSER BYPASSRLS "
+            "NOCREATEDB NOCREATEROLE; END IF; "
+            "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_membership_admin') THEN "
+            "CREATE ROLE nlw_membership_admin NOLOGIN NOSUPERUSER BYPASSRLS "
             "NOCREATEDB NOCREATEROLE; END IF; END $$;"
         )
         for role in ("nlw_app", "nlw_worker", "nlw_scheduler"):
@@ -55,6 +58,7 @@ def _bootstrap_roles(owner_libpq: str, db: str) -> None:
             conn.execute(f"GRANT USAGE ON SCHEMA public TO {role}")
         conn.execute("GRANT nlw_rls_bypass TO CURRENT_USER")
         conn.execute("GRANT nlw_workspace_bootstrap TO CURRENT_USER")
+        conn.execute("GRANT nlw_membership_admin TO CURRENT_USER")
 
 
 @pytest.fixture

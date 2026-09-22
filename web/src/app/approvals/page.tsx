@@ -33,6 +33,9 @@ export default function ApprovalsPage() {
             {a.requested_at ? ` · requested ${new Date(a.requested_at).toLocaleString()}` : ""}
           </p>
           <p className="muted">
+            requested by: <strong>{a.requested_by_user_id ?? "unknown"}</strong>
+          </p>
+          <p className="muted">
             destination: <strong>{a.destination ?? "unresolved"}</strong>
           </p>
           {a.payload_review_blocked ? (
@@ -44,26 +47,36 @@ export default function ApprovalsPage() {
             <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(a.preview, null, 2)}</pre>
           )}
           <RoleGate role={role} allow={["owner", "admin"]}>
-            <div className="row">
-              <button
-                onClick={() => decide.mutate({ id: a.id, decision: "approve" })}
-                disabled={decide.isPending || a.payload_review_blocked}
-                title={
-                  a.payload_review_blocked
-                    ? "Payload exceeds the safe review size; it cannot be approved unseen."
-                    : undefined
-                }
-              >
-                Approve
-              </button>
-              <button
-                className="secondary"
-                onClick={() => decide.mutate({ id: a.id, decision: "reject" })}
-                disabled={decide.isPending}
-              >
-                Reject
-              </button>
-            </div>
+            {/* Separation of duties: the backend forbids deciding an approval you
+                requested. viewer_can_decide reflects that (and any other server
+                rule); the UI merely disables the controls to match. The backend
+                stays authoritative. */}
+            {a.viewer_can_decide ? (
+              <div className="row">
+                <button
+                  onClick={() => decide.mutate({ id: a.id, decision: "approve" })}
+                  disabled={decide.isPending || a.payload_review_blocked}
+                  title={
+                    a.payload_review_blocked
+                      ? "Payload exceeds the safe review size; it cannot be approved unseen."
+                      : undefined
+                  }
+                >
+                  Approve
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => decide.mutate({ id: a.id, decision: "reject" })}
+                  disabled={decide.isPending}
+                >
+                  Reject
+                </button>
+              </div>
+            ) : (
+              <p className="muted" role="note">
+                You requested this action, so someone else must approve it.
+              </p>
+            )}
           </RoleGate>
         </div>
       ))}

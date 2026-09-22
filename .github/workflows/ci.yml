@@ -79,6 +79,9 @@ jobs:
                   "NOCREATEDB NOCREATEROLE; END IF; "
                   "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_workspace_bootstrap') THEN "
                   "CREATE ROLE nlw_workspace_bootstrap NOLOGIN NOSUPERUSER BYPASSRLS "
+                  "NOCREATEDB NOCREATEROLE; END IF; "
+                  "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_membership_admin') THEN "
+                  "CREATE ROLE nlw_membership_admin NOLOGIN NOSUPERUSER BYPASSRLS "
                   "NOCREATEDB NOCREATEROLE; END IF; END $$;"
               )
               for role in ("nlw_app", "nlw_worker", "nlw_scheduler"):
@@ -86,6 +89,7 @@ jobs:
                   conn.execute(f"GRANT USAGE ON SCHEMA public TO {role}")
               conn.execute("GRANT nlw_rls_bypass TO nlw")
               conn.execute("GRANT nlw_workspace_bootstrap TO nlw")
+              conn.execute("GRANT nlw_membership_admin TO nlw")
           PY
       - name: Apply migrations (as owner)
         env:
