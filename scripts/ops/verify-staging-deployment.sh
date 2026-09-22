@@ -8,17 +8,29 @@
 # stop the instance during the validation window.
 set -euo pipefail
 
-DEPLOY_SHA="5151a2cc54cfb63b276bd3b30cf0e683263525ac"
-BACKEND_IMAGE="ghcr.io/atulpandey02/natural-language-workflow@sha256:fef5464b674695050ad4b1ca2e80ca7f03bfdd3b03a6519352e52c8377d7728e"
-WEB_IMAGE="ghcr.io/atulpandey02/natural-language-workflow/web@sha256:57276f04e27e350a8eb8044349346af0f426274e9d27750bec904c203a007228"
-STAGING_HOST="32-197-83-193.sslip.io"
+# Host + release identity from the ONE reviewed source (deploy/staging/*).
+# shellcheck source=lib/staging-target.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/staging-target.sh"
+# The release manifest is the CI-generated artifact for the exact commit
+# (download it; deploy/staging/release.example.json is a REJECTED template).
+# It is REQUIRED when this script runs; sourcing it (unit tests of its pure
+# functions) loads no release identity.
+load_release_identity() {
+  RELEASE_FILE="${NLW_STAGING_RELEASE_FILE:?set NLW_STAGING_RELEASE_FILE to the downloaded release manifest}"
+  (cd "$NLW_REPO_ROOT" && uv run python -m nlw.ops.release_manifest validate "$RELEASE_FILE" >/dev/null) \
+    || { echo "release manifest rejected: $RELEASE_FILE" >&2; exit 3; }
+  release_field() {
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$RELEASE_FILE" "$1"
+  }
+  DEPLOY_SHA="$(release_field release_sha)"
+  BACKEND_IMAGE="$(release_field backend_image)"
+  WEB_IMAGE="$(release_field web_image)"
+  EXPECTED_HEAD="$(release_field target_revision)"
+}
+if [ "${BASH_SOURCE[0]}" = "${0}" ] || [ -n "${NLW_STAGING_RELEASE_FILE:-}" ]; then
+  load_release_identity
+fi
 SUPABASE_JWKS_URL="https://uqjqdfshuwcjftdvxbrm.supabase.co/auth/v1/.well-known/jwks.json"
-
-SSH_HOST="${SSH_HOST:-32.197.83.193}"
-SSH_USER="${SSH_USER:-nlwops}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/nlw-staging-key.pem}"
-TARGET="${SSH_USER}@${SSH_HOST}"
-REMOTE_APP="/opt/nlw/app"
 COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.staging.yml"
 DC="cd '$REMOTE_APP' && docker compose --env-file .env.prod $COMPOSE_FILES"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
@@ -48,6 +60,10 @@ if [ "${BASH_SOURCE[0]}" != "${0}" ]; then return 0 2>/dev/null || true; fi
 
 rsh 'true' || { echo "cannot SSH to $TARGET"; exit 2; }
 rsh 'docker info >/dev/null 2>&1' || { echo "docker not usable as nlwops (fresh login needed?)"; exit 2; }
+
+section "Host identity (IMDSv2 instance id is authoritative)"
+ident="$(rsh "$(staging_remote_identity_cmd)" 2>/dev/null | tr -d '\r')"
+if staging_assert_instance "$ident"; then ok "connected host is $EXPECTED_INSTANCE_ID"; else flag "connected host is NOT the expected instance"; exit 2; fi
 
 section "Deployment identity"
 sha="$(rsh "git -C '$REMOTE_APP' rev-parse HEAD 2>/dev/null" | tr -d '\r')"
@@ -93,6 +109,8 @@ section "Host-local API readiness"
 rd="$(rsh 'curl -fsS --max-time 10 http://127.0.0.1:8000/health/ready 2>/dev/null' | tr -d '\r' || true)"
 info "${rd:-<no response>}"
 grep -q '"status":"ready"' <<<"$rd" && ok "host-local /health/ready is ready" || flag "host-local readiness not ready"
+# Signed context (P3B): the API must prove its key verifies against the registry.
+grep -q '"signed_context":"ok"' <<<"$rd" && ok "signed_context: ok" || flag "readiness lacks signed_context: ok (keys not installed / pre-P3B runtime)"
 
 section "Database roles + schema"
 # Deterministic t/f normalization: boolean||text yields 'true'/'false', NOT
@@ -109,6 +127,14 @@ alv="$(rsh "$DC exec -T postgres psql -U nlw -d nlw -tAc 'SELECT version_num FRO
 alhead="$(rsh "$DC run --rm -T api python -c 'from alembic.config import Config; from alembic.script import ScriptDirectory; h=ScriptDirectory.from_config(Config(\"alembic.ini\")).get_current_head(); assert h; print(\"HEAD=%s\" % h)' 2>/dev/null" | sed -n 's/^HEAD=//p' | head -1 | tr -d '[:space:]')"
 info "alembic_version='$alv' ; head='$alhead'"
 if [ -n "$alv" ] && [ -n "$alhead" ] && [ "$alv" = "$alhead" ]; then ok "schema at head ($alv)"; else flag "schema not at head (current='$alv' head='$alhead')"; fi
+[ "$alv" = "$EXPECTED_HEAD" ] && ok "schema matches release target_revision ($EXPECTED_HEAD)" || flag "schema '$alv' != release target_revision '$EXPECTED_HEAD'"
+# Signed-context registry posture (P3B): owner + no runtime access + no legacy policy.
+ctx="$(rsh "$DC exec -T postgres psql -U nlw -d nlw -tAc \"SELECT (SELECT tableowner FROM pg_tables WHERE tablename='ctx_keys')||'|'||(SELECT count(*) FROM pg_policies)||'|'||(SELECT count(*) FROM pg_policies WHERE qual LIKE '%app.user_id%' OR qual LIKE '%app.tenant_id%' OR with_check LIKE '%app.user_id%' OR with_check LIKE '%app.tenant_id%')||'|'||(SELECT count(*) FROM ctx_keys WHERE status='active')\"" 2>/dev/null | tr -d '[:space:]')"
+info "ctx_keys owner|policies|legacy|active_keys = ${ctx:-<query failed>}"
+case "$ctx" in
+  nlw_ctx_verifier\|51\|0\|[3-9]*) ok "signed-context registry: verifier-owned, 51 policies, 0 legacy, >=3 active keys" ;;
+  *) flag "signed-context registry posture not as expected" ;;
+esac
 
 section "Public edge (from this Mac; TLS validated)"
 code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "https://${STAGING_HOST}/login" 2>/dev/null || true)"

@@ -18,6 +18,7 @@ control plane) and the internal Prometheus metrics (ADR-016).
   - [dr-fresh-host-restore.md](dr-fresh-host-restore.md) — guarded fresh-host restore
   - [post-restore-quiescence.md](post-restore-quiescence.md) — what quiescence changes & why
   - [dr-real-vps-checklist.md](dr-real-vps-checklist.md) — real-provider/real-VPS drill (human-gated)
+- [staging-signed-context-rollout.md](staging-signed-context-rollout.md) — phased, gated M12A upgrade (0010 → 0016) of the staging VPS; read-only by default
 - [signed-context-keys.md](signed-context-keys.md) — **security sensitive**: signed DB context keys (M11.5 P3B, ADR-024): deployment order, install/rotate/revoke, rollback warning
 - [rotate-secret.md](rotate-secret.md) — connector secrets (worker env `NLW_SECRET_*`)
 - [rotate-db-role-password.md](rotate-db-role-password.md) — DB runtime role passwords (`ALTER ROLE`)

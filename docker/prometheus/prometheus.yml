@@ -7,6 +7,16 @@ global:
 # Backup / DR dead-man + failure alerts (M11.5 P2, ADR-022). Fed by the
 # node_exporter textfile the backup job writes; requires a node_exporter scrape
 # target with --collector.textfile.directory pointed at the metrics dir.
+# Alertmanager is the internal `alertmanager` service (docker-compose.staging.yml);
+# it ships with a null receiver until an operator wires a real channel
+# (docs/ops/alerting.md). Unreachable Alertmanager only logs errors here.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+# Rule files are mounted READ-ONLY from ./docker/prometheus/alerts (the staging
+# overlay mounts the whole directory; CI validates every referenced file exists).
 rule_files:
   - alerts/backup.rules.yml
   # Signed DB context self-check alerts (M11.5 P3B, ADR-024): sustained

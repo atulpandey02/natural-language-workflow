@@ -39,6 +39,7 @@ def build_manifest(
     pg_version: str | None,
     database_name: str,
     tool_versions: dict[str, str],
+    source: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the manifest dict. ``files`` maps a logical name -> path; each is
     hashed. No secret-bearing value is accepted here."""
@@ -55,6 +56,8 @@ def build_manifest(
             for name, path in sorted(files.items())
         },
         "tools": tool_versions,
+        # Non-secret provenance the pre-deployment gate binds to the live target.
+        "source": dict(source or {}),
     }
 
 

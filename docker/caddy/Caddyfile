@@ -12,6 +12,19 @@
 {$PUBLIC_HOSTNAME} {
 	encode gzip
 
+	# Maintenance mode (M12A rollout §G/§P): while /srv/maint/MAINTENANCE exists on
+	# the caddy_maint volume, every request gets a 503 — evaluated per request, so
+	# the rollout toggles it with `docker compose exec caddy touch|rm` and no
+	# reload. Nothing else on the edge changes.
+	@maintenance file {
+		root /srv/maint
+		try_files /MAINTENANCE
+	}
+	handle @maintenance {
+		header Retry-After 120
+		respond "Service temporarily unavailable for maintenance." 503
+	}
+
 	# Never expose metrics through the public edge.
 	@metrics path /metrics /metrics/*
 	respond @metrics 404

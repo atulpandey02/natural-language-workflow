@@ -39,6 +39,7 @@ class DbInfo:
     pg_version: str
     alembic_revision: str | None
     database_name: str
+    system_identifier: str = ""  # pg_control_system(): binds a backup to its cluster
 
 
 @dataclass(frozen=True)
@@ -101,11 +102,13 @@ def _default_db_info(database_url: str) -> DbInfo:
         ver_row = conn.execute("SELECT version()").fetchone()
         rev_row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
         db_row = conn.execute("SELECT current_database()").fetchone()
+        sys_row = conn.execute("SELECT system_identifier::text FROM pg_control_system()").fetchone()
     ver = str(ver_row[0]) if ver_row else ""
     return DbInfo(
         pg_version=ver.split(" ")[1] if ver else "",
         alembic_revision=(str(rev_row[0]) if rev_row else None),
         database_name=str(db_row[0]) if db_row else "",
+        system_identifier=str(sys_row[0]) if sys_row else "",
     )
 
 
@@ -204,6 +207,14 @@ def _run_backup_locked(
             pg_version=info.pg_version,
             database_name=info.database_name,
             tool_versions=tool_versions_fn(),
+            # Source binding (M12A-Prep §F): which instance/environment/cluster/
+            # release this dump came from — non-secret, verified by the rollout gate.
+            source={
+                "instance_id": os.environ.get("NLW_BACKUP_SOURCE_INSTANCE_ID", ""),
+                "environment": os.environ.get("NLW_BACKUP_ENVIRONMENT", ""),
+                "release": os.environ.get("NLW_BACKUP_SOURCE_RELEASE", ""),
+                "db_system_identifier": info.system_identifier,
+            },
         )
         write_manifest(manifest, work)
 

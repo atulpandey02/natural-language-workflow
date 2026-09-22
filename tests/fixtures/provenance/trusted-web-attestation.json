@@ -1,0 +1,95 @@
+[
+  {
+    "attestation": {
+      "bundle": "<sigstore bundle omitted in fixture>"
+    },
+    "verificationResult": {
+      "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+      "signature": {
+        "certificate": {
+          "certificateIssuer": "CN=sigstore-intermediate,O=sigstore.dev",
+          "subjectAlternativeName": "https://github.com/atulpandey02/natural-language-workflow/.github/workflows/staging.yml@refs/heads/main",
+          "issuer": "https://token.actions.githubusercontent.com",
+          "githubWorkflowTrigger": "push",
+          "githubWorkflowSHA": "1eebf2ef19c0286c83bfe8768c908bfd2f40178d",
+          "githubWorkflowName": "Delivery",
+          "githubWorkflowRepository": "atulpandey02/natural-language-workflow",
+          "githubWorkflowRef": "refs/heads/main",
+          "buildSignerURI": "https://github.com/atulpandey02/natural-language-workflow/.github/workflows/staging.yml@refs/heads/main",
+          "buildSignerDigest": "1eebf2ef19c0286c83bfe8768c908bfd2f40178d",
+          "runnerEnvironment": "github-hosted",
+          "sourceRepositoryURI": "https://github.com/atulpandey02/natural-language-workflow",
+          "sourceRepositoryDigest": "1eebf2ef19c0286c83bfe8768c908bfd2f40178d",
+          "sourceRepositoryRef": "refs/heads/main",
+          "sourceRepositoryIdentifier": "100000001",
+          "sourceRepositoryOwnerURI": "https://github.com/atulpandey02",
+          "sourceRepositoryOwnerIdentifier": "100000002",
+          "buildConfigURI": "https://github.com/atulpandey02/natural-language-workflow/.github/workflows/staging.yml@refs/heads/main",
+          "buildConfigDigest": "1eebf2ef19c0286c83bfe8768c908bfd2f40178d",
+          "buildTrigger": "push",
+          "runInvocationURI": "https://github.com/atulpandey02/natural-language-workflow/actions/runs/1234567890/attempts/1",
+          "sourceRepositoryVisibilityAtSigning": "public"
+        }
+      },
+      "verifiedTimestamps": [
+        {
+          "type": "TransparencyLog",
+          "uri": "https://rekor.sigstore.dev",
+          "timestamp": "2026-09-22T10:01:00Z"
+        }
+      ],
+      "verifiedIdentity": {
+        "issuer": "https://token.actions.githubusercontent.com",
+        "subjectAlternativeName": "https://github.com/atulpandey02/natural-language-workflow/.github/workflows/staging.yml@refs/heads/main"
+      },
+      "statement": {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [
+          {
+            "name": "ghcr.io/atulpandey02/natural-language-workflow/web",
+            "digest": {
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          }
+        ],
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": {
+          "buildDefinition": {
+            "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+            "externalParameters": {
+              "workflow": {
+                "path": ".github/workflows/staging.yml",
+                "ref": "refs/heads/main",
+                "repository": "https://github.com/atulpandey02/natural-language-workflow"
+              }
+            },
+            "internalParameters": {
+              "github": {
+                "event_name": "push",
+                "repository_id": "100000001",
+                "repository_owner_id": "100000002",
+                "runner_environment": "github-hosted"
+              }
+            },
+            "resolvedDependencies": [
+              {
+                "digest": {
+                  "gitCommit": "1eebf2ef19c0286c83bfe8768c908bfd2f40178d"
+                },
+                "uri": "git+https://github.com/atulpandey02/natural-language-workflow@refs/heads/main"
+              }
+            ]
+          },
+          "runDetails": {
+            "builder": {
+              "id": "https://github.com/atulpandey02/natural-language-workflow/.github/workflows/staging.yml@refs/heads/main"
+            },
+            "metadata": {
+              "invocationId": "https://github.com/atulpandey02/natural-language-workflow/actions/runs/1234567890/attempts/1"
+            }
+          }
+        }
+      }
+    }
+  }
+]

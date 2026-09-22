@@ -1,0 +1,33 @@
+# DISPOSABLE UPGRADE-REHEARSAL overlay (M12A-Prep §N) — NEVER for a real host.
+#
+# Layered on docker-compose.prod.yml + docker-compose.staging.yml by
+# scripts/ops/rehearse-0010-to-0016.sh so the exact production/staging service
+# definitions run on a developer machine:
+#   - the public edge binds loopback high ports (no 80/443, no ACME),
+#   - a MinIO container stands in for the S3 provider (labelled fixture; the
+#     production backup gate REJECTS it — the rehearsal passes an explicit
+#     rehearsal-only switch),
+#   - images come from a throwaway LOCAL registry BY DIGEST (immutable pins,
+#     same as GHCR in staging).
+# Nothing here weakens RLS, key-file isolation, or the migration path.
+services:
+  caddy:
+    ports:
+      - "127.0.0.1:8480:80"
+      - "127.0.0.1:8443:443"
+    environment:
+      PUBLIC_HOSTNAME: rehearsal.localhost  # *.localhost -> Caddy internal CA, no ACME
+
+  minio:
+    image: minio/minio:latest  # same fixture image as scripts/ops/dr-drill.sh
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: rehearsal-fixture
+      MINIO_ROOT_PASSWORD: rehearsal-fixture-not-a-secret
+    networks:
+      - internal
+    volumes:
+      - rehearsal_minio:/data
+
+volumes:
+  rehearsal_minio:

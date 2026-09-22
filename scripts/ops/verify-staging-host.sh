@@ -11,10 +11,10 @@
 # 3000/8000/5432/6379/9090 listening on a non-loopback (public) address.
 set -euo pipefail
 
-SSH_HOST="${SSH_HOST:-54.196.254.101}"
-SSH_USER="${SSH_USER:-nlwops}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/nlw-staging-key.pem}"
-TARGET="${SSH_USER}@${SSH_HOST}"
+# Host identity comes from deploy/staging/target.env (one reviewed source; the
+# EC2 instance id is authoritative — see scripts/ops/lib/staging-target.sh).
+# shellcheck source=lib/staging-target.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/staging-target.sh"
 BASE_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
 FLAGS=0
@@ -25,6 +25,10 @@ section() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 
 command -v ssh >/dev/null || { echo "ssh not found"; exit 2; }
 ssh "${BASE_OPTS[@]}" "$TARGET" 'true' || { echo "cannot SSH to $TARGET"; exit 2; }
+# The connected host must BE the expected instance (IMDSv2), whatever address
+# reached it. Fail closed before reading anything else.
+_ident="$(ssh "${BASE_OPTS[@]}" "$TARGET" "$(staging_remote_identity_cmd)" 2>/dev/null | tr -d '\r')"
+staging_assert_instance "$_ident" || exit 2
 
 # --- Unprivileged snapshot (single round-trip; no sudo) --------------------
 U="$(ssh "${BASE_OPTS[@]}" "$TARGET" 'set -e

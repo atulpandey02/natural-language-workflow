@@ -42,9 +42,9 @@ not from this platform.
 3. Environment:
    ```
    RESTIC_REPOSITORY=s3:https://s3.eu-west-1.amazonaws.com/YOUR-BUCKET/nlw
-   AWS_ACCESS_KEY_ID=AKIA...
-   AWS_SECRET_ACCESS_KEY=...
-   AWS_DEFAULT_REGION=eu-west-1
+   BACKUP_AWS_ACCESS_KEY_ID=AKIA...
+   BACKUP_AWS_SECRET_ACCESS_KEY=...
+   BACKUP_AWS_REGION=eu-west-1
    RESTIC_PASSWORD=<the repository encryption passphrase — store separately>
    ```
 
@@ -52,11 +52,11 @@ not from this platform.
 
 1. Create a **private** bucket. Note its endpoint region (e.g. `s3.us-west-004.backblazeb2.com`).
 2. Create an **application key** restricted to that single bucket (read + write).
-3. Environment (B2 encodes the region in the URL; `AWS_DEFAULT_REGION` may be omitted):
+3. Environment (B2 encodes the region in the URL; `BACKUP_AWS_REGION` may be omitted):
    ```
    RESTIC_REPOSITORY=s3:https://s3.us-west-004.backblazeb2.com/YOUR-BUCKET/nlw
-   AWS_ACCESS_KEY_ID=<keyID>
-   AWS_SECRET_ACCESS_KEY=<applicationKey>
+   BACKUP_AWS_ACCESS_KEY_ID=<keyID>
+   BACKUP_AWS_SECRET_ACCESS_KEY=<applicationKey>
    RESTIC_PASSWORD=<the repository encryption passphrase — store separately>
    ```
 

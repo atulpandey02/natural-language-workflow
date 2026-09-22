@@ -20,12 +20,19 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/nlw
+WorkingDirectory=/opt/nlw/current
 # Bounded runtime; a hung backup fails rather than blocking the next window.
 TimeoutStartSec=1800
 # The backup credentials live in a root-only 0600 env file — never on argv.
-ExecStart=/usr/bin/docker compose --env-file /opt/nlw/.env.backup \
-    -f /opt/nlw/docker-compose.prod.yml --profile backup run --rm backup
+# BOTH env files are required: docker-compose.prod.yml interpolates the runtime
+# pins/secrets (NLW_IMAGE, POSTGRES_PASSWORD, ... as `${VAR:?}` requireds) for
+# EVERY service at render time, so the backup profile cannot render from
+# .env.backup alone. The backup credentials (BACKUP_AWS_*, RESTIC_*) are the only
+# additions; the `backup` service never receives runtime key mounts.
+# /opt/nlw/current is the ACTIVE release (symlink managed by the rollout; before
+# M12A point it at /opt/nlw/app). The compose project name is explicit.
+ExecStart=/usr/bin/docker compose -p app --env-file /opt/nlw/current/.env.prod --env-file /opt/nlw/.env.backup \
+    -f /opt/nlw/current/docker-compose.prod.yml --profile backup run --rm backup
 # Logs flow to the journal (the existing operational logging approach).
 StandardOutput=journal
 StandardError=journal

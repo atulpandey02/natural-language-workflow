@@ -16,6 +16,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # A runner takes (argv, env) and returns (returncode, stdout, stderr). No secret
 # is ever placed in argv; env carries restic's credentials.
@@ -86,6 +87,62 @@ class Restic:
     def snapshot_exists(self, snapshot_id: str) -> bool:
         res = self._restic("snapshots", snapshot_id)
         return res.returncode == 0
+
+    def latest_snapshots(self, *, tag: str = "nlw-db") -> list[dict[str, Any]]:
+        """Non-secret metadata (id, time, hostname, tags) of the newest snapshot
+        carrying ``tag``; ``[]`` when the repository has none."""
+        res = self._restic_checked("snapshots", "--tag", tag, "--latest", "1", what="snapshots")
+        try:
+            doc = json.loads(res.stdout or "[]")
+        except ValueError as exc:
+            raise ResticError("restic snapshots returned malformed JSON") from exc
+        if not isinstance(doc, list):
+            raise ResticError("restic snapshots returned a non-list")
+        return [
+            {
+                "id": str(s.get("id", "")),
+                "short_id": str(s.get("short_id", "")),
+                "time": str(s.get("time", "")),
+                "hostname": str(s.get("hostname", "")),
+                "tags": [str(t) for t in (s.get("tags") or [])],
+            }
+            for s in doc
+            if isinstance(s, dict)
+        ]
+
+    def snapshot_manifest(self, snapshot_id: str) -> dict[str, Any] | None:
+        """The ``manifest.json`` INSIDE a snapshot (parsed), or None if absent.
+        Read straight from the repository — never from a host file."""
+        res = self._restic_checked("ls", snapshot_id, what="ls")
+        path = ""
+        for line in res.stdout.splitlines():
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("struct_type") == "node" and obj.get("name") == "manifest.json":
+                path = str(obj.get("path", ""))
+        if not path:
+            return None
+        dumped = self._restic_checked("dump", snapshot_id, path, what="dump")
+        try:
+            doc = json.loads(dumped.stdout)
+        except ValueError as exc:
+            raise ResticError("manifest.json inside the snapshot is not valid JSON") from exc
+        return doc if isinstance(doc, dict) else None
+
+    def snapshot_file_names(self, snapshot_id: str) -> list[str]:
+        """Base names of the files inside a snapshot (no contents)."""
+        res = self._restic_checked("ls", snapshot_id, what="ls")
+        names: list[str] = []
+        for line in res.stdout.splitlines():
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("struct_type") == "node" and obj.get("type") == "file":
+                names.append(str(obj.get("name", "")))
+        return names
 
     def restore(self, snapshot: str, target: Path) -> None:
         self._restic_checked("restore", snapshot, "--target", str(target), what="restore")

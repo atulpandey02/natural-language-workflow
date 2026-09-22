@@ -18,6 +18,20 @@ verification passed** — never merely because `pg_dump` exited 0. The freshness
 metric `nlw_backup_last_success_timestamp_seconds` advances **only** on a verified
 off-host snapshot.
 
+## Pre-deployment gate (M12A rollouts)
+
+`python -m nlw.ops.rollout verify-backup` refuses to proceed to a migration
+unless `python -m nlw.backup evidence` (run through the `backup` profile with
+BOTH `.env.prod` and `.env.backup`) shows: a real `s3:https://` off-host
+repository (MinIO fixtures, loopback/private hosts and same-host paths are
+rejected), `nlw_backup_success 1`, `nlw_backup_repository_verify_success 1`, a
+verified backup younger than 26 h, and a newest `nlw-db` snapshot tagged with
+the **pre-deployment** revision (`rev-0010_readiness_schema_grant` for M12A) that
+contains no key-like artifact. A local `pg_dump`, an unverified upload or a
+snapshot of a different revision never satisfies it. Without a configured
+provider there is no gate to pass — configure one first
+([backup-providers](../ops/backup-providers.md), [backup-systemd](../ops/backup-systemd.md)).
+
 ## Run one now (ad hoc)
 
 ```bash

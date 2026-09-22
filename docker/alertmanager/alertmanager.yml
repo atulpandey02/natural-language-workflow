@@ -1,0 +1,36 @@
+# Alertmanager (M12A-Prep §K) — PROVIDER-NEUTRAL SKELETON.
+#
+# Prometheus (docker/prometheus/prometheus.yml `alerting:`) sends every firing
+# alert here. This file ships with a single "null" receiver so the pipeline can
+# be validated end to end (routing, grouping, inhibition, `amtool check-config`)
+# WITHOUT any delivery credentials. Choosing and wiring the real infrastructure
+# channel (e-mail, PagerDuty, an ops Slack webhook, ...) is an operator decision
+# recorded in docs/ops/alerting.md; the credential goes into a host-side file
+# mounted at /etc/alertmanager/secrets/ (never committed, never in this file).
+#
+# The deferred PRODUCT Slack connector is unrelated to this and is not touched.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: "null"
+  group_by: ["alertname", "component", "role"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Critical infra alerts (backup dead-man, signed-context outage) repeat more
+    # often. Point them at a real receiver once one is configured.
+    - matchers: ["severity = critical"]
+      receiver: "null"
+      repeat_interval: 1h
+
+receivers:
+  # Intentionally delivers nowhere. Replace/extend via docs/ops/alerting.md.
+  - name: "null"
+
+inhibit_rules:
+  # A critical signed-context outage already implies the warning-level state.
+  - source_matchers: ["severity = critical"]
+    target_matchers: ["severity = warning"]
+    equal: ["alertname", "role"]

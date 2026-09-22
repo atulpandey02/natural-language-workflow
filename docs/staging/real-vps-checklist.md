@@ -52,3 +52,59 @@ readiness 503 -> repair). The TRUE live-interruption test — SIGKILL the proces
 mid-`alembic upgrade`, then observe transaction rollback / partial state /
 alembic_version and confirm readiness stays 503 until repaired — is performed
 here on the real host (not in ephemeral CI).
+
+## M12 GO/NO-GO checklist (signed-context rollout, M12A)
+
+The **code gate** closed with P3B (`1eebf2e`) and the M12A-Prep tooling; the
+**operational gate** is the list below. Every item needs real evidence (not the
+CI "staging simulation" job, which contacts no host). Decision = GO only when
+all boxes are ticked.
+
+- [ ] Release manifest artifact `release-manifest-<sha>` downloaded from the
+      successful `Delivery` run of the **merged main** commit (never a PR build;
+      `deploy/staging/release.example.json` is a rejected template);
+      `nlw.ops.release_manifest validate` passes (schema) **and**
+      `nlw.ops.release_provenance verify` passes (GitHub attestation: this
+      repository, `staging.yml@refs/heads/main`, `push`, exact commit, manifest
+      bytes + both image digests, successful run + artifact); receipt and sha256
+      recorded. Schema validity alone is never authority (ADR-025).
+- [ ] `python -m nlw.ops.rollout preflight --release <manifest>` clean against
+      the intended instance (`i-0d1e65cdc9401dbb9`): revision
+      `0010_readiness_schema_grant`, M11 roles, zero non-terminal work.
+- [ ] `verify-release` passed: both digests pulled, revision labels == release
+      SHA, backend image reports the SHA, migrations 0011–0016, head `0016`, all
+      rollout commands present (an older image such as `1eebf2e` is refused).
+- [ ] Off-host backup provider configured (`docs/ops/backup-providers.md`),
+      `/opt/nlw/.env.backup` in place, `nlw-backup.timer` active; the release
+      staged inactive (`stage-release`, `/opt/nlw/releases/<sha>`); the rollout
+      `backup` phase ran and **`verify-backup` passed** on evidence bound to
+      this instance, environment, database identifier, active release and
+      `rev-0010…` — **before any role, migration or config change**. A
+      MinIO/local fixture or operator-edited JSON never counts.
+- [ ] Production-grade keys prepared on the host (`prepare-keys`: 0700/0400,
+      uid 10001, fingerprints only) and **escrowed off-host** with a recovery
+      test; attestation written by the operator; `verify-escrow` passed with
+      `SIGNED_CONTEXT_KEYS_ESCROWED_AND_RECOVERY_TESTED`.
+- [ ] Operator authorization `AUTHORIZE_M12A_SIGNED_CONTEXT_STAGING_DEPLOYMENT`
+      given for this host + release (the CI manifest). Neither phrase
+      substitutes for the backup provider.
+- [ ] Rollout phases `drain → prepare-roles → migrate → install-context-keys →
+      recreate-runtime (activation: /opt/nlw/current) → validate → reopen`
+      completed; state file (`/opt/nlw/rollout/<sha>.json`) kept as evidence;
+      `signed_context: ok`; the open launch gates recorded by `reopen` listed
+      verbatim in the report.
+- [ ] `scripts/ops/verify-staging-deployment.sh` green after reopen (instance id,
+      release digests, roles incl. `nlw_ctx_verifier`, schema `0016`, registry
+      posture, TLS).
+- [ ] Prometheus rule groups `nlw-backup` + `nlw-signed-context` loaded;
+      Alertmanager reachable; **a real alert receiver wired, credential files
+      present, and a controlled test alert delivered and recorded** —
+      `python -m nlw.ops.rollout go-check` passes. With the committed null
+      receiver this stays **open** (`alert delivery unverified`) and the
+      decision is NO-GO, however healthy the pipeline is (`docs/ops/alerting.md`).
+- [ ] Non-destructive key-rotation drill on staging (API class, overlap, revoke).
+- [ ] k6 planner/API load profile + non-destructive failure drills (restart
+      api/worker/scheduler; wrong-key canary fails closed).
+- [ ] Real-provider fresh-host DR drill (not MinIO) — `dr-real-vps-checklist.md`.
+- [ ] Interactive reboot drill.
+- [ ] Real Slack/webhook delivery test — deliberately **last**.

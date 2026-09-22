@@ -1,21 +1,31 @@
-# Immutable-image delivery (M9, ADR-018).
+# Immutable-image delivery (M9, ADR-018) + RELEASE AUTHORITY (M12A-Prep, ADR-025).
 #
-# One image is built and pushed to GHCR by DIGEST on merge to main; that exact
-# digest is deployed to staging, smoke-tested, and — only after a manual GitHub
-# Environment approval — promoted UNCHANGED to production. Rollback is redeploying
-# a previously-known-good, schema-compatible digest. Migrations are applied as a
-# one-off before switching traffic; image rollback NEVER auto-downgrades the DB.
+# One backend image and one web image are built and pushed to GHCR by DIGEST
+# for the exact merged-main commit; that commit's release manifest is generated
+# from those digests, ATTESTED (GitHub artifact attestation: Sigstore keyless
+# signing with this workflow's OIDC identity, SLSA v1 provenance) together with
+# both images, and uploaded as the run artifact `release-manifest-<sha>`.
+# The operator rollout (`python -m nlw.ops.rollout`) verifies that provenance —
+# repository, this workflow file, refs/heads/main, push, the exact commit, the
+# manifest bytes, both image digests — before it contacts any host.
 #
-# NOTE: third-party actions here should be pinned to immutable commit SHAs before
-# go-live. Server deploy steps are placeholders — wire them to your VPS (SSH +
-# `docker compose -f docker-compose.prod.yml up -d` with NLW_IMAGE=<digest>).
+# TRUSTED TRIGGER: `push` to `main` ONLY. No workflow_dispatch, no PR: the
+# verifier's policy accepts nothing else, and this file is the trusted workflow
+# identity (`.github/workflows/staging.yml`). Renaming or moving it is a
+# security change (see ADR-025 and nlw.ops.release_provenance.TRUSTED_POLICY).
+#
+# Every action below is pinned to a full immutable commit SHA (a unit test
+# enforces this repository-wide). Human-readable versions are in the comments.
+#
+# The "release-authority-proof" and "promote-production" jobs are PROOFS and
+# PLACEHOLDERS: CI holds no VPS credentials and contacts no host. Real
+# deployments are operator-driven and produce separate evidence.
 
 name: Delivery
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 concurrency:
   group: delivery-${{ github.ref }}
@@ -23,43 +33,109 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build-push:
-    name: Build + push immutable image to GHCR
+    name: Build + push immutable images, generate + attest the release manifest
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push images (+ their attestations) to GHCR
+      id-token: write # Sigstore keyless signing identity for the attestations
+      attestations: write # store the attestations on this repository
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       image: ghcr.io/${{ github.repository }}
       web_digest: ${{ steps.build_web.outputs.digest }}
       web_image: ghcr.io/${{ github.repository }}/web
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push backend by digest
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           push: true
           tags: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          # Release identity baked into the artifact (OCI revision label + NLW_GIT_SHA);
+          # the rollout refuses an image whose SHA differs from the manifest.
+          build-args: |
+            NLW_GIT_SHA=${{ github.sha }}
       - name: Build and push frontend by digest
         id: build_web
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ./web
           push: true
           tags: ghcr.io/${{ github.repository }}/web:sha-${{ github.sha }}
+          build-args: |
+            NLW_GIT_SHA=${{ github.sha }}
           # No public Supabase build-args: the browser-safe URL + anon key are
           # supplied at RUNTIME (server-injected), so this ONE digest is promoted
           # unchanged from staging to production and targets each environment's
           # Supabase project via runtime env.
+      # Release manifest (ADR-025): generated AFTER both builds from the final
+      # manifest digests, for the exact commit built. Never committed to git.
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12"
+      - name: Generate + validate the release manifest for this exact commit
+        id: manifest
+        run: |
+          uv sync --frozen
+          uv run python -m nlw.ops.release_manifest generate \
+            --target-env deploy/staging/target.env \
+            --release-sha "${{ github.sha }}" \
+            --backend-image "ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}" \
+            --web-image "ghcr.io/${{ github.repository }}/web@${{ steps.build_web.outputs.digest }}" \
+            --generated-by ci \
+            --attestation "github-artifact-attestation/slsa-provenance-v1" \
+            --out release-manifest.json
+          uv run python -m nlw.ops.release_manifest validate release-manifest.json
+          # The artifact must carry no credential/material: only ids, digests, SHAs.
+          ! grep -Eiq 'password|secret|token|aws_' release-manifest.json
+          digest=$(sha256sum release-manifest.json | cut -d' ' -f1)
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release manifest for ${{ github.sha }}"
+            echo "artifact: release-manifest-${{ github.sha }}"
+            echo "sha256: $digest"
+            echo "backend: ${{ steps.build.outputs.digest }}"
+            echo "web: ${{ steps.build_web.outputs.digest }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      # Provenance (ADR-025): three attestations by THIS workflow identity for the
+      # SAME commit — the manifest bytes (subject = their sha256, which covers
+      # both image digests and the release SHA), the backend image and the web
+      # image (attestations pushed to GHCR next to the images).
+      - name: Attest the release manifest (subject = its sha256)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-manifest.json
+      - name: Attest the backend image (same commit, same run)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Attest the web image (same commit, same run)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}/web
+          subject-digest: ${{ steps.build_web.outputs.digest }}
+          push-to-registry: true
+      - name: Upload the release manifest artifact (release-manifest-<sha>)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-manifest-${{ github.sha }}
+          path: release-manifest.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Scan pushed image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -69,32 +145,88 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL
 
-  deploy-staging:
-    name: Deploy digest to staging + smoke test
+  # NOT A DEPLOYMENT. A separate job downloads the artifact exactly as an
+  # operator would and runs the SAME verifier the rollout runs
+  # (nlw.ops.release_provenance): real `gh attestation verify` against the
+  # Sigstore public-good instance + GitHub attestation API, the explicit
+  # repository/workflow/ref/event/commit policy, the manifest subject digest,
+  # both image attestations, then the image identity/capability checks, and it
+  # proves the committed example is rejected. Only non-secret evidence is
+  # printed. It never connects to, mutates, or verifies the real staging VPS.
+  release-authority-proof:
+    name: Release-authority PROOF (provenance + images; NOT the real VPS)
     needs: build-push
     runs-on: ubuntu-latest
-    environment: staging
+    permissions:
+      contents: read # read attestations + run metadata
+      packages: read # pull the images and their registry attestations
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NLW_IMAGE: ${{ needs.build-push.outputs.image }}@${{ needs.build-push.outputs.digest }}
+      NLW_WEB_IMAGE: ${{ needs.build-push.outputs.web_image }}@${{ needs.build-push.outputs.web_digest }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Deploy the exact digest to staging
-        env:
-          NLW_IMAGE: ${{ needs.build-push.outputs.image }}@${{ needs.build-push.outputs.digest }}
-          NLW_WEB_IMAGE: ${{ needs.build-push.outputs.web_image }}@${{ needs.build-push.outputs.web_digest }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-manifest-${{ github.sha }}
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12"
+      - name: Log in to GHCR (read; the image attestations live next to the images)
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify PROVENANCE with the operator's verifier (policy + subject digest + images)
         run: |
-          echo "Deploy $NLW_IMAGE to staging."
-          echo "Run migrations first (dedicated migrate service; owner cred not in runtime services):"
-          echo "  docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.staging.yml --profile migration run --rm migrate"
-          echo "Then: docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.staging.yml up -d"
-          # TODO: wire to the staging host (SSH / compose). Placeholder for M9.
-      - name: Smoke test staging
+          uv sync --frozen
+          echo "downloaded manifest sha256: $(sha256sum release-manifest.json | cut -d' ' -f1)"
+          # --within-run: this run is still in progress while it proves itself;
+          # the operator path requires a COMPLETED successful run + the artifact.
+          uv run python -m nlw.ops.release_provenance verify release-manifest.json \
+            --within-run --receipt provenance-receipt.json
+          grep -q "\"release_sha\": \"${{ github.sha }}\"" provenance-receipt.json
+          grep -q "\"fixture\": false" provenance-receipt.json
+      - name: Verify the images are the attested release (labels, identity, capabilities)
         run: |
-          echo "curl -fsS https://staging.example.com/health"
-          echo "curl -fsS https://staging.example.com/health/ready"
-          # TODO: real smoke checks against the staging endpoint.
+          uv run python -m nlw.ops.release_manifest validate release-manifest.json > summary.json
+          grep -q "\"release_sha\": \"${{ github.sha }}\"" summary.json
+          grep -q "\"backend_digest\": \"${{ needs.build-push.outputs.digest }}\"" summary.json
+          grep -q "\"web_digest\": \"${{ needs.build-push.outputs.web_digest }}\"" summary.json
+          docker pull -q "$NLW_IMAGE" && docker pull -q "$NLW_WEB_IMAGE"
+          for img in "$NLW_IMAGE" "$NLW_WEB_IMAGE"; do
+            label=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$img")
+            [ "$label" = "${{ github.sha }}" ] || { echo "revision label $label != ${{ github.sha }} for $img"; exit 1; }
+          done
+          docker run --rm --network none --entrypoint python "$NLW_IMAGE" -m nlw.ops.rollout.image_info | grep -q "\"git_sha\": \"${{ github.sha }}\""
+          for cmd in "-m nlw.ops.rollout --help" "-m nlw.ops.roles --help" "-m nlw.ctxkeys prepare --help" "-m nlw.backup evidence --help"; do
+            # shellcheck disable=SC2086
+            docker run --rm --network none --entrypoint python "$NLW_IMAGE" $cmd >/dev/null
+          done
+          # The committed template must be REJECTED by the same loader.
+          ! uv run python -m nlw.ops.release_manifest validate deploy/staging/release.example.json
+          echo "release-authority proof OK for ${{ github.sha }} (CI proof of the artifact, not a deployment)"
+      - name: Publish non-secret evidence
+        run: |
+          {
+            echo "### Release-authority proof for ${{ github.sha }}"
+            echo '```json'
+            cat provenance-receipt.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Print the operator rollout commands for this digest (no host contacted)
+        run: |
+          echo "PROOF ONLY — no SSH, no VPS, no deployment performed by CI."
+          echo "Operator: download artifact release-manifest-${{ github.sha }} from THIS run (merged main),"
+          echo "  uv run python -m nlw.ops.release_provenance verify release-manifest.json --receipt receipt.json"
+          echo "  uv run python -m nlw.ops.rollout preflight --release release-manifest.json   # read-only"
+          echo "Mutating phases require the exact authorization phrase, an escrow attestation,"
+          echo "and a verified off-host backup — see docs/runbooks/staging-signed-context-rollout.md."
 
   promote-production:
-    name: Promote the SAME digest to production (manual approval)
-    needs: [build-push, deploy-staging]
+    name: Promote the SAME digest to production (manual approval; placeholder, no host contacted)
+    needs: [build-push, release-authority-proof]
     runs-on: ubuntu-latest
     environment: production # requires a manual reviewer approval in GitHub
     steps:

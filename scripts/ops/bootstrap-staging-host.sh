@@ -25,11 +25,11 @@
 # create .env.prod or any secret, select the off-host backup client, or reboot.
 set -euo pipefail
 
-# --- Target (override via env) ---------------------------------------------
-SSH_HOST="${SSH_HOST:-54.196.254.101}"
-SSH_USER="${SSH_USER:-nlwops}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/nlw-staging-key.pem}"
-TARGET="${SSH_USER}@${SSH_HOST}"
+# --- Target: deploy/staging/target.env via the shared lib (override via env) --
+# The bootstrap-era address that used to be hard-coded here is retained only in
+# docs/staging historical evidence; the instance id is what identifies the host.
+# shellcheck source=lib/staging-target.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/staging-target.sh"
 
 CM="${TMPDIR:-/tmp}/nlw-cm-$$.sock"        # ControlMaster socket (short path)
 REMOTE_HELPER=""                            # set once created

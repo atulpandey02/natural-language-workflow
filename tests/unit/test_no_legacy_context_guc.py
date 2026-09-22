@@ -61,6 +61,8 @@ def test_application_never_sets_or_reads_unsigned_context() -> None:
         text = path.read_text(encoding="utf-8")
         if path.name == "validate.py" and "backup" in path.parts:
             continue  # the restore validator greps FOR the legacy forms to reject them
+        if "rollout" in path.parts and path.name in ("phases.py", "smoke.py"):
+            continue  # the rollout FORGES legacy settings as nlw_app to prove they grant nothing
         for m in _LEGACY.finditer(text):
             line = text.count("\n", 0, m.start()) + 1
             offenders.append(f"{path.relative_to(_ROOT)}:{line}")

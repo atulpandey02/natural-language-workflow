@@ -64,6 +64,83 @@ superuser, host root, or malicious code already inside a trusted runtime.
    `signed_context: down` and the worker/scheduler healthchecks fail if the key a
    process holds is not the key the database verifies with.
 
+## Production/staging key preparation and off-host escrow (M12A)
+
+Generate keys with the reviewed file-only command — never the dev helper, never
+`openssl` into a world-readable path:
+
+```bash
+# On the host, via the release image as root (bind-mounts the parent dir).
+# The rollout does exactly this in its `prepare-keys` phase.
+docker run --rm --user 0:0 --network none -v /srv/nlw:/host/srv/nlw <backend digest> \
+  python -m nlw.ctxkeys prepare --dir /host/srv/nlw/ctx-keys --class api --owner 10001:10001
+# repeat for worker and scheduler -> prints "prepared <class> <sha256 fingerprint>" only
+```
+
+Rules enforced by `prepare` / `fingerprint` / `verify-files`: directory `0700`
+root-owned, files `0400` owned by uid 10001, regular files only (symlinks and
+directories rejected), ≥ 32 random bytes as hex, never overwrite existing
+material, key ids validated (`[a-z0-9][a-z0-9._-]{2,63}`) and kept separate from
+material. Nothing prints material: not stdout, stderr, argv, env, logs or the
+rollout state.
+
+### Escrow (mandatory before migration 0016)
+
+The rollout will not migrate until an **operator-written attestation** proves
+the three files are in an encrypted **off-host** escrow — separate from the VPS,
+from the restic backup repository, from git, and from deployment artifacts.
+The tooling never chooses the destination. Procedure:
+
+1. Copy the three files **without printing them** to a machine you control,
+   preserving names and the id→purpose mapping:
+   `sudo tar -C /srv/nlw -cf - ctx-keys | ssh you@escrow-host 'cat > ctx-keys.tar'`
+   (or `sudo tar … | gpg --symmetric --cipher-algo AES256 > ctx-keys.tar.gpg`
+   directly on the host and copy the encrypted archive).
+2. Encrypt at rest with a key/passphrase held by the recovery owners, e.g.
+   `gpg --symmetric --cipher-algo AES256 ctx-keys.tar` or `age -p`; restrict the
+   escrow object/folder to the recovery owners.
+3. Verify the encrypted archive is readable: decrypt into a private temp dir
+   (`umask 077; mkdir -p /tmp/kt && gpg -d ctx-keys.tar.gpg | tar -C /tmp/kt -xf -`).
+4. Verify by **fingerprint**, never by displaying contents:
+   `python -m nlw.ctxkeys fingerprint --dir /tmp/kt/ctx-keys --key-id-api … --key-id-worker … --key-id-scheduler … --insecure-permissions`
+   must print the same three sha256 values `prepare` printed on the host.
+5. Shred the temporary plaintext copies (`shred -u` / `rm -P` / a tmpfs) and the
+   unencrypted tar; keep only the encrypted archive.
+6. Record recovery ownership: who holds the passphrase, who may fetch the
+   archive, and the recovery steps (restore the files to `/srv/nlw/ctx-keys`
+   with the same owner/modes, `ctxkeys verify-files`, `ctxkeys check` ×3).
+7. Write the attestation (fingerprints only) and run
+   `python -m nlw.ops.rollout verify-escrow --escrow-confirm SIGNED_CONTEXT_KEYS_ESCROWED_AND_RECOVERY_TESTED --attestation FILE`.
+
+Attestation format (`format_version` 1; **contains no material or credential**):
+
+```json
+{
+  "format_version": 1,
+  "environment": "staging",
+  "release_sha": "<40-hex git sha>",
+  "keys": [
+    {"purpose_class": "api",       "key_id": "<id>", "sha256_fingerprint": "<64 hex>"},
+    {"purpose_class": "worker",    "key_id": "<id>", "sha256_fingerprint": "<64 hex>"},
+    {"purpose_class": "scheduler", "key_id": "<id>", "sha256_fingerprint": "<64 hex>"}
+  ],
+  "escrow_verified_at": "2026-09-22T11:00:00Z",
+  "operator": "<name or handle>",
+  "recovery_test_confirmed": true,
+  "escrow_location_label": "<non-secret label, not a URL with credentials>"
+}
+```
+
+The gate compares every fingerprint with the files on the host, requires the
+same key ids as the CI-generated release manifest, and rejects attestations older
+than 30 days, from another release/environment, or containing anything that
+looks like a credential. Pasting material into the fingerprint field cannot
+pass (sha256(material) ≠ material). Key preparation never writes this file —
+that would make the gate meaningless. Backups must **exclude** the key files
+(the restore validator and the backup gate both check); the registry rows are
+restored with the database, but a restored registry cannot recreate a missing
+key file — only escrow can.
+
 ## Rotation (overlap) and revocation
 
 - Install the NEW key under a new id (`--activate-at` optional). Both keys verify
