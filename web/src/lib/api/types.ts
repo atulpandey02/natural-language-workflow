@@ -193,6 +193,28 @@ export interface RunCreateOut {
   idempotent_hit: boolean;
 }
 
+// Deterministic grounded run summary (M12B-A). No model output; step outcomes
+// are keyed to step ids and UNKNOWN/FAILED/SKIPPED are never reported as success.
+export interface StepSummaryOut {
+  step_id: string;
+  tool: string;
+  outcome: string;
+  detail: string;
+}
+
+export interface RunSummaryOut {
+  run_status: string;
+  outcome: string;
+  headline: string;
+  steps: StepSummaryOut[];
+  total_steps: number;
+  succeeded: number;
+  failed: number;
+  unknown: number;
+  skipped: number;
+  truncated: boolean;
+}
+
 // A plan step as stored in a normalized workflow plan.
 export interface PlanStep {
   id: string;

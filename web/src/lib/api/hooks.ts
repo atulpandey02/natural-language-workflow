@@ -19,6 +19,7 @@ import type {
   ScheduleOut,
   StepRunOut,
   ExternalActionOut,
+  RunSummaryOut,
   TenantContextOut,
   ToolOut,
   UserOut,
@@ -143,6 +144,15 @@ export function useRunActions(id: string) {
   return useQuery({
     queryKey: ["run", id, "actions"],
     queryFn: () => api.get<ExternalActionOut[]>(`/runs/${id}/actions`),
+    enabled: Boolean(id),
+    refetchInterval: RUN_POLL_MS,
+  });
+}
+
+export function useRunSummary(id: string) {
+  return useQuery({
+    queryKey: ["run", id, "summary"],
+    queryFn: () => api.get<RunSummaryOut>(`/runs/${id}/summary`),
     enabled: Boolean(id),
     refetchInterval: RUN_POLL_MS,
   });

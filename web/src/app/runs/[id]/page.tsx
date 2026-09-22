@@ -3,13 +3,14 @@
 import { use } from "react";
 import { AppShell } from "@/components/AppShell";
 import { ErrorBanner, Empty, Loading, StatusBadge } from "@/components/ui";
-import { useRun, useRunActions, useRunSteps } from "@/lib/api/hooks";
+import { useRun, useRunActions, useRunSteps, useRunSummary } from "@/lib/api/hooks";
 
 export default function RunDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const run = useRun(id);
   const steps = useRunSteps(id);
   const actions = useRunActions(id);
+  const summary = useRunSummary(id);
 
   return (
     <AppShell>
@@ -36,6 +37,33 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
               : ""}
           </p>
           {run.data.error ? <div className="banner">{run.data.error}</div> : null}
+        </div>
+      ) : null}
+
+      {summary.data ? (
+        <div className="card">
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <strong>Result summary</strong>
+            <StatusBadge status={summary.data.outcome} />
+          </div>
+          <p>{summary.data.headline}</p>
+          <p className="muted">
+            {summary.data.succeeded} succeeded · {summary.data.failed} failed ·{" "}
+            {summary.data.unknown} unknown · {summary.data.skipped} skipped
+          </p>
+          {summary.data.steps.length > 0 ? (
+            <ul>
+              {summary.data.steps.map((s) => (
+                <li key={s.step_id}>
+                  <StatusBadge status={s.outcome} /> <strong>{s.step_id}</strong> — {s.detail}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <p className="muted">
+            Deterministic summary of persisted state. Failed, skipped, and unknown steps are never
+            reported as success.
+          </p>
         </div>
       ) : null}
 
