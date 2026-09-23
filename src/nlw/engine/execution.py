@@ -399,9 +399,10 @@ def _resume_action(
     # safe to resend -> terminal UNKNOWN. A retry SCHEDULED by a provably
     # pre-transmission / contractually-throttled failure cleared the boundary and
     # is handled above via next_attempt_at, so it is unaffected. A tool with an
-    # enforced contract (spec.idempotent_delivery) may safely replay and falls
-    # through to re-claim below.
-    if ea.transmission_started_at is not None and not spec.idempotent_delivery:
+    # enforced contract (spec.may_replay_after_transmission: the flag AND an
+    # explicit IdempotencyContract, validated at registration) may safely replay
+    # and falls through to re-claim below.
+    if ea.transmission_started_at is not None and not spec.may_replay_after_transmission:
         return _action_unknown(
             session, run, step, ea, "worker died after the transmission boundary; outcome unknown"
         )

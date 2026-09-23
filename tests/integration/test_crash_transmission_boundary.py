@@ -37,7 +37,13 @@ from nlw.engine.actions import (
 )
 from nlw.engine.execution import execute_advancement, process_advance
 from nlw.engine.runs import create_run, create_workflow_with_version
-from nlw.registry.registry import REGISTRY, ToolCategory, ToolSpec, UnknownToolError
+from nlw.registry.registry import (
+    REGISTRY,
+    IdempotencyContract,
+    ToolCategory,
+    ToolSpec,
+    UnknownToolError,
+)
 from nlw.scheduler.reconcile import find_stuck_runs
 from nlw.secrets.store import EnvironmentSecretStore
 from nlw.tenancy.keys import process_signer
@@ -74,6 +80,17 @@ except UnknownToolError:
             side_effecting=True,
             execute_action=execute_webhook_action,
             idempotent_delivery=True,
+            # The flag alone is rejected at registration (fail closed); replay is
+            # authorized only by this explicit, test-verified receiver contract.
+            idempotency_contract=IdempotencyContract(
+                receiver="test-only in-process CountingSink (dedupes on Idempotency-Key)",
+                dedup_key="Idempotency-Key header = external_action_key",
+                contract_ref="ADR-013 P4 (test-only contract; no production connector)",
+                verified_by=(
+                    "tests/integration/test_crash_transmission_boundary.py::"
+                    "test_9_enforced_idempotency_contract_permits_replay"
+                ),
+            ),
         )
     )
 

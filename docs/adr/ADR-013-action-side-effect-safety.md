@@ -216,8 +216,14 @@ idempotency **key** is not such a contract.
 **Corrected invariant.** Once transmission of a side effect *may have started*, an
 unconfirmed outcome is terminal `ACTION_OUTCOME_UNKNOWN` and is **never**
 automatically resent. Only a tool with an explicit, enforced idempotency contract
-(`ToolSpec.idempotent_delivery = True`) may replay after ambiguity; no production
-connector has one, so `webhook.send` and `slack.send_message` never replay.
+may replay after ambiguity: `ToolSpec.idempotent_delivery = True` is accepted at
+registration **only together with** an `IdempotencyContract` (receiver, dedup
+key, contract reference, verifying test) on a side-effecting tool — the Boolean
+alone, or an idempotency key/header alone, is rejected by `ToolSpec.__post_init__`
+(fail closed), and the engine consults the single predicate
+`may_replay_after_transmission`. No production connector has such a contract, so
+`webhook.send` and `slack.send_message` never replay
+(`tests/unit/test_registry.py::test_no_production_tool_may_replay_after_transmission`).
 
 **Mechanism — a durable ambiguity boundary (no new run/step states).** A single
 nullable column, `external_actions.transmission_started_at` (migration `0018`), is

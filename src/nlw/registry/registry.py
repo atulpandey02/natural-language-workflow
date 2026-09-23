@@ -92,6 +92,33 @@ ActionCallable = Callable[[BaseModel, ConnectorContext, ActionContext], ActionRe
 
 
 @dataclass(frozen=True)
+class IdempotencyContract:
+    """The EXPLICIT receiver-side deduplication contract that alone may authorize a
+    replay after the durable transmission boundary (ADR-013 P4).
+
+    A stable idempotency key or header is never proof of deduplication; this
+    record names who deduplicates, on what key, where the contract is documented,
+    and which test proves it end to end. ``ToolSpec.__post_init__`` refuses an
+    ``idempotent_delivery=True`` tool that does not carry one, so the Boolean can
+    never be flipped on its own (fail closed at registration, not at replay).
+    """
+
+    # The receiver bound by the contract (e.g. "webhook receiver at <vendor>").
+    receiver: str
+    # The stable key the receiver MUST dedupe on (the external_action_key carrier).
+    dedup_key: str
+    # Where the contractual requirement is documented (ADR / vendor doc / SLA).
+    contract_ref: str
+    # The test (module::name) that proves a replay with the same key yields ONE effect.
+    verified_by: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("receiver", "dedup_key", "contract_ref", "verified_by"):
+            if not str(getattr(self, field_name)).strip():
+                raise ValueError(f"IdempotencyContract.{field_name} must be non-empty")
+
+
+@dataclass(frozen=True)
 class ToolSpec:
     name: str
     description: str
@@ -115,7 +142,12 @@ class ToolSpec:
     # action whose transmission may have started (ADR-013 crash window); every
     # other side-effecting tool becomes terminal UNKNOWN instead of resending.
     # No current connector has such a contract, so this defaults to False.
+    #
+    # FAIL CLOSED: the Boolean is not a contract. It is accepted ONLY together with
+    # an explicit ``idempotency_contract`` (below) on a side-effecting tool;
+    # ``__post_init__`` rejects every other combination at registration time.
     idempotent_delivery: bool = False
+    idempotency_contract: IdempotencyContract | None = None
 
     def __post_init__(self) -> None:
         if self.side_effecting:
@@ -123,6 +155,32 @@ class ToolSpec:
                 raise ValueError(f"{self.name}: side-effecting tool needs execute_action only")
         elif self.execute is None or self.execute_action is not None:
             raise ValueError(f"{self.name}: inline tool needs execute only")
+        # Replay after the transmission boundary is authorized by an ENFORCED
+        # receiver contract, never by the flag alone (and never on an inline tool).
+        if self.idempotent_delivery:
+            if not self.side_effecting:
+                raise ValueError(f"{self.name}: idempotent_delivery requires a side-effecting tool")
+            if self.idempotency_contract is None:
+                raise ValueError(
+                    f"{self.name}: idempotent_delivery=True requires an explicit "
+                    "IdempotencyContract (receiver, dedup_key, contract_ref, verified_by); "
+                    "a stable idempotency key/header alone never authorizes replay"
+                )
+        elif self.idempotency_contract is not None:
+            raise ValueError(
+                f"{self.name}: an IdempotencyContract is declared but idempotent_delivery "
+                "is False (inconsistent replay authorization)"
+            )
+
+    @property
+    def may_replay_after_transmission(self) -> bool:
+        """True only for a side-effecting tool carrying an enforced receiver
+        contract. This is the single predicate the engine consults."""
+        return (
+            self.side_effecting
+            and self.idempotent_delivery
+            and self.idempotency_contract is not None
+        )
 
 
 class ToolRegistry:
