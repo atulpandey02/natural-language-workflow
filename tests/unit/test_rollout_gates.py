@@ -510,3 +510,17 @@ def test_state_rejects_secret_bearing_values() -> None:
     assert state.phase_done(ok, "drain") and not state.phase_done(ok, "migrate")
     with pytest.raises(state.StateError):
         state.require_phases(ok, "migrate")
+
+
+def test_report_legacy_connector_bindings_surfaces_count_without_claiming_protection() -> None:
+    zero = gates.report_legacy_connector_bindings(0)
+    assert "0 legacy" in zero and "identity-pinned" in zero
+    some = gates.report_legacy_connector_bindings(7)
+    assert "7 LEGACY" in some
+    assert "NOT identity-pinned" in some  # never claims they are protected
+    assert "Re-materialize" in some
+    with pytest.raises(GateError):
+        gates.report_legacy_connector_bindings(-1)
+    # The go-live query is a plain read-only count.
+    assert gates.LEGACY_CONNECTOR_BINDING_SQL.lower().startswith("select count(*)")
+    assert "connector_bindings is null" in gates.LEGACY_CONNECTOR_BINDING_SQL.lower()
