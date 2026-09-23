@@ -11,6 +11,7 @@ Proves, WITHOUT the live model:
 
 from nlw.eval.corpus_v2 import (
     ProductDecision,
+    V2Case,
     grade_live,
     load_v2,
     replay_fixture_status,
@@ -84,7 +85,7 @@ def test_every_decision_class_is_represented() -> None:
 
 
 # --- grade_live classifier (deterministic, synthetic inputs) --------------------------
-def _case(cid: str):
+def _case(cid: str) -> V2Case:
     return next(c for c in load_v2() if c.id == cid)
 
 

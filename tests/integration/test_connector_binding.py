@@ -15,6 +15,7 @@ import json
 import uuid
 from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import psycopg
@@ -59,7 +60,7 @@ def _seed_webhook(
     tenant_id: uuid.UUID,
     *,
     name: str = "hook",
-    config: dict | None = None,
+    config: dict[str, Any] | None = None,
     secret_ref: str | None = None,
     cid: uuid.UUID | None = None,
 ) -> uuid.UUID:
@@ -88,7 +89,7 @@ def _webhook_plan() -> WorkflowPlan:
     )
 
 
-def _current(owner_libpq: str, tenant_id: uuid.UUID, name: str = "hook") -> tuple:
+def _current(owner_libpq: str, tenant_id: uuid.UUID, name: str = "hook") -> tuple[Any, ...]:
     with psycopg.connect(owner_libpq) as c:
         row = c.execute(
             "SELECT id, type, config FROM connectors WHERE tenant_id=%s AND name=%s",
@@ -101,7 +102,7 @@ def _current(owner_libpq: str, tenant_id: uuid.UUID, name: str = "hook") -> tupl
 def _seed_bound_run(pg_stack: SimpleNamespace, m: SimpleNamespace) -> uuid.UUID:
     """A version whose connector binding is pinned to the CURRENT 'hook' connector."""
     cid, ctype, cfg = _current(pg_stack.owner_libpq, m.tenant_id)
-    bindings = {"notify": build_binding(str(cid), ctype, cfg)}
+    bindings: dict[str, Any] = {"notify": build_binding(str(cid), ctype, cfg)}
     engine = create_sync_engine(pg_stack.settings)
     try:
         with create_sync_sessionmaker(engine)() as s, s.begin():
@@ -125,7 +126,7 @@ def _approve(owner_libpq: str, run_id: uuid.UUID, by: uuid.UUID) -> None:
         )
 
 
-def _mutate(owner_libpq: str, sql: str, params: tuple) -> None:
+def _mutate(owner_libpq: str, sql: str, params: tuple[object, ...]) -> None:
     with psycopg.connect(owner_libpq, autocommit=True) as c:
         c.execute(sql, params)
 

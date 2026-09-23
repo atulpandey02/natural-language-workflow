@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import jwt
@@ -70,7 +71,7 @@ def _setup(pg_stack: SimpleNamespace) -> Setup:
 
 
 def _seed_workflow(
-    owner: str, tenant: uuid.UUID, plan: dict, bindings: dict | None = None
+    owner: str, tenant: uuid.UUID, plan: dict[str, Any], bindings: dict[str, Any] | None = None
 ) -> tuple[uuid.UUID, uuid.UUID]:
     wf, ver = uuid.uuid4(), uuid.uuid4()
     binding_json = json.dumps(bindings) if bindings else None
@@ -122,6 +123,7 @@ def _run_count(owner: str, sid: uuid.UUID) -> int:
         row = c.execute(
             "SELECT count(*) FROM workflow_runs WHERE schedule_id=%s", (sid,)
         ).fetchone()
+    assert row is not None
     return int(row[0])
 
 
@@ -137,7 +139,7 @@ def _first_run(owner: str, sid: uuid.UUID) -> uuid.UUID:
             "SELECT id FROM workflow_runs WHERE schedule_id=%s LIMIT 1", (sid,)
         ).fetchone()
     assert row is not None
-    return row[0]
+    return uuid.UUID(str(row[0]))
 
 
 def _remove_membership(owner: str, user_id: uuid.UUID, tenant: uuid.UUID) -> None:
@@ -164,6 +166,7 @@ def _auth(pg_stack: SimpleNamespace, user_id: uuid.UUID, tenant_id: uuid.UUID) -
         row = c.execute(
             "SELECT auth_provider_id, email FROM users WHERE id=%s", (user_id,)
         ).fetchone()
+    assert row is not None
     sub, email = row
     token = jwt.encode(
         {

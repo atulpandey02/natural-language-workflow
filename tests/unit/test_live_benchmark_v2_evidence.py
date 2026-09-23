@@ -9,12 +9,13 @@ provider response, request id, header, credential or raw request/clarification t
 """
 
 import asyncio
+from typing import Any
 
 from nlw.core.config import Settings
 from nlw.eval.live_runner_v2 import _run
 
 
-def _evidence() -> dict:
+def _evidence() -> dict[str, Any]:
     settings = Settings()  # stub provider in tests (planning only)
     return asyncio.run(_run(settings, repeats=2))
 
