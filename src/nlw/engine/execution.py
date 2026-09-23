@@ -57,6 +57,7 @@ from nlw.engine.actions import (
     ActionTask,
     effective_attempt_cap,
     finalize_action,
+    mark_transmission_started,
     run_action,
 )
 from nlw.observability import metrics
@@ -392,6 +393,18 @@ def _resume_action(
         return AdvanceOutcome(
             "deferred", enqueue_next=False, defer_seconds=(ea.next_attempt_at - now).total_seconds()
         )
+    # ADR-013 crash window: the prior attempt crossed the durable transmission
+    # boundary but never finalized (worker death). The side effect MAY have been
+    # transmitted and this tool has no ENFORCED idempotency contract, so it is NOT
+    # safe to resend -> terminal UNKNOWN. A retry SCHEDULED by a provably
+    # pre-transmission / contractually-throttled failure cleared the boundary and
+    # is handled above via next_attempt_at, so it is unaffected. A tool with an
+    # enforced contract (spec.idempotent_delivery) may safely replay and falls
+    # through to re-claim below.
+    if ea.transmission_started_at is not None and not spec.idempotent_delivery:
+        return _action_unknown(
+            session, run, step, ea, "worker died after the transmission boundary; outcome unknown"
+        )
     if ea.attempts >= effective_attempt_cap():
         # No live lease and the retry budget is exhausted: this is an EXPIRED FINAL
         # attempt. Its prior send cannot be disproven, so it is NOT a definite
@@ -647,6 +660,14 @@ def process_advance(
     outcome = execute_advancement(session_factory, run_id, store)
 
     if outcome.action_task is not None:
+        # Durable ambiguity boundary (ADR-013 crash window): commit "transmission
+        # MAY start" BEFORE the out-of-lock send. A worker death between here and
+        # finalize recovers as terminal UNKNOWN, never a silent resend. If the
+        # lease was lost (another worker took over), do NOT transmit.
+        if not mark_transmission_started(
+            session_factory, outcome.action_task, set_worker_context_default
+        ):
+            return AdvanceOutcome("noop", enqueue_next=False, step_id=outcome.step_id)
         runner = action_runner if action_runner is not None else run_action
         action_start = time.perf_counter()
         result = runner(outcome.action_task)

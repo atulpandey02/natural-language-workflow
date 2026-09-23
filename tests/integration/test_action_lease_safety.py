@@ -24,7 +24,12 @@ from test_action_execution import (  # sibling module (pytest prepend import mod
     _worker_sm,
 )
 
-from nlw.engine.actions import effective_attempt_cap, finalize_action, run_action
+from nlw.engine.actions import (
+    effective_attempt_cap,
+    finalize_action,
+    mark_transmission_started,
+    run_action,
+)
 from nlw.engine.execution import execute_advancement, process_advance
 from nlw.secrets.store import EnvironmentSecretStore
 from nlw.tenancy.session import set_worker_context_default
@@ -127,21 +132,25 @@ def test_concurrent_claims_serialize_on_the_real_run_lock(pg_stack: SimpleNamesp
     assert ea["lease_token"] is not None
 
 
-def test_lease_overrun_two_transmissions_possible_without_state_corruption(
+def test_lease_overrun_boundary_prevents_second_transmission(
     pg_stack: SimpleNamespace,
 ) -> None:
-    """A database lease CANNOT fence an external receiver (P1C, honest boundary).
+    """The durable transmission boundary fences a lease overrun (ADR-013 fix).
 
-    If worker A is paused/suspended past its lease expiry at a point where its send
-    may still occur, worker B can reclaim the SAME action (same stable idempotency
-    key, fresh lease token) and also send. We demonstrate:
+    A DB lease cannot fence an external receiver by itself, so the correction adds
+    a durable boundary committed under the lease BEFORE transmission. If worker A
+    crosses it and is then paused past lease expiry, worker B must NOT reclaim and
+    re-transmit: the action is transmission-started, so B recovers it as terminal
+    UNKNOWN. We demonstrate:
 
-    - the reclaim does NOT manufacture a second idempotency key;
-    - BOTH workers can transmit -> two external observations are possible when the
-      receiver ignores the key (the DB lease does not prevent this);
-    - finalization stays CAS-safe: a stale-lease finalize is a noop, the current
-      lease owner wins, and DB state (one success, run COMPLETED, one action row)
-      is never corrupted regardless of finalize order.
+    - only ONE external transmission occurs (B is fenced, not a second send);
+    - a stale worker cannot re-cross the boundary (its lease no longer matches);
+    - A's late, stale-lease finalize is a CAS noop; the terminal UNKNOWN stands;
+    - DB state stays consistent (exactly one action row, no corruption).
+
+    This is the conservative trade-off the correction accepts: A's send may have
+    succeeded, but because it could not be confirmed before the lease expired the
+    outcome is UNKNOWN rather than a risked duplicate.
     """
     m = pg_stack.seed_member()
     _seed_webhook(pg_stack.owner_libpq, m.tenant_id)
@@ -153,46 +162,35 @@ def test_lease_overrun_two_transmissions_possible_without_state_corruption(
     process_advance(sm, run_id, _noop_enqueue, store, _runner(sink))  # park
     _approve(pg_stack.owner_libpq, run_id, m.user_id)
 
-    # Worker A claims (attempt 1, lease L_A, key K) and is then held past expiry.
+    # Worker A claims (attempt 1, lease L_A, key K) and crosses the boundary.
     claim_a = execute_advancement(sm, run_id, store)
     assert claim_a.action_task is not None
     task_a = claim_a.action_task
+    assert mark_transmission_started(sm, task_a, set_worker_context_default)
+    result_a = run_action(task_a, transport=sink.transport())  # A transmits ONCE
+    assert len(sink.calls) == 1
+
+    # A is paused past its lease expiry before it can finalize.
     _expire_lease(pg_stack.owner_libpq, run_id)
 
-    # Worker B reclaims the expired action: SAME key, fresh lease, attempt 2.
-    claim_b = execute_advancement(sm, run_id, store)
-    assert claim_b.action_task is not None
-    task_b = claim_b.action_task
-    assert task_b.external_action_key == task_a.external_action_key  # NO new key
-    assert task_b.lease_token != task_a.lease_token  # fresh lease token
-    assert task_b.attempt == task_a.attempt + 1  # the reclaim advanced attempts
+    # Worker B tries to reclaim: the action is transmission-started, so B is fenced
+    # to terminal UNKNOWN -> NO second claim, NO second transmission.
+    out_b = execute_advancement(sm, run_id, store)
+    assert out_b.action_task is None
+    assert len(sink.calls) == 1  # B did not transmit
+    ea = _ea(pg_stack.owner_libpq, run_id)
+    assert ea["status"] == "unknown"
 
-    # A DB lease does not fence the receiver: BOTH A and B transmit, same key.
-    result_a = run_action(task_a, transport=sink.transport())
-    result_b = run_action(task_b, transport=sink.transport())
-    assert len(sink.calls) == 2  # two external observations occurred
-    key = str(task_a.external_action_key)
-    assert sink.calls[0].headers["Idempotency-Key"] == key
-    assert sink.calls[1].headers["Idempotency-Key"] == key  # identical -> only receiver dedup helps
+    # A stale worker cannot re-cross the boundary (lease no longer matches).
+    assert mark_transmission_started(sm, task_a, set_worker_context_default) is False
 
-    # A's STALE-lease finalize arrives first -> CAS rejects it (noop), no corruption.
+    # A's late, stale-lease finalize is a CAS noop; the terminal UNKNOWN stands.
     final_a = finalize_action(sm, task_a, result_a, set_worker_context_default)
     assert final_a.result == "noop"
-    # B (the current lease owner) finalizes -> success.
-    final_b = finalize_action(sm, task_b, result_b, set_worker_context_default)
-    assert final_b.result == "advanced"
-
-    # State is consistent: exactly one action row and a recorded success.
     assert _count_ea(pg_stack.owner_libpq, run_id) == 1
-    ea = _ea(pg_stack.owner_libpq, run_id)
-    assert ea["status"] == "success"
-    assert _step(pg_stack.owner_libpq, run_id)[0] == "SUCCESS"
-
-    # A follow-up advance completes the run cleanly (the SUCCESS step is durable);
-    # no third transmission occurs.
-    process_advance(sm, run_id, _noop_enqueue, store, _runner(sink))
-    assert _row_run_status(pg_stack.owner_libpq, run_id) == "COMPLETED"
-    assert len(sink.calls) == 2  # no additional external send
+    assert _ea(pg_stack.owner_libpq, run_id)["status"] == "unknown"
+    assert _step(pg_stack.owner_libpq, run_id)[0] == "FAILED"
+    assert _row_run_status(pg_stack.owner_libpq, run_id) == "FAILED"
 
 
 def _row_run_status(owner_libpq: str, run_id: uuid.UUID) -> str:

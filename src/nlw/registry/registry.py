@@ -108,6 +108,14 @@ class ToolSpec:
     # and run OUTSIDE the run-lock via the two-transaction pattern (ADR-013).
     side_effecting: bool = False
     execute_action: ActionCallable | None = None
+    # An ENFORCED end-to-end idempotency contract with the receiver (the receiver
+    # is contractually required AND verified to deduplicate on the stable
+    # ``external_action_key``). This is NOT satisfied by merely sending an
+    # Idempotency-Key header. Only a tool with this set True may safely REPLAY an
+    # action whose transmission may have started (ADR-013 crash window); every
+    # other side-effecting tool becomes terminal UNKNOWN instead of resending.
+    # No current connector has such a contract, so this defaults to False.
+    idempotent_delivery: bool = False
 
     def __post_init__(self) -> None:
         if self.side_effecting:

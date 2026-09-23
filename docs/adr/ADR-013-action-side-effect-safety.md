@@ -204,10 +204,59 @@ receiver-side idempotency or true fencing.
 margin < lease duration` is asserted at import of the action HTTP module
 (`assert_action_deadline_fits_lease`); a violating configuration refuses to start.
 
+## P4 amendment — durable transmission boundary (M12B-A, 2026-09-23)
+
+**Supersedes the crash-window portion of the "Honest guarantee" above.** The
+earlier model accepted at-least-once *redelivery* for the crash-after-transmission
+window and for lease overrun (a duplicate was "documented, not fixed"). That is a
+release-blocking safety gap: unless a receiver is contractually required **and
+verified** to deduplicate, a resend may cause the effect twice. A stable
+idempotency **key** is not such a contract.
+
+**Corrected invariant.** Once transmission of a side effect *may have started*, an
+unconfirmed outcome is terminal `ACTION_OUTCOME_UNKNOWN` and is **never**
+automatically resent. Only a tool with an explicit, enforced idempotency contract
+(`ToolSpec.idempotent_delivery = True`) may replay after ambiguity; no production
+connector has one, so `webhook.send` and `slack.send_message` never replay.
+
+**Mechanism — a durable ambiguity boundary (no new run/step states).** A single
+nullable column, `external_actions.transmission_started_at` (migration `0018`), is
+committed in its own transaction (`mark_transmission_started`) **immediately before
+the out-of-lock network send**, guarded by the lease token. The two-phase pattern
+becomes claim (Txn1) → **boundary (Txn1.5)** → send → finalize (Txn2). On resume:
+
+- boundary **not** crossed (`transmission_started_at IS NULL`) → the send provably
+  never started → eligible for retry (re-claim);
+- boundary crossed, attempt never finalized (worker death / lease expiry / lease
+  overrun) → terminal UNKNOWN, **no resend** — unless `idempotent_delivery` is set;
+- a RETRY finalize (a provable pre-transmission failure, or Slack's throttle
+  contract) **clears** the boundary so the next attempt starts fresh; a live
+  foreign lease still defers; `next_attempt_at` still gates early redelivery.
+
+This deliberately admits a **conservative false UNKNOWN**: a worker that dies after
+committing the boundary but before any bytes leave becomes UNKNOWN even though
+nothing was sent. That availability cost is accepted; an uncontrolled duplicate is
+not. Lease overrun is now fenced the same way — a stale worker cannot re-cross the
+boundary (its lease no longer matches), so at most one attempt transmits.
+
+**Preserved unchanged.** The P1C within-attempt classification matrix
+(DNS/pool/connect/TLS → retry; generic webhook 429/5xx → UNKNOWN; Slack 429 →
+retry; write/partial-write/reset/missing-response → UNKNOWN; provable
+pre-transmission cap exhaustion → definite FAILED), connector-identity pinning,
+approval binding, lease CAS finalize, attempt caps, signed DB context, and the
+"no exactly-once" honesty. UNKNOWN remains excluded from retry, the reconciler, and
+redelivery. Proof: `tests/integration/test_crash_transmission_boundary.py` (the
+ten-point crash/ambiguity matrix) plus the updated action/recovery suites.
+
 ## Alternatives considered
 
 - **Run the side effect inside the run lock (M5 style)** — rejected: holds the
   lock across a network call and blocks the run; unsafe for side effects.
+- **Keep at-least-once + a stable key (pre-P4)** — rejected: a key is not an
+  enforced dedup contract; a non-idempotent receiver can be duplicated on crash or
+  lease overrun. Replaced by the durable boundary + UNKNOWN.
+- **An in-memory "sent" flag** — rejected: does not survive process/container
+  death, which is exactly the crash the boundary must cover.
 - **APPROVED/REJECTED run/step states** — rejected: kept minimal; the decision
   lives on the approval record, run/step only add `WAITING_APPROVAL`.
 - **Deriving the idempotency key from the attempt** — rejected: would change per

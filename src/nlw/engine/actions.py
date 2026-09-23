@@ -169,6 +169,43 @@ class FinalizeOutcome:
     defer_seconds: float | None = None
 
 
+def mark_transmission_started(
+    session_factory: sessionmaker[Session],
+    task: ActionTask,
+    set_context: Callable[[Session, uuid.UUID, uuid.UUID], None],
+) -> bool:
+    """Txn1.5 (ADR-013 crash window): commit the durable ambiguity boundary BEFORE
+    the out-of-lock network transmission.
+
+    Persists ``transmission_started_at`` on the leased action, guarded by the lease
+    token, so a worker death anywhere between here and ``finalize_action`` recovers
+    as terminal UNKNOWN instead of silently resending a non-idempotent side effect.
+    The first boundary timestamp is preserved across a re-mark (``COALESCE``).
+
+    Returns True when the boundary is durably committed for THIS lease; False when
+    the lease is no longer held or the action is already finalized (the caller must
+    then NOT transmit — another worker owns it).
+    """
+    from nlw.engine.execution import _resolve_tenant  # avoid cycle
+
+    with session_factory() as session, session.begin():
+        tenant_id = _resolve_tenant(session, task.run_id)
+        if tenant_id is None:
+            return False
+        set_context(session, tenant_id, task.run_id)
+        ea = (
+            session.query(ExternalAction)
+            .filter(ExternalAction.id == task.external_action_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if ea is None or ea.lease_token != task.lease_token or ea.status != "pending":
+            return False
+        if ea.transmission_started_at is None:
+            ea.transmission_started_at = _now()
+        return True
+
+
 def finalize_action(
     session_factory: sessionmaker[Session],
     task: ActionTask,
@@ -255,6 +292,13 @@ def finalize_action(
             ea.lease_token = None
             ea.lease_owner = None
             ea.lease_expires_at = None
+            # RETRY is raised ONLY for an outcome that is safe to re-attempt: a
+            # provable pre-transmission failure (DNS/pool/connect/TLS) or a
+            # contractual throttle (Slack 429 — the message was not accepted). The
+            # next attempt therefore starts from a FRESH ambiguity boundary; clear
+            # this one so resume does not misread it as "transmission may have
+            # started" and force a spurious UNKNOWN.
+            ea.transmission_started_at = None
             run.last_progress_at = func.now()  # retry scheduled (genuine progress)
             # Step stays RUNNING; a delayed advance_run resumes it.
             return FinalizeOutcome("retry", defer_seconds=delay)

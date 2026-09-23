@@ -30,11 +30,18 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.domain.workflow import WorkflowPlan
-from nlw.engine.actions import ActionExecResult, ActionKind, ActionTask, run_action
+from nlw.engine.actions import (
+    ACTION_OUTCOME_UNKNOWN,
+    ActionExecResult,
+    ActionKind,
+    ActionTask,
+    mark_transmission_started,
+    run_action,
+)
 from nlw.engine.execution import execute_advancement, process_advance
 from nlw.engine.runs import create_run, create_workflow_with_version
 from nlw.secrets.store import EnvironmentSecretStore
-from nlw.tenancy.session import apply_signed_context_sync
+from nlw.tenancy.session import apply_signed_context_sync, set_worker_context_default
 from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
@@ -257,9 +264,10 @@ def test_3_inline_crash_before_commit_rolls_back_and_reruns_once(
 #   B. the tool has an ENFORCED idempotency contract with the receiver, so a
 #      re-attempt with the *same* stable key collapses to one effect.
 # This scenario proves case A precisely. A GENERIC side effect (no enforced
-# contract) is category C and is governed by UNKNOWN, NOT by free re-execution;
-# that separation is proven by ``test_4_negative_*`` and ``test_8_*`` below. See
-# the release note in docs/.../ai-core-recovery-matrix.md on the crash-window gap.
+# contract) is category C and is governed by UNKNOWN once its durable transmission
+# boundary is crossed, NOT by free re-execution; that separation is proven by
+# ``test_4_negative_*``, ``test_4_generic_crash_after_boundary_*`` and ``test_8_*``
+# below, and exhaustively in test_crash_transmission_boundary.py (ADR-013).
 def test_4_readonly_reexecution_may_occur_more_than_once_and_is_safe(
     pg_stack: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -334,21 +342,16 @@ def test_4_negative_generic_side_effect_uses_leased_path_not_readonly_reexecutio
     ) == (1,)
 
 
-def test_4_known_gap_generic_crash_window_is_at_least_once_not_unknown(
+def test_4_generic_crash_after_boundary_is_unknown_never_resent(
     pg_stack: SimpleNamespace,
 ) -> None:
-    """KNOWN DIVERGENCE (release-blocking), documented honestly, not as 'safe'.
+    """CATEGORY C (corrected, ADR-013): a generic side effect interrupted after the
+    durable transmission boundary is terminal UNKNOWN and is NEVER resent.
 
-    A generic side effect interrupted in its crash-after-send / pre-finalize window
-    is currently REDELIVERED at-least-once (ADR-013), reusing the stable key; a
-    non-idempotent receiver may therefore observe a DUPLICATE. The reviewer's target
-    contract is that a generic (non-contractual) side effect whose transmission is
-    uncertain must instead become terminal ACTION_OUTCOME_UNKNOWN and NEVER be
-    resent. Reconciling the two is an ADR-013-level durability change (it also turns
-    a provable crash-BEFORE-send into UNKNOWN, a reliability trade-off) and is NOT
-    performed here; see the release note in ai-core-recovery-matrix.md. This test
-    pins the ACTUAL behavior so the gap is explicit and un-hidden — it does not
-    assert the behavior is safe, and it never claims exactly-once."""
+    A stable idempotency key does not authorize replay for a non-idempotent
+    receiver, so once ``transmission_started_at`` is committed a worker death
+    recovers as ACTION_OUTCOME_UNKNOWN rather than a redelivery. The full matrix is
+    in test_crash_transmission_boundary.py; this pins the recovery-suite scenario."""
     m = pg_stack.seed_member()
     _seed_webhook(pg_stack.owner_libpq, m.tenant_id)
     run_id = _seed(pg_stack, m, _webhook_plan())
@@ -357,32 +360,22 @@ def test_4_known_gap_generic_crash_window_is_at_least_once_not_unknown(
     _park_and_approve(sm, run_id, m, pg_stack.owner_libpq, sink.runner())
     claim = execute_advancement(sm, run_id, STORE)
     assert claim.action_task is not None
-    # Send succeeds but "crash" before finalize (do not call finalize_action).
+    # Cross the durable boundary (as process_advance does), send, then "crash".
+    assert mark_transmission_started(sm, claim.action_task, set_worker_context_default)
     run_action(claim.action_task, transport=httpx.MockTransport(sink.handler))
     assert sink.calls == 1
-    key_first = _row(
-        pg_stack.owner_libpq,
-        "SELECT external_action_key FROM external_actions WHERE run_id=%s",
-        (run_id,),
-    )
-    assert _row(
-        pg_stack.owner_libpq, "SELECT status FROM external_actions WHERE run_id=%s", (run_id,)
-    ) == ("pending",)  # not finalized
-    # Resume after lease expiry: the current engine RE-DELIVERS (at-least-once) —
-    # a duplicate send is possible here. We assert the stable key is REUSED (the
-    # only property that bounds the blast radius), NOT exactly-once, NOT safety.
+    # Resume after lease expiry: NEVER resent -> terminal UNKNOWN.
     _expire_lease(pg_stack.owner_libpq, run_id)
-    assert _drive(sm, run_id, sink.runner()) == "completed"
-    assert sink.calls >= 1  # at-least-once; may be a duplicate for a non-idempotent receiver
-    key_after = _row(
+    assert _drive(sm, run_id, sink.runner()) == "failed"
+    assert sink.calls == 1  # not redelivered
+    assert _row(
         pg_stack.owner_libpq,
-        "SELECT external_action_key FROM external_actions WHERE run_id=%s",
+        "SELECT status, error_class FROM external_actions WHERE run_id=%s",
         (run_id,),
-    )
-    assert key_after == key_first  # stable key reused across the redelivery, never regenerated
+    ) == ("unknown", ACTION_OUTCOME_UNKNOWN)
     assert _row(
         pg_stack.owner_libpq, "SELECT status FROM step_runs WHERE run_id=%s", (run_id,)
-    ) == ("SUCCESS",)
+    ) == ("FAILED",)
 
 
 # --- 5. worker restart while waiting for approval -------------------------------------

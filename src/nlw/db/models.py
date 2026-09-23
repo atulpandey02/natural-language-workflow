@@ -325,6 +325,16 @@ class ExternalAction(TimestampMixin, Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Durable ambiguity boundary (ADR-013 crash window). Committed immediately
+    # BEFORE the out-of-lock network transmission and cleared only when a provably
+    # pre-transmission (or contractually-throttled) failure schedules a retry. If
+    # this is set and the attempt never finalized (worker death), the transmission
+    # MAY have started: lease recovery transitions the action to terminal UNKNOWN
+    # rather than resending it (unless the tool has an enforced idempotency
+    # contract). NULL = no attempt has crossed the boundary yet.
+    transmission_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 # --- Planner proposals (M6) ---
