@@ -25,7 +25,10 @@ from nlw.eval.harness import corpus_digest, corpus_versions
 from nlw.eval.live_runner import CaseRun, classify_run
 
 EVIDENCE_DIR = Path(__file__).resolve().parents[2] / "docs" / "evaluation"
-ARTIFACTS = sorted(EVIDENCE_DIR.glob("live-benchmark-*.json"))
+# v1-schema evidence only (files dated `live-benchmark-YYYY-...`). The v2
+# natural-language benchmark uses a different schema and is validated by its own
+# recomputation test (tests/unit/test_live_benchmark_v2_committed.py).
+ARTIFACTS = sorted(EVIDENCE_DIR.glob("live-benchmark-[0-9]*.json"))
 
 _ALLOWED_RUN_KEYS = {
     "case_id",
