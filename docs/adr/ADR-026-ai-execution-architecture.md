@@ -39,9 +39,11 @@ agent loop and the model never dynamically calls tools.**
    never the final status.
 
 3. **Persist, then re-validate on materialize.** A `PlanProposal` is an
-   immutable audit snapshot (no raw prompt, no raw provider bytes — only
-   `prompt_len`, the parsed proposed plan, the normalized plan, and the
-   feasibility report). `POST /plans/{id}/materialize` **re-runs feasibility
+   immutable audit snapshot (no raw provider bytes — the parsed proposed plan,
+   the normalized plan, the feasibility report and, since migration `0017`, the
+   bounded natural-language request itself with its sha256 digest and planner
+   contract version: tenant-scoped, immutable to the runtime role, never
+   logged/metered/listed — see `ai-provenance-and-stale-plan.md`). `POST /plans/{id}/materialize` **re-runs feasibility
    against current tenant capabilities** ("never trust the stored PASS") before
    writing an immutable `WorkflowVersion`.
 

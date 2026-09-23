@@ -19,6 +19,12 @@ uv run python -m nlw.eval.runner --json eval-results.json --md eval-summary.md
 ```
 
 **Live-model** (optional, credential-gated). Runs the actual planner per case,
+feeding the case's `request` string to the planner verbatim. Note (independent
+review): most corpus `request` strings are fixture *labels*, not customer
+requests, and `expect.feasibility_status` is fixture-derived — so live
+`exact_outcome` is not a planner-quality figure. See
+[docs/evaluation/README.md](../evaluation/README.md) for the versioned evidence
+and its caveats. It
 captures the model / provider / token usage, and grades the structured result
 for safety (never exact-match — a live model may propose a different valid plan,
 but must never turn an adversarial/unsupported case into an executable PASS). It

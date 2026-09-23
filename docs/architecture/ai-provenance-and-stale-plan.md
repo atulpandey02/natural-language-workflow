@@ -38,13 +38,16 @@ Already on the row: `created_by`, `tenant_id`, `provider`, `model`, `status`
 
 ### Retention / deletion (honest)
 
-`plan_proposals` rows are retained for the life of the tenant; there is no
-automatic expiry today. `request_text` is deleted when the proposal row is
-deleted, which happens via the tenant/workflow cascade (`workflows` FK
-`ondelete=CASCADE` reaches versions; proposals are removed when the tenant's data
-is purged). A per-proposal delete endpoint is **not** provided in M12B-A (out of
-scope); a future retention policy would add a bounded TTL sweep. This is stated
-so operators do not assume request text auto-expires.
+`plan_proposals` rows are retained indefinitely; there is no automatic expiry
+today. **There is no cascade and no purge path for proposals**: `plan_proposals`
+carries no foreign key to `workspaces`, `workflows` or `workflow_versions`
+(migration `0007`; `workflow_version_id` is a bare column), so deleting a
+workflow or a workspace does **not** delete its proposals or their
+`request_text`, and no service code deletes proposal rows. Removing a tenant's
+request text is currently an operator SQL action as the owner role. A
+per-proposal delete endpoint and a bounded retention sweep are **not** provided
+in M12B-A (out of scope). This is stated so operators do not assume request text
+auto-expires or is removed by workspace deletion.
 
 ### UI
 
@@ -91,6 +94,14 @@ classification over the stable `FeasibilityCode` categories.
   and re-loads the connector by tenant-scoped SQL per step, and pins an approved
   action to the approved connector id (P1C) — so even without the pre-run gate,
   a step fails closed rather than invoking an unsafe tool.
+- **Scheduled runs are NOT pre-gated.** The scheduler creates occurrence runs
+  directly from the pinned version (`scheduler/due.py`) without calling the
+  re-validation classifier; a stale scheduled plan therefore surfaces as a run
+  that FAILS at its first affected step (e.g. a connector-not-found step error)
+  rather than as a `STALE_PLAN` 409. No tool is invoked either way. Likewise a
+  schedule keeps producing runs after its creator's membership is removed
+  (approval still requires a different admin/owner). Both are documented
+  limitations of M12B-A, not gaps in the fail-closed property.
 
 The reason exposed to the API/UI is sanitized (a member-safe sentence + a stable
 low-cardinality code); connector secrets and internal DB details are never

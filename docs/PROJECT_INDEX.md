@@ -318,8 +318,10 @@ checks tool availability (tenant-scoped registry projection), connector
 ownership/type/status (RLS inventory; `error` recoverable, `disabled` rejects),
 argument models, the M5 SQL validator (single source of truth), and the DAG
 (Kahn). `POST /plans` runs planning API-side and persists an immutable
-`plan_proposals` audit row that stores **no raw prompt** (only `prompt_len`) and
-**no raw provider response**. `POST /plans/{id}/materialize` re-earns PASS against
+`plan_proposals` audit row that stores **no raw provider response** (since
+M12B-A / migration `0017` it does store the bounded natural-language request as
+tenant-scoped, immutable, never-logged provenance — see
+`architecture/ai-provenance-and-stale-plan.md`). `POST /plans/{id}/materialize` re-earns PASS against
 the current capability view (`FOR UPDATE`, idempotent) before creating one
 `workflow_version`. The platform LLM key is API-process-only (never worker/
 scheduler, never in model context); safe planner schema context is an
@@ -469,8 +471,10 @@ executed recovery-boundary evidence for all ten scenarios
 benchmark (`nlw.eval.live_runner`; planning only), summary-endpoint
 confidentiality (no raw output, tenant-scoped, frontend injection-safe), and an
 [observability coverage matrix](architecture/ai-observability-matrix.md).
-Live-model benchmarking remains the one blocking evidence item (no app provider
-credential is configured).
+The live-model benchmark was executed on 2026-09-22 (claude-haiku-4-5, 34 cases
+× 3 repeats = 102 planning-only calls); its sanitized, versioned evidence and the
+independent-review caveats on what it does and does not measure live in
+[docs/evaluation/](evaluation/README.md).
 
 ## Runbooks
 

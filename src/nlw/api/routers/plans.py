@@ -7,7 +7,10 @@
 
 Planning runs API-side. The LLM sees only the tenant capability view (Tool
 Registry + secret-free connectors); it never receives secrets or the LLM key.
-The raw prompt and raw provider response are never stored. Deterministic
+The raw provider response is never stored. The natural-language request IS
+persisted (M12B-A, migration 0017) as tenant-scoped, immutable provenance on the
+proposal — bounded before persistence, never logged/metered/listed, returned only
+on the single-proposal detail and version-provenance endpoints. Deterministic
 feasibility owns the final status — a parsed plan is not executable.
 """
 
