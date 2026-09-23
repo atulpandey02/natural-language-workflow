@@ -38,6 +38,7 @@ from nlw.domain.workflow import WorkflowPlan
 from nlw.feasibility.limits import DEFAULT_LIMITS
 from nlw.feasibility.revalidation import revalidate_plan
 from nlw.observability import metrics
+from nlw.planner.provenance import ProvenanceIntegrityError, verify_request_provenance
 from nlw.tenancy.context import TenantContext
 from nlw.tenancy.session import set_request_context
 from nlw.tenancy.signing import Purpose
@@ -141,6 +142,17 @@ async def get_workflow_provenance(
     proposal = await PlanProposalRepository(session).get_by_version(version_id, ctx.tenant_id)
     if proposal is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no provenance for this version")
+    # Verify the stored digest against the stored request before serving it, so a
+    # tampered request is detected rather than returned (fail closed). The error
+    # carries only the proposal id, never the request text.
+    try:
+        verify_request_provenance(
+            proposal.request_text, proposal.request_sha256, proposal_id=proposal.id
+        )
+    except ProvenanceIntegrityError as exc:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "request provenance integrity check failed"
+        ) from exc
     return WorkflowProvenanceOut(
         workflow_version_id=version_id,
         request_text=proposal.request_text,

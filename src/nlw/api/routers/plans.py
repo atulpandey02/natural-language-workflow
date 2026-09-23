@@ -11,7 +11,6 @@ The raw prompt and raw provider response are never stored. Deterministic
 feasibility owns the final status — a parsed plan is not executable.
 """
 
-import hashlib
 import time
 import uuid
 
@@ -45,6 +44,11 @@ from nlw.feasibility.revalidation import revalidate_plan
 from nlw.observability import metrics
 from nlw.planner.budget import PromptBudgetError
 from nlw.planner.planner import plan_and_check
+from nlw.planner.provenance import (
+    ProvenanceIntegrityError,
+    compute_request_digest,
+    verify_request_provenance,
+)
 from nlw.planner.provider import (
     LLMAuthError,
     LLMProvider,
@@ -152,7 +156,7 @@ async def create_plan(
         feasibility=_feasibility_dict(report),
         clarification_questions=report.clarification_questions,
         request_text=prompt,
-        request_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        request_sha256=compute_request_digest(prompt),
         planner_contract_version=PLANNER_CONTRACT_VERSION,
     )
 
@@ -198,6 +202,18 @@ async def get_plan(
     proposal = await PlanProposalRepository(session).get(proposal_id, ctx.tenant_id)
     if proposal is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "proposal not found")
+    # The stored digest is only meaningful if a read re-derives and compares it:
+    # an out-of-band mutation of request_text is detected here, never served.
+    try:
+        verify_request_provenance(
+            proposal.request_text, proposal.request_sha256, proposal_id=proposal.id
+        )
+    except ProvenanceIntegrityError as exc:
+        # Fail closed: never serve a request whose provenance no longer holds.
+        # The message carries only the proposal id, never the request text.
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "request provenance integrity check failed"
+        ) from exc
     return PlanProposalDetailOut.model_validate(proposal)
 
 

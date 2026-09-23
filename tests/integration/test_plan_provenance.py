@@ -178,6 +178,64 @@ def test_oversized_request_is_rejected_and_not_persisted(pg_stack: SimpleNamespa
     assert client.get("/plans", headers=h).json() == []  # nothing persisted
 
 
+def test_stored_digest_covers_the_exact_persisted_request_encoding(
+    pg_stack: SimpleNamespace,
+) -> None:
+    # A multibyte prompt round-trips: the persisted digest equals sha256 over the
+    # UTF-8 bytes of the persisted request_text (the encoding never drifts).
+    prompt = "read 山田's résumé ✅"
+    client = _client(pg_stack, _plan())
+    h = _member(client, "prov-h", "h@x.com")
+    pid = client.post("/plans", json={"prompt": prompt}, headers=h).json()["id"]
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        row = c.execute(
+            "SELECT request_text, request_sha256 FROM plan_proposals WHERE id=%s", (pid,)
+        ).fetchone()
+    assert row is not None
+    assert row[0] == prompt
+    assert row[1] == hashlib.sha256(row[0].encode("utf-8")).hexdigest()
+
+
+def test_read_detects_owner_mutation_of_request_without_digest_update(
+    pg_stack: SimpleNamespace,
+) -> None:
+    # The column grant stops nlw_app; this proves the RESIDUAL case where a
+    # privileged (owner) UPDATE mutates request_text but not request_sha256. Both
+    # read paths must FAIL CLOSED (500) rather than serve the tampered request.
+    client = _client(pg_stack, _plan())
+    h = _member(client, "prov-i", "i@x.com")
+    pid = client.post("/plans", json={"prompt": "authentic request"}, headers=h).json()["id"]
+    ver = client.post(f"/plans/{pid}/materialize", headers=h).json()["workflow_version_id"]
+    # Both reads succeed while provenance is intact.
+    assert client.get(f"/plans/{pid}", headers=h).status_code == 200
+    assert client.get(f"/workflow-versions/{ver}/provenance", headers=h).status_code == 200
+    # Owner tampers with the request text, leaving the digest stale.
+    tampered = "MALICIOUSLY-swapped request text"
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        c.execute("UPDATE plan_proposals SET request_text=%s WHERE id=%s", (tampered, pid))
+    # Now every read of the request fails the integrity check and never serves it.
+    r1 = client.get(f"/plans/{pid}", headers=h)
+    r2 = client.get(f"/workflow-versions/{ver}/provenance", headers=h)
+    assert r1.status_code == 500 and tampered not in r1.text
+    assert r2.status_code == 500 and tampered not in r2.text
+
+
+def test_request_digest_is_also_immutable_to_the_app_role(pg_stack: SimpleNamespace) -> None:
+    # A runtime role cannot rewrite request_sha256 either, so it can never forge a
+    # CONSISTENT tampered (text, digest) pair to defeat the read-time verification.
+    client = _client(pg_stack, _plan())
+    h = _member(client, "prov-j", "j@x.com")
+    pid = client.post("/plans", json={"prompt": "immutable digest"}, headers=h).json()["id"]
+    with (
+        psycopg.connect(pg_stack.app_libpq) as c,
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+    ):
+        c.execute(
+            "UPDATE plan_proposals SET request_sha256=%s WHERE id=%s",
+            (hashlib.sha256(b"forged").hexdigest(), pid),
+        )
+
+
 def test_secret_like_request_text_does_not_leak_to_list_or_metrics(
     pg_stack: SimpleNamespace,
 ) -> None:
