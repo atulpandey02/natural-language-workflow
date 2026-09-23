@@ -343,6 +343,28 @@ def test_5_expired_lease_on_transmission_started_is_unknown(pg_stack: SimpleName
     assert _ea(pg_stack.owner_libpq, run_id)["status"] == "unknown"
 
 
+def test_5b_mark_transmission_started_refuses_an_expired_lease(pg_stack: SimpleNamespace) -> None:
+    # Clock-controlled (lease_expires_at set into the past): a worker whose lease
+    # already expired must NOT cross the boundary or transmit — the action is
+    # eligible for reclaim. Because the boundary is not set, the action stays
+    # safely retryable (nothing was transmitted).
+    m = pg_stack.seed_member()
+    _seed_webhook(pg_stack.owner_libpq, m.tenant_id)
+    run_id = _seed(pg_stack, m, _plan())
+    sm = _worker_sm(pg_stack)
+    _park_and_approve(sm, run_id, m, pg_stack.owner_libpq)
+    claim = execute_advancement(sm, run_id, STORE)
+    assert claim.action_task is not None
+    _expire_lease(pg_stack.owner_libpq, run_id)  # lease now in the past
+    assert _cross_boundary(sm, claim.action_task) is False  # refused, no boundary
+    assert _ea(pg_stack.owner_libpq, run_id)["transmission_started_at"] is None
+    # Still retryable: a resume re-claims and delivers exactly once.
+    sink = CountingSink()
+    assert _drive(sm, run_id, sink.runner()) == "completed"
+    assert sink.calls >= 1
+    assert _ea(pg_stack.owner_libpq, run_id)["status"] == "success"
+
+
 # --- 6. the reconciler cannot re-arm an UNKNOWN action --------------------------------
 def test_6_reconciler_excludes_boundary_unknown(pg_stack: SimpleNamespace) -> None:
     m = pg_stack.seed_member()

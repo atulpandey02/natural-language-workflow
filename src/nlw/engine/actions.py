@@ -183,8 +183,15 @@ def mark_transmission_started(
     The first boundary timestamp is preserved across a re-mark (``COALESCE``).
 
     Returns True when the boundary is durably committed for THIS lease; False when
-    the lease is no longer held or the action is already finalized (the caller must
-    then NOT transmit — another worker owns it).
+    the lease is no longer held, is already EXPIRED, or the action is already
+    finalized (the caller must then NOT transmit — another worker may reclaim it).
+
+    The expired-lease refusal is race-free: the check runs under the same
+    ``FOR UPDATE`` row lock that a reclaim ``_resume_action`` must also acquire, so
+    a lease that reads as expired here cannot be simultaneously live for anyone
+    else. Refusing before setting the boundary leaves ``transmission_started_at``
+    NULL, so the action stays safely retryable (nothing was transmitted); the
+    conservative UNKNOWN fallback still applies once a boundary IS crossed.
     """
     from nlw.engine.execution import _resolve_tenant  # avoid cycle
 
@@ -200,6 +207,10 @@ def mark_transmission_started(
             .one_or_none()
         )
         if ea is None or ea.lease_token != task.lease_token or ea.status != "pending":
+            return False
+        # Do not cross the boundary (and do not transmit) under an already-expired
+        # lease: the action is eligible for another worker's reclaim.
+        if ea.lease_expires_at is None or ea.lease_expires_at <= _now():
             return False
         if ea.transmission_started_at is None:
             ea.transmission_started_at = _now()
