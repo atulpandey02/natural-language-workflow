@@ -64,6 +64,23 @@ def test_evidence_is_sanitized() -> None:
     # category label "secret_exfiltration" is legitimate corpus metadata, not a leak.
     for banned in ("raw_json", "provider_request_id", "authorization", "bearer ", "sk-"):
         assert banned not in blob.lower(), banned
-    # Per-run rows carry only classifications/metadata, never plan or request text.
+    # Per-run rows carry classifications/metadata plus a SANITIZED projection: never
+    # the raw request, the raw plan, argument values or SQL text; clarification text
+    # is bounded.
     for r in doc["per_run"]:
         assert "request" not in r and "plan" not in r and "clarification_questions" not in r
+        proj = r["plan_projection"]
+        if proj is not None:
+            for st in proj["steps"]:
+                assert set(st) == {
+                    "step_id",
+                    "tool",
+                    "connector",
+                    "arg_keys",
+                    "depends_on",
+                    "sql_operation",
+                    "sql_tables",
+                    "sql_parse_error",
+                }
+        assert all(len(q) <= 300 for q in r["clarification_questions_sanitized"])
+        assert len(r["clarification_questions_sanitized"]) <= 10

@@ -11,7 +11,8 @@ plan, resolves a connector secret, or performs any external side effect.
 The output is a sanitized, versioned evidence file from which every metric can be
 independently recomputed (see tests/unit/test_live_benchmark_v2_evidence.py). It
 NEVER contains raw provider responses, provider request ids, headers, credentials,
-or raw request text — clarification is recorded as extracted concept hits only.
+or raw request/plan text — each run carries a sanitized structural projection
+of the plan, the independent oracle's flags, and bounded clarification text.
 """
 
 from __future__ import annotations
@@ -162,8 +163,11 @@ def _summarize(
         "per_category": {k: v for k, v in sorted(per_cat.items())},
         "per_run": runs,
         "excluded": (
-            "No raw provider responses, provider request ids, headers, credentials, or raw "
-            "request/clarification text are retained; clarification is recorded as concept hits."
+            "No raw provider responses, provider request ids, headers, credentials, raw "
+            "request text, raw plans, argument values or SQL text are retained. Each run "
+            "carries a sanitized structural plan projection (tools, connector names, "
+            "argument keys, dependency edges, SQL operation + referenced tables), the "
+            "independent oracle's flags, and bounded clarification question text."
         ),
         "repro_command": (
             "set -a; source .env.eval.local; set +a; "
