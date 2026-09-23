@@ -53,6 +53,66 @@ _PLANNER_LATENCY = Histogram(
     "nlw_planner_latency_seconds",
     "Planner (LLM + feasibility) latency (seconds).",
 )
+# --- AI-core behavior (M12B-A, Part I). All labels are bounded vocabularies:
+# never tenant/run/step ids, prompt text, or tool output. ---
+# Structurally invalid model output (unparseable / schema violation) -> a
+# deterministic PLANNER_INVALID_OUTPUT reject. A rising rate signals a model /
+# provider / schema-drift problem distinct from ordinary business rejects.
+_PLANNER_INVALID = Counter(
+    "nlw_planner_invalid_output_total",
+    "Planner responses rejected as structurally invalid (schema/parse failure).",
+)
+# Feasibility REJECT reasons by stable code (FeasibilityCode is a small fixed
+# vocabulary). One increment per reject finding.
+_FEASIBILITY_REJECT = Counter(
+    "nlw_feasibility_reject_total",
+    "Feasibility reject findings by stable code.",
+    labelnames=("code",),
+)
+# Proposed plan shape (accepted plans that reached feasibility).
+_PLAN_STEPS = Histogram(
+    "nlw_plan_steps",
+    "Number of steps in a proposed plan.",
+    buckets=(0, 1, 2, 3, 5, 10, 20, 50, 100),
+)
+_PLAN_BYTES = Histogram(
+    "nlw_plan_bytes",
+    "Serialized size of a proposed plan (bytes).",
+    buckets=(256, 1024, 4096, 16384, 65536, 262144),
+)
+# Planner token usage (direction is bounded: input|output). Cost/latency signal.
+_PLANNER_TOKENS = Histogram(
+    "nlw_planner_tokens",
+    "Planner token usage per request.",
+    labelnames=("direction",),
+    buckets=(64, 256, 1024, 2048, 4096, 8192),
+)
+# Deterministic grounded run summary outcomes (RunOutcome is a fixed vocabulary).
+_RUN_SUMMARY = Counter(
+    "nlw_run_summary_total",
+    "Grounded run summaries produced, by run outcome.",
+    labelnames=("outcome",),
+)
+# Stale-plan re-validation blocks (M12B-A addendum, Part 2). Both labels are fixed
+# vocabularies: outcome (STALE_PLAN/POLICY_DENIED/INVALID_PLAN) and reason (a
+# stable FeasibilityCode value). Never customer data.
+_STALE_PLAN = Counter(
+    "nlw_stale_plan_total",
+    "Re-validation blocks of a previously-accepted plan, by outcome and reason.",
+    labelnames=("outcome", "reason"),
+)
+# Queue-to-start latency: run creation -> first RUNNING transition (how long a run
+# waited before a worker picked it up). Observed once, at the actual start.
+_QUEUE_TO_START = Histogram(
+    "nlw_run_queue_to_start_seconds",
+    "Seconds from run creation to its first RUNNING transition.",
+)
+# Approval wait: request -> decision. Observed once, when a decision is recorded.
+_APPROVAL_WAIT = Histogram(
+    "nlw_approval_wait_seconds",
+    "Seconds a run waited for an approval decision.",
+    buckets=(1, 10, 60, 300, 1800, 7200, 86400),
+)
 
 # --- Tools / actions (worker) ---
 _TOOL_LATENCY = Histogram(
@@ -106,6 +166,11 @@ _SCHED_RECON_FAIRNESS_DEFERRED = Counter(
 _SCHED_OCCURRENCE_EXISTS = Counter(
     "nlw_scheduler_occurrence_exists_total",
     "Due occurrences whose run already existed (idempotent scheduler no-op).",
+)
+_SCHED_BLOCKED = Counter(
+    "nlw_scheduler_blocked_total",
+    "Due schedules blocked from creating an occurrence (fail-closed authorization).",
+    ["reason"],
 )
 
 # --- Errors / rate limiting ---
@@ -262,6 +327,46 @@ def observe_planner(seconds: float) -> None:
     _PLANNER_LATENCY.observe(seconds)
 
 
+def record_planner_invalid_output() -> None:
+    _PLANNER_INVALID.inc()
+
+
+def record_feasibility_reject(code: str) -> None:
+    """One reject finding by stable FeasibilityCode value (bounded vocabulary)."""
+    _FEASIBILITY_REJECT.labels(code=code).inc()
+
+
+def observe_plan_shape(steps: int, plan_bytes: int) -> None:
+    _PLAN_STEPS.observe(steps)
+    _PLAN_BYTES.observe(plan_bytes)
+
+
+def observe_planner_tokens(input_tokens: int | None, output_tokens: int | None) -> None:
+    if input_tokens is not None:
+        _PLANNER_TOKENS.labels(direction="input").observe(input_tokens)
+    if output_tokens is not None:
+        _PLANNER_TOKENS.labels(direction="output").observe(output_tokens)
+
+
+def record_run_summary(outcome: str) -> None:
+    _RUN_SUMMARY.labels(outcome=outcome).inc()
+
+
+def record_stale_plan(outcome: str, reason: str) -> None:
+    """One re-validation block. ``reason`` is a stable FeasibilityCode value."""
+    _STALE_PLAN.labels(outcome=outcome, reason=reason).inc()
+
+
+def observe_queue_to_start(seconds: float) -> None:
+    """Observe run creation -> first RUNNING (once, at the actual start)."""
+    _QUEUE_TO_START.observe(max(0.0, seconds))
+
+
+def observe_approval_wait(seconds: float) -> None:
+    """Observe request -> decision (once, when a decision is recorded)."""
+    _APPROVAL_WAIT.observe(max(0.0, seconds))
+
+
 def observe_tool(tool: str, outcome: str, seconds: float) -> None:
     _TOOL_LATENCY.labels(tool=tool, outcome=outcome).observe(seconds)
 
@@ -306,6 +411,10 @@ def record_reconcile_fairness_deferred(n: int) -> None:
 def record_scheduler_occurrence_exists(n: int) -> None:
     if n:
         _SCHED_OCCURRENCE_EXISTS.inc(n)
+
+
+def record_schedule_blocked(reason: str) -> None:
+    _SCHED_BLOCKED.labels(reason=reason).inc()
 
 
 def record_rate_limit_rejected(endpoint: str) -> None:

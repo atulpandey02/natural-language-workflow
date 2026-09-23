@@ -11,6 +11,7 @@ validation -> SQL safety (M5 validator) -> DAG -> limits -> approval/clarificati
 """
 
 import enum
+import json
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -40,6 +41,8 @@ class Severity(enum.StrEnum):
 class FeasibilityCode(enum.StrEnum):
     EMPTY_PLAN = "EMPTY_PLAN"
     TOO_MANY_STEPS = "TOO_MANY_STEPS"
+    PLAN_TOO_LARGE = "PLAN_TOO_LARGE"
+    ARGS_TOO_LARGE = "ARGS_TOO_LARGE"
     DUPLICATE_STEP_ID = "DUPLICATE_STEP_ID"
     UNKNOWN_TOOL = "UNKNOWN_TOOL"
     TOOL_NOT_AVAILABLE = "TOOL_NOT_AVAILABLE"
@@ -47,6 +50,9 @@ class FeasibilityCode(enum.StrEnum):
     CONNECTOR_NOT_FOUND = "CONNECTOR_NOT_FOUND"
     CONNECTOR_TYPE_MISMATCH = "CONNECTOR_TYPE_MISMATCH"
     CONNECTOR_UNUSABLE = "CONNECTOR_UNUSABLE"
+    # The bound connector's execution-relevant configuration/destination changed
+    # since materialization (identity binding, M12B final; see connector_binding).
+    CONNECTOR_CONFIG_CHANGED = "CONNECTOR_CONFIG_CHANGED"
     CONNECTOR_ON_CONNECTORLESS_TOOL = "CONNECTOR_ON_CONNECTORLESS_TOOL"
     CONNECTOR_HEALTH_UNVERIFIED = "CONNECTOR_HEALTH_UNVERIFIED"
     ARG_VALIDATION_FAILED = "ARG_VALIDATION_FAILED"
@@ -335,6 +341,32 @@ def check_plan(
                 code=FeasibilityCode.TOO_MANY_STEPS,
                 severity=Severity.REJECT,
                 message=f"plan has {len(plan.steps)} steps; limit is {limits.max_steps}",
+            )
+        )
+
+    # Serialized-size bounds (M12B-A): never let an unbounded arg blob reach
+    # durable state. Per-step args first (so the finding names the offender),
+    # then the whole plan. compact separators = the persisted-ish size.
+    for step in plan.steps:
+        args_bytes = len(json.dumps(step.args, default=str, separators=(",", ":")).encode())
+        if args_bytes > limits.max_step_args_bytes:
+            findings.append(
+                FeasibilityFinding(
+                    code=FeasibilityCode.ARGS_TOO_LARGE,
+                    severity=Severity.REJECT,
+                    message=f"step '{step.id}' args exceed {limits.max_step_args_bytes} bytes",
+                    step_id=step.id,
+                    detail={"bytes": args_bytes, "limit": limits.max_step_args_bytes},
+                )
+            )
+    plan_bytes = len(plan.model_dump_json().encode())
+    if plan_bytes > limits.max_plan_bytes:
+        findings.append(
+            FeasibilityFinding(
+                code=FeasibilityCode.PLAN_TOO_LARGE,
+                severity=Severity.REJECT,
+                message=f"plan serializes to {plan_bytes} bytes; limit is {limits.max_plan_bytes}",
+                detail={"bytes": plan_bytes, "limit": limits.max_plan_bytes},
             )
         )
 

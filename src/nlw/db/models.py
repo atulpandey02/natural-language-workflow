@@ -163,6 +163,11 @@ class WorkflowVersion(TimestampMixin, Base):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     plan: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # M12B final: authoritative connector identity binding per connector-backed
+    # step -> {connector_id, connector_type, config_fingerprint}. Computed at
+    # materialization; execution loads by the bound id and fails closed (STALE_PLAN)
+    # on identity/type/config change. NULL only for pre-binding historical versions.
+    connector_bindings: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
 class WorkflowRun(TimestampMixin, Base):
@@ -325,6 +330,16 @@ class ExternalAction(TimestampMixin, Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Durable ambiguity boundary (ADR-013 crash window). Committed immediately
+    # BEFORE the out-of-lock network transmission and cleared only when a provably
+    # pre-transmission (or contractually-throttled) failure schedules a retry. If
+    # this is set and the attempt never finalized (worker death), the transmission
+    # MAY have started: lease recovery transitions the action to terminal UNKNOWN
+    # rather than resending it (unless the tool has an enforced idempotency
+    # contract). NULL = no attempt has crossed the boundary yet.
+    transmission_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 # --- Planner proposals (M6) ---
@@ -346,8 +361,15 @@ class PlanProposal(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    # No raw prompt: only its length (bounded by the platform cap).
+    # Length of the request (bounded by the platform cap); kept for back-compat.
     prompt_len: Mapped[int] = mapped_column(Integer, nullable=False)
+    # M12B-A: durable request->plan provenance. The original NL request text
+    # (bounded before persistence), its sha256 digest (mutation detection), and
+    # the planner contract version. Immutable after INSERT (nlw_app has no UPDATE
+    # grant on these columns); never logged/metered; RLS/tenant-scoped.
+    request_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    planner_contract_version: Mapped[str | None] = mapped_column(String, nullable=True)
     provider: Mapped[str] = mapped_column(String, nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
     workflow_name: Mapped[str] = mapped_column(String, nullable=False)
@@ -407,6 +429,11 @@ class Schedule(TimestampMixin, Base):
     created_by: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
+    # M12B final (Part 4): fail-closed schedule ownership. When the creator loses
+    # membership/role, occurrence creation is BLOCKED with a stable reason until an
+    # authorized admin reassigns/re-enables the schedule. NULL = not blocked.
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # --- Disaster recovery (M11.5 P2) ---

@@ -11,6 +11,10 @@ from dataclasses import dataclass
 
 from nlw.feasibility.engine import FeasibilityReport, check_plan, planner_invalid_output_report
 from nlw.feasibility.limits import PlatformLimits
+from nlw.planner.budget import (
+    assert_prompt_within_budget,
+    assert_tool_catalog_within_budget,
+)
 from nlw.planner.capabilities import CapabilityView
 from nlw.planner.prompt import build_system_prompt, build_user_prompt
 from nlw.planner.provider import (
@@ -42,9 +46,15 @@ async def plan_and_check(
     max_output_tokens: int,
     timeout_s: int,
 ) -> PlanningResult:
+    system = build_system_prompt()
+    user = build_user_prompt(view, user_request, limits.max_steps)
+    # Deterministic context budget (M12B-A, Part G): reject an over-budget prompt
+    # or tool catalog BEFORE the provider call. Never truncate a schema/constraint.
+    assert_tool_catalog_within_budget([t.description for t in view.tools])
+    assert_prompt_within_budget(system, user)
     req = LLMRequest(
-        system=build_system_prompt(),
-        user=build_user_prompt(view, user_request, limits.max_steps),
+        system=system,
+        user=user,
         output_schema=PlannerOutput.model_json_schema(),
         max_output_tokens=max_output_tokens,
         timeout_s=timeout_s,

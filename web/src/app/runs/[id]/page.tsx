@@ -3,13 +3,15 @@
 import { use } from "react";
 import { AppShell } from "@/components/AppShell";
 import { ErrorBanner, Empty, Loading, StatusBadge } from "@/components/ui";
-import { useRun, useRunActions, useRunSteps } from "@/lib/api/hooks";
+import { RunSummaryCard } from "@/components/RunSummaryCard";
+import { useRun, useRunActions, useRunSteps, useRunSummary } from "@/lib/api/hooks";
 
 export default function RunDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const run = useRun(id);
   const steps = useRunSteps(id);
   const actions = useRunActions(id);
+  const summary = useRunSummary(id);
 
   return (
     <AppShell>
@@ -38,6 +40,8 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
           {run.data.error ? <div className="banner">{run.data.error}</div> : null}
         </div>
       ) : null}
+
+      {summary.data ? <RunSummaryCard summary={summary.data} /> : null}
 
       <h2>Steps</h2>
       {steps.data && steps.data.length === 0 ? <Empty>No steps recorded yet.</Empty> : null}

@@ -19,6 +19,8 @@ import type {
   ScheduleOut,
   StepRunOut,
   ExternalActionOut,
+  RunSummaryOut,
+  WorkflowProvenanceOut,
   TenantContextOut,
   ToolOut,
   UserOut,
@@ -143,6 +145,23 @@ export function useRunActions(id: string) {
   return useQuery({
     queryKey: ["run", id, "actions"],
     queryFn: () => api.get<ExternalActionOut[]>(`/runs/${id}/actions`),
+    enabled: Boolean(id),
+    refetchInterval: RUN_POLL_MS,
+  });
+}
+
+export function useWorkflowProvenance(versionId: string | null | undefined) {
+  return useQuery({
+    queryKey: ["workflow-version", versionId, "provenance"],
+    queryFn: () => api.get<WorkflowProvenanceOut>(`/workflow-versions/${versionId}/provenance`),
+    enabled: Boolean(versionId),
+  });
+}
+
+export function useRunSummary(id: string) {
+  return useQuery({
+    queryKey: ["run", id, "summary"],
+    queryFn: () => api.get<RunSummaryOut>(`/runs/${id}/summary`),
     enabled: Boolean(id),
     refetchInterval: RUN_POLL_MS,
   });

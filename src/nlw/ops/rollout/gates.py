@@ -183,6 +183,32 @@ def check_drained(d: DrainSnapshot) -> None:
         )
 
 
+# Go-live SQL that counts materialized workflow versions predating connector
+# identity binding (migration 0019). Such versions have NULL connector_bindings and
+# fall back to NAME resolution at execution — they are legacy and are NOT
+# identity-pinned. The count is surfaced (never silently treated as protected).
+LEGACY_CONNECTOR_BINDING_SQL = (
+    "SELECT count(*) FROM workflow_versions WHERE connector_bindings IS NULL"
+)
+
+
+def report_legacy_connector_bindings(null_binding_versions: int) -> str:
+    """Advisory go-live report (NOT a hard gate): surface how many workflow versions
+    predate connector identity binding (0019) and therefore fall back to NAME
+    resolution — legacy, NOT identity-pinned. Never claims they are protected; a
+    non-zero count is informational, not a failure (legacy versions remain valid)."""
+    if null_binding_versions < 0:
+        raise GateError("legacy connector-binding count cannot be negative")
+    if null_binding_versions == 0:
+        return "connector bindings: 0 legacy versions — every workflow version is identity-pinned"
+    return (
+        f"connector bindings: {null_binding_versions} LEGACY workflow version(s) predate "
+        "migration 0019 (connector_bindings IS NULL). These are NAME-resolved at execution, "
+        "NOT identity-pinned; a connector rename/recreate is not stale-detected for them. "
+        "Re-materialize them to pin identity."
+    )
+
+
 def check_policy_cutover(policy_count: int, legacy_count: int, *, expected_policies: int) -> None:
     if policy_count != expected_policies:
         raise GateError(f"{policy_count} live policies, expected {expected_policies}")

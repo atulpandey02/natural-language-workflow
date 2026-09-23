@@ -16,11 +16,17 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.domain.workflow import WorkflowPlan
-from nlw.engine.actions import ActionExecResult, ActionTask, run_action
+from nlw.engine.actions import (
+    ACTION_OUTCOME_UNKNOWN,
+    ActionExecResult,
+    ActionTask,
+    mark_transmission_started,
+    run_action,
+)
 from nlw.engine.execution import execute_advancement, process_advance
 from nlw.engine.runs import create_run, create_workflow_with_version
 from nlw.secrets.store import EnvironmentSecretStore, SecretStore, env_key_for
-from nlw.tenancy.session import apply_signed_context_sync
+from nlw.tenancy.session import apply_signed_context_sync, set_worker_context_default
 from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
@@ -275,7 +281,10 @@ def test_w1_crash_before_send_delivers_once_after_lease_expiry(pg_stack: SimpleN
     assert _step(pg_stack.owner_libpq, run_id)[0] == "SUCCESS"
 
 
-def test_w2_crash_after_send_redelivers_at_least_once(pg_stack: SimpleNamespace) -> None:
+def test_w2_crash_after_transmission_boundary_becomes_unknown(pg_stack: SimpleNamespace) -> None:
+    # ADR-013 correction: once the durable transmission boundary is crossed, a
+    # worker death is NOT redelivered (a stable key does not authorize replay for a
+    # non-idempotent receiver) -> terminal UNKNOWN.
     m = pg_stack.seed_member()
     _seed_webhook(pg_stack.owner_libpq, m.tenant_id)
     run_id = _seed_run(pg_stack, m.user_id, m.tenant_id, _webhook_plan())
@@ -285,23 +294,24 @@ def test_w2_crash_after_send_redelivers_at_least_once(pg_stack: SimpleNamespace)
 
     process_advance(sm, run_id, _noop_enqueue, store, _runner(sink))  # park
     _approve(pg_stack.owner_libpq, run_id, m.user_id)
-    # Claim + send, but "crash" before finalize (do not call finalize_action).
     claim = execute_advancement(sm, run_id, store)
     assert claim.action_task is not None
+    # Cross the durable boundary exactly as process_advance does, then send and
+    # "crash" before finalize (do not call finalize_action).
+    assert mark_transmission_started(sm, claim.action_task, set_worker_context_default)
     run_action(claim.action_task, transport=sink.transport())
     assert len(sink.calls) == 1  # delivered once
-    key_first = str(claim.action_task.external_action_key)
 
-    # Lease still live -> redelivery defers (no premature duplicate).
+    # Lease still live -> a redelivery defers (no premature duplicate).
     assert execute_advancement(sm, run_id, store).result == "deferred"
 
-    # Simulate the original worker's death; a resume re-attempts with the SAME
-    # idempotency key -> AT-LEAST-ONCE: the sink sees a second delivery.
+    # Original worker dies: resume must NOT resend a transmission-started action.
     _expire_lease(pg_stack.owner_libpq, run_id)
     _drive(sm, run_id, _runner(sink), store)
-    assert len(sink.calls) == 2  # duplicate window demonstrated
-    assert sink.calls[1].headers["Idempotency-Key"] == key_first  # stable key reused
-    assert _step(pg_stack.owner_libpq, run_id)[0] == "SUCCESS"
+    assert len(sink.calls) == 1  # NEVER resent
+    ea = _ea(pg_stack.owner_libpq, run_id)
+    assert ea["status"] == "unknown" and ea["error_class"] == ACTION_OUTCOME_UNKNOWN
+    assert _step(pg_stack.owner_libpq, run_id)[0] == "FAILED"
 
 
 def test_w3_replay_after_finalize_is_noop(pg_stack: SimpleNamespace) -> None:

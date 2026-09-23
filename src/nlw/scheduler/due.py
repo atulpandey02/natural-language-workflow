@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -48,7 +48,13 @@ def scan_due(
     due = (
         session.execute(
             select(Schedule)
-            .where(Schedule.enabled.is_(True), Schedule.next_run_at <= now)
+            .where(
+                Schedule.enabled.is_(True),
+                Schedule.next_run_at <= now,
+                # Already-blocked schedules are excluded until an admin remediates,
+                # so a blocked schedule never re-scans (no unbounded failed work).
+                Schedule.blocked_reason.is_(None),
+            )
             .order_by(Schedule.next_run_at)
             .with_for_update(skip_locked=True)
             .limit(batch_limit)
@@ -64,6 +70,23 @@ def scan_due(
         rec = _recurrence(s)
         scheduled_for = latest_occurrence(rec, now)
         run_made = False
+
+        # Fail-closed authorization (M12B, Part 4): the creator must still be an
+        # active member with a sufficient role. The check is a SECURITY DEFINER
+        # function (nlw_scheduler cannot read memberships). The model never decides.
+        block_reason = session.execute(
+            text("SELECT schedule_creator_block_reason(:sid)"), {"sid": str(s.id)}
+        ).scalar_one_or_none()
+        if block_reason is not None:
+            # Create NO run and enqueue nothing; record a stable blocked state +
+            # low-cardinality metric, and advance next_run_at so a later remediation
+            # resumes cleanly. The schedule is now excluded until an admin unblocks.
+            s.blocked_reason = block_reason
+            s.blocked_at = now
+            s.next_run_at = next_occurrence(rec, now)
+            s.updated_at = now
+            metrics.record_schedule_blocked(block_reason)
+            continue
 
         if scheduled_for is not None and (now - scheduled_for) <= catchup:
             run_id = uuid.uuid4()

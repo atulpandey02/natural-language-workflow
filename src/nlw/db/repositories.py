@@ -325,6 +325,9 @@ class PlanProposalRepository:
         normalized_plan: dict[str, Any] | None,
         feasibility: dict[str, Any],
         clarification_questions: list[str] | None,
+        request_text: str | None = None,
+        request_sha256: str | None = None,
+        planner_contract_version: str | None = None,
     ) -> PlanProposal:
         proposal = PlanProposal(
             id=uuid.uuid4(),
@@ -339,6 +342,9 @@ class PlanProposalRepository:
             normalized_plan=normalized_plan,
             feasibility=feasibility,
             clarification_questions=clarification_questions,
+            request_text=request_text,
+            request_sha256=request_sha256,
+            planner_contract_version=planner_contract_version,
         )
         self.session.add(proposal)
         await self.session.flush()
@@ -349,6 +355,20 @@ class PlanProposalRepository:
             await self.session.execute(
                 select(PlanProposal).where(
                     PlanProposal.id == proposal_id, PlanProposal.tenant_id == tenant_id
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def get_by_version(
+        self, workflow_version_id: uuid.UUID, tenant_id: uuid.UUID
+    ) -> PlanProposal | None:
+        """The proposal that materialized this workflow version (request provenance).
+        Tenant-scoped; RLS additionally guarantees cross-tenant isolation."""
+        return (
+            await self.session.execute(
+                select(PlanProposal).where(
+                    PlanProposal.workflow_version_id == workflow_version_id,
+                    PlanProposal.tenant_id == tenant_id,
                 )
             )
         ).scalar_one_or_none()

@@ -7,7 +7,10 @@
 
 Planning runs API-side. The LLM sees only the tenant capability view (Tool
 Registry + secret-free connectors); it never receives secrets or the LLM key.
-The raw prompt and raw provider response are never stored. Deterministic
+The raw provider response is never stored. The natural-language request IS
+persisted (M12B-A, migration 0017) as tenant-scoped, immutable provenance on the
+proposal — bounded before persistence, never logged/metered/listed, returned only
+on the single-proposal detail and version-provenance endpoints. Deterministic
 feasibility owns the final status — a parsed plan is not executable.
 """
 
@@ -19,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import nlw.tools.builtin  # noqa: F401  (populates the tool + connector-type registries)
+from nlw.api.capability import build_tenant_view
 from nlw.api.deps import (
     get_app_settings,
     get_llm_provider,
@@ -26,24 +30,36 @@ from nlw.api.deps import (
     get_tenant_context,
     rate_limit,
 )
-from nlw.api.schemas import MaterializeOut, PlanProposalOut, PlanRequest
-from nlw.connectors.postgres import PostgresConnectorConfig
+from nlw.api.schemas import (
+    MaterializeOut,
+    PlanProposalDetailOut,
+    PlanProposalOut,
+    PlanRequest,
+)
 from nlw.core.config import Settings
 from nlw.db.models import Connector, Workflow, WorkflowVersion
 from nlw.db.quota import QuotaExceededError, enforce_cap, workflows_count_stmt
-from nlw.db.repositories import ConnectorRepository, PlanProposalRepository
+from nlw.db.repositories import PlanProposalRepository
 from nlw.domain.workflow import WorkflowPlan
-from nlw.feasibility.engine import FeasibilityReport, FeasibilityStatus, check_plan
+from nlw.feasibility.connector_binding import build_binding
+from nlw.feasibility.engine import FeasibilityReport
 from nlw.feasibility.limits import DEFAULT_LIMITS
+from nlw.feasibility.revalidation import revalidate_plan
 from nlw.observability import metrics
-from nlw.planner.capabilities import SafeConnector, build_capability_view
+from nlw.planner.budget import PromptBudgetError
 from nlw.planner.planner import plan_and_check
+from nlw.planner.provenance import (
+    ProvenanceIntegrityError,
+    compute_request_digest,
+    verify_request_provenance,
+)
 from nlw.planner.provider import (
     LLMAuthError,
     LLMProvider,
     LLMTimeoutError,
     LLMUnavailableError,
 )
+from nlw.planner.schema import PLANNER_CONTRACT_VERSION
 from nlw.registry.registry import REGISTRY
 from nlw.tenancy.context import TenantContext
 
@@ -51,43 +67,42 @@ router = APIRouter()
 log = structlog.get_logger(__name__)
 
 
-def _safe_connectors(connectors: list[Connector]) -> list[SafeConnector]:
-    """Project connector rows to a secret-free view for the planner + feasibility."""
-    result: list[SafeConnector] = []
-    for c in connectors:
-        if c.type == "postgres":
-            cfg = PostgresConnectorConfig.model_validate(c.config)
-            hint = cfg.schema_hint.model_dump(by_alias=True) if cfg.schema_hint else None
-            result.append(
-                SafeConnector(
-                    name=c.name,
-                    type=c.type,
-                    status=c.status,
-                    allowed_schemas=cfg.allowed_schemas,
-                    allowed_tables=cfg.allowed_tables,
-                    schema_hint=hint,
-                )
-            )
-        else:
-            result.append(SafeConnector(name=c.name, type=c.type, status=c.status))
-    return result
-
-
-async def _build_view_and_tools(
-    session: AsyncSession, tenant_id: uuid.UUID
-) -> tuple[list[SafeConnector], set[str]]:
-    connectors = await ConnectorRepository(session).list_for_tenant(tenant_id)
-    return _safe_connectors(connectors), {spec.name for spec in REGISTRY.all()}
-
-
 def _feasibility_dict(report: FeasibilityReport) -> dict[str, object]:
     # Persist the report WITHOUT normalized_plan (stored in its own column).
     return report.model_dump(mode="json", exclude={"normalized_plan"})
 
 
+async def _compute_connector_bindings(
+    session: AsyncSession, tenant_id: uuid.UUID, plan: WorkflowPlan
+) -> dict[str, dict[str, str]] | None:
+    """Resolve each connector-backed step to its authoritative connector identity
+    and fingerprint. Returns the binding map, or None if a required connector no
+    longer resolves (fail closed at the caller). The LLM never sees these ids."""
+    from sqlalchemy import select as _select
+
+    bindings: dict[str, dict[str, str]] = {}
+    for step in plan.steps:
+        spec = REGISTRY.get(step.tool)
+        if spec.connector_type is None:
+            continue  # connector-less tool: nothing to bind
+        connector = (
+            await session.execute(
+                _select(Connector).where(
+                    Connector.tenant_id == tenant_id,
+                    Connector.type == spec.connector_type,
+                    Connector.name == step.connector,
+                )
+            )
+        ).scalar_one_or_none()
+        if connector is None:
+            return None
+        bindings[step.id] = build_binding(str(connector.id), connector.type, connector.config)
+    return bindings
+
+
 @router.post(
     "/plans",
-    response_model=PlanProposalOut,
+    response_model=PlanProposalDetailOut,
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(rate_limit("plans", "plans"))],
 )
@@ -97,7 +112,7 @@ async def create_plan(
     session: AsyncSession = Depends(get_session),
     provider: LLMProvider = Depends(get_llm_provider),
     settings: Settings = Depends(get_app_settings),
-) -> PlanProposalOut:
+) -> PlanProposalDetailOut:
     prompt = body.prompt
     if len(prompt) > settings.llm_max_prompt_chars:
         raise HTTPException(
@@ -107,8 +122,7 @@ async def create_plan(
     if not prompt.strip():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "prompt must not be empty")
 
-    connectors, all_tool_names = await _build_view_and_tools(session, ctx.tenant_id)
-    view = build_capability_view(REGISTRY.all(), connectors)
+    view, all_tool_names = await build_tenant_view(session, ctx.tenant_id)
 
     planner_start = time.perf_counter()
     try:
@@ -134,11 +148,29 @@ async def create_plan(
         metrics.record_error("planner_auth")
         log.error("planner.provider_error", error_class="auth", provider=settings.llm_provider)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "planner provider misconfigured") from exc
+    except PromptBudgetError as exc:
+        # Deterministic: the assembled prompt/tool catalog exceeded its budget.
+        # Rejected before any provider call; never truncated (Part G).
+        metrics.record_error("planner_prompt_budget")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     finally:
         metrics.observe_planner(time.perf_counter() - planner_start)
 
     report = result.report
     metrics.record_plan(report.status.value)
+    # AI-core observability (M12B-A, Part I): token usage, invalid-output rate,
+    # reject reasons by stable code, and the proposed-plan shape. All bounded.
+    metrics.observe_planner_tokens(result.input_tokens, result.output_tokens)
+    if result.output is None:
+        metrics.record_planner_invalid_output()
+    else:
+        plan_obj = result.output.to_workflow_plan()
+        metrics.observe_plan_shape(
+            len(result.output.steps), len(plan_obj.model_dump_json().encode())
+        )
+    for finding in report.findings:
+        if finding.severity == "reject":
+            metrics.record_feasibility_reject(finding.code.value)
     proposed_plan = result.output.to_workflow_plan().model_dump() if result.output else None
     normalized_plan = (
         report.normalized_plan.model_dump() if report.normalized_plan is not None else None
@@ -156,6 +188,9 @@ async def create_plan(
         normalized_plan=normalized_plan,
         feasibility=_feasibility_dict(report),
         clarification_questions=report.clarification_questions,
+        request_text=prompt,
+        request_sha256=compute_request_digest(prompt),
+        planner_contract_version=PLANNER_CONTRACT_VERSION,
     )
 
     # Observability: metadata only. Never the raw prompt (not even at DEBUG).
@@ -179,7 +214,7 @@ async def create_plan(
         approvals_required=report.approvals_required,
         clarification_count=len(report.clarification_questions),
     )
-    return PlanProposalOut.model_validate(proposal)
+    return PlanProposalDetailOut.model_validate(proposal)
 
 
 @router.get("/plans", response_model=list[PlanProposalOut])
@@ -191,16 +226,28 @@ async def list_plans(
     return [PlanProposalOut.model_validate(p) for p in proposals]
 
 
-@router.get("/plans/{proposal_id}", response_model=PlanProposalOut)
+@router.get("/plans/{proposal_id}", response_model=PlanProposalDetailOut)
 async def get_plan(
     proposal_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
-) -> PlanProposalOut:
+) -> PlanProposalDetailOut:
     proposal = await PlanProposalRepository(session).get(proposal_id, ctx.tenant_id)
     if proposal is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "proposal not found")
-    return PlanProposalOut.model_validate(proposal)
+    # The stored digest is only meaningful if a read re-derives and compares it:
+    # an out-of-band mutation of request_text is detected here, never served.
+    try:
+        verify_request_provenance(
+            proposal.request_text, proposal.request_sha256, proposal_id=proposal.id
+        )
+    except ProvenanceIntegrityError as exc:
+        # Fail closed: never serve a request whose provenance no longer holds.
+        # The message carries only the proposal id, never the request text.
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "request provenance integrity check failed"
+        ) from exc
+    return PlanProposalDetailOut.model_validate(proposal)
 
 
 @router.post(
@@ -231,27 +278,54 @@ async def materialize_plan(
 
     if proposal.proposed_plan is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "proposal has no materializable plan")
+    # Only a previously-ACCEPTED proposal can materialize; a REJECT/CLARIFY
+    # proposal was never executable (INVALID/POLICY at creation), never STALE.
+    if proposal.status not in ("PASS", "NEEDS_APPROVAL"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "INVALID_PLAN", "message": "This proposal was not accepted."},
+        )
 
-    # Never trust the stored PASS: re-validate against CURRENT tenant capabilities.
+    # Never trust the stored PASS: re-validate against CURRENT tenant capabilities
+    # and classify a no-longer-executable plan (STALE_PLAN / POLICY_DENIED /
+    # INVALID_PLAN) with a stable, sanitized reason.
     plan = WorkflowPlan.model_validate(proposal.proposed_plan)
-    connectors, all_tool_names = await _build_view_and_tools(session, ctx.tenant_id)
-    view = build_capability_view(REGISTRY.all(), connectors)
-    report = check_plan(plan, view, DEFAULT_LIMITS, all_tool_names)
+    view, all_tool_names = await build_tenant_view(session, ctx.tenant_id)
+    reval = revalidate_plan(plan, view, DEFAULT_LIMITS, all_tool_names)
 
-    # A structurally executable plan may contain runtime approval-gated (M7)
-    # steps -> NEEDS_APPROVAL is materializable; approval remains per run+step.
-    _MATERIALIZABLE = (FeasibilityStatus.PASS, FeasibilityStatus.NEEDS_APPROVAL)
-    if report.status not in _MATERIALIZABLE or report.normalized_plan is None:
+    if not reval.fresh or reval.report.normalized_plan is None:
+        metrics.record_stale_plan(reval.outcome.value, reval.reason_code)
         log.info(
             "plan.materialize",
             tenant_id=str(ctx.tenant_id),
             proposal_id=str(proposal.id),
-            revalidation_status=report.status.value,
+            revalidation_outcome=reval.outcome.value,
+            reason_code=reval.reason_code,
             idempotent_hit=False,
         )
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"plan no longer materializable (revalidation: {report.status.value})",
+            detail={"code": reval.outcome.value, "message": reval.message},
+        )
+    report = reval.report
+    assert report.normalized_plan is not None  # fresh guarantees a normalized plan
+
+    # Pin every connector-backed step to the authoritative connector IDENTITY +
+    # a non-secret config fingerprint (M12B final). The LLM never sees these ids;
+    # execution loads by the bound id and fails closed (STALE_PLAN) on any
+    # identity/type/destination change. Resolving here (deterministic) is safe
+    # because revalidation above already proved each connector currently resolves.
+    bindings = await _compute_connector_bindings(session, ctx.tenant_id, report.normalized_plan)
+    if bindings is None:
+        # A connector vanished between revalidation and binding: fail closed.
+        metrics.record_stale_plan("STALE_PLAN", "CONNECTOR_NOT_FOUND")
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "STALE_PLAN",
+                "message": "A connector this workflow depends on is no longer available. "
+                "Re-plan the request to continue.",
+            },
         )
 
     # Concurrency-safe per-tenant workflow cap (a materialized workflow is a
@@ -275,6 +349,7 @@ async def materialize_plan(
         workflow_id=workflow.id,
         version=1,
         plan=report.normalized_plan.model_dump(),
+        connector_bindings=bindings,
     )
     session.add(version)
     await session.flush()

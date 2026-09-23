@@ -6,6 +6,7 @@ needed. Proves persistence privacy, materialize-time revalidation, idempotency,
 and provider-failure behavior.
 """
 
+import hashlib
 import time
 import uuid
 from collections.abc import Iterator
@@ -169,8 +170,11 @@ def test_materialize_blocked_when_connector_disabled(pg_stack: SimpleNamespace) 
     assert mat.status_code == 409  # revalidation blocks a stale PASS
 
 
-def test_prompt_not_persisted_or_returned(pg_stack: SimpleNamespace) -> None:
-    sentinel = "SENSITIVE-TOKEN-DO-NOT-STORE-42"
+def test_request_provenance_persisted_bounded_and_not_listed(pg_stack: SimpleNamespace) -> None:
+    # M12B-A: the request is now DURABLY bound to its proposal (request_text +
+    # sha256 + contract version), but only under the `request_text` field, only
+    # on the detail view, never on the list, and only for the owning tenant.
+    request = "list people please"
     provider = ScriptedProvider(_pg_query_plan("SELECT id FROM public.people"))
     client = _client(pg_stack, provider)
     h = {**_auth("m6-d", "d@x.com")}
@@ -178,20 +182,28 @@ def test_prompt_not_persisted_or_returned(pg_stack: SimpleNamespace) -> None:
     h = {**h, "X-Workspace-Id": ws}
     _make_pg_connector(client, h)
 
-    resp = client.post("/plans", json={"prompt": f"list people {sentinel}"}, headers=h)
-    body = resp.json()
+    body = client.post("/plans", json={"prompt": request}, headers=h).json()
     assert body["status"] == "PASS"
-    assert "prompt" not in body
-    # The raw prompt must not appear anywhere in the persisted row.
+    assert "prompt" not in body  # the wire field is request_text, not prompt
+    assert body["request_text"] == request
+    assert body["request_sha256"] == hashlib.sha256(request.encode()).hexdigest()
+    assert body["planner_contract_version"]
+
+    # Persisted row carries the request + digest + contract version.
     with psycopg.connect(pg_stack.owner_libpq) as c:
         row = c.execute(
-            "SELECT to_jsonb(p) FROM plan_proposals p WHERE id=%s", (body["id"],)
+            "SELECT request_text, request_sha256, planner_contract_version, prompt_len "
+            "FROM plan_proposals WHERE id=%s",
+            (body["id"],),
         ).fetchone()
     assert row is not None
-    persisted = row[0]  # jsonb -> dict
-    assert sentinel not in str(persisted)  # raw prompt never stored
-    assert "prompt" not in persisted  # no raw-prompt column
-    assert persisted["prompt_len"] == len(f"list people {sentinel}")  # only the length
+    assert row[0] == request
+    assert row[1] == hashlib.sha256(request.encode()).hexdigest()
+    assert row[2] and row[3] == len(request)
+
+    # The LIST endpoint must NOT expose the request text.
+    listed = client.get("/plans", headers=h).json()
+    assert listed and all("request_text" not in item for item in listed)
 
 
 def test_provider_timeout_yields_503_and_no_proposal_row(pg_stack: SimpleNamespace) -> None:
@@ -252,3 +264,41 @@ def test_cross_tenant_connector_not_usable_in_plan(pg_stack: SimpleNamespace) ->
     hb = {**b, "X-Workspace-Id": ws_b}
     resp = client.post("/plans", json={"prompt": "list"}, headers=hb)
     assert resp.json()["status"] == "REJECT"
+
+
+def test_run_creation_blocked_stale_plan_after_connector_removed(
+    pg_stack: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # M12B-A Part 2: a materialized PASS plan whose connector is later removed is
+    # blocked at run creation with a STALE_PLAN outcome — fail closed BEFORE any
+    # tool is invoked. Non-retryable: the customer must re-plan.
+    import nlw.api.routers.workflows as wf_router
+
+    # no Redis in this stack: patch the enqueue seam so a FRESH run creation succeeds.
+    monkeypatch.setattr(wf_router, "_enqueue_advance", lambda _run_id: None)
+    provider = ScriptedProvider(_pg_query_plan("SELECT id FROM public.people"))
+    client = _client(pg_stack, provider)
+    h = {**_auth("stale-a", "s@x.com")}
+    ws = _workspace(client, h)
+    h = {**h, "X-Workspace-Id": ws}
+    _make_pg_connector(client, h)
+
+    pid = client.post("/plans", json={"prompt": "list"}, headers=h).json()["id"]
+    mat = client.post(f"/plans/{pid}/materialize", headers=h).json()
+    wf_id = mat["workflow_id"]
+
+    # A fresh workflow runs (sanity): the plan is still executable.
+    ok = client.post(f"/workflows/{wf_id}/runs", headers={**h, "Idempotency-Key": "run-fresh-1"})
+    assert ok.status_code == 201, ok.text
+
+    # Operator removes the connector out-of-band.
+    with psycopg.connect(pg_stack.owner_libpq, autocommit=True) as c:
+        c.execute("DELETE FROM connectors WHERE tenant_id=%s AND name='pg'", (ws,))
+
+    blocked = client.post(
+        f"/workflows/{wf_id}/runs", headers={**h, "Idempotency-Key": "run-stale-1"}
+    )
+    assert blocked.status_code == 409
+    err = blocked.json()["error"]
+    assert err["code"] == "STALE_PLAN"
+    assert "re-plan" in err["message"].lower()

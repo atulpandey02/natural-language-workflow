@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "scripts" / "ops" / "deploy-staging.sh"
 VERIFY = ROOT / "scripts" / "ops" / "verify-staging-deployment.sh"
-NAMED_REV = "0016_signed_database_context"
+NAMED_REV = "0020_schedule_authorization"
 
 
 def _sh(call: str, stdin: str = "") -> subprocess.CompletedProcess[str]:

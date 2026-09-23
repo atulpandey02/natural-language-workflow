@@ -318,8 +318,10 @@ checks tool availability (tenant-scoped registry projection), connector
 ownership/type/status (RLS inventory; `error` recoverable, `disabled` rejects),
 argument models, the M5 SQL validator (single source of truth), and the DAG
 (Kahn). `POST /plans` runs planning API-side and persists an immutable
-`plan_proposals` audit row that stores **no raw prompt** (only `prompt_len`) and
-**no raw provider response**. `POST /plans/{id}/materialize` re-earns PASS against
+`plan_proposals` audit row that stores **no raw provider response** (since
+M12B-A / migration `0017` it does store the bounded natural-language request as
+tenant-scoped, immutable, never-logged provenance — see
+`architecture/ai-provenance-and-stale-plan.md`). `POST /plans/{id}/materialize` re-earns PASS against
 the current capability view (`FOR UPDATE`, idempotent) before creating one
 `workflow_version`. The platform LLM key is API-process-only (never worker/
 scheduler, never in model context); safe planner schema context is an
@@ -422,8 +424,57 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-022 — Encrypted off-host backup & disaster recovery (M11.5 P2)](adr/ADR-022-encrypted-offhost-backup-dr.md)
 - [ADR-023 — Membership, invitations & approval separation of duties (M11.5 P3A)](adr/ADR-023-membership-approval-sod.md)
 - [ADR-024 — Signed database context (M11.5 P3B, migration `0016`)](adr/ADR-024-signed-database-context.md)
+- [ADR-025 — Release-manifest provenance (M12A-Prep)](adr/ADR-025-release-manifest-provenance.md)
+- [ADR-026 — AI execution architecture (M12B-A): deterministic engine with an LLM planner](adr/ADR-026-ai-execution-architecture.md)
 
 Planned: ADR-008 Deployment strategy.
+
+## M12B-A — AI core production readiness (evidence-first audit + bounded corrections)
+
+Evidence-first audit and bounded hardening of the applied-AI core (the LLM
+planner → deterministic feasibility → durable execution → grounded result path).
+The architecture is a **deterministic workflow engine with an LLM planner**
+(ADR-026): the model proposes one structured plan; deterministic code owns every
+verdict and re-validates tools/args/connectors/approval at execution. Delivered:
+
+- **Audit + findings**: [AI-core architecture & failure-mode audit](architecture/ai-core-audit.md)
+  (severity-ranked, reproduced) and the [checkpoint/recovery matrix](architecture/ai-core-recovery-matrix.md).
+- **Deterministic evaluation harness** (`nlw.eval`): a 34-case, versioned,
+  synthetic corpus across all 20 planning/policy categories, graded against the
+  real registry + feasibility engine; deterministic replay in CI + an optional
+  credential-gated live-model mode. See [ai-evaluation](development/ai-evaluation.md).
+- **Planner/feasibility hardening**: serialized plan/arg **byte bounds**
+  (`PLAN_TOO_LARGE`/`ARGS_TOO_LARGE`), a deterministic **prompt/context budget**
+  (`nlw.planner.budget`), and run/step **transition guards**
+  (`assert_transition_*`) wired into the engine (which surfaced and fixed a
+  missing `PENDING → FAILED` edge).
+- **Prompt-injection & untrusted-data boundary**: an explicit
+  [prompt-construction contract](security/planner-prompt-contract.md) plus
+  adversarial tests proving untrusted content cannot add tools, alter
+  authorization, bypass approval, or substitute a tenant/connector.
+- **Grounded result synthesis** (`nlw.engine.summary`, `GET /runs/{id}/summary`
+  + a run-detail UI panel): a deterministic, non-LLM summary that never reports
+  FAILED/SKIPPED/UNKNOWN as success.
+- **AI observability**: low-cardinality planner/feasibility/summary metrics.
+
+Boundaries respected: no VPS/provider access, no production keys, no deployment,
+restore, reboot, or real Slack/webhook delivery. No conversation memory was
+added (single-shot planning is deliberate).
+
+**M12B-A final-evidence addendum**: durable request→plan provenance
+(`plan_proposals.request_text` + sha256 + contract version; RLS, immutable,
+never logged/listed; [provenance + STALE doc](architecture/ai-provenance-and-stale-plan.md)),
+a stable `STALE_PLAN`/`POLICY_DENIED`/`INVALID_PLAN` re-validation boundary
+(`nlw.feasibility.revalidation`) gating run-creation + materialize fail-closed,
+executed recovery-boundary evidence for all ten scenarios
+(`tests/integration/test_recovery_boundaries.py`), a credential-gated live-model
+benchmark (`nlw.eval.live_runner`; planning only), summary-endpoint
+confidentiality (no raw output, tenant-scoped, frontend injection-safe), and an
+[observability coverage matrix](architecture/ai-observability-matrix.md).
+The live-model benchmark was executed on 2026-09-22 (claude-haiku-4-5, 34 cases
+× 3 repeats = 102 planning-only calls); its sanitized, versioned evidence and the
+independent-review caveats on what it does and does not measure live in
+[docs/evaluation/](evaluation/README.md).
 
 ## Runbooks
 

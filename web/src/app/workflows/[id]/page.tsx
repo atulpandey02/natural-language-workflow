@@ -12,6 +12,7 @@ import {
   useRuns,
   useSchedules,
   useWorkflow,
+  useWorkflowProvenance,
 } from "@/lib/api/hooks";
 
 export default function WorkflowDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -38,6 +39,7 @@ export default function WorkflowDetailPage({ params }: { params: Promise<{ id: s
   }
 
   const version = workflow.data?.current_version;
+  const provenance = useWorkflowProvenance(workflow.data?.current_version_id);
   const steps = Array.isArray((version?.plan as { steps?: unknown[] })?.steps)
     ? ((version!.plan as { steps?: Array<Record<string, unknown>> }).steps as Array<
         Record<string, unknown>
@@ -59,6 +61,18 @@ export default function WorkflowDetailPage({ params }: { params: Promise<{ id: s
           </div>
           {!version ? <p className="muted">No materialized version to run.</p> : null}
           <ErrorBanner error={runError} />
+
+          {provenance.data?.request_text ? (
+            <div className="card">
+              <strong>Original request</strong>
+              <p style={{ whiteSpace: "pre-wrap" }}>{provenance.data.request_text}</p>
+              <p className="muted">
+                planned by {provenance.data.provider}/{provenance.data.model} ·{" "}
+                {provenance.data.planner_contract_version} ·{" "}
+                {new Date(provenance.data.created_at).toLocaleString()}
+              </p>
+            </div>
+          ) : null}
 
           <h2>Steps {version ? `(v${version.version})` : ""}</h2>
           {steps.length === 0 ? (

@@ -57,11 +57,13 @@ class ToolOut(BaseModel):
 
 
 class PlanRequest(BaseModel):
-    # The raw prompt is used to plan and then discarded; it is never persisted.
+    # The request is bounded (llm_max_prompt_chars) and then durably bound to the
+    # proposal it produces (M12B-A). It is never logged, metered, or listed.
     prompt: str
 
 
 class PlanProposalOut(BaseModel):
+    # LIST/summary view: deliberately WITHOUT the request text (never listed).
     # protected_namespaces=() so the ``model`` field name is allowed.
     model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
@@ -75,6 +77,30 @@ class PlanProposalOut(BaseModel):
     feasibility: dict[str, Any]
     clarification_questions: list[str] | None
     workflow_version_id: uuid.UUID | None
+
+
+class PlanProposalDetailOut(PlanProposalOut):
+    """Single-proposal DETAIL view: additionally carries the original request and
+    its provenance. Returned only by the create + get-one endpoints (never lists),
+    and only to an authorized workspace member (tenant RLS)."""
+
+    request_text: str | None = None
+    request_sha256: str | None = None
+    planner_contract_version: str | None = None
+
+
+class WorkflowProvenanceOut(BaseModel):
+    """What caused a workflow version to exist: the originating request + planner
+    identity + the feasibility decision that allowed it. Read-only, tenant-scoped."""
+
+    workflow_version_id: uuid.UUID
+    request_text: str | None
+    request_sha256: str | None
+    provider: str
+    model: str
+    planner_contract_version: str | None
+    status: str
+    created_at: str
 
 
 class MaterializeOut(BaseModel):
@@ -189,6 +215,10 @@ class ScheduleOut(BaseModel):
     enabled: bool
     next_run_at: str
     last_scheduled_for: str | None
+    # Fail-closed authorization (M12B, Part 4): a stable reason when occurrence
+    # creation is blocked (creator lost membership/role); null when authorized.
+    blocked_reason: str | None = None
+    blocked_at: str | None = None
 
 
 # --- M10 read models (workflows / versions / runs) ---

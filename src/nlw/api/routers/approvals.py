@@ -25,6 +25,7 @@ from nlw.api.schemas import ApprovalDecisionOut, ApprovalOut
 from nlw.db.models import Approval, WorkflowVersion
 from nlw.db.repositories import ApprovalRepository, AuditRepository
 from nlw.domain.workflow import WorkflowPlan
+from nlw.observability import metrics
 from nlw.tenancy.context import Role, TenantContext, role_at_least
 from nlw.tenancy.session import set_request_context
 from nlw.tenancy.signing import Purpose
@@ -166,6 +167,10 @@ async def _decide(
                 actor_user_id=ctx.user_id,
                 subject_id=approval_id,
             )
+            approval = await session.get(Approval, approval_id)
+            if approval is not None and approval.decided_at is not None:
+                waited = (approval.decided_at - approval.requested_at).total_seconds()
+                metrics.observe_approval_wait(waited)
     if outcome == "not_found":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "approval not found")
     if outcome == "self_approval":
