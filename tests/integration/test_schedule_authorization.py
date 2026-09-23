@@ -336,3 +336,27 @@ def test_10_blocked_no_unbounded_runs(pg_stack: SimpleNamespace) -> None:
     for tick in range(5):
         _scan(pg_stack, NOW + timedelta(days=tick))
     assert _run_count(pg_stack.owner_libpq, sid) == 0
+
+
+# --- 11. unblock is refused while the creator is STILL unauthorized ------------------
+def test_11_unblock_refused_while_creator_still_unauthorized(pg_stack: SimpleNamespace) -> None:
+    s = _setup(pg_stack)
+    wf, ver = _seed_workflow(pg_stack.owner_libpq, s.tenant_id, _PLAN)
+    sid = _seed_schedule(pg_stack.owner_libpq, s.tenant_id, wf, ver, s.creator_id)
+    _set_role(pg_stack.owner_libpq, s.creator_id, s.tenant_id, "member")  # demoted
+    assert _scan(pg_stack) == 0
+    assert _blocked(pg_stack.owner_libpq, sid) == "CREATOR_ROLE_INSUFFICIENT"
+    client = _client(pg_stack)
+    headers = _auth(pg_stack, s.owner_id, s.tenant_id)
+    # A current admin cannot clear the block while the creator remains unauthorized:
+    # the endpoint re-validates with the scheduler's checker and refuses (409).
+    r = client.post(f"/schedules/{sid}/unblock", headers=headers)
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "SCHEDULE_CREATOR_UNAUTHORIZED"
+    assert _blocked(pg_stack.owner_libpq, sid) == "CREATOR_ROLE_INSUFFICIENT"
+    assert _run_count(pg_stack.owner_libpq, sid) == 0
+    # Once the creator's role is restored, the same call succeeds.
+    _set_role(pg_stack.owner_libpq, s.creator_id, s.tenant_id, "admin")
+    r = client.post(f"/schedules/{sid}/unblock", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["blocked_reason"] is None
