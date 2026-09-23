@@ -215,6 +215,10 @@ class ScheduleOut(BaseModel):
     enabled: bool
     next_run_at: str
     last_scheduled_for: str | None
+    # Fail-closed authorization (M12B, Part 4): a stable reason when occurrence
+    # creation is blocked (creator lost membership/role); null when authorized.
+    blocked_reason: str | None = None
+    blocked_at: str | None = None
 
 
 # --- M10 read models (workflows / versions / runs) ---

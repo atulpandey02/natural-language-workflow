@@ -5,6 +5,8 @@
 - ``GET  /schedules``        member: list the tenant's schedules.
 - ``GET  /schedules/{id}``   member.
 - ``PATCH /schedules/{id}``  admin/owner: update recurrence / enable.
+- ``POST /schedules/{id}/unblock`` admin/owner: clear a fail-closed authorization
+                             block after the creator's authorization is restored.
 - ``DELETE /schedules/{id}`` admin/owner: DISABLE (retains history).
 
 The LLM never creates schedules; recurrence is deterministically validated here.
@@ -64,6 +66,8 @@ def _to_out(s: Schedule) -> ScheduleOut:
         enabled=s.enabled,
         next_run_at=s.next_run_at.isoformat(),
         last_scheduled_for=_iso(s.last_scheduled_for),
+        blocked_reason=s.blocked_reason,
+        blocked_at=_iso(s.blocked_at),
     )
 
 
@@ -168,6 +172,38 @@ async def update_schedule(
     if fields.keys() & {"timezone", "frequency", "minute", "hour", "day_of_week"}:
         rec = _recurrence(s.timezone, s.frequency, s.minute, s.hour, s.day_of_week)
         s.next_run_at = next_occurrence(rec, datetime.now(UTC))
+    await session.flush()
+    return _to_out(s)
+
+
+@router.post(
+    "/schedules/{schedule_id}/unblock",
+    response_model=ScheduleOut,
+    dependencies=[Depends(rate_limit("schedules_update", "write"))],
+)
+async def unblock_schedule(
+    schedule_id: uuid.UUID,
+    ctx: TenantContext = Depends(_require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> ScheduleOut:
+    """Administrator remediation for a schedule blocked because its creator lost
+    membership/role (M12B, Part 4). An admin/owner of THIS workspace, having
+    restored the creator's authorization (or deliberately accepting the current
+    creator), clears the blocked state so future occurrences resume. This does NOT
+    mutate ``created_by`` (immutable by P3A separation of duties); to transfer
+    ownership to a different creator, recreate the schedule. The check is
+    fail-closed regardless: if the creator is still unauthorized at the next tick,
+    the schedule blocks again. Cross-tenant use is impossible — RLS scopes the
+    schedule to the caller's tenant and ``_require_admin`` proves the caller's
+    current role here."""
+    s = await ScheduleRepository(session).get(schedule_id, ctx.tenant_id)
+    if s is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "schedule not found")
+    s.blocked_reason = None
+    s.blocked_at = None
+    # Resume from the next future occurrence (no retroactive catch-up burst).
+    rec = _recurrence(s.timezone, s.frequency, s.minute, s.hour, s.day_of_week)
+    s.next_run_at = next_occurrence(rec, datetime.now(UTC))
     await session.flush()
     return _to_out(s)
 

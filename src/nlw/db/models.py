@@ -429,6 +429,11 @@ class Schedule(TimestampMixin, Base):
     created_by: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
+    # M12B final (Part 4): fail-closed schedule ownership. When the creator loses
+    # membership/role, occurrence creation is BLOCKED with a stable reason until an
+    # authorized admin reassigns/re-enables the schedule. NULL = not blocked.
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # --- Disaster recovery (M11.5 P2) ---

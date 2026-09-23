@@ -167,6 +167,11 @@ _SCHED_OCCURRENCE_EXISTS = Counter(
     "nlw_scheduler_occurrence_exists_total",
     "Due occurrences whose run already existed (idempotent scheduler no-op).",
 )
+_SCHED_BLOCKED = Counter(
+    "nlw_scheduler_blocked_total",
+    "Due schedules blocked from creating an occurrence (fail-closed authorization).",
+    ["reason"],
+)
 
 # --- Errors / rate limiting ---
 _ERRORS = Counter(
@@ -406,6 +411,10 @@ def record_reconcile_fairness_deferred(n: int) -> None:
 def record_scheduler_occurrence_exists(n: int) -> None:
     if n:
         _SCHED_OCCURRENCE_EXISTS.inc(n)
+
+
+def record_schedule_blocked(reason: str) -> None:
+    _SCHED_BLOCKED.labels(reason=reason).inc()
 
 
 def record_rate_limit_rejected(endpoint: str) -> None:
