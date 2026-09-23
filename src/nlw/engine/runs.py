@@ -14,7 +14,11 @@ from nlw.domain.workflow import WorkflowPlan
 
 
 def create_workflow_with_version(
-    session: Session, tenant_id: uuid.UUID, name: str, plan: WorkflowPlan
+    session: Session,
+    tenant_id: uuid.UUID,
+    name: str,
+    plan: WorkflowPlan,
+    connector_bindings: dict[str, object] | None = None,
 ) -> tuple[Workflow, WorkflowVersion]:
     workflow = Workflow(tenant_id=tenant_id, name=name)
     session.add(workflow)
@@ -24,6 +28,7 @@ def create_workflow_with_version(
         workflow_id=workflow.id,
         version=1,
         plan=plan.model_dump(),
+        connector_bindings=connector_bindings,
     )
     session.add(version)
     session.flush()

@@ -60,6 +60,7 @@ from nlw.engine.actions import (
     mark_transmission_started,
     run_action,
 )
+from nlw.feasibility.connector_binding import CurrentConnector, StalePlanError, verify_binding
 from nlw.observability import metrics
 from nlw.registry.registry import REGISTRY, ToolExecutionError, ToolSpec, UnknownToolError
 from nlw.secrets.store import SecretError, SecretStore, build_secret_store
@@ -76,6 +77,7 @@ _STEP_FAILURES = (
     ConnectorError,
     SecretError,
     ValidationError,
+    StalePlanError,  # a stale connector binding -> terminal STALE_PLAN, before any I/O
 )
 
 
@@ -130,26 +132,66 @@ def _set_connector_status(session: Session, connector_id: uuid.UUID, status: str
     )
 
 
-def _resolve_connector(
+def _load_connector_row(
     session: Session,
     tenant_id: uuid.UUID,
     connector_type: str,
-    connector_name: str | None,
-    secret_store: SecretStore,
-) -> ConnectorContext:
-    """Inline-tool connector resolution: load (RLS-scoped), health-check, activate."""
-    if connector_name is None:
-        raise MissingConnectorSelectorError(connector_type)
+    connector_name: str,
+    binding: dict[str, Any] | None,
+) -> tuple[uuid.UUID, str, dict[str, Any], str | None, str]:
+    """Load the connector row and fail closed on identity/config drift.
+
+    When a ``binding`` exists (a materialized workflow version), the connector is
+    loaded BY THE BOUND UUID (tenant-scoped) — never re-resolved by name — and
+    verified against the binding; any missing/type-changed/config-changed/disabled
+    connector raises ``StalePlanError`` BEFORE any connector I/O. Legacy versions
+    (no binding) fall back to name resolution unchanged. Returns
+    ``(id, type, config, secret_ref, status)``.
+    """
+    if binding is not None:
+        row = session.execute(
+            text(
+                "SELECT id, type, config, secret_ref, status FROM connectors "
+                "WHERE id = :id AND tenant_id = :t"
+            ),
+            {"id": binding["connector_id"], "t": str(tenant_id)},
+        ).one_or_none()
+        current = None
+        if row is not None:
+            current = CurrentConnector(str(row[0]), row[1], row[2], row[4])
+        reason = verify_binding(binding, current)
+        if reason is not None:
+            metrics.record_stale_plan("STALE_PLAN", reason)
+            raise StalePlanError(reason, connector_name)
+        assert row is not None  # verify_binding returned fresh -> row exists
+        return row[0], row[1], dict(row[2]), row[3], row[4]
     row = session.execute(
         text(
-            "SELECT id, config, secret_ref, status FROM connectors "
+            "SELECT id, type, config, secret_ref, status FROM connectors "
             "WHERE tenant_id = :t AND type = :ty AND name = :n"
         ),
         {"t": str(tenant_id), "ty": connector_type, "n": connector_name},
     ).one_or_none()
     if row is None:
         raise ConnectorNotFoundError(f"{connector_type}:{connector_name}")
-    connector_id, config, secret_ref, status = row
+    return row[0], row[1], dict(row[2]), row[3], row[4]
+
+
+def _resolve_connector(
+    session: Session,
+    tenant_id: uuid.UUID,
+    connector_type: str,
+    connector_name: str | None,
+    secret_store: SecretStore,
+    binding: dict[str, Any] | None = None,
+) -> ConnectorContext:
+    """Inline-tool connector resolution: load (by bound id / RLS-scoped),
+    health-check, activate. Fails closed (STALE_PLAN) on a stale binding."""
+    if connector_name is None:
+        raise MissingConnectorSelectorError(connector_type)
+    connector_id, _ctype, config, secret_ref, status = _load_connector_row(
+        session, tenant_id, connector_type, connector_name, binding
+    )
     if status == "disabled":
         raise ConnectorDisabledError(connector_name)
     spec = get_connector_type(connector_type)
@@ -187,23 +229,18 @@ def _load_action_connector(
     connector_type: str,
     connector_name: str | None,
     secret_store: SecretStore,
+    binding: dict[str, Any] | None = None,
 ) -> tuple[uuid.UUID, dict[str, Any], str | None]:
     """Action connector load WITHOUT a network health probe (no I/O in the lock).
 
-    Delivery itself is the liveness proof (ADR-013). Returns (id, config, secret).
+    Delivery itself is the liveness proof (ADR-013). Loads by the bound id and
+    fails closed (STALE_PLAN) on a stale binding. Returns (id, config, secret).
     """
     if connector_name is None:
         raise MissingConnectorSelectorError(connector_type)
-    row = session.execute(
-        text(
-            "SELECT id, config, secret_ref, status FROM connectors "
-            "WHERE tenant_id = :t AND type = :ty AND name = :n"
-        ),
-        {"t": str(tenant_id), "ty": connector_type, "n": connector_name},
-    ).one_or_none()
-    if row is None:
-        raise ConnectorNotFoundError(f"{connector_type}:{connector_name}")
-    connector_id, config, secret_ref, status = row
+    connector_id, _ctype, config, secret_ref, status = _load_connector_row(
+        session, tenant_id, connector_type, connector_name, binding
+    )
     if status == "disabled":
         raise ConnectorDisabledError(connector_name)
     secret: str | None = None
@@ -233,6 +270,14 @@ def _destination_summary(tool: str, config: dict[str, Any], step: WorkflowStep) 
         ch = step.args.get("channel") if isinstance(step.args, dict) else None
         return str(ch) if ch else str(config.get("default_channel", "") or "") or None
     return None
+
+
+def _step_failure_message(exc: Exception) -> str:
+    """A STALE binding records its stable, low-cardinality reason code as the step
+    error (so the UI/operator key on it); other failures record their message."""
+    if isinstance(exc, StalePlanError):
+        return exc.reason_code
+    return str(exc)
 
 
 def _fail_run_step(
@@ -288,11 +333,12 @@ def _claim_action(
     spec: ToolSpec,
     secret_store: SecretStore,
     expected_connector_id: uuid.UUID | None = None,
+    binding: dict[str, Any] | None = None,
 ) -> AdvanceOutcome:
     """Txn1 fresh claim: step -> RUNNING, create leased external_actions row."""
     assert spec.connector_type is not None
     connector_id, config, _secret = _load_action_connector(
-        session, tenant_id, spec.connector_type, plan_step.connector, secret_store
+        session, tenant_id, spec.connector_type, plan_step.connector, secret_store, binding
     )
     # Pin to the APPROVED connector identity: a post-approval connector edit /
     # recreate (same name, different id, possibly a different destination) must
@@ -321,7 +367,9 @@ def _claim_action(
     )
     session.add(ea)
     session.flush()
-    return _build_action_task_outcome(session, tenant_id, run, plan_step, spec, ea, secret_store)
+    return _build_action_task_outcome(
+        session, tenant_id, run, plan_step, spec, ea, secret_store, binding
+    )
 
 
 def _build_action_task_outcome(
@@ -332,10 +380,11 @@ def _build_action_task_outcome(
     spec: ToolSpec,
     ea: ExternalAction,
     secret_store: SecretStore,
+    binding: dict[str, Any] | None = None,
 ) -> AdvanceOutcome:
     assert spec.connector_type is not None
     connector_id, config, secret = _load_action_connector(
-        session, tenant_id, spec.connector_type, plan_step.connector, secret_store
+        session, tenant_id, spec.connector_type, plan_step.connector, secret_store, binding
     )
     assert ea.lease_token is not None
     task = ActionTask(
@@ -364,10 +413,12 @@ def _resume_action(
     step: StepRun,
     tenant_id: uuid.UUID,
     secret_store: SecretStore,
+    bindings: dict[str, Any] | None = None,
 ) -> AdvanceOutcome:
     """Txn1 resume of a durably RUNNING action: CAS-acquire the lease or defer."""
     plan_step = plan.step(step.step_id)
     spec = REGISTRY.get(step.tool)
+    binding = (bindings or {}).get(step.step_id)
     ea = session.execute(
         select(ExternalAction)
         .where(ExternalAction.run_id == run.id, ExternalAction.step_id == step.step_id)
@@ -419,7 +470,9 @@ def _resume_action(
     ea.last_attempt_at = now
     _mark_progress(run)  # retry claim (a fresh delivery attempt is genuine progress)
     session.flush()
-    return _build_action_task_outcome(session, tenant_id, run, plan_step, spec, ea, secret_store)
+    return _build_action_task_outcome(
+        session, tenant_id, run, plan_step, spec, ea, secret_store, binding
+    )
 
 
 def _handle_waiting(
@@ -429,6 +482,7 @@ def _handle_waiting(
     step: StepRun,
     tenant_id: uuid.UUID,
     secret_store: SecretStore,
+    bindings: dict[str, Any] | None = None,
 ) -> AdvanceOutcome:
     """A WAITING_APPROVAL step: act on the durable approval decision."""
     approval = session.execute(
@@ -454,9 +508,10 @@ def _handle_waiting(
             spec,
             secret_store,
             expected_connector_id=approval.connector_id,
+            binding=(bindings or {}).get(step.step_id),
         )
     except _STEP_FAILURES as exc:
-        return _fail_run_step(session, run, step, str(exc))
+        return _fail_run_step(session, run, step, _step_failure_message(exc))
 
 
 def _park_for_approval(
@@ -467,11 +522,12 @@ def _park_for_approval(
     step: StepRun,
     spec: ToolSpec,
     secret_store: SecretStore,
+    binding: dict[str, Any] | None = None,
 ) -> AdvanceOutcome:
     """Create a PENDING approval and park run + step at WAITING_APPROVAL."""
     assert spec.connector_type is not None
     connector_id, _config, _secret = _load_action_connector(
-        session, tenant_id, spec.connector_type, plan_step.connector, secret_store
+        session, tenant_id, spec.connector_type, plan_step.connector, secret_store, binding
     )
     _set_step_status(step, StepStatus.WAITING_APPROVAL)
     existing = session.execute(
@@ -542,6 +598,10 @@ def execute_advancement(
         if version is None:
             return AdvanceOutcome("noop", enqueue_next=False)
         plan = WorkflowPlan.model_validate(version.plan)
+        # Authoritative connector identity bindings (M12B final). NULL for legacy
+        # pre-binding versions (name resolution, unchanged). Every connector-backed
+        # step loads by the BOUND id and fails closed (STALE_PLAN) on drift.
+        bindings: dict[str, Any] = version.connector_bindings or {}
 
         step_rows = list(
             session.execute(select(StepRun).where(StepRun.run_id == run_id)).scalars().all()
@@ -567,16 +627,16 @@ def execute_advancement(
         running = next((s for s in step_rows if s.status == StepStatus.RUNNING.value), None)
         if running is not None:
             try:
-                return _resume_action(session, run, plan, running, tenant_id, store)
+                return _resume_action(session, run, plan, running, tenant_id, store, bindings)
             except _STEP_FAILURES as exc:
-                return _fail_run_step(session, run, running, str(exc))
+                return _fail_run_step(session, run, running, _step_failure_message(exc))
 
         # 2) Act on an approval decision.
         waiting = next(
             (s for s in step_rows if s.status == StepStatus.WAITING_APPROVAL.value), None
         )
         if waiting is not None:
-            return _handle_waiting(session, run, plan, waiting, tenant_id, store)
+            return _handle_waiting(session, run, plan, waiting, tenant_id, store, bindings)
 
         # 3) Select the next runnable step.
         nxt = select_next_step(plan, states)
@@ -609,18 +669,25 @@ def execute_advancement(
             spec = REGISTRY.get(nxt.tool)
             args_model = spec.input_model.model_validate(nxt.args)
 
+            step_binding = bindings.get(nxt.id)
             if spec.side_effecting:
                 if spec.requires_approval:
-                    return _park_for_approval(session, run, tenant_id, nxt, step, spec, store)
+                    return _park_for_approval(
+                        session, run, tenant_id, nxt, step, spec, store, step_binding
+                    )
                 step.attempt = step.attempt + 1
-                return _claim_action(session, run, tenant_id, nxt, step, spec, store)
+                return _claim_action(
+                    session, run, tenant_id, nxt, step, spec, store, binding=step_binding
+                )
 
             # Inline (M3/M5) path: execute in-lock.
             _set_step_status(step, StepStatus.RUNNING)
             step.attempt = step.attempt + 1
             step.started_at = _now()
             connector_ctx = (
-                _resolve_connector(session, tenant_id, spec.connector_type, nxt.connector, store)
+                _resolve_connector(
+                    session, tenant_id, spec.connector_type, nxt.connector, store, step_binding
+                )
                 if spec.connector_type is not None
                 else None
             )

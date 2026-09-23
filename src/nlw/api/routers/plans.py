@@ -37,10 +37,11 @@ from nlw.api.schemas import (
     PlanRequest,
 )
 from nlw.core.config import Settings
-from nlw.db.models import Workflow, WorkflowVersion
+from nlw.db.models import Connector, Workflow, WorkflowVersion
 from nlw.db.quota import QuotaExceededError, enforce_cap, workflows_count_stmt
 from nlw.db.repositories import PlanProposalRepository
 from nlw.domain.workflow import WorkflowPlan
+from nlw.feasibility.connector_binding import build_binding
 from nlw.feasibility.engine import FeasibilityReport
 from nlw.feasibility.limits import DEFAULT_LIMITS
 from nlw.feasibility.revalidation import revalidate_plan
@@ -59,6 +60,7 @@ from nlw.planner.provider import (
     LLMUnavailableError,
 )
 from nlw.planner.schema import PLANNER_CONTRACT_VERSION
+from nlw.registry.registry import REGISTRY
 from nlw.tenancy.context import TenantContext
 
 router = APIRouter()
@@ -68,6 +70,34 @@ log = structlog.get_logger(__name__)
 def _feasibility_dict(report: FeasibilityReport) -> dict[str, object]:
     # Persist the report WITHOUT normalized_plan (stored in its own column).
     return report.model_dump(mode="json", exclude={"normalized_plan"})
+
+
+async def _compute_connector_bindings(
+    session: AsyncSession, tenant_id: uuid.UUID, plan: WorkflowPlan
+) -> dict[str, dict[str, str]] | None:
+    """Resolve each connector-backed step to its authoritative connector identity
+    and fingerprint. Returns the binding map, or None if a required connector no
+    longer resolves (fail closed at the caller). The LLM never sees these ids."""
+    from sqlalchemy import select as _select
+
+    bindings: dict[str, dict[str, str]] = {}
+    for step in plan.steps:
+        spec = REGISTRY.get(step.tool)
+        if spec.connector_type is None:
+            continue  # connector-less tool: nothing to bind
+        connector = (
+            await session.execute(
+                _select(Connector).where(
+                    Connector.tenant_id == tenant_id,
+                    Connector.type == spec.connector_type,
+                    Connector.name == step.connector,
+                )
+            )
+        ).scalar_one_or_none()
+        if connector is None:
+            return None
+        bindings[step.id] = build_binding(str(connector.id), connector.type, connector.config)
+    return bindings
 
 
 @router.post(
@@ -280,6 +310,24 @@ async def materialize_plan(
     report = reval.report
     assert report.normalized_plan is not None  # fresh guarantees a normalized plan
 
+    # Pin every connector-backed step to the authoritative connector IDENTITY +
+    # a non-secret config fingerprint (M12B final). The LLM never sees these ids;
+    # execution loads by the bound id and fails closed (STALE_PLAN) on any
+    # identity/type/destination change. Resolving here (deterministic) is safe
+    # because revalidation above already proved each connector currently resolves.
+    bindings = await _compute_connector_bindings(session, ctx.tenant_id, report.normalized_plan)
+    if bindings is None:
+        # A connector vanished between revalidation and binding: fail closed.
+        metrics.record_stale_plan("STALE_PLAN", "CONNECTOR_NOT_FOUND")
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "STALE_PLAN",
+                "message": "A connector this workflow depends on is no longer available. "
+                "Re-plan the request to continue.",
+            },
+        )
+
     # Concurrency-safe per-tenant workflow cap (a materialized workflow is a
     # durable resource); the advisory lock serializes concurrent materializes.
     try:
@@ -301,6 +349,7 @@ async def materialize_plan(
         workflow_id=workflow.id,
         version=1,
         plan=report.normalized_plan.model_dump(),
+        connector_bindings=bindings,
     )
     session.add(version)
     await session.flush()

@@ -62,7 +62,7 @@ def test_generator_reads_target_env_and_ci_identity_and_validates() -> None:
 
 def test_generator_derives_target_revision_from_this_checkout() -> None:
     doc = _gen(target_revision=None)
-    assert doc["target_revision"] == "0018_transmission_boundary"
+    assert doc["target_revision"] == "0019_connector_bindings"
 
 
 def test_committed_example_is_rejected_in_every_mode() -> None:

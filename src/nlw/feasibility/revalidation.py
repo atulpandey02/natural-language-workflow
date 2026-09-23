@@ -60,6 +60,7 @@ _STALE_CODES = frozenset(
         FeasibilityCode.CONNECTOR_NOT_FOUND,
         FeasibilityCode.CONNECTOR_TYPE_MISMATCH,
         FeasibilityCode.CONNECTOR_UNUSABLE,
+        FeasibilityCode.CONNECTOR_CONFIG_CHANGED,
         FeasibilityCode.CONNECTOR_REQUIRED,
         FeasibilityCode.CONNECTOR_ON_CONNECTORLESS_TOOL,
         FeasibilityCode.ARG_VALIDATION_FAILED,  # a tool's argument schema changed

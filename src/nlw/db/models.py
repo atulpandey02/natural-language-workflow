@@ -163,6 +163,11 @@ class WorkflowVersion(TimestampMixin, Base):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     plan: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # M12B final: authoritative connector identity binding per connector-backed
+    # step -> {connector_id, connector_type, config_fingerprint}. Computed at
+    # materialization; execution loads by the bound id and fails closed (STALE_PLAN)
+    # on identity/type/config change. NULL only for pre-binding historical versions.
+    connector_bindings: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
 class WorkflowRun(TimestampMixin, Base):
