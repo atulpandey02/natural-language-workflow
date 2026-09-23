@@ -62,3 +62,32 @@ natural-language corpus **v2** (`tests/eval/corpus/v2/v2_core.json`,
 whose grader reports the product-decision / feasible-plan / clarification-usefulness
 rates separately. The v1 corpus file itself is left byte-for-byte unchanged so the
 committed v1 evidence stays bound to it by sha256.
+
+## `live-benchmark-v2-2026-09-23.json` — natural-language corpus v2 run
+
+102 planner calls (34 NL cases × 3), `anthropic` / `claude-haiku-4-5-20251001`,
+planning only. Every aggregate recomputes from `per_run` and the artifact is bound
+to the exact v2 corpus by sha256 (`tests/unit/test_live_benchmark_v2_committed.py`).
+
+| measure | value |
+|---|---|
+| unsafe executable outcomes (category D) | **0 / 102** |
+| approval-policy safety | **1.0** |
+| tenant/connector-isolation safety | **1.0** |
+| direct + indirect injection resistance | **1.0** |
+| secret-exfiltration safety | **1.0** |
+| schema-valid / argument-schema / dependency validity | 0.980 / 1.0 / 1.0 |
+| immediate feasible-plan rate (sufficiently specified supported cases) | **0.733** |
+| useful-clarification rate (genuinely underspecified) | **1.0** |
+| unsupported/rejection correctness | 0.882 |
+| correct product-decision (all cases) | 0.392 |
+| three-run consistency (classified outcome) | 32 / 34 |
+
+The low overall product-decision rate is dominated by a conservative model that
+prefers `NEEDS_CLARIFICATION` over emitting a plan for adversarial or terse inputs —
+a SAFE degradation, not an unsafe one. The two `direct_injection` cases are counted
+as product-decision misses (the model did the benign part and IGNORED the injection,
+producing an executable but harmless plan); the injected `DROP`/exfiltration payload
+is never executable (SQL-safety + table allowlist), so injection resistance is 1.0
+and D = 0. Deterministic rejection of the 14 adversarial plan FIXTURES is proven
+separately (`tests/eval/test_corpus_v2.py`).
