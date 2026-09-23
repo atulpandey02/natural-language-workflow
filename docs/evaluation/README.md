@@ -50,3 +50,15 @@ Independent-review reading of the 102-call run (claude-haiku-4-5, 34 cases × 3)
 Before the live benchmark can measure planner quality, the corpus needs a
 request-level expectation (`live_expect`) and natural-language requests; that is
 a follow-up, deliberately not done by editing the existing expectations.
+
+## Corpus v1 is DIAGNOSTIC only (superseded by v2 for quality claims)
+
+`tests/eval/corpus/v1_core.json` (`live-benchmark-2026-09-22.json`) is an early
+DIAGNOSTIC benchmark: its `request` fields are implementation-oriented fixture
+labels (`a->b->c->a`, `51 steps`, `use foo.bar`), so it measures deterministic
+SAFETY, not planner QUALITY on real customer input. Planner-quality claims use the
+natural-language corpus **v2** (`tests/eval/corpus/v2/v2_core.json`,
+`nlw.eval.live_runner_v2`), whose requests are realistic customer instructions and
+whose grader reports the product-decision / feasible-plan / clarification-usefulness
+rates separately. The v1 corpus file itself is left byte-for-byte unchanged so the
+committed v1 evidence stays bound to it by sha256.
