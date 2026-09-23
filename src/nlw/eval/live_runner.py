@@ -29,11 +29,18 @@ import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from nlw.core.config import Settings
-from nlw.eval.harness import EvalCase, build_view_and_tools, load_all_cases
+from nlw.eval.harness import (
+    EvalCase,
+    build_view_and_tools,
+    corpus_digest,
+    corpus_versions,
+    load_all_cases,
+)
 from nlw.feasibility.engine import FeasibilityCode, FeasibilityStatus
 from nlw.feasibility.limits import DEFAULT_LIMITS
 from nlw.planner.capabilities import build_capability_view
@@ -228,6 +235,11 @@ def summarize(bench: Benchmark) -> dict[str, Any]:
     actionable = [r for r in runs if r.expected_status in _ACTIONABLE_EXPECTED]
     actionable_exact = sum(1 for r in actionable if r.exact_outcome)
     return {
+        # Evidence provenance: when the benchmark ran and EXACTLY which corpus it
+        # was measured against (a result is meaningless without both).
+        "generated_at": datetime.now(UTC).isoformat(),
+        "corpus_sha256": corpus_digest(),
+        "corpus_versions": corpus_versions(),
         "provider": bench.provider,
         "model_config": bench.model_config,
         "planner_contract_version": bench.planner_contract_version,

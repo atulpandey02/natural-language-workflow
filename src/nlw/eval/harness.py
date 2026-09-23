@@ -9,6 +9,7 @@ side effect.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -113,6 +114,24 @@ def load_all_cases() -> list[EvalCase]:
     for p in sorted(corpus_dir().glob("*.json")):
         cases.extend(load_corpus(p).cases)
     return cases
+
+
+def corpus_digest() -> str:
+    """sha256 over the exact bytes of every corpus file (sorted by name).
+
+    Recorded in benchmark evidence so a reported result is bound to the precise
+    corpus it was measured against; with a single corpus file this equals that
+    file's sha256.
+    """
+    h = hashlib.sha256()
+    for p in sorted(corpus_dir().glob("*.json")):
+        h.update(p.read_bytes())
+    return h.hexdigest()
+
+
+def corpus_versions() -> dict[str, str]:
+    """``{file name: corpus_version}`` for every corpus file."""
+    return {p.name: load_corpus(p).corpus_version for p in sorted(corpus_dir().glob("*.json"))}
 
 
 def _validate_connectors(case: EvalCase) -> None:
