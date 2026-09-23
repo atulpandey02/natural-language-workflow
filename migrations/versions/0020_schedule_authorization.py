@@ -39,6 +39,9 @@ def upgrade() -> None:
     # SECURITY DEFINER authorization checker. Owned by the BYPASSRLS helper role so
     # nlw_scheduler needs no direct read on memberships/schedules. Returns a stable
     # low-cardinality reason, or NULL when the creator is still authorized.
+    # memberships.role was already granted to nlw_rls_bypass in 0008 (for
+    # is_current_user_admin_or_owner); re-granting is idempotent. It is NOT revoked
+    # on downgrade because 0008's helper still depends on it below 0020.
     op.execute("GRANT SELECT (role) ON memberships TO nlw_rls_bypass")
     op.execute("GRANT SELECT (id, created_by, tenant_id) ON schedules TO nlw_rls_bypass")
     op.execute(
@@ -70,7 +73,9 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP FUNCTION IF EXISTS schedule_creator_block_reason(uuid)")
     op.execute("REVOKE SELECT (id, created_by, tenant_id) ON schedules FROM nlw_rls_bypass")
-    op.execute("REVOKE SELECT (role) ON memberships FROM nlw_rls_bypass")
+    # Deliberately NOT revoked: SELECT (role) ON memberships belongs to migration
+    # 0008 (is_current_user_admin_or_owner relies on it). Revoking it here broke
+    # the admin/owner RLS predicate on a 0020 -> 0019 downgrade.
     op.execute("REVOKE UPDATE (blocked_reason, blocked_at) ON schedules FROM nlw_scheduler")
     op.drop_column("schedules", "blocked_at")
     op.drop_column("schedules", "blocked_reason")

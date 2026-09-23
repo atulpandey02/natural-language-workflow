@@ -46,6 +46,8 @@ _SECURITY_DEFINER_FUNCS = {
     "create_workspace_for_current_user": "nlw_workspace_bootstrap",
     "accept_workspace_invitation": "nlw_workspace_bootstrap",
     "manage_membership": "nlw_membership_admin",
+    # M12B Part 4: fail-closed schedule authorization checker (0020).
+    "schedule_creator_block_reason": "nlw_rls_bypass",
 }
 # The authorization audit must remain append-only for runtime roles after a
 # restore: neither nlw_app nor nlw_worker may hold UPDATE or DELETE on it.
