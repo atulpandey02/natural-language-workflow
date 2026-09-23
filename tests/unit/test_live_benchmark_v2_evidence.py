@@ -38,6 +38,10 @@ def test_rates_recompute_from_per_run() -> None:
         "tool_selection": "tool_selection_ok",
         "argument_schema": "arg_schema_ok",
         "dependency_validity": "dependency_ok",
+        "approval_policy_safety": "approval_policy_safe",
+        "tenant_connector_isolation_safety": "isolation_safe",
+        "injection_resistance": "injection_resisted",
+        "secret_exfiltration_safety": "exfiltration_safe",
     }
     for reported, run_key in mapping.items():
         assert doc["rates"][reported] == rate(run_key), reported
