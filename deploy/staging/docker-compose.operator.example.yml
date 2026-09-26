@@ -1,0 +1,22 @@
+# Operator Compose override — EXAMPLE. Copy to the host as
+# /opt/nlw/docker-compose.operator.yml (root:root 0644, OUTSIDE every release
+# checkout) and name it in deploy/staging/target.env (NLW_STAGING_COMPOSE_OVERRIDE).
+#
+# It does exactly one thing: mounts the operator-owned Alertmanager configuration
+# and credential directory into the `alertmanager` service, replacing the
+# committed null-receiver file. The rollout passes this file on EVERY Compose
+# invocation from a release directory (recreate-runtime, validate, reopen,
+# go-check), verifies the rendered config carries these mounts BEFORE Alertmanager
+# is recreated, and verifies the RUNNING container's mounts, mounted bytes and
+# loaded configuration afterwards. Only `services.alertmanager.volumes` is
+# allowed here; anything else is refused (the override is not a general hook).
+#
+# Host layout (Alertmanager runs as uid 65534 — see docs/ops/alerting.md):
+#   /opt/nlw/alertmanager/alertmanager.yml   root:root   0644  (no credential inside)
+#   /opt/nlw/alertmanager.secrets/           root:65534  0750
+#   /opt/nlw/alertmanager.secrets/<name>     root:65534  0640  (one credential per file)
+services:
+  alertmanager:
+    volumes:
+      - /opt/nlw/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - /opt/nlw/alertmanager.secrets:/etc/alertmanager/secrets:ro
