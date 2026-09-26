@@ -4,6 +4,8 @@ templates/fixtures/old images (M12A-Prep §A/§B/§H)."""
 from __future__ import annotations
 
 import json
+import re
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +18,23 @@ from nlw.ops.rollout.gates import GateError
 from nlw.ops.rollout.release import load_release
 
 ROOT = Path(__file__).resolve().parents[2]
-TARGET_ENV = ROOT / "deploy" / "staging" / "target.env"
+COMMITTED_TARGET_ENV = ROOT / "deploy" / "staging" / "target.env"
+
+
+def _target_env_at(revision: str) -> Path:
+    """The committed target.env with the live revision rewritten: the generator
+    tests describe a 0010 -> 0016 roll and must not depend on what the staging
+    host is at today (0020 since the first rollout)."""
+    text = COMMITTED_TARGET_ENV.read_text()
+    text = re.sub(
+        r"(?m)^NLW_STAGING_CURRENT_REVISION=.*$", f"NLW_STAGING_CURRENT_REVISION={revision}", text
+    )
+    p = Path(tempfile.mkdtemp(prefix="nlw-target-env-")) / "target.env"
+    p.write_text(text)
+    return p
+
+
+TARGET_ENV = _target_env_at("0010_readiness_schema_grant")
 SHA = "1eebf2ef19c0286c83bfe8768c908bfd2f40178d"
 BACKEND = "ghcr.io/atulpandey02/natural-language-workflow@sha256:" + "a" * 64
 WEB = "ghcr.io/atulpandey02/natural-language-workflow/web@sha256:" + "b" * 64
@@ -63,6 +81,16 @@ def test_generator_reads_target_env_and_ci_identity_and_validates() -> None:
 def test_generator_derives_target_revision_from_this_checkout() -> None:
     doc = _gen(target_revision=None)
     assert doc["target_revision"] == "0020_schedule_authorization"
+
+
+def test_committed_target_env_is_at_the_live_revision_and_needs_a_new_migration_to_roll() -> None:
+    """The host is at 0020 (first rollout done). A release WITHOUT a new migration
+    has nothing for the phased rollout to roll: the generator refuses instead of
+    producing a manifest whose expected == target (known limitation)."""
+    text = COMMITTED_TARGET_ENV.read_text()
+    assert "NLW_STAGING_CURRENT_REVISION=0020_schedule_authorization" in text
+    with pytest.raises(rm.ReleaseManifestError, match="nothing to roll"):
+        _gen(target_env=COMMITTED_TARGET_ENV, target_revision=None)
 
 
 def test_committed_example_is_rejected_in_every_mode() -> None:
