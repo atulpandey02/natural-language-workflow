@@ -210,7 +210,7 @@ change (migration `0014` unchanged).
   (`restart: unless-stopped`) a locked worker therefore restart-loops without ever
   consuming, and the container healthcheck (`nlw.ops.healthcheck`) independently
   fails with `recovery_lock failed: RecoveryLocked`. Proven by
-  `tests/unit/test_worker_boot_recovery_lock.py` (real `Worker.start()`, every
+  `tests/unit/test_worker_boot_recovery_lock_inprocess.py` (real `Worker.start()`, every
   lock state) and `tests/integration/test_worker_boot_recovery_lock.py` (the real
   `dramatiq nlw.worker.actors` entrypoint against a locked/unreachable database) —
   **regardless of `NLW_RESTORE_MODE`, compose profile, or any mounted file**. This
