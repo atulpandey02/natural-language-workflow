@@ -33,12 +33,30 @@ not from this platform.
          "Resource": "arn:aws:s3:::YOUR-BUCKET" },
        { "Effect": "Allow",
          "Action": ["s3:PutObject", "s3:GetObject"],
-         "Resource": "arn:aws:s3:::YOUR-BUCKET/nlw/*" }
+         "Resource": "arn:aws:s3:::YOUR-BUCKET/nlw/*" },
+       { "Effect": "Allow",
+         "Action": ["s3:DeleteObject"],
+         "Resource": "arn:aws:s3:::YOUR-BUCKET/nlw/locks/*" }
      ]
    }
    ```
-   Note: the write path intentionally has **no `s3:DeleteObject`** — see
-   ransomware resistance below.
+   The `locks/*` delete is **required for any writer**: restic writes a lock
+   object for every operation and removes it afterwards; without it the lock
+   stays behind (`Remove(<lock/…>) failed: Access Denied`) and the very next
+   operation — the `restic check` this job runs after every upload — fails with
+   "repository is already locked", so **every backup fails**. (Measured with a
+   disposable MinIO fixture, restic 0.18: no-delete writer → backup exit 0 but
+   lock left → check exit 11; locks-only delete → backup, check, second backup
+   and lock cleanup all succeed.) The data/index/snapshot path intentionally has
+   **no `s3:DeleteObject`** — see ransomware resistance below — which means:
+
+   | `NLW_BACKUP_RETENTION_MODE` | writer needs `s3:DeleteObject` on | result with the policy above |
+   |---|---|---|
+   | `immutable` (job never prunes) | `nlw/locks/*` only | **works**; retention runs off-host with a separate delete-capable key |
+   | `simple` (job runs `forget --prune`) | the whole `nlw/*` prefix | **fails after the verified upload**: `forget` → `Fatal: … Access Denied` (exit 1), the job reports `nlw_backup_success 0`, the rollout's backup gate refuses (measured) |
+
+   Choose the mode explicitly in `.env.backup` before the first backup; the
+   default is `simple`.
 3. Environment:
    ```
    RESTIC_REPOSITORY=s3:https://s3.eu-west-1.amazonaws.com/YOUR-BUCKET/nlw

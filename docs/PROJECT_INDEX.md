@@ -533,6 +533,19 @@ correction). "Correction pending" items are being fixed in dedicated commits.
   superuser or host root can mint context (ADR-024).
 - **Legacy workflow versions predating `0019`** are name-resolved, not
   identity-pinned, until re-materialized (the rollout go-live report counts them).
+- **Rollout tooling binds the active checkout by configuration, not by
+  `/opt/nlw/current`.** `deploy/staging/target.env` names `/opt/nlw/app`; that is
+  correct for the FIRST rollout only. After activation the next release needs the
+  tooling to follow `current` (and to fetch from the GitHub origin rather than
+  the local clone chain). Enforced: the pre-activation phases refuse a host whose
+  `current` points at another release (fail closed, nothing changed) — a second
+  rollout cannot start before that lands.
+- **Timer backups carry no release binding.** The rollout's `backup` phase binds
+  instance/environment/release per run; systemd-timer backups bind only the
+  instance/environment set in `.env.backup` (a static release would go stale).
+- **`scripts/ops/verify-staging-deployment.sh` inspects `/opt/nlw/app`** and
+  FLAGs the SHA/pins after activation; the rollout's `validate`/`go-check`
+  evidence is authoritative until it is updated.
 - **Deferred:** cloud/encrypted secret storage and self-service secret onboarding,
   HttpOnly/opaque sessions, PITR, typed step-output references, additional
   connectors.

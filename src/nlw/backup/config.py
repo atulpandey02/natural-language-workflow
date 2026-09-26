@@ -38,7 +38,14 @@ class BackupSettings(BaseSettings):
     never log or persist the values.
     """
 
-    model_config = SettingsConfigDict(env_file=None, extra="ignore", populate_by_name=True)
+    model_config = SettingsConfigDict(
+        env_file=None,
+        extra="ignore",
+        populate_by_name=True,
+        # A validation failure is printed to the journal by the CLI; never echo the
+        # (possibly partial) credential values that were supplied.
+        hide_input_in_errors=True,
+    )
 
     app_env: Environment = Field(default="local")
 
@@ -146,7 +153,14 @@ class RestoreSettings(BaseSettings):
     production DB by default: it requires an explicit destructive confirmation
     that matches the exact target identity."""
 
-    model_config = SettingsConfigDict(env_file=None, extra="ignore", populate_by_name=True)
+    model_config = SettingsConfigDict(
+        env_file=None,
+        extra="ignore",
+        populate_by_name=True,
+        # A validation failure is printed to the journal by the CLI; never echo the
+        # (possibly partial) credential values that were supplied.
+        hide_input_in_errors=True,
+    )
 
     app_env: Environment = Field(default="local")
     restic_repository: str = Field(default="", alias="RESTIC_REPOSITORY")

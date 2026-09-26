@@ -2,8 +2,8 @@
 mutation re-gated, no database mutation before the verified off-host backup,
 fail closed with runtimes stopped after migration.
 
-Phase order for the ``M11 runtime + schema 0010 -> P3B runtime + schema 0016``
-boundary (``state.PHASES``):
+Phase order for an upgrade from the expected current schema to the release's
+target head (both named by the release manifest; ``state.PHASES``):
 
     preflight            read-only (the default)
     verify-release       pull the manifest digests; prove the exact image carries
@@ -20,7 +20,8 @@ boundary (``state.PHASES``):
     drain                caddy on the release config + maintenance 503; stop
                          scheduler; wait for zero work; stop worker+api; no sessions
     prepare-roles        create nlw_membership_admin / nlw_ctx_verifier if absent
-    migrate              0010 -> 0016 (migrate service from the staged release)
+    migrate              alembic upgrade head == manifest target_revision (migrate
+                         service from the staged release)
     install-context-keys install + check the three registry keys
     recreate-runtime     ACTIVATE: <ops_root>/current -> staged release; recreate
                          api/worker/scheduler/web (+ monitoring) from it
@@ -145,9 +146,17 @@ class Rollout:
 
     def _migrate_run(self, extra: str, cmd: str, *, timeout: int = 600) -> str:
         """One-shot command in the STAGED release's migrate profile service (owner
-        credential), container removed afterwards. ``extra`` adds run flags."""
+        credential), container removed afterwards. ``extra`` adds run flags.
+
+        ``--no-deps`` is mandatory: the staged release lives in a different
+        directory from the one the running ``postgres`` container was created from,
+        so its relative bind mounts (``./docker/postgres/initdb``) resolve to a
+        different path and the service's config hash diverges. Without
+        ``--no-deps`` Compose converges the ``depends_on`` dependency and RECREATES
+        the live database container mid-rollout (reproduced with Compose v5). The
+        database is proven reachable by the ``_psql`` gates that precede every call."""
         return self._run(
-            f"{self.dc_staged} --profile migration run --rm -T {extra} migrate {cmd}",
+            f"{self.dc_staged} --profile migration run --rm --no-deps -T {extra} migrate {cmd}",
             timeout=timeout,
         )
 
@@ -195,6 +204,71 @@ class Rollout:
 
     def read_active_sha(self) -> str:
         return self._run(f"git -C '{self.target.remote_app}' rev-parse HEAD")
+
+    def refuse_foreign_activation(self) -> str:
+        """Pre-activation phases assume the checkout named by ``target.env``
+        (``<ops_root>/app``) IS the active deployment. Once a release has been
+        activated, ``<ops_root>/current`` points at ``releases/<sha>`` and that
+        assumption is false: evidence would bind to the obsolete legacy SHA and
+        the staged ``.env.prod`` would derive from the legacy file. Until the
+        tooling follows ``current``, a host whose ``current`` points anywhere but
+        THIS release's staged directory is refused (fail closed, explicit).
+        Returns the observed shape: ABSENT / THIS_RELEASE."""
+        cur = self.target.current_link
+        out = self._run(
+            f"if [ -L '{cur}' ]; then readlink '{cur}'; "
+            f"elif [ -e '{cur}' ]; then echo NOT_A_SYMLINK; else echo ABSENT; fi"
+        ).strip()
+        if out == "ABSENT":
+            return "ABSENT"
+        if out == self.staged:
+            return "THIS_RELEASE"
+        if out == "NOT_A_SYMLINK":
+            raise GateError(
+                f"{cur} exists but is not a symlink: activation would not be able to "
+                "switch it atomically — remove or rename it by hand (nothing was changed)"
+            )
+        raise GateError(
+            f"{cur} already points at {out!r}: this host has an activated release and "
+            f"the tooling's active checkout is still {self.target.remote_app} "
+            "(deploy/staging/target.env). A second rollout is not supported until the "
+            "rollout follows `current` — STOP (nothing was changed)"
+        )
+
+    def check_backup_env_file(self) -> str:
+        """The backup job's env file (restic repository + provider credentials) is
+        read CLIENT-SIDE by ``docker compose --env-file`` as the rollout's SSH user
+        — never by root. A file that is missing, unreadable, or world-readable
+        stops the rollout here (preflight) instead of failing inside ``backup``,
+        and its contents are never read by this check (mode + readability only)."""
+        path = self.target.backup_env_file
+        # Portable (GNU + BSD): readability via the shell test, the permission
+        # string via `ls -ld` (never `stat -c`, which BSD stat does not know).
+        res = self.remote.run(
+            f"if [ -r '{path}' ] && [ -f '{path}' ]; then "
+            f"if [ -s '{path}' ]; then ls -ld '{path}' | cut -c1-10; else echo EMPTY; fi; "
+            f"else echo MISSING_OR_UNREADABLE; fi"
+        )
+        perms = res.text.strip()
+        if perms == "EMPTY":
+            raise GateError(
+                f"backup env file {path} is empty: the backup job would fail closed inside "
+                "the backup phase (missing RESTIC_REPOSITORY / RESTIC_PASSWORD / provider "
+                "credentials / NLW_BACKUP_DATABASE_URL); fill it from .env.backup.example first"
+            )
+        if not res.ok or perms == "MISSING_OR_UNREADABLE" or len(perms) != 10:
+            raise GateError(
+                f"backup env file {path} is missing or not readable by the rollout user "
+                f"({self.target.ssh_user}); the backup + verify-backup phases run "
+                "`docker compose --env-file` as that user (no sudo). Provide the file "
+                "readable by that user (e.g. root:<group> 0640) or point "
+                "NLW_STAGING_BACKUP_ENV_FILE at the readable copy — see the runbook"
+            )
+        if perms[7] != "-":
+            raise GateError(
+                f"backup env file {path} has permissions {perms}: it must not be world-readable"
+            )
+        return perms
 
     def read_roles(self) -> dict[str, str]:
         text = self._psql(
@@ -267,10 +341,14 @@ class Rollout:
         roles = self.read_roles()
         gates.check_roles(roles, require_provisioned=False)
         drain = self.read_drain()
+        current_shape = self.refuse_foreign_activation()
+        backup_env_mode = self.check_backup_env_file()
         doc = self._state()
         if not state.phase_done(doc, "migrate"):
             gates.check_current_revision(rev, self.release.expected_current_revision)
         report = {
+            "backup_env_mode": backup_env_mode,
+            "current_link": current_shape,
             "manifest_sha256": self.release.sha256,
             "release_sha": self.release.release_sha,
             "instance_id": imds.get("instance-id"),
@@ -419,6 +497,7 @@ class Rollout:
         doc = self._state()
         state.require_phases(doc, "verify-release", "verify-escrow")
         self.check_identity()
+        self.refuse_foreign_activation()
         active = self.target.remote_app
         active_env_hash_before = self._run(f"sha256sum '{active}/.env.prod' | cut -d' ' -f1")
         self._run(
@@ -431,6 +510,7 @@ class Rollout:
         )
         self.verify_checkout(self.staged)
         self._write_staged_env(keys_dir=keys_dir)
+        worker_secrets = self._stage_worker_secrets()
         self._run(f"{self.dc_staged} config >/dev/null")
         self._run(f"{self.target.dc_backup_in(self.staged)} build -q backup", timeout=900)
         active_env_hash_after = self._run(f"sha256sum '{active}/.env.prod' | cut -d' ' -f1")
@@ -438,9 +518,33 @@ class Rollout:
             raise RolloutStop("active .env.prod changed during staging — aborting")
         gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
         state.mark_phase(
-            doc, "stage-release", staged_dir=self.staged, active_checkout=self.read_active_sha()
+            doc,
+            "stage-release",
+            staged_dir=self.staged,
+            active_checkout=self.read_active_sha(),
+            worker_env_file=worker_secrets,
         )
         self._save(doc)
+
+    # The worker's connector secrets live in a git-IGNORED file next to the active
+    # compose files; `git clone` never carries it and the worker service declares it
+    # `required: false`, so a recreated worker would silently start WITHOUT its
+    # connector secrets. Carry it into the staged release (0600, temp-file + mv).
+    WORKER_SECRETS = "docker/worker.secrets.env"
+
+    def _stage_worker_secrets(self) -> str:
+        src = f"{self.target.remote_app}/{self.WORKER_SECRETS}"
+        dst = f"{self.staged}/{self.WORKER_SECRETS}"
+        out = self._run(
+            f"if [ -f '{src}' ]; then set -e; umask 077; cp '{src}' '{dst}.tmp'; "
+            f"chmod 600 '{dst}.tmp'; mv '{dst}.tmp' '{dst}'; echo staged; "
+            f"else echo absent; fi"
+        )
+        verdict = out.strip()
+        if verdict not in ("staged", "absent"):
+            raise RolloutStop("unexpected result while staging the worker secrets file")
+        self.log(f"worker connector secrets file: {verdict}")
+        return verdict
 
     def _write_staged_env(self, *, keys_dir: str) -> None:
         """Staged .env.prod = active .env.prod with ONLY the pins rewritten
@@ -467,7 +571,9 @@ class Rollout:
         doc = self._state()
         state.require_phases(doc, "stage-release")
         self.check_identity()
+        self.refuse_foreign_activation()
         self.verify_checkout(self.staged)
+        self.check_backup_env_file()
         gates.check_current_revision(self.read_revision(), self.release.expected_current_revision)
         env = (
             f"-e NLW_BACKUP_SOURCE_INSTANCE_ID={self.release.instance_id} "
@@ -485,6 +591,7 @@ class Rollout:
         self._require_mutation_authority()
         doc = self._state()
         state.require_phases(doc, "stage-release")
+        self.refuse_foreign_activation()
         self.verify_checkout(self.staged)
         res = self.remote.run(
             f"{self.target.dc_backup_in(self.staged)} run --rm --no-deps -T backup evidence",
@@ -618,6 +725,7 @@ class Rollout:
         self._require_mutation_authority()
         doc = self._state()
         state.require_phases(doc, "migrate")
+        self.check_identity()
         gates.check_no_runtime_sessions(self.read_runtime_sessions())
         gates.check_current_revision(self.read_revision(), self.release.target_revision)
         mount = f"-v '{keys_dir}:/run/nlw/keys:ro' -e NLW_CTX_OPERATOR=rollout"
@@ -657,11 +765,27 @@ class Rollout:
         self._require_mutation_authority()
         doc = self._state()
         state.require_phases(doc, "install-context-keys")
+        self.check_identity()
         self.verify_checkout(self.staged)
         gates.check_current_revision(self.read_revision(), self.release.target_revision)
         gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
         self._run(f"{self.dc_staged} config >/dev/null")
-        self._run(f"ln -sfn '{self.staged}' '{self.target.current_link}'")
+        # <ops_root>/current must be absent (first activation from the legacy
+        # layout) or an existing SYMLINK (`ln -sfn` replaces it). A real directory
+        # would silently receive a link INSIDE it and activation would be a lie.
+        cur = self.target.current_link
+        shape = self._run(
+            f"if [ -e '{cur}' ] && [ ! -L '{cur}' ]; then echo DIRECTORY; "
+            f"elif [ -L '{cur}' ]; then echo SYMLINK; else echo ABSENT; fi"
+        ).strip()
+        if shape == "DIRECTORY":
+            raise GateError(
+                f"{cur} exists and is not a symlink; refusing to activate over a directory"
+            )
+        self._run(f"ln -sfn '{self.staged}' '{cur}'")
+        pointed = self._run(f"readlink '{cur}'").strip()
+        if pointed != self.staged:
+            raise GateError(f"{cur} points at {pointed!r}, not the staged release")
         self._run(
             f"{self.dc_staged} up -d --force-recreate --no-deps api worker scheduler web",
             timeout=600,
