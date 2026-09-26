@@ -8,7 +8,8 @@ target head (both named by the release manifest; ``state.PHASES``):
     preflight            read-only (the default)
     verify-release       pull the manifest digests; prove the exact image carries
                          the release SHA, the required commands, migrations, head
-    prepare-keys         generate the three key files on the host (0700/0400)
+    prepare-keys         generate the three key files on the host (0700/0400) —
+                         or verify + fingerprint the existing ones (N -> N+1)
     verify-escrow        operator attestation fingerprints == host key files
     stage-release        clone+checkout the release into <ops_root>/releases/<sha>
                          with its own pinned .env.prod; build the backup image.
@@ -22,12 +23,20 @@ target head (both named by the release manifest; ``state.PHASES``):
     prepare-roles        create nlw_membership_admin / nlw_ctx_verifier if absent
     migrate              alembic upgrade head == manifest target_revision (migrate
                          service from the staged release)
-    install-context-keys install + check the three registry keys
+    install-context-keys install + check the three registry keys (each one-shot
+                         mounts ONLY its key file: the key dir is root 0700)
     recreate-runtime     ACTIVATE: <ops_root>/current -> staged release; recreate
-                         api/worker/scheduler/web (+ monitoring) from it
+                         api/worker/scheduler/web (+ monitoring, with the
+                         operator Alertmanager override) from it
     validate             signed_context readiness, cutover, mounts, forgery,
                          health, alert rules/connectivity (delivery kept separate)
     reopen               leave maintenance mode; record open launch gates
+
+The active checkout is what ``target.env`` names: the legacy ``<ops_root>/app``
+for the first rollout, ``<ops_root>/current`` afterwards (``follows_current``);
+the phases never guess it. Alerting for staging/production is evaluated from
+the RUNNING Alertmanager against the operator's host files (``OperatorAlerting``),
+never from the committed null config in a checkout.
 
 Every command runs through the ``Remote`` (SSH to the host or local rehearsal).
 Secrets never appear on argv: the installer reads files mounted into a
@@ -45,6 +54,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from nlw.ops.release_provenance import ProvenanceReceipt
 from nlw.ops.rollout import alerting, gates, keyfiles, state
 from nlw.ops.rollout.attestation import (
@@ -61,7 +72,7 @@ from nlw.ops.rollout.backup_evidence import (
 )
 from nlw.ops.rollout.gates import GateError
 from nlw.ops.rollout.release import KEY_CLASSES, ReleaseSpec
-from nlw.ops.rollout.remote import Remote, TargetConfig
+from nlw.ops.rollout.remote import OperatorAlerting, Remote, TargetConfig
 
 EXPECTED_SIGNED_POLICIES = 51
 # Caddy serves 503 for every request while this file exists on its `caddy_maint`
@@ -100,6 +111,24 @@ class RolloutStop(RuntimeError):
     """Stop the rollout. The message is safe to print (no secrets)."""
 
 
+@dataclass(frozen=True)
+class OperatorConfigFacts:
+    """What the operator's Alertmanager files say (host side, never secrets)."""
+
+    receiver: str
+    receivers: dict[str, alerting.ReceiverConfig]
+    config_sha256: str
+    credential_paths: dict[str, str]  # container path -> host path
+
+    def evidence(self) -> dict[str, Any]:
+        # Names only — never a path into the secrets directory.
+        return {
+            "receiver": self.receiver,
+            "config_sha256": self.config_sha256,
+            "credential_file_count": len(self.credential_paths),
+        }
+
+
 class Rollout:
     def __init__(
         self,
@@ -125,6 +154,7 @@ class Rollout:
         self.staged = target.release_dir(release.release_sha)
         self.dc = target.dc  # ACTIVE checkout: exec / ps / stop only
         self.dc_staged = target.dc_in(self.staged)
+        self._probe_image_cache: str | None = None
 
     # ---- helpers -----------------------------------------------------------
     def _run(self, cmd: str, *, stdin: str | None = None, timeout: int = 300) -> str:
@@ -206,34 +236,270 @@ class Rollout:
         return self._run(f"git -C '{self.target.remote_app}' rev-parse HEAD")
 
     def refuse_foreign_activation(self) -> str:
-        """Pre-activation phases assume the checkout named by ``target.env``
-        (``<ops_root>/app``) IS the active deployment. Once a release has been
-        activated, ``<ops_root>/current`` points at ``releases/<sha>`` and that
-        assumption is false: evidence would bind to the obsolete legacy SHA and
-        the staged ``.env.prod`` would derive from the legacy file. Until the
-        tooling follows ``current``, a host whose ``current`` points anywhere but
-        THIS release's staged directory is refused (fail closed, explicit).
-        Returns the observed shape: ABSENT / THIS_RELEASE."""
+        """Bind the phases to the deployment ``target.env`` says is active.
+
+        * ``follows_current`` (every rollout after the first): ``<ops_root>/current``
+          must be a symlink into ``releases/`` — the PREVIOUS release (N) or, when a
+          phase is re-run after activation, THIS release. A legacy host (no
+          ``current``) is a configuration error, not a rollout.
+        * legacy (first rollout, ``remote_app`` = ``<ops_root>/app``): ``current``
+          must be absent or already point at THIS release; a host that has
+          activated another release is served through ``current`` — the target must
+          say so. Fail closed either way; nothing is changed."""
         cur = self.target.current_link
         out = self._run(
             f"if [ -L '{cur}' ]; then readlink '{cur}'; "
             f"elif [ -e '{cur}' ]; then echo NOT_A_SYMLINK; else echo ABSENT; fi"
         ).strip()
-        if out == "ABSENT":
-            return "ABSENT"
-        if out == self.staged:
-            return "THIS_RELEASE"
         if out == "NOT_A_SYMLINK":
             raise GateError(
                 f"{cur} exists but is not a symlink: activation would not be able to "
                 "switch it atomically — remove or rename it by hand (nothing was changed)"
             )
+        if out == self.staged:
+            return "THIS_RELEASE"
+        if self.target.follows_current:
+            if out == "ABSENT":
+                raise GateError(
+                    f"{cur} does not exist: this host has no activated release (legacy "
+                    f"layout). For the FIRST rollout set NLW_STAGING_REMOTE_APP to the "
+                    "legacy checkout (deploy/staging/target.env) — STOP (nothing was changed)"
+                )
+            if not out.startswith(f"{self.target.ops_root}/releases/"):
+                raise GateError(
+                    f"{cur} points at {out!r}, outside {self.target.ops_root}/releases/ — "
+                    "not a release activated by this tooling; STOP (nothing was changed)"
+                )
+            return "PREVIOUS_RELEASE"
+        if out == "ABSENT":
+            return "ABSENT"
         raise GateError(
-            f"{cur} already points at {out!r}: this host has an activated release and "
-            f"the tooling's active checkout is still {self.target.remote_app} "
-            "(deploy/staging/target.env). A second rollout is not supported until the "
-            "rollout follows `current` — STOP (nothing was changed)"
+            f"{cur} already points at {out!r}: the active deployment is a release, not the "
+            f"legacy checkout {self.target.remote_app}. Set NLW_STAGING_REMOTE_APP="
+            f"{cur} (and NLW_STAGING_CURRENT_REVISION to the live revision) in "
+            "deploy/staging/target.env — STOP (nothing was changed)"
         )
+
+    # ---- operator Alertmanager authority (host files -> override -> running container) --
+    def _probe_image(self) -> str:
+        """An image present on the host for read-only stat/readability probes: the
+        ACTIVE deployment's pinned backend image (running, hence pulled)."""
+        if self._probe_image_cache is None:
+            image = self.read_pins(self.target.remote_app).get("NLW_IMAGE", "")
+            if "@sha256:" not in image:
+                raise GateError("active .env.prod carries no digest-pinned NLW_IMAGE")
+            self._probe_image_cache = image
+        return self._probe_image_cache
+
+    def _stat_host_path(self, path: str, *, directory: bool) -> keyfiles.StatLine:
+        """stat a host path through a throwaway root container (the rollout user
+        cannot traverse root-owned secret directories; the daemon can). Read-only,
+        no network; the file's CONTENT is never read."""
+        mount = f"-v '{path}:/probe:ro'" if directory else f"-v '{path}:/probe/f:ro'"
+        target = "'/probe/.'" if directory else "/probe/f"
+        line = self._run(
+            f"docker run --rm --user 0:0 --network none --entrypoint stat {mount} "
+            f"{self._probe_image()} -c '{keyfiles.STAT_FORMAT}' {target}"
+        )
+        return keyfiles.parse_stat_line(line)
+
+    def _read_host_text(self, path: str, what: str) -> str:
+        out = self._run(f"if [ -r '{path}' ]; then cat '{path}'; else echo __UNREADABLE__; fi")
+        if out.strip() == "__UNREADABLE__" or not out.strip():
+            raise GateError(
+                f"{what} {path} is missing, empty or not readable by the rollout user "
+                f"({self.target.ssh_user}) — STOP"
+            )
+        return out
+
+    def _check_outside_releases(self, path: str, what: str) -> None:
+        roots = (
+            f"{self.target.ops_root}/releases/",
+            self.target.current_link + "/",
+            self.target.remote_app.rstrip("/") + "/",
+        )
+        if any(path.startswith(r) for r in roots):
+            raise GateError(
+                f"{what} {path} lies inside a release checkout: operator authority must live "
+                f"on the host outside {self.target.ops_root}/releases/ and "
+                f"{self.target.current_link}"
+            )
+
+    def check_alertmanager_authority(self) -> OperatorConfigFacts:
+        """Fail closed unless the operator's Alertmanager files exist, are sane and
+        are wired through the reviewed override: real (non-null) receiver with
+        ``*_file`` credentials inside the secrets mount; config root-owned and not
+        writable by others; secrets dir + files not world-accessible; every
+        credential readable AS the Alertmanager user (uid 65534); the override
+        mounts exactly those host paths read-only. Contents of credential files are
+        never read."""
+        contract: OperatorAlerting | None = self.target.operator_alerting
+        if contract is None:
+            raise GateError(
+                "operator Alertmanager configuration is required for staging/production: set "
+                "NLW_STAGING_ALERTMANAGER_CONFIG, NLW_STAGING_ALERTMANAGER_SECRETS_DIR and "
+                "NLW_STAGING_COMPOSE_OVERRIDE in deploy/staging/target.env (docs/ops/alerting.md)"
+            )
+        for path, what in (
+            (contract.config_path, "operator Alertmanager config"),
+            (contract.secrets_dir, "Alertmanager secrets directory"),
+            (contract.override_path, "operator Compose override"),
+        ):
+            self._check_outside_releases(path, what)
+        override_doc = yaml.safe_load(
+            self._read_host_text(contract.override_path, "operator Compose override")
+        )
+        alerting.check_override_mounts(
+            alerting.override_alertmanager_mounts(override_doc),
+            config_path=contract.config_path,
+            secrets_dir=contract.secrets_dir,
+            what="operator Compose override",
+        )
+        cfg_text = self._read_host_text(contract.config_path, "operator Alertmanager config")
+        default, receivers = alerting.check_operator_config(cfg_text)
+        cfg_sha = self._run(f"sha256sum '{contract.config_path}' | cut -d' ' -f1").strip()
+        alerting.check_config_file_stat(
+            self._stat_host_path(contract.config_path, directory=False), contract.config_path
+        )
+        alerting.check_secrets_dir_stat(
+            self._stat_host_path(contract.secrets_dir, directory=True), contract.secrets_dir
+        )
+        cred = alerting.credential_host_paths(receivers, default, contract.secrets_dir)
+        rel = [c[len(alerting.SECRETS_MOUNT) + 1 :] for c in cred]
+        for name, host in zip(rel, cred.values(), strict=True):
+            res = self.remote.run(
+                f"docker run --rm --user 0:0 --network none --entrypoint stat "
+                f"-v '{contract.secrets_dir}:/probe:ro' {self._probe_image()} "
+                f"-c '{keyfiles.STAT_FORMAT}' '/probe/{name}'"
+            )
+            if not res.ok:
+                raise GateError(f"credential file {host} is missing — STOP")
+            alerting.check_credential_file_stat(keyfiles.parse_stat_line(res.text), host)
+        probe = " ".join(shlex.quote(n) for n in rel)
+        script = (
+            f'for f in {probe}; do if [ -r "/probe/$f" ]; then echo "$f R"; '
+            'else echo "$f X"; fi; done'
+        )
+        readable = self._run(
+            f"docker run --rm --user {alerting.ALERTMANAGER_UID}:{alerting.ALERTMANAGER_UID} "
+            f"--network none --entrypoint sh -v '{contract.secrets_dir}:/probe:ro' "
+            f"{self._probe_image()} -c {shlex.quote(script)}"
+        )
+        verdicts = dict(line.split() for line in readable.splitlines() if len(line.split()) == 2)
+        for name, host in zip(rel, cred.values(), strict=True):
+            if verdicts.get(name) != "R":
+                raise GateError(
+                    f"credential file {host} is not readable by the Alertmanager user "
+                    f"(uid {alerting.ALERTMANAGER_UID}): want root:65534 0640 in a root:65534 "
+                    "0750 directory (docs/ops/alerting.md) — STOP"
+                )
+        return OperatorConfigFacts(default, receivers, cfg_sha, cred)
+
+    def check_rendered_alertmanager_mounts(self, facts: OperatorConfigFacts) -> None:
+        """The staged release's RENDERED Compose config (with the override) must
+        mount the operator paths — proven before Alertmanager is (re)created."""
+        contract = self.target.operator_alerting
+        assert contract is not None
+        raw = self._run(f"{self.dc_staged} config --format json")
+        try:
+            rendered = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise GateError("rendered Compose config is not JSON") from exc
+        mounts = alerting.override_alertmanager_mounts(
+            {
+                "services": {
+                    "alertmanager": {
+                        "volumes": rendered["services"]["alertmanager"].get("volumes", [])
+                    }
+                }
+            }
+            if isinstance(rendered, dict) and "alertmanager" in (rendered.get("services") or {})
+            else {}
+        )
+        alerting.check_override_mounts(
+            mounts,
+            config_path=contract.config_path,
+            secrets_dir=contract.secrets_dir,
+            what="rendered Compose config",
+        )
+
+    def verify_alertmanager_runtime(self, facts: OperatorConfigFacts) -> None:
+        """The RUNNING container is the authority: its mounts come from the operator
+        paths (read-only), the mounted bytes equal the host file, the LOADED config
+        (``/api/v2/status``) routes to the same receiver/credential files, and
+        every credential is readable as the container's own user."""
+        contract = self.target.operator_alerting
+        assert contract is not None
+        mounts_raw = self._run(
+            "docker inspect --format '{{range .Mounts}}{{.Source}}:{{.Destination}}:{{.RW}} "
+            f"{{{{end}}}}' $({self.dc_staged} ps -q alertmanager | head -1)"
+        )
+        # The daemon reports the RESOLVED source: on Linux the host path itself; on
+        # Docker Desktop (rehearsal only) possibly `/host_mnt<realpath>`. Accept the
+        # operator path or its `readlink -f` form, nothing else.
+        aliases: dict[str, str] = {}
+        for want in (contract.config_path, contract.secrets_dir):
+            real = self._run(f"readlink -f '{want}' 2>/dev/null || echo '{want}'").strip()
+            for form in (want, real):
+                aliases[form.rstrip("/")] = want
+        mounts: dict[str, tuple[str, bool]] = {}
+        for item in mounts_raw.split():
+            parts = item.rsplit(":", 2)
+            if len(parts) == 3:
+                src = parts[0]
+                if src.startswith("/host_mnt/"):
+                    src = src[len("/host_mnt") :]
+                mounts[parts[1]] = (aliases.get(src.rstrip("/"), parts[0]), parts[2] == "false")
+        alerting.check_override_mounts(
+            mounts,
+            config_path=contract.config_path,
+            secrets_dir=contract.secrets_dir,
+            what="running Alertmanager container",
+        )
+        mounted_sha = self._run(
+            f"{self.dc_staged} exec -T alertmanager sha256sum {alerting.CONFIG_MOUNT} "
+            "| cut -d' ' -f1"
+        ).strip()
+        if mounted_sha != facts.config_sha256:
+            raise GateError(
+                "the Alertmanager config mounted in the running container and the operator "
+                f"file {contract.config_path} differ (sha256 {mounted_sha[:12]} != "
+                f"{facts.config_sha256[:12]}): recreate the container — STOP"
+            )
+        status_raw = self.remote.run(
+            f"{self.dc_staged} exec -T alertmanager wget -qO- http://127.0.0.1:9093/api/v2/status"
+        )
+        try:
+            loaded = (json.loads(status_raw.text).get("config") or {}).get("original")
+        except (json.JSONDecodeError, AttributeError):
+            loaded = None
+        if not status_raw.ok or not isinstance(loaded, str):
+            raise GateError("running Alertmanager did not report its loaded configuration — STOP")
+        alerting.check_loaded_matches_mounted(
+            loaded, default=facts.receiver, receivers=facts.receivers
+        )
+        files = " ".join(shlex.quote(c) for c in facts.credential_paths)
+        script = (
+            f'for f in {files}; do if [ -r "$f" ]; then echo "$f R"; else echo "$f X"; fi; done'
+        )
+        readable = self._run(f"{self.dc_staged} exec -T alertmanager sh -c {shlex.quote(script)}")
+        verdicts = dict(line.split() for line in readable.splitlines() if len(line.split()) == 2)
+        for c in facts.credential_paths:
+            if verdicts.get(c) != "R":
+                raise GateError(
+                    f"credential file {c} is not readable inside the running Alertmanager "
+                    "container — STOP"
+                )
+
+    def _read_delivery_record(self) -> tuple[dict[str, Any] | None, str | None]:
+        path = f"{self.target.state_dir}/alert-delivery.json"
+        res = self.remote.run(
+            f"if [ -e '{path}' ]; then if [ -r '{path}' ]; then echo __OK__; cat '{path}'; "
+            f"else echo __UNREADABLE__; fi; else echo __ABSENT__; fi"
+        )
+        if not res.ok:
+            return None, "unreadable"
+        return alerting.classify_delivery_record(res.text)
 
     def check_backup_env_file(self) -> str:
         """The backup job's env file (restic repository + provider credentials) is
@@ -343,10 +609,12 @@ class Rollout:
         drain = self.read_drain()
         current_shape = self.refuse_foreign_activation()
         backup_env_mode = self.check_backup_env_file()
+        am = self.check_alertmanager_authority()
         doc = self._state()
         if not state.phase_done(doc, "migrate"):
             gates.check_current_revision(rev, self.release.expected_current_revision)
         report = {
+            "alertmanager": am.evidence(),
             "backup_env_mode": backup_env_mode,
             "current_link": current_shape,
             "manifest_sha256": self.release.sha256,
@@ -433,6 +701,38 @@ class Rollout:
         doc = self._state()
         state.require_phases(doc, "verify-release")
         parent = str(Path(keys_dir).parent)
+        # N -> N+1 keeps the installed keys: `ctxkeys prepare` never overwrites, so
+        # an existing COMPLETE set is verified + fingerprinted instead of generated.
+        # A partial set is never completed silently.
+        existing = [
+            cls
+            for cls in KEY_CLASSES
+            if self.remote.run(
+                f"docker run --rm --user 0:0 --network none --entrypoint stat "
+                f"-v '{keys_dir}:/keys:ro' {self.release.backend_image} "
+                f"-c '{keyfiles.STAT_FORMAT}' '/keys/{cls}.key'"
+            ).ok
+        ]
+        if existing and len(existing) != len(KEY_CLASSES):
+            raise GateError(
+                f"partial key set in {keys_dir}: {existing} exist, "
+                f"{sorted(set(KEY_CLASSES) - set(existing))} do not — STOP "
+                "(never completed silently)"
+            )
+        if existing:
+            host_fps = self.verify_key_files(keys_dir)
+            state.mark_phase(
+                doc,
+                "prepare-keys",
+                keys_dir=keys_dir,
+                fingerprints={c: fp for c, (_kid, fp) in host_fps.items()},
+                reused_existing=True,
+            )
+            self._save(doc)
+            self.log(
+                "prepare-keys: existing key files verified and fingerprinted (not regenerated)"
+            )
+            return
         fps: dict[str, str] = {}
         for cls in KEY_CLASSES:
             out = self._image_python(
@@ -446,7 +746,9 @@ class Rollout:
                 raise RolloutStop(f"unexpected prepare output for {cls}")
             fps[cls] = parts[2]
         self.verify_key_files(keys_dir)
-        state.mark_phase(doc, "prepare-keys", keys_dir=keys_dir, fingerprints=fps)
+        state.mark_phase(
+            doc, "prepare-keys", keys_dir=keys_dir, fingerprints=fps, reused_existing=False
+        )
         self._save(doc)
 
     def _stat_in_container(self, keys_dir: str, name: str) -> keyfiles.StatLine:
@@ -500,14 +802,26 @@ class Rollout:
         self.refuse_foreign_activation()
         active = self.target.remote_app
         active_env_hash_before = self._run(f"sha256sum '{active}/.env.prod' | cut -d' ' -f1")
+        # Objects come from the active checkout (local, fast); the release SHA itself
+        # is fetched from the REVIEWED git remote (target.env) — or, when none is
+        # configured, from the active checkout's own origin (the legacy clone chain).
+        remote = self.target.git_remote or f"$(git -C '{active}' remote get-url origin)"
         self._run(
-            f"set -e; git -C '{active}' fetch -q origin 2>/dev/null || true; "
-            f"mkdir -p '{self.target.ops_root}/releases'; "
+            f"set -e; mkdir -p '{self.target.ops_root}/releases'; "
             f"if [ ! -d '{self.staged}/.git' ]; then git clone -q '{active}' '{self.staged}'; fi; "
-            f"git -C '{self.staged}' fetch -q '{active}' 2>/dev/null || true; "
-            f"git -C '{self.staged}' checkout -q --detach {self.release.release_sha}",
+            f"git -C '{self.staged}' fetch -q '{remote}' "
+            "'+refs/heads/*:refs/remotes/origin/*' 2>/dev/null || true",
             timeout=600,
         )
+        res = self.remote.run(
+            f"git -C '{self.staged}' checkout -q --detach {self.release.release_sha}", timeout=300
+        )
+        if not res.ok:
+            raise GateError(
+                f"release {self.release.release_sha[:12]} is not available from "
+                f"{self.target.git_remote or 'the active checkout origin'}: "
+                "merge/push it first — STOP"
+            )
         self.verify_checkout(self.staged)
         self._write_staged_env(keys_dir=keys_dir)
         worker_secrets = self._stage_worker_secrets()
@@ -728,11 +1042,20 @@ class Rollout:
         self.check_identity()
         gates.check_no_runtime_sessions(self.read_runtime_sessions())
         gates.check_current_revision(self.read_revision(), self.release.target_revision)
-        mount = f"-v '{keys_dir}:/run/nlw/keys:ro' -e NLW_CTX_OPERATOR=rollout"
+
+        # The one-shot runs as the image's uid 10001 and the key directory is root
+        # 0700 (never loosened): mounting the DIRECTORY makes every key unreadable
+        # ("context key file unreadable" on the pilot host). Each one-shot mounts
+        # ONLY its own key file — exactly what the runtime services do.
+        def mount(cls: str) -> str:
+            return (
+                f"-v '{keys_dir}/{cls}.key:/run/nlw/keys/{cls}.key:ro' -e NLW_CTX_OPERATOR=rollout"
+            )
+
         for cls in KEY_CLASSES:
             kid = self.release.key_ids[cls]
             out = self._migrate_run(
-                mount,
+                mount(cls),
                 f"python -m nlw.ctxkeys install --class {cls} --key-id {kid} "
                 f"--secret-file /run/nlw/keys/{cls}.key",
             )
@@ -741,7 +1064,7 @@ class Rollout:
         for cls in KEY_CLASSES:
             kid = self.release.key_ids[cls]
             out = self._migrate_run(
-                mount,
+                mount(cls),
                 f"python -m nlw.ctxkeys check --class {cls} --key-id {kid} "
                 f"--secret-file /run/nlw/keys/{cls}.key",
             )
@@ -770,6 +1093,11 @@ class Rollout:
         gates.check_current_revision(self.read_revision(), self.release.target_revision)
         gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
         self._run(f"{self.dc_staged} config >/dev/null")
+        # Operator Alertmanager authority is proven BEFORE anything is recreated: the
+        # host files, the override and the rendered Compose config (which carries the
+        # override on every invocation from a release directory).
+        am = self.check_alertmanager_authority()
+        self.check_rendered_alertmanager_mounts(am)
         # <ops_root>/current must be absent (first activation from the legacy
         # layout) or an existing SYMLINK (`ln -sfn` replaces it). A real directory
         # would silently receive a link INSIDE it and activation would be a lie.
@@ -800,7 +1128,14 @@ class Rollout:
         images = self.read_running_images()
         gates.check_running_images(images, self.release)
         self.verify_mount_isolation(keys_dir)
-        state.mark_phase(doc, "recreate-runtime", images=images, current=self.staged)
+        self.verify_alertmanager_runtime(am)
+        state.mark_phase(
+            doc,
+            "recreate-runtime",
+            images=images,
+            current=self.staged,
+            alertmanager={**am.evidence(), "config_source": "running-alertmanager"},
+        )
         self._save(doc)
 
     def verify_mount_isolation(self, keys_dir: str) -> None:
@@ -826,6 +1161,17 @@ class Rollout:
                 and svc != "backup"
             ):
                 raise GateError(f"{svc} must not mount the backup evidence volume")
+            contract = self.target.operator_alerting
+            am_mounts = [
+                m
+                for m in mounts.split()
+                if "/etc/alertmanager/" in m
+                or (contract is not None and m.startswith(contract.secrets_dir + ":"))
+            ]
+            if svc != "alertmanager" and am_mounts:
+                raise GateError(
+                    f"{svc} must not mount Alertmanager configuration/secrets: {am_mounts}"
+                )
             allowed = ("NLW_CTX_KEY_ID", "NLW_CTX_KEY_FILE", "NLW_CTX_TTL_S")
             for item in env.split():
                 name = item.split("=", 1)[0]
@@ -885,7 +1231,10 @@ class Rollout:
 
     def alerting_status(self) -> alerting.AlertingStatus:
         """Rules loaded / Alertmanager reachable / delivery verified — three
-        separate facts, never conflated (M12A-Prep §E)."""
+        separate facts, never conflated (M12A-Prep §E). The receiver configuration
+        is read from the RUNNING Alertmanager after the operator authority checks
+        (host files, override, mounts, mounted bytes, loaded config); the
+        committed file in the release checkout is never consulted."""
         rules_raw = self.remote.run(
             f"{self.dc_staged} exec -T prometheus wget -qO- http://127.0.0.1:9090/api/v1/rules"
         )
@@ -906,31 +1255,19 @@ class Rollout:
             f"{self.dc_staged} exec -T alertmanager wget -qO- http://127.0.0.1:9093/-/healthy"
         )
         reachable = bool(active) and healthy.ok
-        cfg_text = self._run(f"cat '{self.staged}/docker/alertmanager/alertmanager.yml'")
-        default, receivers = alerting.parse_alertmanager_config(cfg_text)
-        secrets_dir = f"{self.target.ops_root}/alertmanager.secrets"
-        present = set(
-            f"/etc/alertmanager/secrets/{n}"
-            for n in self._run(f"ls -1 '{secrets_dir}' 2>/dev/null || true").split()
-        )
-        record_raw = self.remote.run(
-            f"cat '{self.target.state_dir}/alert-delivery.json' 2>/dev/null"
-        )
-        record: dict[str, Any] | None = None
-        if record_raw.ok and record_raw.text:
-            try:
-                loaded = json.loads(record_raw.text)
-                record = loaded if isinstance(loaded, dict) else None
-            except json.JSONDecodeError:
-                record = None
+        facts = self.check_alertmanager_authority()
+        self.verify_alertmanager_runtime(facts)
+        record, problem = self._read_delivery_record()
         return alerting.build_status(
             rule_groups=groups,
             alertmanager_reachable=reachable,
-            default_receiver=default,
-            receivers=receivers,
-            present_files=present,
+            default_receiver=facts.receiver,
+            receivers=facts.receivers,
+            present_files=set(facts.credential_paths),
             delivery_record=record,
             now=self.now(),
+            config_source="running-alertmanager",
+            record_problem=problem,
         )
 
     def verify_unsigned_forgery_denied(self) -> None:
@@ -958,6 +1295,7 @@ class Rollout:
         gates.check_readiness_body(self._run("curl -sS -m 5 http://127.0.0.1:8000/health/ready"))
         status = self.alerting_status()
         alerting.check_rules_and_connectivity(status)
+        alerting.check_delivery_record_usable(status)
         open_gates = alerting.launch_gates_for(status, environment=self.release.environment)
         self._run(f"{self.dc_staged} exec -T caddy rm -f {MAINTENANCE_FLAG}")
         state.mark_phase(doc, "reopen", launch_gates_open=open_gates, alerting=status.evidence())

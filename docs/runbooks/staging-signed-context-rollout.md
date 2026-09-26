@@ -106,7 +106,12 @@ take the manifest from `NLW_STAGING_RELEASE_FILE` and validate it first.
 /opt/nlw/releases/<release_sha>  STAGED release: clone at the release SHA, its OWN .env.prod (digests, key ids, key dir)
 /opt/nlw/current -> releases/…   created by recreate-runtime; the systemd backup timer follows it
 /opt/nlw/rollout/<sha>.json      rollout state + evidence (outside every git checkout)
-/opt/nlw/rollout/alert-delivery.json   operator record of a verified controlled test alert (see docs/ops/alerting.md)
+/opt/nlw/rollout/alert-delivery.json   operator record of a verified controlled test alert (root:nlwops 0640,
+                                 written by scripts/ops/record-alert-delivery.sh; see docs/ops/alerting.md)
+/opt/nlw/alertmanager/alertmanager.yml   OPERATOR Alertmanager config (root:root 0644) — authority for the receiver
+/opt/nlw/alertmanager.secrets/   receiver credentials, root:65534 0750 / files root:65534 0640 (Alertmanager = uid 65534)
+/opt/nlw/docker-compose.operator.yml   reviewed override mounting both into the alertmanager service (every
+                                 Compose invocation from a release directory carries it)
 /opt/nlw/.env.backup             backup env (systemd + rollout use the same file; MUST be readable by the
                                  rollout SSH user — preflight refuses a missing/unreadable/world-readable file)
 /opt/nlw/app/docker/worker.secrets.env   git-IGNORED worker connector secrets: stage-release copies it (0600) into the
@@ -139,7 +144,7 @@ never recreates the live `postgres`/`redis` containers from the staged directory
 | where | as | what |
 |---|---|---|
 | **Mac** (repo root, `main` at the release SHA) | you | `gh run download`, `release_provenance verify`, **every** `uv run python -m nlw.ops.rollout …` phase (SSH → host as `nlwops`, no sudo) |
-| `ubuntu@32.197.83.193` (or the sudo-capable operator login) | **root** (`sudo`) | one-time host prerequisites only: backup env file + ownership, key escrow tarball, systemd units **after** activation |
+| `ubuntu@32.197.83.193` (or the sudo-capable operator login) | **root** (`sudo`) | one-time host prerequisites only: backup env file + ownership, key escrow tarball, the operator Alertmanager files (config, secrets dir, override — permissions in `docs/ops/alerting.md`), the delivery record (`scripts/ops/record-alert-delivery.sh` after a human saw the test alert), systemd units **after** activation |
 | host | **nlwops** | nothing by hand — the rollout acts as this user; the only manual `nlwops` action is `docker login ghcr.io` if the packages are private |
 | host | anyone | read-only checks (`docker compose -p app ps`, `readlink /opt/nlw/current`, `journalctl -u nlw-backup`) |
 
@@ -200,18 +205,34 @@ of a `0600` file and **never** echoed, logged, passed on argv, or committed.
 | `prepare-roles` / `migrate` / `install-context-keys` STOP | DB mutated, runtimes stopped | **halted state, never silently old code**: fix forward (`failed-migration.md`) and re-run the failed phase; the verified backup is the rollback |
 | `recreate-runtime` STOP | `current` may already point at the release | re-run the phase; do not touch `/opt/nlw/app` |
 
-### After activation (first rollout only)
+### After activation: every later rollout follows `current` (N → N+1)
 
-* `target.env` still names `/opt/nlw/app` as the active checkout. That is
-  correct for **this** rollout (`validate`/`reopen` only `exec` into the same
-  project). It is **not** correct for the next release: the tooling does not
-  yet follow `current` (recorded under *Known technical debt*). This is
-  **enforced**, not merely documented: once `current` points at any release
-  other than the one being rolled out, `preflight`, `stage-release`, `backup`
-  and `verify-backup` stop with "A second rollout is not supported until the
-  rollout follows `current`" and change nothing. Re-running a phase for the
-  release that is already active is still allowed (`current_link:
-  THIS_RELEASE` in the preflight report).
+* The first rollout is done: `deploy/staging/target.env` now names
+  `NLW_STAGING_REMOTE_APP=/opt/nlw/current` and
+  `NLW_STAGING_CURRENT_REVISION=0020_schedule_authorization`. Every phase
+  reads, stops, `exec`s into and clones **through `current`** (the previous
+  release N); `stage-release` fetches the release SHA from the reviewed
+  `NLW_STAGING_GIT_REMOTE` (GitHub), not the local clone chain; `prepare-keys`
+  verifies and fingerprints the existing keys (the operator writes a new escrow
+  attestation for the new release SHA with the **same** fingerprints);
+  `install-context-keys` reports `unchanged:`; activation re-points `current`
+  to `releases/<N+1>`. The Compose project stays `app`, volumes and the live
+  `postgres`/`redis` containers are untouched (`--no-deps` everywhere).
+  Rehearsed end to end by `scripts/ops/rehearse-0010-to-0016.sh` step 9b.
+* Fail-closed mismatches (nothing changed): a follows-current target on a host
+  with no `current` ("no activated release"); a legacy target
+  (`/opt/nlw/app`) on a host whose `current` points at a release ("set
+  NLW_STAGING_REMOTE_APP=/opt/nlw/current"); `current` pointing outside
+  `releases/`; a release SHA not reachable from the git remote ("merge/push it
+  first"). Re-running a phase for the release that is already active is
+  allowed (`current_link: THIS_RELEASE`).
+* **Code-only releases** (no new migration, `expected_current_revision ==
+  target_revision` — the shape of a hotfix) are supported: CI generates the
+  manifest as usual, `migrate` runs `alembic upgrade head` as a verified no-op
+  and every other gate (verified backup, live revision, keys, activation,
+  effective alerting) applies unchanged. Rehearsed as the N → N+1 cycle.
+* `/opt/nlw/app` is a rollback artefact of the first rollout only; nothing
+  reads it any more.
 * Install the systemd backup units only now (`docs/ops/backup-systemd.md`): the
   unit runs from `/opt/nlw/current`, which exists only after activation, and the
   pre-M12A checkout has no `backup` service. The rollout's own `backup` phase
@@ -246,7 +267,7 @@ uv run python -m nlw.ops.rollout go-check              --release M   # READ-ONLY
 | *(every invocation)* | no | manifest schema; **provenance** (GitHub attestation policy; fixture only under `--local`) | stops before any host contact when the manifest is not release authority |
 | `preflight` | no | manifest schema/kind/deployability; instance id + region; hostname ↔ public IPv4; active `.env.prod` hostname; roles model (M11 set acceptable); drain counters; current revision = expected; backup env file readable by the rollout user, not world-readable and not empty (mode and size only, contents never read); `current` absent or pointing at this release | prints a sanitized report (manifest sha256, active checkout SHA, backup env mode); run it as often as you like |
 | `verify-release` | host image cache, evidence dir | authorization; provenance receipt for this exact manifest digest; identity | `docker pull` both digests; `org.opencontainers.image.revision` label == release SHA on both; runs `nlw.ops.rollout.image_info` in the backend image and checks reported git SHA, every migration from expected+1 to the target present, Alembic head == `target_revision`; runs `--help` of `nlw.ops.rollout`, `nlw.ops.roles`, `nlw.ctxkeys prepare/fingerprint/verify-files`, `nlw.backup evidence` inside the exact image. An older image (e.g. `1eebf2e`, no label, no tooling) is refused |
-| `prepare-keys` | host files | authorization; identity | generates three independent 32-byte keys **on the host** through the release image running as root (`nlw.ctxkeys prepare`): dir `0700` root, files `0400` uid 10001, never overwrites, prints fingerprints only |
+| `prepare-keys` | host files | authorization; identity | generates three independent 32-byte keys **on the host** through the release image running as root (`nlw.ctxkeys prepare`): dir `0700` root, files `0400` uid 10001, never overwrites, prints fingerprints only. On a follow-up release the complete existing set is verified + fingerprinted instead (`reused_existing`); a partial set stops |
 | `verify-escrow` | state only | authorization; **escrow phrase**; attestation fingerprints == host fingerprints; release SHA/env; ≤ 30 days old | the operator must have escrowed the files first — see the escrow section of [signed-context-keys](signed-context-keys.md) |
 | `stage-release` | `releases/<sha>` only | authorization; verify-release + verify-escrow done; identity | clone the active checkout into `releases/<sha>`, `git checkout --detach <release_sha>` (clean), write the staged `.env.prod` (active copy with only digests/key ids/key dir rewritten; temp-file rewrite, 0600), copy the git-ignored `docker/worker.secrets.env` (0600) when present (recorded as `staged`/`absent`), render `config`, build the backup image from the pinned digest; verifies the active `.env.prod` hash is unchanged afterwards |
 | `backup` | nothing on the host DB | authorization; stage-release done; staged checkout clean; revision = expected | runs the real off-host backup job from the staged release (`--profile backup run --rm --no-deps`, owner credential, read-only dump) with the source binding `instance id / environment / active release SHA`; the backup manifest records the DB system identifier and revision |
@@ -254,9 +275,9 @@ uv run python -m nlw.ops.rollout go-check              --release M   # READ-ONLY
 | `drain` | runtime | authorization; **verify-backup done**; identity; staged checkout | recreate **caddy only** from the staged config (`--no-deps --force-recreate`, brief edge blip) so the maintenance matcher exists; maintenance 503 (`caddy_maint` flag, no reload); stop scheduler; wait ≤ 120 s for non-terminal runs / queue to reach zero (never force-retries ambiguous work); stop worker + api; require zero runtime DB sessions |
 | `prepare-roles` | DB roles | verify-backup + drain done; identity; no sessions | `python -m nlw.ops.roles ensure` via the staged `migrate` service: creates `nlw_membership_admin` (NOLOGIN, BYPASSRLS) and `nlw_ctx_verifier` (NOLOGIN, NOBYPASSRLS) if absent, verifies every nlw role, grants nothing on tables |
 | `migrate` | DB | verify-backup/drain/prepare-roles done; identity; staged checkout; no sessions; revision = expected; roles complete | runs the staged `migrate` service (`alembic upgrade head`, `--no-deps`), verifies revision = `target_revision`, 51 policies, 0 legacy-GUC policies, registry owner/grants |
-| `install-context-keys` | DB registry | migrate done; no sessions; revision = target | `nlw.ctxkeys install` ×3 from mounted files (throwaway `migrate` container, removed after), `ctxkeys check` ×3, ≥ 3 active keys, audit contains no material |
-| `recreate-runtime` | `current` symlink, containers | install done; identity; revision; staged pins; `current` absent or a symlink (a real directory is refused); the link is re-read and must point at the staged release | **activation**: `current -> releases/<sha>`, `up -d --force-recreate --no-deps api worker scheduler web` (+ prometheus/alertmanager) from the staged release; each runtime runs the release digest and mounts **only its own** key read-only; no runtime mounts the backup evidence volume; no key-like env values; no leftover one-shot containers |
-| `validate` | none | recreate done | `/health/ready` → `signed_context: ok`; policy cutover; mount isolation; **unsigned forgery as the real `nlw_app` sees no rows**; worker/scheduler healthy; Prometheus rule groups loaded + Alertmanager reachable. Then run `nlw.ops.rollout.smoke` inside the api container with synthetic ids for the invitation / four-eyes checks |
+| `install-context-keys` | DB registry | migrate done; no sessions; revision = target | `nlw.ctxkeys install` ×3 (throwaway `migrate` container, uid 10001, removed after), each mounting **only its own key file** — the `root 0700` key directory is never mounted or loosened (mounting the directory made every key unreadable on the pilot host); `ctxkeys check` ×3, ≥ 3 active keys, audit contains no material |
+| `recreate-runtime` | `current` symlink, containers | install done; identity; revision; staged pins; **operator Alertmanager authority** (files, permissions, override, rendered Compose mounts — before anything is recreated); `current` absent or a symlink (a real directory is refused); the link is re-read and must point at the staged release | **activation**: `current -> releases/<sha>`, `up -d --force-recreate --no-deps api worker scheduler web` (+ prometheus/alertmanager, with the operator override) from the staged release; each runtime runs the release digest and mounts **only its own** key read-only; no runtime mounts the backup evidence volume or Alertmanager secrets; no key-like env values; no leftover one-shot containers; the running Alertmanager mounts the operator paths and loaded the operator config |
+| `validate` | none | recreate done | `/health/ready` → `signed_context: ok`; policy cutover; mount isolation; **unsigned forgery as the real `nlw_app` sees no rows**; worker/scheduler healthy; Prometheus rule groups loaded + Alertmanager reachable; the **running** Alertmanager's effective configuration (mounts, mounted bytes, loaded config, credential readability as uid 65534) is the operator's. Then run `nlw.ops.rollout.smoke` inside the api container with synthetic ids for the invitation / four-eyes checks |
 | `reopen` | Caddy flag | validate done; readiness re-checked; rules + connectivity | removes the maintenance flag and **records the open launch gates** — with the null receiver: `alert delivery unverified` (technical deployment only, not an M12 GO) |
 | `go-check` | no | reopen done | the M12 GO evaluation: NO-GO on a null receiver, missing credential files, or no verified controlled test alert on record |
 
@@ -291,7 +312,12 @@ outside every git checkout, so no checkout is ever dirtied by a rollout.
   pre-deployment backup is the only true rollback; before activation, the
   untouched `/opt/nlw/app` runtime is.
 * **A null Alertmanager receiver never becomes "alert delivery configured"**:
-  see [alerting](../ops/alerting.md); `go-check` fails on it.
+  see [alerting](../ops/alerting.md). For staging/production the operator's
+  host-side configuration is required and evaluated from the **running**
+  container (mounts, mounted bytes, loaded config, credential readability as
+  uid 65534); a null operator config, an inline credential, a world-readable or
+  unreadable credential, a dropped override, or a stale/malformed delivery
+  record all fail closed; `go-check` needs the human delivery record.
 
 ## Human phrases (documented; never pre-filled)
 

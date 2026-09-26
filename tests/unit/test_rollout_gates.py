@@ -75,7 +75,9 @@ def test_committed_example_is_rejected_and_target_env_is_consistent() -> None:
         load_release(ROOT / "deploy" / "staging" / "release.example.json")
     tgt = parse_target_env((ROOT / "deploy" / "staging" / "target.env").read_text())
     assert tgt["NLW_STAGING_INSTANCE_ID"] == REL.instance_id
-    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0010_readiness_schema_grant"
+    # The first rollout completed: the host is at 0020 and served through current.
+    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0020_schedule_authorization"
+    assert tgt["NLW_STAGING_REMOTE_APP"] == "/opt/nlw/current"
     assert tgt["NLW_STAGING_OPS_ROOT"] == "/opt/nlw"
 
 
@@ -86,7 +88,6 @@ def test_committed_example_is_rejected_and_target_env_is_consistent() -> None:
         {"backend_image": "ghcr.io/o/r:sha-1eebf2e"},
         {"release_sha": "1eebf2e"},
         {"instance_id": "32.197.83.193"},  # an IP is not an identity
-        {"expected_current_revision": "0016_signed_database_context"},  # nothing to roll
         {"key_ids": {"api": "k", "worker": "k", "scheduler": "k"}},  # not unique
         {"key_ids": {"api": "stg-api-1", "worker": "stg-worker-1"}},
         {"format_version": 1},

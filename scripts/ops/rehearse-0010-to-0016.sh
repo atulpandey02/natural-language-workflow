@@ -40,7 +40,22 @@
 #   6  post-upgrade proofs: invitation accept + four-eyes approval under signed
 #      contexts, a worker-executed synthetic run, one scheduler occurrence,
 #      Prometheus rule groups loaded;
-#   7  a SEPARATE disposable downgrade <head> -> 0015 proving the legacy policies
+#   7  post-rollout hotfix proofs (reproduced on the first REAL staging rollout):
+#      the root-0700 key directory is never mounted (each one-shot mounts only its
+#      key file; kernel-semantics proof through a Docker volume); the OPERATOR
+#      Alertmanager files (config root:root 0644, secrets root:65534 0750/0640,
+#      Compose override) outside every checkout are required, permission-checked,
+#      and evaluated from the RUNNING container; a null operator config, an
+#      inline/world-readable credential and a missing override are refused; a
+#      bare recreation without the override is caught ("mount disagreement");
+#      the HUMAN delivery record (scripts/ops/record-alert-delivery.sh) closes
+#      the launch gate and go-check passes — stale/mismatched/malformed records
+#      do not;
+#   8  a SECOND, CODE-ONLY release (N -> N+1: same schema head, same keys — the
+#      shape of the post-rollout hotfix itself) rolled out THROUGH <ops_root>/current
+#      with target.env pointing at it — migrate is a verified no-op, no duplicate
+#      project/volumes, no live database recreation, operator Alertmanager kept;
+#   9  a SEPARATE disposable downgrade <head> -> 0015 proving the legacy policies
 #      come back (documented rollback warning), then cleanup of keys, manifests,
 #      volumes and the registry.
 #
@@ -111,12 +126,18 @@ assert_datastores_untouched() {
   ok "$1: postgres/redis containers, the single pgdata volume and the project are untouched"
 }
 
+# Root-owned operator files (Alertmanager config/secrets/override, like the VPS)
+# are created and edited through a root container; $TMP is mounted at /t.
+as_root() { docker run --rm --user 0:0 -v "$TMP:/t" alpine:3.20 sh -ec "$1"; }
+AMDIR="$OPS/alertmanager"; AMSEC="$OPS/alertmanager.secrets"; OVR="$OPS/docker-compose.operator.yml"
+
 cleanup() {
   log "cleanup (${PROJ}) — keys, manifests, volumes, registry, worktrees"
   docker compose -p "$PROJ" --env-file "$APP/.env.prod" -f "$APP/docker-compose.prod.yml" -f "$OVERLAY" down -v --remove-orphans >/dev/null 2>&1 || true
   docker volume ls -q --filter "label=com.docker.compose.project=$PROJ" | xargs docker volume rm >/dev/null 2>&1 || true
   docker rm -f "$REGNAME" >/dev/null 2>&1 || true
   docker run --rm --user 0:0 -v "$KEYS_PARENT:/k" alpine:3.20 sh -c 'rm -rf /k/ctx-keys' >/dev/null 2>&1 || true
+  docker run --rm --user 0:0 -v "$TMP:/t" alpine:3.20 sh -c 'rm -rf /t/ops/alertmanager /t/ops/alertmanager.secrets /t/ops/docker-compose.operator.yml /t/am-operator.yml' >/dev/null 2>&1 || true
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -133,6 +154,7 @@ log "2/10 build + push images: OLD backend (${OLD_SHA:0:7}, unlabelled), NEW bac
 # with `origin` pointing at it — exactly like /opt/nlw/app today.
 git clone -q "$REPO" "$SRC"
 rsync -a --exclude .git --exclude .venv --exclude node_modules --exclude "web/.next" \
+  --exclude ".mypy_cache" --exclude ".ruff_cache" --exclude ".pytest_cache" --exclude "__pycache__" \
   --exclude "docker/ctx-keys" --exclude ".env*" --exclude "/supabase/" --exclude ".rollout" "$REPO/" "$SRC/"
 git -C "$SRC" add -A >/dev/null && git -C "$SRC" -c user.name=rehearsal -c user.email=r@localhost commit -q -m "rehearsal snapshot" --allow-empty
 NEW_SHA="$(git -C "$SRC" rev-parse HEAD)"
@@ -209,11 +231,46 @@ NLW_STAGING_COMPOSE_PROJECT=$PROJ
 NLW_STAGING_COMPOSE_FILES=docker-compose.prod.yml docker-compose.staging.yml $OVERLAY
 NLW_STAGING_BACKUP_ENV_FILE=$OPS/.env.backup
 NLW_STAGING_CURRENT_REVISION=0010_readiness_schema_grant
+NLW_STAGING_GIT_REMOTE=$SRC
+NLW_STAGING_ALERTMANAGER_CONFIG=$AMDIR/alertmanager.yml
+NLW_STAGING_ALERTMANAGER_SECRETS_DIR=$AMSEC
+NLW_STAGING_COMPOSE_OVERRIDE=$OVR
 NLW_STAGING_KEY_ID_API=rehearsal-api
 NLW_STAGING_KEY_ID_WORKER=rehearsal-worker
 NLW_STAGING_KEY_ID_SCHEDULER=rehearsal-scheduler
 EOF
 umask 022
+# OPERATOR Alertmanager authority, laid out like the VPS (docs/ops/alerting.md):
+# a real (webhook) receiver whose credential is a *_file under the secrets mount.
+# The webhook target is an unroutable placeholder: delivery is proved by a HUMAN
+# record, never by this fixture. Ownership/modes are set through a root container
+# so the container view is exactly the host's (config root:root 0644, secrets
+# root:65534 0750, credential root:65534 0640).
+mkdir -p "$AMDIR" "$AMSEC"
+cat > "$TMP/am-operator.yml" <<'EOF'
+route:
+  receiver: ops-webhook
+  group_by: ["alertname", "component", "role"]
+  routes:
+    - matchers: ["severity = critical"]
+      receiver: ops-webhook
+receivers:
+  - name: "null"
+  - name: ops-webhook
+    webhook_configs:
+      - url_file: /etc/alertmanager/secrets/webhook.url
+EOF
+cp "$TMP/am-operator.yml" "$AMDIR/alertmanager.yml"
+printf 'http://127.0.0.1:9/rehearsal-placeholder-not-a-secret\n' > "$AMSEC/webhook.url"
+cat > "$OVR" <<EOF
+services:
+  alertmanager:
+    volumes:
+      - $AMDIR/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - $AMSEC:/etc/alertmanager/secrets:ro
+EOF
+as_root 'chown 0:0 /t/ops/alertmanager /t/ops/alertmanager/alertmanager.yml /t/ops/docker-compose.operator.yml; chmod 755 /t/ops/alertmanager; chmod 644 /t/ops/alertmanager/alertmanager.yml /t/ops/docker-compose.operator.yml; chown 0:65534 /t/ops/alertmanager.secrets /t/ops/alertmanager.secrets/webhook.url; chmod 750 /t/ops/alertmanager.secrets; chmod 640 /t/ops/alertmanager.secrets/webhook.url'
+ok "operator Alertmanager authority laid out outside every checkout: config root:root 0644, secrets root:65534 0750/0640, override"
 mkdir -p "$KEYS_PARENT"
 # The rollout reads host identity from IMDS on a real target; the LOCAL executor
 # answers with this canned identity instead (see nlw.ops.rollout.remote).
@@ -319,6 +376,48 @@ must_fail "preflight passed with an EMPTY backup env file" "${ROLLOUT[@]}" prefl
 grep -q "is empty" <<<"$LAST_OUT" || die "empty backup env rejected for the wrong reason: $LAST_OUT"
 write_backup_env "$PGPW"
 ok "preflight: backup env file must be readable by the rollout user, not world-readable, and non-empty (contents never read)"
+# --- Operator Alertmanager authority is checked at preflight (read-only), before anything is staged.
+as_root 'cp /t/src/docker/alertmanager/alertmanager.yml /t/ops/alertmanager/alertmanager.yml'
+must_fail "preflight accepted the committed NULL config as operator authority" "${ROLLOUT[@]}" preflight
+grep -q "null receiver" <<<"$LAST_OUT" || die "null operator config rejected for the wrong reason: $LAST_OUT"
+as_root 'printf "route:\n  receiver: s\nreceivers:\n  - name: s\n    slack_configs:\n      - api_url: https://hooks.example.invalid/placeholder-not-a-secret\n" > /t/ops/alertmanager/alertmanager.yml'
+must_fail "preflight accepted an INLINE credential" "${ROLLOUT[@]}" preflight
+grep -q "inline credential" <<<"$LAST_OUT" || die "inline credential rejected for the wrong reason: $LAST_OUT"
+as_root 'cp /t/am-operator.yml /t/ops/alertmanager/alertmanager.yml; chown 0:0 /t/ops/alertmanager/alertmanager.yml; chmod 644 /t/ops/alertmanager/alertmanager.yml'
+as_root 'chmod 644 /t/ops/alertmanager.secrets/webhook.url'
+must_fail "preflight accepted a WORLD-READABLE credential" "${ROLLOUT[@]}" preflight
+grep -q "world-readable" <<<"$LAST_OUT" || die "world-readable credential rejected for the wrong reason: $LAST_OUT"
+as_root 'chmod 640 /t/ops/alertmanager.secrets/webhook.url'
+if [ "$(uname -s)" = "Linux" ]; then
+  # The previously documented layout (root:root 0700 dir, root:root 0600 file): unreadable as uid 65534.
+  as_root 'chown 0:0 /t/ops/alertmanager.secrets /t/ops/alertmanager.secrets/webhook.url; chmod 700 /t/ops/alertmanager.secrets; chmod 600 /t/ops/alertmanager.secrets/webhook.url'
+  must_fail "preflight accepted a root-only credential Alertmanager (uid 65534) cannot read" "${ROLLOUT[@]}" preflight
+  grep -q "readable by the Alertmanager user" <<<"$LAST_OUT" || die "root-only credential rejected for the wrong reason: $LAST_OUT"
+  as_root 'chown 0:65534 /t/ops/alertmanager.secrets /t/ops/alertmanager.secrets/webhook.url; chmod 750 /t/ops/alertmanager.secrets; chmod 640 /t/ops/alertmanager.secrets/webhook.url'
+  ok "preflight: root:root 0700/0600 secrets are refused (unreadable as uid 65534); root:65534 0750/0640 pass"
+else
+  ok "host bind-mount uid-65534 probe skipped on Docker Desktop (bind mounts do not enforce uid/mode); kernel-semantics proof follows"
+fi
+as_root 'mv /t/ops/docker-compose.operator.yml /t/ops/docker-compose.operator.yml.off'
+must_fail "preflight passed WITHOUT the operator Compose override" "${ROLLOUT[@]}" preflight
+grep -q "override" <<<"$LAST_OUT" || die "missing override rejected for the wrong reason: $LAST_OUT"
+as_root 'mv /t/ops/docker-compose.operator.yml.off /t/ops/docker-compose.operator.yml'
+"${ROLLOUT[@]}" preflight | grep -q '"receiver": "ops-webhook"' || die "preflight does not report the operator receiver"
+ok "preflight: null operator config, inline credential, world-readable credential and missing override are refused; the real receiver is reported"
+# --- Kernel-semantics reproductions (a Docker VOLUME lives in the Linux VM, so uid/mode are enforced
+# exactly as on the VPS even under Docker Desktop): defect 1 (key dir) and defect 4 (secrets layout).
+KV="${PROJ}-kernel-proof"; docker volume create "$KV" >/dev/null
+docker run --rm --user 0:0 -v "$KV:/v" alpine:3.20 sh -ec '
+mkdir -p /v/ctx-keys /v/bad /v/good
+head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n" > /v/ctx-keys/api.key; chown 0:0 /v/ctx-keys; chmod 700 /v/ctx-keys; chown 10001:10001 /v/ctx-keys/api.key; chmod 400 /v/ctx-keys/api.key
+echo placeholder > /v/bad/cred;  chown 0:0 /v/bad /v/bad/cred;       chmod 700 /v/bad;  chmod 600 /v/bad/cred
+echo placeholder > /v/good/cred; chown 0:65534 /v/good /v/good/cred; chmod 750 /v/good; chmod 640 /v/good/cred' >/dev/null
+! docker run --rm --user 10001:10001 --mount "type=volume,src=$KV,dst=/run/nlw/keys,volume-subpath=ctx-keys,readonly" alpine:3.20 cat /run/nlw/keys/api.key >/dev/null 2>&1 || die "kernel proof: uid 10001 could read a key through the mounted root-0700 directory"
+docker run --rm --user 10001:10001 --mount "type=volume,src=$KV,dst=/run/nlw/keys/api.key,volume-subpath=ctx-keys/api.key,readonly" alpine:3.20 sh -c '[ "$(wc -c < /run/nlw/keys/api.key)" -ge 64 ]' >/dev/null 2>&1 || die "kernel proof: uid 10001 could NOT read the individually mounted key file"
+! docker run --rm --user 65534:65534 --mount "type=volume,src=$KV,dst=/etc/alertmanager/secrets,volume-subpath=bad,readonly" alpine:3.20 cat /etc/alertmanager/secrets/cred >/dev/null 2>&1 || die "kernel proof: uid 65534 could read a root:root 0600 credential"
+docker run --rm --user 65534:65534 --mount "type=volume,src=$KV,dst=/etc/alertmanager/secrets,volume-subpath=good,readonly" alpine:3.20 cat /etc/alertmanager/secrets/cred >/dev/null 2>&1 || die "kernel proof: uid 65534 could NOT read a root:65534 0640 credential"
+docker volume rm "$KV" >/dev/null
+ok "KERNEL SEMANTICS: root-0700 key dir mounted whole -> unreadable for uid 10001; the key FILE mounted alone -> readable; root:root 0600 secret -> unreadable for uid 65534; root:65534 0640 -> readable"
 must_fail "verify-release accepted the OLD image" uv run python -m nlw.ops.rollout --local \
   --release "$OLD_IMAGE_MANIFEST" --provenance-fixture "$OLD_IMAGE_PROV" --target "$TMP/target.env" --keys-dir "$KEYS" verify-release --authorize "$AUTH"
 grep -q "revision label" <<<"$LAST_OUT" || die "old image rejected for the wrong reason: $LAST_OUT"
@@ -410,6 +509,9 @@ ok "roles provisioned — only after the verified backup"
 ok "schema ${TARGET_HEAD}; ${EXPECTED_POLICIES} signed policies"
 assert_datastores_untouched "after prepare-roles + migrate (one-shot runs use --no-deps)"
 "${ROLLOUT[@]}" install-context-keys --authorize "$AUTH"
+KD="$(docker run --rm --user 0:0 --network none --entrypoint stat -v "$KEYS:/k:ro" "$NEW_BACKEND" -c '%a %u' /k/.)"
+[ "$KD" = "700 0" ] || die "key directory was loosened during install-context-keys (want 700 root, got $KD)"
+ok "install-context-keys: keys installed with the directory still root 0700 (each one-shot mounted only its key file; no chmod workaround)"
 [ ! -e "$OPS/current" ] || die "active release switched before recreate-runtime"
 # A real DIRECTORY at <ops_root>/current must refuse activation (a link would
 # otherwise be created INSIDE it and nothing would actually switch).
@@ -429,31 +531,79 @@ assert_datastores_untouched "after activation"
 WORKER_CID="$(docker ps -q --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=worker")"
 docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$WORKER_CID" | grep -q '^NLW_SECRET_REHEARSAL=' || die "recreated worker lost its connector secrets env file"
 ok "recreated worker carries the connector secrets env file (variable name checked, value never printed)"
-DC="docker compose -p $PROJ --env-file $STAGED/.env.prod -f $STAGED/docker-compose.prod.yml -f $STAGED/docker-compose.staging.yml -f $OVERLAY"
+DC_BARE="docker compose -p $PROJ --env-file $STAGED/.env.prod -f $STAGED/docker-compose.prod.yml -f $STAGED/docker-compose.staging.yml -f $OVERLAY"
+DC="$DC_BARE -f $OVR"   # the reviewed invocation: the operator override on every call from a release dir
+am_mounts() { docker inspect --format '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' "$(docker ps -q --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=alertmanager")"; }
+# am_has_mount <host path> <container path>: the daemon reports the RESOLVED source
+# (Docker Desktop: /host_mnt<realpath>); compare realpaths, exactly as the rollout does.
+am_has_mount() { python3 - "$1" "$2" "$(am_mounts)" <<'PYEOF2'
+import os, sys
+want, dest = os.path.realpath(sys.argv[1]), sys.argv[2]
+for item in sys.argv[3].split():
+    src, _, d = item.rpartition(":")
+    if src.startswith("/host_mnt/"):
+        src = src[len("/host_mnt"):]
+    if d == dest and os.path.realpath(src) == want:
+        sys.exit(0)
+sys.exit(1)
+PYEOF2
+}
+am_loaded_receiver() { $DC exec -T alertmanager wget -qO- http://127.0.0.1:9093/api/v2/status | uv run python -c 'import sys,json,yaml; print(yaml.safe_load(json.load(sys.stdin)["config"]["original"])["route"]["receiver"])'; }
+am_has_mount "$AMDIR/alertmanager.yml" /etc/alertmanager/alertmanager.yml && am_has_mount "$AMSEC" /etc/alertmanager/secrets || die "recreated Alertmanager does not mount the operator config/secrets: $(am_mounts)"
+[ "$(am_loaded_receiver)" = "ops-webhook" ] || die "running Alertmanager loaded receiver $(am_loaded_receiver), not the operator's"
+python3 -c 'import json,sys; a=json.load(open(sys.argv[1]))["evidence"]["recreate-runtime"]["alertmanager"]; assert a["receiver"]=="ops-webhook" and a["config_source"]=="running-alertmanager", a; assert "secret" not in json.dumps(a)' "$OPS/rollout/$NEW_SHA.json"
+ok "recreate-runtime: the RUNNING Alertmanager mounts the operator config + secrets (not the committed file) and LOADED the operator receiver"
 "${ROLLOUT[@]}" validate --authorize "$AUTH"
 REOPEN_OUT="$("${ROLLOUT[@]}" reopen --authorize "$AUTH" 2>&1)"; printf '%s\n' "$REOPEN_OUT"
 grep -q "LAUNCH GATE OPEN: alert delivery unverified" <<<"$REOPEN_OUT" || die "reopen did not record the open alert-delivery gate"
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["evidence"]["reopen"]; assert d["launch_gates_open"]==["alert delivery unverified"], d; a=d["alerting"]; assert a["rules_loaded"] and a["alertmanager_reachable"] and a["receiver_is_null"] and not a["delivery_verified"], a' "$OPS/rollout/$NEW_SHA.json"
-ok "reopen: traffic reopened; state records rules loaded + Alertmanager reachable + receiver null + delivery NOT verified"
-must_fail "go-check passed on the null receiver" "${ROLLOUT[@]}" go-check
-grep -q "null receiver" <<<"$LAST_OUT" || die "go-check failed for the wrong reason: $LAST_OUT"
-ok "go-check: NO-GO — the null receiver is never 'alert delivery configured'"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["evidence"]["reopen"]; assert d["launch_gates_open"]==["alert delivery unverified"], d; a=d["alerting"]; assert a["rules_loaded"] and a["alertmanager_reachable"] and not a["receiver_is_null"] and a["receiver"]=="ops-webhook" and a["credential_files_present"] and not a["delivery_verified"] and a["config_source"]=="running-alertmanager" and a["delivery_status"]=="absent", a' "$OPS/rollout/$NEW_SHA.json"
+ok "reopen: traffic reopened; evidence = rules loaded + Alertmanager reachable + REAL receiver (running config) + delivery NOT verified (no human record)"
+must_fail "go-check passed without a controlled-delivery record" "${ROLLOUT[@]}" go-check
+grep -q "no verified controlled test" <<<"$LAST_OUT" || die "go-check failed for the wrong reason: $LAST_OUT"
+ok "go-check: NO-GO — a reachable Alertmanager with a real receiver is still not delivery proof"
+# --- The HUMAN delivery record (never written by the rollout). Here the rehearsal plays the
+# operator; the record is a labelled FIXTURE — no alert was delivered anywhere.
+REC=(bash scripts/ops/record-alert-delivery.sh --dir "$OPS/rollout" --owner "$(id -un)" --group "$(id -gn)")
+ROLLOUT_DIR_BEFORE="$(ls -ldn "$OPS/rollout" | awk '{print $1, $3, $4}')"
+"${REC[@]}" --receiver ops-webhook --confirmed-by "rehearsal-operator FIXTURE nothing was delivered" >/dev/null
+[ "$(ls -ldn "$OPS/rollout" | awk '{print $1, $3, $4}')" = "$ROLLOUT_DIR_BEFORE" ] || die "recording the delivery changed the rollout directory ownership/mode"
+[ "$(stat -f %Lp "$OPS/rollout/alert-delivery.json" 2>/dev/null || stat -c %a "$OPS/rollout/alert-delivery.json")" = "640" ] || die "delivery record is not 0640"
+"${ROLLOUT[@]}" go-check 2>&1 | grep -q "M12 GO check: PASS" || die "go-check did not pass with a fresh, matching, confirmed record"
+ok "go-check: PASS only after the HUMAN record (receiver ops-webhook, confirmed, fresh) — REHEARSAL FIXTURE, not a delivery claim; rollout dir untouched"
+"${REC[@]}" --receiver ops-webhook --confirmed-by rehearsal-operator --delivered-at "$(date -u -v-10d +%Y-%m-%dT%H:%M:%S+00:00 2>/dev/null || date -u -d '10 days ago' +%Y-%m-%dT%H:%M:%S+00:00)" >/dev/null
+must_fail "go-check passed on a STALE record" "${ROLLOUT[@]}" go-check; grep -q "stale" <<<"$LAST_OUT" || die "stale record rejected for the wrong reason: $LAST_OUT"
+"${REC[@]}" --receiver other-team --confirmed-by rehearsal-operator >/dev/null
+must_fail "go-check passed on a record naming ANOTHER receiver" "${ROLLOUT[@]}" go-check; grep -q "receiver-mismatch" <<<"$LAST_OUT" || die "mismatched record rejected for the wrong reason: $LAST_OUT"
+printf '{"receiver": ' > "$OPS/rollout/alert-delivery.json"
+must_fail "go-check passed on a MALFORMED record" "${ROLLOUT[@]}" go-check; grep -q "malformed" <<<"$LAST_OUT" || die "malformed record rejected for the wrong reason: $LAST_OUT"
+must_fail "reopen passed on a MALFORMED record" "${ROLLOUT[@]}" reopen --authorize "$AUTH"; grep -q "malformed" <<<"$LAST_OUT" || die "reopen: malformed record rejected for the wrong reason: $LAST_OUT"
+"${REC[@]}" --receiver ops-webhook --confirmed-by "rehearsal-operator FIXTURE nothing was delivered" >/dev/null
+ok "delivery record: stale, other-receiver and malformed records never verify (malformed stops reopen too); a fresh record is back"
+# --- A bare recreation WITHOUT the override (what an operator might type) reverts the container
+# to the committed null file; the rollout catches it instead of reporting a null pipeline.
+$DC_BARE up -d --force-recreate --no-deps alertmanager >/dev/null 2>&1
+am_has_mount "$STAGED/docker/alertmanager/alertmanager.yml" /etc/alertmanager/alertmanager.yml || die "bare recreation did not mount the committed file (test setup)"
+must_fail "go-check passed after the override was dropped by a bare recreation" "${ROLLOUT[@]}" go-check
+grep -q "mount disagreement" <<<"$LAST_OUT" || die "dropped override caught for the wrong reason: $LAST_OUT"
+$DC up -d --force-recreate --no-deps alertmanager >/dev/null 2>&1   # the reviewed invocation restores it
+for _ in $(seq 1 30); do $DC exec -T alertmanager wget -qO- http://127.0.0.1:9093/-/healthy >/dev/null 2>&1 && break; sleep 1; done
+am_has_mount "$AMDIR/alertmanager.yml" /etc/alertmanager/alertmanager.yml || die "recreation with the override did not restore the operator mounts"
+"${ROLLOUT[@]}" go-check 2>&1 | grep -q "M12 GO check: PASS" || die "go-check did not pass after the operator mounts were restored"
+ok "a recreation that drops the override is caught (mount disagreement -> NO-GO); recreating with the reviewed invocation keeps the operator Alertmanager"
 [ -z "$(git -C "$APP" status --porcelain)" ] && [ -z "$(git -C "$STAGED" status --porcelain)" ] || die "rollout state dirtied a git checkout"
 ok "rollout state lives in $OPS/rollout (outside both checkouts); both checkouts are clean"
 curl -fsS http://127.0.0.1:8000/health/ready | grep -q '"signed_context":"ok"' || die "signed_context not ok"
 ok "NEW runtime ready with signed_context: ok"
 assert_datastores_untouched "after reopen"
-# Second-rollout guard: with current -> THIS release, pre-activation phases still
-# run; with current -> ANOTHER release the tooling refuses (target.env still names
-# the legacy checkout as active) instead of binding evidence to the wrong SHA.
-"${ROLLOUT[@]}" preflight >/dev/null
+# Layout/target mismatch guard: a LEGACY target (remote_app = app) on a host whose
+# current -> another release is a configuration error naming the fix, not a rollout.
+"${ROLLOUT[@]}" preflight >/dev/null   # current -> THIS release: still fine
 ln -sfn "$OPS/releases/0000000000000000000000000000000000000000" "$OPS/current"
-must_fail "preflight accepted a host activated for another release" "${ROLLOUT[@]}" preflight
-grep -q "second rollout is not supported" <<<"$LAST_OUT" || die "foreign activation rejected for the wrong reason: $LAST_OUT"
-must_fail "stage-release accepted a host activated for another release" "${ROLLOUT[@]}" stage-release --authorize "$AUTH"
+must_fail "preflight accepted a legacy target on a host activated for another release" "${ROLLOUT[@]}" preflight
+grep -q "NLW_STAGING_REMOTE_APP=$OPS/current" <<<"$LAST_OUT" || die "layout mismatch rejected for the wrong reason: $LAST_OUT"
 ln -sfn "$STAGED" "$OPS/current"
 [ "$(readlink "$OPS/current")" = "$STAGED" ] || die "current not restored"
-ok "second-rollout guard: current -> another release is refused by preflight/stage-release (nothing changed); current -> this release passes"
+ok "layout guard: a legacy target on an activated host stops and names NLW_STAGING_REMOTE_APP=<ops_root>/current (nothing changed)"
 ok "LOCAL TIMING: preflight -> reopen took $(( $(date +%s) - T_ROLLOUT_START )) s (local rehearsal, not the VPS)"
 
 log "9/10 post-upgrade proofs: invitation + four-eyes (signed), worker run, scheduler occurrence, rules"
@@ -482,6 +632,82 @@ RULE_GROUPS="$($DC exec -T prometheus wget -qO- http://127.0.0.1:9090/api/v1/rul
 $DC exec -T alertmanager wget -qO- http://127.0.0.1:9093/-/healthy | grep -qi ok || die "alertmanager unhealthy"
 ok "prometheus rule groups loaded (nlw-backup, nlw-signed-context); alertmanager healthy (null receiver: delivery UNVERIFIED)"
 
+log "9b/10 SECOND, CODE-ONLY release (N -> N+1, same schema head) rolled out THROUGH current: same keys, operator Alertmanager kept"
+# Step 9 left synthetic work in flight (the approved four-eyes run); N+1's drain
+# gate refuses non-terminal work — proven above for N. On the host the operator
+# waits for the queue; the rehearsal settles its own fixtures by hand.
+LEFT="$(psql_owner "SELECT count(*) FROM workflow_runs WHERE status IN ('PENDING','RUNNING','WAITING_APPROVAL')")"
+psql_owner "UPDATE workflow_runs SET status='FAILED', error='rehearsal: settled by hand before N+1', finished_at=now() WHERE status IN ('PENDING','RUNNING','WAITING_APPROVAL')" >/dev/null
+psql_owner "UPDATE external_actions SET status='failed', lease_expires_at=NULL WHERE status='pending' OR lease_expires_at > now()" >/dev/null 2>&1 || true
+ok "synthetic in-flight work from step 9 settled by hand ($LEFT run(s)); the drain gate itself is proven in step 8"
+# A code-only change (no migration): exactly what a hotfix release looks like.
+printf '\n<!-- rehearsal: N+1 code-only release marker -->\n' >> "$SRC/README.md"
+git -C "$SRC" add -A >/dev/null && git -C "$SRC" -c user.name=rehearsal -c user.email=r@localhost commit -q -m "rehearsal: N+1 code-only release"
+NEW2_SHA="$(git -C "$SRC" rev-parse HEAD)"
+docker build -q -t "$REG/nlw:new2" --build-arg "NLW_GIT_SHA=$NEW2_SHA" "$SRC" >/dev/null
+docker build -q -t "$REG/nlw-web:new2" --build-arg "NLW_GIT_SHA=$NEW2_SHA" "$SRC/web" >/dev/null
+docker push -q "$REG/nlw:new2" >/dev/null; docker push -q "$REG/nlw-web:new2" >/dev/null
+NEW2_BACKEND="$(digest nlw:new2)"; NEW2_WEB="$(digest nlw-web:new2)"
+# target.env for the NEXT rollout: the active checkout IS current; the live revision is the head we just reached.
+sed -i.bak -e "s#^NLW_STAGING_REMOTE_APP=.*#NLW_STAGING_REMOTE_APP=$OPS/current#" -e "s#^NLW_STAGING_CURRENT_REVISION=.*#NLW_STAGING_CURRENT_REVISION=$TARGET_HEAD#" "$TMP/target.env"
+MANIFEST2="$TMP/release-manifest-2.json"; PROV2="$TMP/provenance-fixture-2.json"
+"${GEN[@]}" generate --target-env "$TMP/target.env" --release-sha "$NEW2_SHA" --backend-image "$NEW2_BACKEND" --web-image "$NEW2_WEB" \
+  --generated-by local-rehearsal --out "$MANIFEST2" >/dev/null
+grep -q "\"expected_current_revision\": \"$TARGET_HEAD\"" "$MANIFEST2" && grep -q "\"target_revision\": \"$TARGET_HEAD\"" "$MANIFEST2" || die "N+1 manifest is not a same-revision (code-only) release"
+ok "N+1 manifest generated by the SAME generator CI runs: expected == target == ${TARGET_HEAD} (code-only release; nothing is refused)"
+"${PV[@]}" fixture "$MANIFEST2" --out "$PROV2" >/dev/null
+ROLLOUT2=(uv run python -m nlw.ops.rollout --local --release "$MANIFEST2" --provenance-fixture "$PROV2" --target "$TMP/target.env" --keys-dir "$KEYS")
+STAGED2="$OPS/releases/$NEW2_SHA"
+T2_START=$(date +%s)
+PRE2="$("${ROLLOUT2[@]}" preflight 2>&1)"; printf '%s\n' "$PRE2"
+grep -q '"current_link": "PREVIOUS_RELEASE"' <<<"$PRE2" && grep -q "\"active_checkout\": \"$NEW_SHA\"" <<<"$PRE2" && grep -q "\"current_revision\": \"$TARGET_HEAD\"" <<<"$PRE2" || die "N+1 preflight did not read the active release through current"
+ok "N+1 preflight: active checkout read THROUGH current (release N = $NEW_SHA), live revision $TARGET_HEAD, operator receiver reported"
+"${ROLLOUT2[@]}" verify-release --authorize "$AUTH"
+"${ROLLOUT2[@]}" prepare-keys --authorize "$AUTH"
+python3 -c 'import json,sys; e=json.load(open(sys.argv[1]))["evidence"]["prepare-keys"]; assert e["reused_existing"] is True and len(e["fingerprints"])==3, e' "$OPS/rollout/$NEW2_SHA.json"
+ok "N+1 prepare-keys: existing keys verified + fingerprinted (not regenerated, never overwritten)"
+python3 - "$TMP/attestation-2.json" "$NEW2_SHA" <<EOF
+import json, sys, datetime
+fps = {l.split()[0]: l.split() for l in """$FPS""".splitlines() if len(l.split()) == 3}
+doc = {"format_version": 1, "environment": "staging", "release_sha": sys.argv[2],
+       "keys": [{"purpose_class": c, "key_id": fps[c][1], "sha256_fingerprint": fps[c][2]} for c in ("api", "worker", "scheduler")],
+       "escrow_verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+       "operator": "rehearsal-operator", "recovery_test_confirmed": True,
+       "escrow_location_label": "REHEARSAL fixture vault - not real escrow"}
+open(sys.argv[1], "w").write(json.dumps(doc, indent=2))
+EOF
+"${ROLLOUT2[@]}" verify-escrow --authorize "$AUTH" --escrow-confirm "$ESC" --attestation "$TMP/attestation-2.json"
+"${ROLLOUT2[@]}" stage-release --authorize "$AUTH"
+[ "$(git -C "$STAGED2" rev-parse HEAD)" = "$NEW2_SHA" ] || die "N+1 staged release is not at the release SHA (fetched from the reviewed git remote)"
+grep -q "^NLW_IMAGE=$NEW2_BACKEND$" "$STAGED2/.env.prod" || die "N+1 staged .env.prod not pinned to the new digest"
+cmp -s "$STAGED/docker/worker.secrets.env" "$STAGED2/docker/worker.secrets.env" || die "N+1 worker secrets were not carried from the active release"
+[ "$(readlink "$OPS/current")" = "$STAGED" ] || die "N+1 staging switched current"
+ok "N+1 stage-release: cloned from current, release fetched from NLW_STAGING_GIT_REMOTE, env derived from release N, current untouched"
+"${ROLLOUT2[@]}" backup --authorize "$AUTH"
+"${ROLLOUT2[@]}" verify-backup --authorize "$AUTH" --allow-fixture-repository
+assert_datastores_untouched "N+1: after verify-backup"
+"${ROLLOUT2[@]}" drain --authorize "$AUTH"
+"${ROLLOUT2[@]}" prepare-roles --authorize "$AUTH"
+"${ROLLOUT2[@]}" migrate --authorize "$AUTH"
+[ "$(psql_owner "SELECT version_num FROM alembic_version")" = "$TARGET_HEAD" ] || die "N+1: schema moved off ${TARGET_HEAD} on a code-only release"
+[ "$(psql_owner "SELECT count(*) FROM pg_policies")" = "$EXPECTED_POLICIES" ] || die "N+1: policy count changed"
+ok "N+1 migrate: verified no-op — schema stays ${TARGET_HEAD}, ${EXPECTED_POLICIES} policies"
+"${ROLLOUT2[@]}" install-context-keys --authorize "$AUTH"
+"${ROLLOUT2[@]}" recreate-runtime --authorize "$AUTH"
+[ "$(readlink "$OPS/current")" = "$STAGED2" ] || die "N+1: current does not point at the new release"
+[ "$(running_api_image)" = "$NEW2_BACKEND" ] || die "N+1: api is not running the N+1 digest"
+[ "$(git -C "$STAGED" rev-parse HEAD)" = "$NEW_SHA" ] && [ "$(git -C "$APP" rev-parse HEAD)" = "$OLD_SHA" ] || die "N+1: a previous checkout was modified"
+DC="docker compose -p $PROJ --env-file $STAGED2/.env.prod -f $STAGED2/docker-compose.prod.yml -f $STAGED2/docker-compose.staging.yml -f $OVERLAY -f $OVR"
+am_has_mount "$AMDIR/alertmanager.yml" /etc/alertmanager/alertmanager.yml && am_has_mount "$AMSEC" /etc/alertmanager/secrets || die "N+1: operator Alertmanager mounts lost on recreation"
+[ "$(am_loaded_receiver)" = "ops-webhook" ] || die "N+1: Alertmanager loaded receiver changed"
+"${ROLLOUT2[@]}" validate --authorize "$AUTH"
+REOPEN2="$("${ROLLOUT2[@]}" reopen --authorize "$AUTH" 2>&1)"
+! grep -q "LAUNCH GATE OPEN" <<<"$REOPEN2" || die "N+1 reopen left a launch gate open despite the fresh record: $REOPEN2"
+"${ROLLOUT2[@]}" go-check 2>&1 | grep -q "M12 GO check: PASS" || die "N+1 go-check did not pass"
+assert_datastores_untouched "N+1: after reopen (same project, same pgdata, live postgres/redis never recreated)"
+curl -fsS http://127.0.0.1:8000/health/ready | grep -q '"signed_context":"ok"' || die "N+1: signed_context not ok"
+ok "N+1 ACTIVATED through current: releases/$NEW_SHA -> releases/$NEW2_SHA, code-only release at schema ${TARGET_HEAD}, keys unchanged, operator Alertmanager kept, go-check PASS (fixture record)"
+ok "LOCAL TIMING: N+1 preflight -> reopen took $(( $(date +%s) - T2_START )) s"
 log "10/10 SEPARATE disposable downgrade ${TARGET_HEAD} -> 0015: legacy policies return (documented rollback warning)"
 $DC stop api worker scheduler >/dev/null
 $DC --profile migration run --rm -T migrate sh -c 'alembic downgrade 0015_membership_approval_sod' >/dev/null
@@ -492,4 +718,4 @@ $DC --profile migration run --rm -T migrate >/dev/null
 [ "$(psql_owner "SELECT version_num FROM alembic_version")" = "$TARGET_HEAD" ] || die "re-upgrade failed"
 ok "re-upgraded to ${TARGET_HEAD} (up -> down -> up)"
 
-printf '\n\033[1;32mREHEARSAL PASSED\033[0m — local, disposable, MinIO fixture (NOT DR evidence), null Alertmanager (delivery UNVERIFIED); keys, manifests and volumes are removed on exit.\n'
+printf '\n\033[1;32mREHEARSAL PASSED\033[0m — local, disposable, MinIO fixture (NOT DR evidence), webhook receiver + FIXTURE delivery record (NOT a delivery claim); N -> N+1 rolled out through current; keys, manifests and volumes are removed on exit.\n'
