@@ -12,9 +12,11 @@ integration/drill runs use the real subprocess against MinIO.
 """
 
 import json
+import re
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +91,15 @@ class Restic:
         return res.returncode == 0
 
     def latest_snapshots(self, *, tag: str = "nlw-db") -> list[dict[str, Any]]:
-        """Non-secret metadata (id, time, hostname, tags) of the newest snapshot
-        carrying ``tag``; ``[]`` when the repository has none."""
+        """Non-secret metadata (id, time, hostname, tags) of the newest snapshot(s)
+        carrying ``tag``, NEWEST FIRST; ``[]`` when the repository has none.
+
+        ``restic snapshots --latest 1`` keeps the latest snapshot PER host+paths
+        group, and every one-shot backup container has its own hostname, so a
+        repository written by several rollouts/timer runs answers with several
+        entries in repository order. Callers take ``[0]`` as "the newest": sort by
+        time so the evidence (manifest, artifact names) belongs to the newest
+        snapshot — the one the pre-deployment gate binds to."""
         res = self._restic_checked("snapshots", "--tag", tag, "--latest", "1", what="snapshots")
         try:
             doc = json.loads(res.stdout or "[]")
@@ -98,7 +107,7 @@ class Restic:
             raise ResticError("restic snapshots returned malformed JSON") from exc
         if not isinstance(doc, list):
             raise ResticError("restic snapshots returned a non-list")
-        return [
+        snaps = [
             {
                 "id": str(s.get("id", "")),
                 "short_id": str(s.get("short_id", "")),
@@ -109,6 +118,7 @@ class Restic:
             for s in doc
             if isinstance(s, dict)
         ]
+        return sorted(snaps, key=_snapshot_time, reverse=True)
 
     def snapshot_manifest(self, snapshot_id: str) -> dict[str, Any] | None:
         """The ``manifest.json`` INSIDE a snapshot (parsed), or None if absent.
@@ -160,3 +170,16 @@ class Restic:
             "--prune",
             what="forget/prune",
         )
+
+
+def _snapshot_time(snap: dict[str, Any]) -> datetime:
+    """ISO-8601 (restic emits RFC 3339 with nanoseconds) -> aware datetime; an
+    unparseable time sorts oldest so a malformed entry is never "the newest"."""
+    raw = str(snap.get("time", "")).replace("Z", "+00:00")
+    # datetime.fromisoformat accepts at most 6 fractional digits.
+    raw = re.sub(r"(\.\d{6})\d+", r"\1", raw)
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
