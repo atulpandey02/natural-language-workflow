@@ -11,6 +11,7 @@ Each workspace keeps a distinct OWNER plus the schedule CREATOR (an admin), so a
 test can remove/demote the creator without tripping the last-owner guard.
 """
 
+import contextlib
 import json
 import threading
 import time
@@ -498,10 +499,8 @@ def _synchronized_read(monkeypatch: pytest.MonkeyPatch, parties: int) -> threadi
 
     async def synced(self: Any, *args: Any, **kwargs: Any) -> Any:
         row = await real(self, *args, **kwargs)
-        try:
+        with contextlib.suppress(threading.BrokenBarrierError):
             barrier.wait(timeout=3)
-        except threading.BrokenBarrierError:
-            pass
         return row
 
     monkeypatch.setattr(ScheduleRepository, target, synced)
