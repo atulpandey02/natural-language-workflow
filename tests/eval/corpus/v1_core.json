@@ -73,8 +73,6 @@
         "allowed_tools": [
           "fake.echo",
           "fake.fail",
-          "pilot.sales_analysis",
-          "pilot.support_analysis",
           "postgres.query"
         ],
         "approval_required": false,
@@ -215,8 +213,6 @@
         "allowed_tools": [
           "fake.echo",
           "fake.fail",
-          "pilot.sales_analysis",
-          "pilot.support_analysis",
           "postgres.query"
         ],
         "approval_required": false,
@@ -453,9 +449,7 @@
         "approvals_required": [],
         "allowed_tools": [
           "fake.echo",
-          "fake.fail",
-          "pilot.sales_analysis",
-          "pilot.support_analysis"
+          "fake.fail"
         ],
         "approval_required": false,
         "execution_may_start": false

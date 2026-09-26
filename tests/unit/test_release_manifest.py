@@ -80,17 +80,18 @@ def test_generator_reads_target_env_and_ci_identity_and_validates() -> None:
 
 def test_generator_derives_target_revision_from_this_checkout() -> None:
     doc = _gen(target_revision=None)
-    assert doc["target_revision"] == "0020_schedule_authorization"
+    assert doc["target_revision"] == "0021_analytics_handoff"
+    assert doc["expected_current_revision"] == "0010_readiness_schema_grant"
 
 
-def test_committed_target_env_yields_a_code_only_release_for_this_checkout() -> None:
-    """The host is at 0020 (first rollout done) and this checkout's head is 0020:
+def test_committed_target_env_yields_a_code_only_release_at_accepted_0020() -> None:
+    """The recorded host is at 0020; keep the accepted code-only scenario at 0020:
     CI must still produce an attested manifest for a CODE-ONLY release —
     expected == target, `migrate` a verified no-op. The image gate needs no
     migration files for an empty range and the live-revision gate stays."""
     text = COMMITTED_TARGET_ENV.read_text()
     assert "NLW_STAGING_CURRENT_REVISION=0020_schedule_authorization" in text
-    doc = _gen(target_env=COMMITTED_TARGET_ENV, target_revision=None)
+    doc = _gen(target_env=COMMITTED_TARGET_ENV, target_revision="0020_schedule_authorization")
     assert (
         doc["expected_current_revision"] == doc["target_revision"] == "0020_schedule_authorization"
     )
@@ -100,6 +101,18 @@ def test_committed_target_env_yields_a_code_only_release_for_this_checkout() -> 
     gates.check_image_info(info, m)
     with pytest.raises(GateError, match="unknown migration state"):
         gates.check_current_revision("0019_connector_bindings", m.expected_current_revision)
+
+
+def test_checkout_head_requires_new_migration_from_recorded_target() -> None:
+    doc = _gen(target_env=COMMITTED_TARGET_ENV, target_revision=None)
+    assert doc["expected_current_revision"] == "0020_schedule_authorization"
+    assert doc["target_revision"] == "0021_analytics_handoff"
+    m = rm.parse_manifest(doc, raw_bytes=json.dumps(doc).encode())
+    info = dict(GOOD_INFO, alembic_head="0021_analytics_handoff",
+                migrations=[f"{n:04d}_x.py" for n in range(1, 22)])  # fmt: skip
+    gates.check_image_info(info, m)
+    with pytest.raises(GateError):
+        gates.check_image_info({**info, "migrations": info["migrations"][:-1]}, m)
 
 
 def test_committed_example_is_rejected_in_every_mode() -> None:

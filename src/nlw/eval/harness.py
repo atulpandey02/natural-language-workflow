@@ -19,12 +19,12 @@ from pydantic import BaseModel, ConfigDict
 
 import nlw.tools.builtin  # noqa: F401  (populates the registry)
 from nlw.connectors.postgres import PostgresSchemaHint
+from nlw.eval.catalog import benchmark_tools
 from nlw.feasibility.engine import FeasibilityReport, FeasibilityStatus, check_plan
 from nlw.feasibility.limits import DEFAULT_LIMITS, PlatformLimits
 from nlw.planner.capabilities import SafeConnector, build_capability_view
 from nlw.planner.provider import LLMInvalidOutputError, parse_planner_output
 from nlw.planner.schema import PlannerOutput
-from nlw.registry.registry import REGISTRY
 
 
 class EvalConnector(BaseModel):
@@ -146,7 +146,7 @@ def build_view_and_tools(
     case: EvalCase,
 ) -> tuple[list[SafeConnector], set[str]]:
     connectors = [c.to_safe() for c in case.connectors]
-    all_tool_names = {spec.name for spec in REGISTRY.all()}
+    all_tool_names = {spec.name for spec in benchmark_tools()}
     return connectors, all_tool_names
 
 
@@ -164,7 +164,7 @@ def run_feasibility(
 ) -> tuple[FeasibilityReport, list[str]]:
     _validate_connectors(case)
     connectors, all_tool_names = build_view_and_tools(case)
-    view = build_capability_view(REGISTRY.all(), connectors, include_demo=True)
+    view = build_capability_view(benchmark_tools(), connectors, include_demo=True)
     report = check_plan(
         output.to_workflow_plan(),
         view,

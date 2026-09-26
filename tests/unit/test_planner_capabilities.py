@@ -63,13 +63,32 @@ def test_prompt_json_is_secret_free_and_has_input_schema() -> None:
     )
     payload = capability_view_to_prompt_json(view)
     blob = json.dumps(payload)
-    # No secret-ish tokens leak into the model-facing projection.
+    # No credential/infrastructure fields leak into the model-facing projection.
+    # Match complete JSON names: the harmless word "support" contains "port".
     for forbidden in ("secret", "password", "secret_ref", "host", "port", "sslmode"):
-        assert forbidden not in blob
+        assert f'"{forbidden}"' not in blob
+    assert set(payload) == {"tools", "connectors"}
     # Each tool exposes its input JSON schema.
     for tool in payload["tools"]:
+        assert set(tool) == {
+            "name",
+            "description",
+            "category",
+            "connector_type",
+            "read_only",
+            "requires_approval",
+            "input_schema",
+        }
         assert "input_schema" in tool and isinstance(tool["input_schema"], dict)
     # Postgres connector context is present (allowlist + hint), no infra fields.
     pg = next(c for c in payload["connectors"] if c["type"] == "postgres")
+    assert set(pg) == {
+        "name",
+        "type",
+        "status",
+        "allowed_schemas",
+        "allowed_tables",
+        "schema_hint",
+    }
     assert pg["allowed_schemas"] == ["public"]
     assert "schema_hint" in pg
