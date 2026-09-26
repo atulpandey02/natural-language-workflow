@@ -63,7 +63,7 @@ export default function WorkflowDetailPage({ params }: { params: Promise<{ id: s
           <ErrorBanner error={runError} />
 
           {provenance.data?.request_text ? (
-            <div className="card">
+            <div className="card" data-testid="workflow-provenance">
               <strong>Original request</strong>
               <p style={{ whiteSpace: "pre-wrap" }}>{provenance.data.request_text}</p>
               <p className="muted">
@@ -71,6 +71,14 @@ export default function WorkflowDetailPage({ params }: { params: Promise<{ id: s
                 {provenance.data.planner_contract_version} ·{" "}
                 {new Date(provenance.data.created_at).toLocaleString()}
               </p>
+            </div>
+          ) : null}
+          {!provenance.data && provenance.error ? (
+            // A failed provenance read is shown (safe, status-mapped message),
+            // never silently dropped as if the version had no recorded request.
+            <div className="card" data-testid="workflow-provenance-error">
+              <strong>Original request</strong>
+              <ErrorBanner error={provenance.error} />
             </div>
           ) : null}
 
