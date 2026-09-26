@@ -183,3 +183,15 @@ def test_unrelated_tool_output_never_contributes() -> None:
 def test_tool_arguments_are_bounded(months: Any) -> None:
     with pytest.raises(ValidationError):
         AnalysisArgs(months=months)
+
+
+@pytest.mark.parametrize("dataset", ["sales", "support"])
+def test_internal_malformed_values_fail_before_charting(dataset: str) -> None:
+    from nlw.analytics.analysis import AnalysisOutput
+
+    data = (
+        analyze_sales(AnalysisArgs()) if dataset == "sales" else analyze_support(AnalysisArgs())
+    ).model_dump()
+    data["totals"][0] = -1 if dataset == "sales" else 101
+    with pytest.raises(ValidationError):
+        AnalysisOutput.model_validate(data)

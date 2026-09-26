@@ -87,6 +87,7 @@ class PlanProposalDetailOut(PlanProposalOut):
     request_text: str | None = None
     request_sha256: str | None = None
     planner_contract_version: str | None = None
+    analytics_source: dict[str, Any] | None = None
 
 
 class WorkflowProvenanceOut(BaseModel):
@@ -101,6 +102,7 @@ class WorkflowProvenanceOut(BaseModel):
     planner_contract_version: str | None
     status: str
     created_at: str
+    analytics_source: dict[str, Any] | None = None
 
 
 class MaterializeOut(BaseModel):

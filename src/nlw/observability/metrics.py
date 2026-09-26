@@ -446,3 +446,26 @@ def record_ctx_verification(purpose: str, ok: bool, reason: str = "none") -> Non
 
 def set_ctx_signer_configured(purpose: str, configured: bool) -> None:
     _CTX_SIGNER_CONFIGURED.labels(purpose=purpose).set(1 if configured else 0)
+
+
+_ANALYTICS_RESULTS = Counter(
+    "nlw_analytics_result_total",
+    "Analytics projections served (including repeated reads).",
+    labelnames=("status",),
+)
+_ANALYTICS_CHARTS = Histogram(
+    "nlw_analytics_chart_count",
+    "Validated charts per analytics read.",
+    buckets=(0, 1, 2, 4, 6),
+)
+_ANALYTICS_DURATION = Histogram(
+    "nlw_analytics_result_seconds",
+    "Authorized analytics projection duration.",
+)
+
+
+def record_analytics_result(status: str, chart_count: int, seconds: float) -> None:
+    label = status if status in {"READY", "PARTIAL", "PENDING", "EMPTY", "INVALID"} else "INVALID"
+    _ANALYTICS_RESULTS.labels(status=label).inc()
+    _ANALYTICS_CHARTS.observe(max(0, min(chart_count, 6)))
+    _ANALYTICS_DURATION.observe(max(0.0, seconds))

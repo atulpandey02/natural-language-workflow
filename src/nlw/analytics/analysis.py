@@ -45,6 +45,36 @@ class AnalysisOutput(StrictModel):
             raise ValueError("incomplete comparison")
         if len(self.products) != (8 if self.dataset == "sales-v1" else 0):
             raise ValueError("incomplete products")
+        if self.dataset == "sales-v1":
+            for row in [self.totals, *self.trend, *self.comparison, *self.products]:
+                revenue, count, aov, units = row
+                if revenue is None or revenue < 0 or not isinstance(count, int) or count < 0:
+                    raise ValueError("invalid revenue or order count")
+                if not isinstance(units, int) or units < 0:
+                    raise ValueError("invalid unit count")
+                if count and (aov is None or abs(aov - revenue / count) > 0.011):
+                    raise ValueError("invalid average order value")
+                if not count and aov is not None:
+                    raise ValueError("empty group has no average")
+            for index in (0, 1, 3):
+                if (
+                    abs(
+                        sum(float(r[index] or 0) for r in self.trend)
+                        - float(self.totals[index] or 0)
+                    )
+                    > 0.011
+                ):
+                    raise ValueError("trend does not reconcile to totals")
+        else:
+            for compliance, backlog, hours, csat in [self.totals, *self.trend, *self.comparison]:
+                if compliance is not None and not 0 <= compliance <= 100:
+                    raise ValueError("invalid SLA percent")
+                if not isinstance(backlog, int) or backlog < 0:
+                    raise ValueError("invalid backlog count")
+                if hours is not None and hours < 0:
+                    raise ValueError("invalid resolution time")
+                if csat is not None and not 1 <= csat <= 5:
+                    raise ValueError("invalid satisfaction score")
         return self
 
 

@@ -160,6 +160,7 @@ async def get_workflow_provenance(
         provider=proposal.provider,
         model=proposal.model,
         planner_contract_version=proposal.planner_contract_version,
+        analytics_source=proposal.analytics_source,
         status=proposal.status,
         created_at=proposal.created_at.isoformat(),
     )
