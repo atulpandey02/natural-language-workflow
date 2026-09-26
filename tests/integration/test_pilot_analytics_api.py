@@ -1,5 +1,6 @@
 """Real planner/feasibility/materialization/Redis/worker/Postgres golden paths."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -238,15 +239,26 @@ def test_three_golden_journeys_and_authorization(pilot: SimpleNamespace) -> None
         assert pilot.client.get(f"/runs/{rid}/analytics").status_code == 401
         with psycopg.connect(pilot.pg.owner_libpq) as conn:
             rows = conn.execute(
-                "SELECT status,attempt FROM step_runs WHERE run_id=%s", (rid,)
+                "SELECT status,attempt,finished_at,output FROM step_runs WHERE run_id=%s", (rid,)
             ).fetchall()
-            assert rows == [("SUCCESS", 1)]
+            assert len(rows) == 1 and rows[0][:2] == ("SUCCESS", 1)
         pilot.enqueue(uuid.UUID(rid))
+        pilot.broker.join("default", timeout=10000)
+        with psycopg.connect(pilot.pg.owner_libpq) as conn:
+            assert (
+                conn.execute(
+                    "SELECT status,attempt,finished_at,output FROM step_runs WHERE run_id=%s",
+                    (rid,),
+                ).fetchall()
+                == rows
+            )
     proposal = handoff(pilot, rid)
     binding = proposal["analytics_source"]
     assert binding["source_run_id"] == rid and binding["contract_version"] == "analytics-1"
     assert binding["connector_id"] == pilot.connector["id"] and binding["channel"] == "CPILOT"
     message = proposal["proposed_plan"]["steps"][0]["args"]["text"]
+    assert binding["message_digest"] == hashlib.sha256(message.encode()).hexdigest()
+    assert binding["result_digest"] == result["summary_digest"]
     assert message not in pilot.client.get("/plans", headers=pilot.owner).text
     assert "Synthetic pilot analysis" not in pilot.client.get("/plans", headers=pilot.owner).text
     shared_run = start_proposal(pilot, proposal["id"])
@@ -285,7 +297,8 @@ def test_handoff_drift_fails_closed(pilot: SimpleNamespace, drift: str) -> None:
     with psycopg.connect(pilot.pg.owner_libpq, autocommit=True) as conn:
         if drift == "output":
             conn.execute(
-                "UPDATE step_runs SET output=jsonb_set(output,'{totals,0}','999') WHERE run_id=%s",
+                "UPDATE step_runs SET output=jsonb_set(output,'{categories,0,2}','-25') "
+                "WHERE run_id=%s",
                 (rid,),
             )
         elif drift == "connector":
@@ -298,6 +311,10 @@ def test_handoff_drift_fails_closed(pilot: SimpleNamespace, drift: str) -> None:
             conn.execute("UPDATE step_runs SET output=NULL WHERE run_id=%s", (rid,))
         else:
             conn.execute("UPDATE workflow_runs SET status='FAILED' WHERE id=%s", (rid,))
+    if drift == "output":
+        changed = pilot.client.get(f"/runs/{rid}/analytics", headers=pilot.owner).json()
+        assert changed["status"] == "READY"  # valid data still must match the exact bound digest
+        assert changed["summary_digest"] != proposal["analytics_source"]["result_digest"]
     response = pilot.client.post(f"/plans/{proposal['id']}/materialize", headers=pilot.owner)
     assert response.status_code == 409 and "STALE_ANALYTICS_SOURCE" in response.text
     assert not pilot.evidence.exists()
@@ -316,6 +333,23 @@ def test_handoff_rejects_browser_text_cross_tenant_and_disallowed_destination(
         == 422
     )
     assert pilot.client.post(endpoint, json=body, headers=pilot.other).status_code == 404
+    foreign = pilot.client.post(
+        "/connectors",
+        json={
+            "name": "foreign-slack",
+            "type": "slack",
+            "config": {"workspace_label": "Other synthetic tenant", "default_channel": "CPILOT"},
+            "secret_ref": "OTHER_TEST",
+        },
+        headers=pilot.other,
+    )
+    assert foreign.status_code == 201
+    assert (
+        pilot.client.post(
+            endpoint, json={**body, "connector_id": foreign.json()["id"]}, headers=pilot.owner
+        ).status_code
+        == 404
+    )
     assert (
         pilot.client.post(
             endpoint, json={**body, "channel": "CFOREIGN"}, headers=pilot.owner
@@ -397,12 +431,23 @@ def test_stale_connector_after_approval_blocks_before_io(
     )
     with psycopg.connect(pilot.pg.owner_libpq, autocommit=True) as conn:
         conn.execute(
-            "UPDATE connectors SET status='disabled' WHERE id=%s", (pilot.connector["id"],)
+            "UPDATE connectors SET config=jsonb_set(config, '{default_channel}', "
+            "'\"CDRIFT\"'::jsonb) WHERE id=%s",
+            (pilot.connector["id"],),
         )
     pilot.enqueue(uuid.UUID(rid))
     wait_status(pilot, rid, "FAILED")
     assert not pilot.evidence.exists()
-    assert "STALE_PLAN" in pilot.client.get(f"/runs/{rid}/summary", headers=pilot.owner).text
+    # Existing STALE_PLAN execution stores its precise reason code, not the
+    # exception's prose (see _step_failure_message and connector-binding tests).
+    summary = pilot.client.get(f"/runs/{rid}/summary", headers=pilot.owner).json()
+    assert summary["outcome"] == "FAILED" and summary["succeeded"] == 0
+    assert summary["steps"][0]["outcome"] == "FAILED"
+    assert summary["steps"][0]["detail"] == "slack.send_message failed: CONNECTOR_CONFIG_CHANGED"
+    with psycopg.connect(pilot.pg.owner_libpq) as conn:
+        assert conn.execute("SELECT error FROM step_runs WHERE run_id=%s", (rid,)).fetchone() == (
+            "CONNECTOR_CONFIG_CHANGED",
+        )
 
 
 def test_raw_output_and_missing_source_provenance_fail_closed(pilot: SimpleNamespace) -> None:
@@ -420,6 +465,7 @@ def test_raw_output_and_missing_source_provenance_fail_closed(pilot: SimpleNames
     response = pilot.client.get(f"/runs/{rid}/analytics", headers=pilot.owner)
     assert response.json()["status"] == "INVALID"
     assert "DO-NOT-RETURN" not in response.text and response.json()["metrics"] == []
+    assert "Synthetic pilot analysis" not in pilot.client.get("/plans", headers=pilot.owner).text
     assert (
         pilot.client.post(f"/plans/{proposal['id']}/materialize", headers=pilot.owner).status_code
         == 409

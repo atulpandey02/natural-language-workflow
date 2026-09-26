@@ -231,7 +231,7 @@ async def list_plans(
         PlanProposalOut.model_validate(p).model_copy(
             update={"proposed_plan": None, "normalized_plan": None, "feasibility": {}}
         )
-        if p.analytics_source is not None
+        if p.analytics_source is not None or p.planner_contract_version == "analytics-handoff-1"
         else PlanProposalOut.model_validate(p)
         for p in proposals
     ]
