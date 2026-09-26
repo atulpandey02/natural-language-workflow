@@ -104,11 +104,17 @@ all boxes are ticked.
       legacy `/opt/nlw/app` checkout and FLAGs after activation — known limitation;
       install `nlw-backup.timer` only now.)
 - [ ] Prometheus rule groups `nlw-backup` + `nlw-signed-context` loaded;
-      Alertmanager reachable; **a real alert receiver wired, credential files
-      present, and a controlled test alert delivered and recorded** —
-      `python -m nlw.ops.rollout go-check` passes. With the committed null
-      receiver this stays **open** (`alert delivery unverified`) and the
-      decision is NO-GO, however healthy the pipeline is (`docs/ops/alerting.md`).
+      Alertmanager reachable; **the operator Alertmanager files are in place
+      (`/opt/nlw/alertmanager/alertmanager.yml` root:root 0644,
+      `/opt/nlw/alertmanager.secrets/` root:65534 0750 with root:65534 0640
+      credentials, `/opt/nlw/docker-compose.operator.yml`) and named in
+      `target.env`; the RUNNING container mounts them and loaded that config; a
+      controlled test alert was delivered, seen by a human and recorded with
+      `scripts/ops/record-alert-delivery.sh` (root:nlwops 0640, rollout dir left
+      nlwops:nlwops 0700)** — `python -m nlw.ops.rollout go-check` passes. The
+      committed null receiver is refused for staging; a dropped override, a
+      stale/mismatched/malformed record or an unreadable credential is NO-GO,
+      however healthy the pipeline is (`docs/ops/alerting.md`).
 - [ ] Non-destructive key-rotation drill on staging (API class, overlap, revoke).
 - [ ] k6 planner/API load profile + non-destructive failure drills (restart
       api/worker/scheduler; wrong-key canary fails closed).

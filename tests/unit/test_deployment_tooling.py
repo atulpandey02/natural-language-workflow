@@ -316,3 +316,96 @@ def test_local_executor_timeout_kills_the_whole_process_group() -> None:
     res = LocalRemote().run("sleep 30 & wait", timeout=1)
     assert res.returncode == 124 and "timed out" in res.stderr
     assert time.monotonic() - started < 5
+
+
+# --- post-rollout hotfix: operator Alertmanager override + secret isolation (J.10) --------
+def _rendered_with_operator_override(tmp: Path) -> dict[str, Any]:
+    """prod + staging + the reviewed operator override example, with the operator
+    paths rewritten to a scratch directory (the render must not touch /opt)."""
+    env = {
+        k: f"dummy-{k}"
+        for k in re.findall(r"\$\{([A-Z_]+):\?", (ROOT / "docker-compose.prod.yml").read_text())
+    }
+    env["NLW_CTX_KEYS_DIR"] = "/srv/nlw/ctx-keys"
+    ovr = (ROOT / "deploy/staging/docker-compose.operator.example.yml").read_text()
+    ovr = ovr.replace("/opt/nlw/alertmanager/alertmanager.yml", str(tmp / "alertmanager.yml"))
+    ovr = ovr.replace("/opt/nlw/alertmanager.secrets", str(tmp / "secrets"))
+    (tmp / "alertmanager.yml").write_text("route: {}\n")
+    (tmp / "secrets").mkdir()
+    (tmp / "override.yml").write_text(ovr)
+    p = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.prod.yml",
+            "-f",
+            "docker-compose.staging.yml",
+            "-f",
+            str(tmp / "override.yml"),
+            "config",
+        ],
+        cwd=ROOT,
+        env={**env, "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if p.returncode != 0:
+        import pytest
+
+        pytest.skip(f"docker compose unavailable: {p.stderr[-200:]}")
+    doc: dict[str, Any] = yaml.safe_load(p.stdout)
+    return doc
+
+
+def test_operator_override_replaces_the_committed_config_and_isolates_secrets(
+    tmp_path: Path,
+) -> None:
+    doc = _rendered_with_operator_override(tmp_path)
+    services = doc["services"]
+    am = {m["target"]: m for m in services["alertmanager"]["volumes"]}
+    # The operator file REPLACES the committed null file at the same target; the
+    # secrets dir is mounted read-only; nothing else about the service changed.
+    assert am["/etc/alertmanager/alertmanager.yml"]["source"] == str(tmp_path / "alertmanager.yml")
+    assert am["/etc/alertmanager/alertmanager.yml"].get("read_only") is True
+    assert am["/etc/alertmanager/secrets"]["source"] == str(tmp_path / "secrets")
+    assert am["/etc/alertmanager/secrets"].get("read_only") is True
+    assert services["alertmanager"]["user"] == "65534:65534" and not services["alertmanager"].get(
+        "ports"
+    )
+    # No runtime service receives Alertmanager configuration/secrets or a foreign key.
+    holders = {"api": "api.key", "worker": "worker.key", "scheduler": "scheduler.key"}
+    for name, svc in services.items():
+        targets = {str(m.get("target")) for m in (svc.get("volumes") or [])}
+        sources = {str(m.get("source")) for m in (svc.get("volumes") or [])}
+        if name != "alertmanager":
+            assert not any(t.startswith("/etc/alertmanager") for t in targets), name
+            assert str(tmp_path / "secrets") not in sources, name
+        keys = {t for t in targets if t.startswith("/run/nlw/keys/")}
+        assert keys == ({f"/run/nlw/keys/{holders[name]}"} if name in holders else set()), name
+        env_text = " ".join(f"{k}={v}" for k, v in (svc.get("environment") or {}).items()).lower()
+        assert "slack" not in env_text and "alertmanager" not in env_text.replace(
+            "alertmanager:9093", ""
+        ), name
+        for k in svc.get("environment") or {}:
+            assert not (
+                k.startswith("NLW_CTX_")
+                and k not in ("NLW_CTX_KEY_ID", "NLW_CTX_KEY_FILE", "NLW_CTX_TTL_S")
+            ), (name, k)
+
+
+def test_committed_target_env_carries_the_operator_contract_without_secrets() -> None:
+    text = (ROOT / "deploy/staging/target.env").read_text()
+    for key in (
+        "NLW_STAGING_ALERTMANAGER_CONFIG=/opt/nlw/",
+        "NLW_STAGING_ALERTMANAGER_SECRETS_DIR=/opt/nlw/",
+        "NLW_STAGING_COMPOSE_OVERRIDE=/opt/nlw/",
+        "NLW_STAGING_REMOTE_APP=/opt/nlw/current",
+        "NLW_STAGING_CURRENT_REVISION=0020_schedule_authorization",
+        "NLW_STAGING_GIT_REMOTE=https://github.com/",
+    ):
+        assert key in text, key
+    live = "\n".join(ln for ln in text.splitlines() if ln and not ln.startswith("#"))
+    assert "/releases/" not in live  # operator authority never lives inside a release
+    assert not re.search(r"(?i)(password|secret_key|token|hooks\.slack|xox)", live)
