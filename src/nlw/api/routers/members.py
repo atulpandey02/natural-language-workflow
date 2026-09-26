@@ -17,8 +17,10 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nlw.api import db_errors
 from nlw.api.deps import (
     get_app_settings,
     get_ctx_signer,
@@ -51,21 +53,31 @@ def _iso(value: object) -> str | None:
     return value.isoformat() if value is not None else None  # type: ignore[attr-defined]
 
 
-def _sqlstate(exc: BaseException) -> str | None:
-    orig = getattr(exc, "orig", None)
-    return getattr(orig, "sqlstate", None) or getattr(exc, "sqlstate", None)
+def _membership_error(exc: SQLAlchemyError, verb: str) -> HTTPException:
+    """Translate a ``manage_membership`` database failure PRECISELY.
 
-
-def _membership_error(exc: Exception, verb: str) -> HTTPException:
-    """Map a ``manage_membership`` failure to a stable, non-enumerating HTTP error.
-    42501 (denied: not admin/owner, owner-only row, or target absent) -> 403;
-    23514 (final-owner invariant) -> 409. Anything else -> 409. No internals leak."""
-    state = _sqlstate(exc)
-    if state == "42501":
+    Expected outcomes raised by the SECURITY DEFINER function keep their intended,
+    non-enumerating responses:
+      42501 (denied: not admin/owner, owner-only row, target absent) -> 403
+      23514 (the >=1-owner invariant)                                  -> 409
+      22023 (invalid role/action — defensive; the API validates first) -> 422
+    Anything else is infrastructure: transient/connection failures -> sanitized
+    503; the rest is re-raised by the caller for the opaque 500. No internals leak."""
+    state = db_errors.sqlstate(exc)
+    if state == db_errors.SQLSTATE_INSUFFICIENT_PRIVILEGE:
         return HTTPException(status.HTTP_403_FORBIDDEN, f"{verb} not allowed")
-    return HTTPException(
-        status.HTTP_409_CONFLICT, f"{verb} not allowed (workspace must keep an owner)"
-    )
+    if state == db_errors.SQLSTATE_CHECK_VIOLATION:
+        return HTTPException(
+            status.HTTP_409_CONFLICT, f"{verb} not allowed (workspace must keep an owner)"
+        )
+    if state == db_errors.SQLSTATE_INVALID_PARAMETER_VALUE:
+        return HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"{verb}: invalid role or action"
+        )
+    if db_errors.is_unavailable(exc):
+        return db_errors.unavailable(exc, f"membership.{verb}")
+    db_errors.log_unexpected(exc, f"membership.{verb}")
+    raise exc
 
 
 async def _admin_ctx(ctx: TenantContext = Depends(get_tenant_context)) -> TenantContext:
@@ -93,13 +105,16 @@ async def change_member_role(
     if body.role not in ("owner", "admin", "member"):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid role")
     sessionmaker = request.app.state.sessionmaker
+    # The failed transaction is rolled back by the context managers BEFORE the
+    # error is translated; the session is never reused. HTTPExceptions (e.g. the
+    # 503 for an unconfigured signer) pass through untouched.
     try:
         async with sessionmaker() as session, session.begin():
             await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
             # manage_membership authorizes, mutates, preserves >=1 owner, and audits
             # atomically. It RAISES on denial/final-owner; no separate emit here.
             await MembershipRepository(session).set_role(user_id, ctx.tenant_id, body.role)
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         raise _membership_error(exc, "role change") from exc
     return MemberOut(user_id=user_id, role=body.role)
 
@@ -115,7 +130,7 @@ async def remove_member(
         async with sessionmaker() as session, session.begin():
             await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
             await MembershipRepository(session).remove(user_id, ctx.tenant_id)
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         raise _membership_error(exc, "removal") from exc
 
 
@@ -156,41 +171,56 @@ async def create_invitation(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "a valid email is required")
     raw_token, token_hash = new_invitation_token()
     sessionmaker = request.app.state.sessionmaker
-    async with sessionmaker() as session, session.begin():
-        await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
-        repo = InvitationRepository(session)
-        if await repo.count_pending(ctx.tenant_id) >= settings.invitation_max_pending_per_workspace:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT, "too many pending invitations for this workspace"
+    # The invitation row and its audit event commit together or not at all. A
+    # database failure leaves the ``with`` blocks first (transaction rolled back,
+    # session closed) and is only THEN classified: only the exact pending-email
+    # unique violation is a duplicate; an RLS denial is 403; a transient failure
+    # is 503; anything else is re-raised for the opaque 500.
+    try:
+        async with sessionmaker() as session, session.begin():
+            await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
+            repo = InvitationRepository(session)
+            pending = await repo.count_pending(ctx.tenant_id)
+            if pending >= settings.invitation_max_pending_per_workspace:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT, "too many pending invitations for this workspace"
+                )
+            inv = await repo.create(
+                tenant_id=ctx.tenant_id,
+                email=email,
+                role=body.role,
+                invited_by=ctx.user_id,
+                token_hash=token_hash,
+                expiry_hours=settings.invitation_expiry_hours,
             )
-        inv = await repo.create(
-            tenant_id=ctx.tenant_id,
-            email=email,
-            role=body.role,
-            invited_by=ctx.user_id,
-            token_hash=token_hash,
-            expiry_hours=settings.invitation_expiry_hours,
-        )
-        if inv is None:
+            await AuditRepository(session).emit(
+                tenant_id=ctx.tenant_id,
+                event_type="invitation.created",
+                actor_user_id=ctx.user_id,
+                subject_id=inv.id,
+                detail=body.role,
+            )
+            out = InvitationCreatedOut(
+                id=inv.id,
+                email=inv.email,
+                role=inv.role,
+                status=inv.status,
+                expires_at=_iso(inv.expires_at),
+                created_at=_iso(inv.created_at),
+                token=raw_token,
+            )
+    except SQLAlchemyError as exc:
+        if db_errors.is_unique_violation_of(exc, db_errors.PENDING_INVITATION_UNIQUE_INDEX):
             raise HTTPException(
                 status.HTTP_409_CONFLICT, "a pending invitation for this email already exists"
-            )
-        await AuditRepository(session).emit(
-            tenant_id=ctx.tenant_id,
-            event_type="invitation.created",
-            actor_user_id=ctx.user_id,
-            subject_id=inv.id,
-            detail=body.role,
-        )
-        out = InvitationCreatedOut(
-            id=inv.id,
-            email=inv.email,
-            role=inv.role,
-            status=inv.status,
-            expires_at=_iso(inv.expires_at),
-            created_at=_iso(inv.created_at),
-            token=raw_token,
-        )
+            ) from exc
+        if db_errors.sqlstate(exc) == db_errors.SQLSTATE_INSUFFICIENT_PRIVILEGE:
+            log.info("invitation.create_denied", tenant_id=str(ctx.tenant_id))
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "invitation not allowed") from exc
+        if db_errors.is_unavailable(exc):
+            raise db_errors.unavailable(exc, "invitation.create") from exc
+        db_errors.log_unexpected(exc, "invitation.create")
+        raise
     # The raw token is returned ONCE here and never logged/stored/returned again.
     log.info("invitation.created", tenant_id=str(ctx.tenant_id), invitation_id=str(out.id))
     return out
@@ -231,12 +261,23 @@ async def accept_invitation(
     if not body.token or len(body.token) > MAX_TOKEN_LENGTH:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "invitation is not valid")
     token_hash = hash_token(body.token)
+    # The SECURITY DEFINER function raises SQLSTATE 22023 for EVERY expected
+    # rejection (unknown / not pending / expired / revoked / used / wrong email /
+    # lost race) — one uniform, non-enumerating 400. Anything else is NOT a bad
+    # token: a transient failure is 503, the rest is re-raised for the opaque 500.
+    # The request transaction (which holds the accept's membership + audit rows)
+    # is rolled back by the ``get_session`` dependency on any exception.
     try:
         workspace_id = await InvitationRepository(session).accept(token_hash)
         membership = await MembershipRepository(session).get(user.id, workspace_id)
-    except Exception as exc:  # uniform sanitized failure — no enumeration
-        log.info("invitation.accept_failed", error_class=type(exc).__name__)
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invitation is not valid") from exc
+    except SQLAlchemyError as exc:
+        if db_errors.sqlstate(exc) == db_errors.SQLSTATE_INVALID_PARAMETER_VALUE:
+            log.info("invitation.accept_rejected")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "invitation is not valid") from exc
+        if db_errors.is_unavailable(exc):
+            raise db_errors.unavailable(exc, "invitation.accept") from exc
+        db_errors.log_unexpected(exc, "invitation.accept")
+        raise
     role = membership.role if membership is not None else "member"
     log.info("invitation.accepted", workspace_id=str(workspace_id), user_id=str(user.id))
     return InvitationAcceptedOut(workspace_id=workspace_id, role=role)

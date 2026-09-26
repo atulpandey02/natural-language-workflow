@@ -518,10 +518,6 @@ warning).
 Honest, current list (each item is either a documented limitation or a tracked
 correction). "Correction pending" items are being fixed in dedicated commits.
 
-- **Invitation / membership error classification — correction pending.** Database
-  connection, RLS-denial and unrelated integrity failures are translated into the
-  business responses (duplicate invitation `409`, owner-retention `409`, invalid
-  invitation `400`) instead of sanitized `5xx`.
 - **Blocked schedules in the UI — correction pending.** The API returns
   `blocked_reason`/`blocked_at`, but the frontend type omits them, so an
   authorization-blocked schedule renders as *active*; a successful unblock writes
