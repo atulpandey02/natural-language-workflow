@@ -18,7 +18,7 @@ decision, numbered and never deleted (supersede instead of removing).
 | [000](ADR-000-toolchain.md) | Engineering toolchain | Accepted |
 | [001](ADR-001-postgres-state-store.md) | PostgreSQL as the system of record | Accepted |
 | [002](ADR-002-redis-dramatiq-queue.md) | Redis + Dramatiq as the execution queue (transport only) | Accepted |
-| [003](ADR-003-multi-tenant-isolation.md) | Multi-tenant isolation strategy (RLS + restricted role) | Accepted |
+| [003](ADR-003-multi-tenant-isolation.md) | Multi-tenant isolation strategy (RLS + restricted role) | Accepted — superseded in part by ADR-024 (signed context replaces the plain GUC mechanism) |
 | [004](ADR-004-planner-feasibility-separation.md) | Planner / feasibility separation (LLM proposes, code decides) | Accepted |
 | [005](ADR-005-llm-provider-byok.md) | LLMProvider abstraction & BYOK | Accepted |
 | [006](ADR-006-connector-tool-separation.md) | Connector/Tool separation + deterministic Tool Registry | Accepted |
@@ -38,8 +38,9 @@ decision, numbered and never deleted (supersede instead of removing).
 | [021](ADR-021-scheduler-reconciler-correctness.md) | Scheduler & reconciler correctness (occurrence idempotency, fairness, progress, approval binding) | Accepted |
 | [022](ADR-022-encrypted-offhost-backup-dr.md) | Encrypted off-host backup & disaster recovery (restic, verified success, guarded restore, post-restore quiescence) | Accepted |
 | [023](ADR-023-membership-approval-sod.md) | Membership, invitations & approval separation of duties (hashed single-use invites, owner invariant, DB-enforced four-eyes) | Accepted |
-| [024](ADR-024-signed-database-context.md) | Tamper-evident (signed) database context — HMAC design + threat model | Proposed (implementation is a launch gate) |
+| [024](ADR-024-signed-database-context.md) | Signed (HMAC) database context — design + threat model; RLS trusts only verified claims | Accepted — implemented (migration `0016`, M11.5 P3B) |
 | [025](ADR-025-release-manifest-provenance.md) | Release-manifest provenance — GitHub artifact attestations bound to repository / workflow / main / push / commit and to the manifest + both image digests, verified before any host contact; explicit trust boundary | Accepted |
+| [026](ADR-026-ai-execution-architecture.md) | AI execution architecture — planner/executor with deterministic feasibility, not an agent loop; provenance, stale-plan detection, deterministic summaries | Accepted (M12B-A) |
 
 ## Template
 

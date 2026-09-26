@@ -122,7 +122,9 @@ async def create_plan(
     if not prompt.strip():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "prompt must not be empty")
 
-    view, all_tool_names = await build_tenant_view(session, ctx.tenant_id)
+    view, all_tool_names = await build_tenant_view(
+        session, ctx.tenant_id, settings, purpose="planning"
+    )
 
     planner_start = time.perf_counter()
     try:
@@ -290,7 +292,9 @@ async def materialize_plan(
     # and classify a no-longer-executable plan (STALE_PLAN / POLICY_DENIED /
     # INVALID_PLAN) with a stable, sanitized reason.
     plan = WorkflowPlan.model_validate(proposal.proposed_plan)
-    view, all_tool_names = await build_tenant_view(session, ctx.tenant_id)
+    view, all_tool_names = await build_tenant_view(
+        session, ctx.tenant_id, settings, purpose="planning"
+    )
     reval = revalidate_plan(plan, view, DEFAULT_LIMITS, all_tool_names)
 
     if not reval.fresh or reval.report.normalized_plan is None:

@@ -211,9 +211,16 @@ class InvitationRepository:
         invited_by: uuid.UUID,
         token_hash: str,
         expiry_hours: int,
-    ) -> WorkspaceInvitation | None:
-        """Create a pending invitation. Returns the row, or None on a duplicate
-        pending invite for the same (workspace, email) — conflict-safe."""
+    ) -> WorkspaceInvitation:
+        """Create a pending invitation and flush it.
+
+        Raises the database error unchanged: a duplicate pending invite for the same
+        (workspace, email) surfaces as an ``IntegrityError`` on the
+        ``uq_invitation_pending_email`` index, which the API translates precisely
+        (SQLSTATE + constraint name). Nothing is swallowed here — a connection loss,
+        RLS denial or unrelated integrity failure must never look like a duplicate.
+        After a failed flush the session's transaction is aborted; callers let the
+        enclosing ``session.begin()`` roll it back and do not reuse the session."""
         inv = WorkspaceInvitation(
             tenant_id=tenant_id,
             email=email,
@@ -224,10 +231,7 @@ class InvitationRepository:
             expires_at=datetime.now(UTC) + timedelta(hours=expiry_hours),
         )
         self.session.add(inv)
-        try:
-            await self.session.flush()
-        except Exception:
-            return None
+        await self.session.flush()
         return inv
 
     async def list_pending(self, tenant_id: uuid.UUID) -> list[WorkspaceInvitation]:
@@ -609,6 +613,21 @@ class ScheduleRepository:
         return (
             await self.session.execute(
                 select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id)
+            )
+        ).scalar_one_or_none()
+
+    async def get_for_update(
+        self, schedule_id: uuid.UUID, tenant_id: uuid.UUID
+    ) -> "Schedule | None":
+        """Row-locked read (``SELECT ... FOR UPDATE``) for a state transition that
+        must happen at most once per logical change (e.g. unblock): a concurrent
+        transaction blocks until this one commits and then sees the COMMITTED row,
+        never the pre-transition snapshot. RLS + the tenant filter still apply."""
+        return (
+            await self.session.execute(
+                select(Schedule)
+                .where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id)
+                .with_for_update()
             )
         ).scalar_one_or_none()
 

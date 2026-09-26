@@ -129,6 +129,11 @@ export interface ScheduleOut {
   enabled: boolean;
   next_run_at: string;
   last_scheduled_for: string | null;
+  // Fail-closed authorization block (migration 0020): set by the scheduler when the
+  // creator lost membership/role. A blocked schedule creates NO occurrences even
+  // while enabled=true, so status precedence is blocked > active > disabled.
+  blocked_reason: string | null;
+  blocked_at: string | null;
 }
 
 export interface WorkflowOut {

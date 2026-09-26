@@ -17,7 +17,7 @@ Package layout (empty scaffolding in M0; filled in later milestones):
 - engine         durable executor: DAG, checkpointing, resume, idempotency  [mypy strict]
 - scheduler      due-schedule reader -> enqueue
 - worker         Dramatiq actors / entrypoint
-- observability  structlog + OpenTelemetry (+ Langfuse later)
+- observability  structlog + Prometheus metrics (OpenTelemetry / Langfuse planned)
 """
 
 __version__ = "0.0.0"

@@ -78,11 +78,13 @@ did not touch metrics. If it recurs, check for a stuck first process
 - **gate-check failed (exit 4)** — a runtime service (restore mode) found a
   missing/malformed/stale/cross-DB/wrong-project restore-ready file gate
   (defense-in-depth). Ensure the restore completed and wrote the gate for THIS DB.
-- **startup blocked by the recovery lock (exit 6 / RecoveryLocked)** — the
-  AUTHORITATIVE database lock: the newest `dr_restore_events` generation is not
-  operator-enabled (or is quiesced-but-not-validated). api/worker/scheduler refuse
-  to start until you run `nlw.backup enable-runtime` for the exact newest validated
-  generation. `RecoveryStateUnknown` means the state could not be read (e.g. missing
+- **startup blocked by the recovery lock (`startup-check` exit 6 / RecoveryLocked)**
+  — the AUTHORITATIVE database lock: the newest `dr_restore_events` generation is
+  not operator-enabled (or is quiesced-but-not-validated). api/worker/scheduler
+  refuse to start (non-zero exit; the worker logs `worker.recovery_lock_refused`
+  and exits 1 with `WorkerBootRefused` before any consumer starts, and under
+  Compose restart-loops with its healthcheck failing on `recovery_lock`) until
+  you run `nlw.backup enable-runtime` for the exact newest validated generation. `RecoveryStateUnknown` means the state could not be read (e.g. missing
   grant/columns) — fail closed; check the migration ran and the grant is present.
 - **enable-runtime rejected (exit 5)** — the supplied generation is not the newest
   validated one, or the project confirmation does not match. Re-query the newest

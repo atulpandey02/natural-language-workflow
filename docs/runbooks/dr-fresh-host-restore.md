@@ -93,7 +93,12 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    env flag, compose profile, or mounted file** — and refuse to start while the
    newest generation is not enabled. (The file gate / `NLW_RESTORE_MODE` /
    `gate-check` are now defense-in-depth and a binding artifact; the **database is
-   the authority**.) Attempting to start a service now fails closed (exit 6).
+   the authority**.) Attempting to start a service now fails closed: the process
+   exits non-zero (`nlw.backup startup-check` exits 6; the worker exits 1 with
+   `WorkerBootRefused` before any consumer thread starts). Under Compose
+   (`restart: unless-stopped`) a service started too early simply restart-loops —
+   visible in `docker compose ps` as *Restarting* — and never processes anything;
+   its healthcheck reports `recovery_lock failed: RecoveryLocked`.
 
 7. **Operator ENABLE — a separate, explicit command (operator credential).** Get the
    generation id and enable exactly it:

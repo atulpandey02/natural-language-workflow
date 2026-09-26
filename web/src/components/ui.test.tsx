@@ -35,6 +35,11 @@ describe("StatusBadge", () => {
     expect(screen.getByText("COMPLETED")).toBeInTheDocument();
   });
 
+  it("renders a blocked schedule as a failure state (it will not run)", () => {
+    render(<StatusBadge status="blocked" />);
+    expect(screen.getByText("blocked")).toHaveClass("fail");
+  });
+
   it("renders the ambiguous unknown outcome as a warning, distinct from failure", () => {
     render(<StatusBadge status="unknown" />);
     const badge = screen.getByText("unknown");

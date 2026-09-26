@@ -32,7 +32,7 @@ PG = SafeConnector(
 
 
 def _check(output: PlannerOutput, connectors: list[SafeConnector]) -> Any:
-    view = build_capability_view(REGISTRY.all(), connectors)
+    view = build_capability_view(REGISTRY.all(), connectors, include_demo=True)
     return check_plan(
         output.to_workflow_plan(),
         view,
@@ -129,7 +129,9 @@ def test_malicious_schema_hint_and_name_do_not_change_authorization() -> None:
     assert _check(out, [benign]).status == _check(out, [malicious]).status == FeasibilityStatus.PASS
     # The malicious hint would appear verbatim in the model prompt (it is data),
     # but it never reaches any authorization decision.
-    prompt_json = capability_view_to_prompt_json(build_capability_view(REGISTRY.all(), [malicious]))
+    prompt_json = capability_view_to_prompt_json(
+        build_capability_view(REGISTRY.all(), [malicious], include_demo=True)
+    )
     assert "IGNORE ALL PREVIOUS INSTRUCTIONS" in str(prompt_json)
 
 

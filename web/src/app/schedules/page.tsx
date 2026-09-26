@@ -4,6 +4,7 @@ import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { ErrorBanner, Empty, Loading, RoleGate, StatusBadge } from "@/components/ui";
 import { useCurrentWorkspace, useSchedules, useUpdateSchedule } from "@/lib/api/hooks";
+import { blockedReasonText, scheduleStatus } from "@/lib/schedules";
 
 export default function SchedulesPage() {
   const schedules = useSchedules();
@@ -45,7 +46,13 @@ export default function SchedulesPage() {
                 </td>
                 <td className="muted">{new Date(s.next_run_at).toLocaleString()}</td>
                 <td>
-                  <StatusBadge status={s.enabled ? "active" : "disabled"} />
+                  <StatusBadge status={scheduleStatus(s)} />
+                  {s.blocked_reason ? (
+                    <div className="muted" data-testid="schedule-blocked-reason">
+                      {blockedReasonText(s.blocked_reason)}
+                      {s.blocked_at ? ` (since ${new Date(s.blocked_at).toLocaleString()})` : ""}
+                    </div>
+                  ) : null}
                 </td>
                 <td>
                   <RoleGate role={role} allow={["owner", "admin"]}>

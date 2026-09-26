@@ -37,7 +37,12 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   run), tenant-owned connectors (RLS), and a SecretStore (refs in DB; values resolved
   worker-side only, never in the LLM path). Steps dispatch through the registry; a
   connector-backed step loads the tenant's connector, health-checks it, and resolves its
-  secret before executing.
+  secret before executing. **Demo tools** (`fake.*`, `static.*`; `ToolSpec.demo`) stay
+  registered and executable everywhere, but reach NEW planning (`POST /plans`,
+  materialize, `GET /tools`) only under the operator setting `DEMO_TOOLS_ENABLED=true`
+  (unset = hidden, fail closed; never a tenant/request field). The manual-run
+  STALE_PLAN gate uses registry compatibility so already-materialized versions that
+  reference demo tools keep running; the worker/scheduler never consult the view.
 - **PostgreSQL connector (read-only)** — [ADR-012](../adr/ADR-012-postgres-connector.md) +
   [ADR-009](../adr/ADR-009-sql-safety.md): the `postgres.query` tool reaches a tenant's
   external database with read-only guaranteed by three independent controls
@@ -52,8 +57,10 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   `nlw.feasibility.engine` assigns `PASS`/`REJECT`/`NEEDS_CLARIFICATION`/`NEEDS_APPROVAL`
   from tool availability, connector ownership/type/status, argument models, the M5 SQL
   validator, the DAG (Kahn), and platform limits. Planning runs API-side and persists an
-  immutable `plan_proposals` audit row (no raw prompt: only `prompt_len`; no raw provider
-  response). `POST /plans/{id}/materialize` re-earns PASS against the current capability
+  immutable `plan_proposals` row (since migration `0017` it carries the bounded,
+  tenant-scoped `request_text` plus its SHA-256 digest — verified on read, never logged or
+  exported to metrics; no raw provider response is stored; logs keep only `prompt_len`).
+  `POST /plans/{id}/materialize` re-earns PASS against the current capability
   view (`FOR UPDATE`, idempotent) before creating a `workflow_version`. The platform LLM
   key lives in the API process only (never worker/scheduler, never in model context).
 - **Action connectors + approvals** — [ADR-013](../adr/ADR-013-action-side-effect-safety.md) +

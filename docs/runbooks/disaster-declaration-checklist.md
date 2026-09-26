@@ -56,9 +56,12 @@ is a decision aid, not automation.
 
 ## 7. Enable the runtime (separate, explicit)
 
-- [ ] The runtime is **database-locked** after restore: api/worker/scheduler refuse
-      to start (exit 6) against the restored generation until it is explicitly
-      enabled — regardless of any env flag or file. Enable it with the operator
+- [ ] The runtime is **database-locked** after restore: api/worker/scheduler
+      refuse to start (non-zero exit; `nlw.backup startup-check` exits 6, the
+      worker exits 1 with `WorkerBootRefused`) against the restored generation
+      until it is explicitly enabled — regardless of any env flag or file. A
+      service started too early restart-loops without processing anything and
+      its healthcheck fails on `recovery_lock`. Enable it with the operator
       credential: `nlw.backup enable-runtime` (exact newest validated generation +
       project confirmation). See [dr-fresh-host-restore](dr-fresh-host-restore.md)
       steps 6–8.

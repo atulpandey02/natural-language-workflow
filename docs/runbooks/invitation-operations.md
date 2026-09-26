@@ -79,3 +79,16 @@ FROM authz_audit_events WHERE tenant_id = :ws ORDER BY created_at DESC LIMIT 50;
 - **`400 invitation is not valid` on accept** — wrong email, expired, revoked, or
   already used. Issue a fresh invite. (This is intentionally uniform — do not read
   more into it.)
+- **`503 service temporarily unavailable`** (with `Retry-After`) on any of these
+  endpoints — the database was unreachable or the statement was cancelled /
+  deadlocked (SQLSTATE class 08/53/57, 40001/40P01). Nothing was committed; retry.
+  It is **never** reported as a duplicate invitation, an owner-retention conflict
+  or an invalid token — those responses are reserved for their exact database
+  conditions (the `uq_invitation_pending_email` unique violation, SQLSTATE 23514,
+  SQLSTATE 22023 respectively). Logs carry `db.unavailable` with the error class +
+  SQLSTATE only.
+- **`500 internal server error`** — an unexpected database failure (e.g. an
+  unrelated integrity violation or an internal error). Nothing was committed; the
+  correlation id + exception are in the API log (`db.unexpected_failure` then
+  `api.unhandled_exception`). Responses never carry SQL, constraint names,
+  connection strings, tokens or emails.

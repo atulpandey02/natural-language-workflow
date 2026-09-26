@@ -42,6 +42,14 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
       ) : null}
 
       {summary.data ? <RunSummaryCard summary={summary.data} /> : null}
+      {!summary.data && summary.error ? (
+        // A failed summary read is shown, never silently dropped: a missing
+        // panel must not be mistaken for "nothing to summarize".
+        <div className="card" data-testid="run-summary-error">
+          <strong>Result summary</strong>
+          <ErrorBanner error={summary.error} />
+        </div>
+      ) : null}
 
       <h2>Steps</h2>
       {steps.data && steps.data.length === 0 ? <Empty>No steps recorded yet.</Empty> : null}

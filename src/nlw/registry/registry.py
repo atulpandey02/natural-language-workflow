@@ -148,6 +148,12 @@ class ToolSpec:
     # ``__post_init__`` rejects every other combination at registration time.
     idempotent_delivery: bool = False
     idempotency_contract: IdempotencyContract | None = None
+    # Demo / test tool (fake.*, static.*). Registration and EXECUTION are identical
+    # to real tools (existing workflow versions stay executable), but the planner
+    # capability view offers a demo tool to NEW planning only when the operator
+    # setting DEMO_TOOLS_ENABLED explicitly allows it (see
+    # nlw.planner.capabilities.build_capability_view).
+    demo: bool = False
 
     def __post_init__(self) -> None:
         if self.side_effecting:

@@ -143,6 +143,9 @@ def pg_stack() -> Iterator[SimpleNamespace]:
                 rate_limit_enabled=False,
                 ctx_key_id=key_ids[key_class],
                 ctx_key_file=str(key_files[key_class]),
+                # Tests are a development environment: demo tools (fake.*, static.*)
+                # are enabled EXPLICITLY (unset = hidden from planning, fail closed).
+                demo_tools_enabled=True,
             )
 
         def sign(purpose: Purpose, **ids: uuid.UUID | None) -> SignedContext:

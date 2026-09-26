@@ -34,9 +34,26 @@ test.describe("MVP happy path", () => {
     // Run the pre-seeded materialized workflow and observe it complete.
     await page.goto("/workflows");
     await page.getByRole("link", { name: "E2E Seeded Workflow" }).click();
+
+    // Provenance travels through the real BFF path. The seeded version was
+    // inserted directly (no plan proposal), so the BACKEND answers 404 "no
+    // provenance for this version" — which the page must surface, not hide.
+    // The BFF's own rejection ("Unknown resource.") must never appear.
+    const provenance = page.getByTestId("workflow-provenance-error");
+    await expect(provenance).toBeVisible();
+    await expect(provenance).toContainText("no provenance for this version");
+    await expect(provenance).not.toContainText("Unknown resource.");
+
     await page.getByRole("button", { name: /run now/i }).click();
     await expect(page).toHaveURL(/\/runs\/[0-9a-f-]{36}$/);
     await expect(page.getByText("COMPLETED").first()).toBeVisible({ timeout: 30000 });
     await expect(page.getByText("fake.echo").first()).toBeVisible();
+
+    // The deterministic result summary is fetched through the real BFF path
+    // and rendered for an authorized member (previously blocked by the
+    // allowlist and silently omitted).
+    await expect(page.getByTestId("run-summary")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("summary-headline")).not.toBeEmpty();
+    await expect(page.getByTestId("run-summary-error")).toHaveCount(0);
   });
 });

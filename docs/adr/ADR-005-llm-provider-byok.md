@@ -67,7 +67,10 @@ provider response.
 - **Persisting a keyed/HMAC prompt fingerprint for observability** — deferred:
   M6 stores only `prompt_len` and correlates by `proposal_id`; if stable
   fingerprinting is needed later it will use an explicit keyed digest, not a
-  plain hash.
+  plain hash. *(Historical note: since M12B-A, migration `0017`, `plan_proposals`
+  also persists the bounded, tenant-scoped request text with a plain SHA-256
+  integrity digest for provenance — see ADR-026. Logs still carry only
+  `prompt_len`.)*
 
 ## Consequences
 

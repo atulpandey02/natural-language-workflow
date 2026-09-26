@@ -164,7 +164,7 @@ def run_feasibility(
 ) -> tuple[FeasibilityReport, list[str]]:
     _validate_connectors(case)
     connectors, all_tool_names = build_view_and_tools(case)
-    view = build_capability_view(REGISTRY.all(), connectors)
+    view = build_capability_view(REGISTRY.all(), connectors, include_demo=True)
     report = check_plan(
         output.to_workflow_plan(),
         view,

@@ -5,15 +5,17 @@ link to `docs/` rather than duplicating it.
 
 ## What this project is
 
-A production, self-hostable natural-language workflow platform. See
+A production-hardened **pilot candidate**: a self-hostable natural-language
+workflow platform (not a launched production platform). See
 [`README.md`](README.md) and [`docs/PROJECT_INDEX.md`](docs/PROJECT_INDEX.md).
 Always read `docs/PROJECT_INDEX.md` first to learn the current phase and
 milestone.
 
 ## Non-negotiable architectural invariants
 
-- **Models reason; code enforces invariants.** The LLM may interpret language,
-  generate structured plans, and summarize. It must **never** control:
+- **Models reason; code enforces invariants.** The LLM may interpret language
+  and generate structured plans (run summaries are deterministic projections of
+  persisted state, not model output). It must **never** control:
   authentication, tenant authorization, permission enforcement, workflow state
   transitions, retry policy, idempotency, SQL safety, secret access, scheduler
   correctness, deterministic conditions, connector ownership, or
@@ -62,4 +64,5 @@ uv run pytest
 
 Python 3.12 · uv · Ruff · mypy (strict on `domain`/`feasibility`/`engine`) ·
 pytest · Alembic (M1+) · Dramatiq/Redis (M1+) · Supabase Auth behind an
-`AuthProvider` abstraction (M2+) · GitHub Actions · ghcr.io · structlog + OTel.
+`AuthProvider` abstraction (M2+) · GitHub Actions · ghcr.io · structlog +
+Prometheus (OpenTelemetry tracing is planned, not implemented).

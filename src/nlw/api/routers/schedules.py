@@ -26,7 +26,7 @@ from nlw.api.schemas import ScheduleCreate, ScheduleOut, ScheduleUpdate
 from nlw.core.config import Settings
 from nlw.db.models import Schedule, Workflow
 from nlw.db.quota import QuotaExceededError, enforce_cap, schedules_count_stmt
-from nlw.db.repositories import ScheduleRepository
+from nlw.db.repositories import AuditRepository, ScheduleRepository
 from nlw.scheduler.recurrence import Frequency, Recurrence, RecurrenceError, next_occurrence
 from nlw.tenancy.context import Role, TenantContext
 
@@ -198,7 +198,13 @@ async def unblock_schedule(
     every tick regardless. Cross-tenant use is impossible — RLS scopes the
     schedule to the caller's tenant and ``_require_admin`` proves the caller's
     current role here."""
-    s = await ScheduleRepository(session).get(schedule_id, ctx.tenant_id)
+    # Serialize the transition: the schedule row is locked (SELECT ... FOR UPDATE)
+    # for the whole request transaction, so of two concurrent unblocks exactly one
+    # observes blocked -> clears it, recomputes next_run_at and writes the single
+    # audit event; the other waits for that commit, re-reads the already-cleared
+    # row and takes the idempotent no-op path below. Authorization and creator
+    # revalidation run against the locked/current row.
+    s = await ScheduleRepository(session).get_for_update(schedule_id, ctx.tenant_id)
     if s is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "schedule not found")
     still_blocked = (
@@ -218,11 +224,26 @@ async def unblock_schedule(
                 ),
             },
         )
+    if s.blocked_reason is None:
+        # Idempotent: nothing to clear (never blocked, or a concurrent request
+        # already cleared it before our lock was granted) -> no state transition,
+        # no audit event and no next_run_at churn. The committed state is returned.
+        return _to_out(s)
+    prior_reason = s.blocked_reason
     s.blocked_reason = None
     s.blocked_at = None
     # Resume from the next future occurrence (no retroactive catch-up burst).
     rec = _recurrence(s.timezone, s.frequency, s.minute, s.hour, s.day_of_week)
     s.next_run_at = next_occurrence(rec, datetime.now(UTC))
+    # Append-only authorization audit of the transition, in the SAME transaction as
+    # the state change (identifiers + the stable prior reason code only).
+    await AuditRepository(session).emit(
+        tenant_id=ctx.tenant_id,
+        event_type="schedule.unblocked",
+        actor_user_id=ctx.user_id,
+        subject_id=s.id,
+        detail=prior_reason,
+    )
     await session.flush()
     return _to_out(s)
 

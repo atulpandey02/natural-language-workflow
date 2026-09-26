@@ -53,6 +53,7 @@ def _register() -> None:
     REGISTRY.register(
         ToolSpec(
             name="fake.echo",
+            demo=True,
             description="Echo the args",
             category=ToolCategory.PROCESSING,
             connector_type=None,
@@ -66,6 +67,7 @@ def _register() -> None:
     REGISTRY.register(
         ToolSpec(
             name="fake.fail",
+            demo=True,
             description="Always fail deterministically",
             category=ToolCategory.PROCESSING,
             connector_type=None,
@@ -79,6 +81,7 @@ def _register() -> None:
     REGISTRY.register(
         ToolSpec(
             name="static.echo",
+            demo=True,
             description="Echo through a static connector",
             category=ToolCategory.PROCESSING,
             connector_type="static",
@@ -92,6 +95,7 @@ def _register() -> None:
     REGISTRY.register(
         ToolSpec(
             name="static.secret_check",
+            demo=True,
             description="Confirm the connector secret resolves",
             category=ToolCategory.PROCESSING,
             connector_type="static",

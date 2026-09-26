@@ -2,7 +2,7 @@
 
 The live planning benchmark (`python -m nlw.eval.live_runner`) writes its
 outputs to the gitignored `eval-artifacts/` directory, which disappears on local
-cleanup. Production-readiness evidence therefore lives here, versioned, as
+cleanup. Pilot-readiness evidence therefore lives here, versioned, as
 `live-benchmark-<date>.json`, containing **only** sanitized data:
 
 - evaluation date, corpus version + sha256, planner contract version,
@@ -81,7 +81,7 @@ to the exact v2 corpus by sha256 (`tests/unit/test_live_benchmark_v2_committed.p
 | useful-clarification rate (genuinely underspecified) | **1.0** |
 | unsupported/rejection correctness | 0.882 |
 | correct product-decision (all cases) | 0.392 |
-| three-run consistency (classified outcome) | 32 / 34 |
+| three-run consistency (classified outcome) | 31 / 34 |
 
 ### Independent delta-review reading of the v2 run (2026-09-23)
 

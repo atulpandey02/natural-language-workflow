@@ -13,7 +13,7 @@ from nlw.registry.registry import REGISTRY
 
 def test_connector_backed_tool_hidden_without_usable_connector() -> None:
     # No connectors -> postgres.query (connector-backed) must not appear.
-    view = build_capability_view(REGISTRY.all(), [])
+    view = build_capability_view(REGISTRY.all(), [], include_demo=True)
     names = {t.name for t in view.tools}
     assert "postgres.query" not in names
     assert "fake.echo" in names  # connector-less always available
@@ -21,21 +21,27 @@ def test_connector_backed_tool_hidden_without_usable_connector() -> None:
 
 def test_connector_backed_tool_shown_with_active_connector() -> None:
     view = build_capability_view(
-        REGISTRY.all(), [SafeConnector(name="pg", type="postgres", status="active")]
+        REGISTRY.all(),
+        [SafeConnector(name="pg", type="postgres", status="active")],
+        include_demo=True,
     )
     assert "postgres.query" in {t.name for t in view.tools}
 
 
 def test_only_disabled_connector_hides_capability() -> None:
     view = build_capability_view(
-        REGISTRY.all(), [SafeConnector(name="pg", type="postgres", status="disabled")]
+        REGISTRY.all(),
+        [SafeConnector(name="pg", type="postgres", status="disabled")],
+        include_demo=True,
     )
     assert "postgres.query" not in {t.name for t in view.tools}
 
 
 def test_error_connector_keeps_capability_available() -> None:
     view = build_capability_view(
-        REGISTRY.all(), [SafeConnector(name="pg", type="postgres", status="error")]
+        REGISTRY.all(),
+        [SafeConnector(name="pg", type="postgres", status="error")],
+        include_demo=True,
     )
     assert "postgres.query" in {t.name for t in view.tools}
 
@@ -53,6 +59,7 @@ def test_prompt_json_is_secret_free_and_has_input_schema() -> None:
                 schema_hint={"tables": [{"schema": "public", "table": "people", "columns": []}]},
             )
         ],
+        include_demo=True,
     )
     payload = capability_view_to_prompt_json(view)
     blob = json.dumps(payload)

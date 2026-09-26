@@ -2,7 +2,7 @@
 
 # Natural Language Workflow Platform
 
-**A production-grade, self-hostable AI workflow engine. Describe what you want in plain English — an LLM turns it into a structured plan, and deterministic Python validates and executes it durably, with multi-tenant isolation, human approvals, and a full audit trail.**
+**A production-hardened pilot candidate: a self-hostable AI workflow engine. Describe what you want in plain English — an LLM turns it into a structured plan, and deterministic Python validates and executes it durably, with multi-tenant isolation, human approvals, and an append-only authorization audit log.**
 
 [![CI](https://github.com/atulpandey02/natural-language-workflow/actions/workflows/ci.yml/badge.svg)](https://github.com/atulpandey02/natural-language-workflow/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
@@ -18,12 +18,14 @@
 
 <br/>
 
-**134 source modules &nbsp;·&nbsp; 142 test files (76 unit · 62 integration · eval + DR drills) &nbsp;·&nbsp; 20 database migrations &nbsp;·&nbsp; 27 ADRs &nbsp;·&nbsp; 51 RLS policies &nbsp;·&nbsp; 3 least-privilege DB roles**
+**A CI-enforced backend, integration (real PostgreSQL), frontend, migration-reversibility, recovery-drill and E2E test suite &nbsp;·&nbsp; 20 database migrations &nbsp;·&nbsp; 26 ADRs &nbsp;·&nbsp; 51 RLS policies &nbsp;·&nbsp; 3 least-privilege DB roles**
 
 <br/>
 
 > **Core principle — _Models reason. Code enforces invariants._**
-> The LLM interprets language, proposes a structured plan, and summarizes. It **never** controls authentication, tenant authorization, workflow state, retries, idempotency, SQL safety, secret access, or scheduling. Those live in deterministic, tested Python — so a wrong guess from the model can never become an unsafe action.
+> The LLM interprets language and proposes a structured plan — nothing else. It **never** controls authentication, tenant authorization, workflow state, retries, idempotency, SQL safety, secret access, or scheduling, and it does not write run summaries (those are deterministic projections of persisted state). Those live in deterministic, tested Python — so a wrong guess from the model can never become an unsafe action.
+
+> **Status:** a production-hardened **pilot candidate**, validated on a real single-host VPS — not a launched production platform. See [`docs/PROJECT_INDEX.md`](docs/PROJECT_INDEX.md) for the current milestone, open launch gates, and known limitations.
 
 </div>
 
@@ -55,9 +57,9 @@
 
 ## What It Is
 
-A complete, self-hostable platform that lets a user automate real operational work by **typing it in English** — *"every weekday at 9am, pull yesterday's failed orders from our warehouse and post a summary to #ops"* — and have it run reliably, on a schedule, forever.
+A self-hostable platform that lets a user automate real operational work by **typing it in English** — *"every weekday at 9am, pull yesterday's failed orders from our warehouse and post a summary to #ops"* — and have it run reliably, on a schedule.
 
-Underneath the natural-language surface, it is a **deterministic workflow engine** with the guarantees you would expect from serious infrastructure: durable execution that survives crashes, exactly-one-run-per-scheduled-occurrence, per-tenant data isolation enforced by the database, approval gates on anything with a side effect, and a signed, tamper-evident audit trail. The LLM is one bounded component — a *planner* — wired in behind a hard trust boundary, not the thing in control.
+Underneath the natural-language surface, it is a **deterministic workflow engine** with the guarantees you would expect from serious infrastructure: durable execution that survives crashes, exactly-one-run-per-scheduled-occurrence, per-tenant data isolation enforced by the database, approval gates on anything with a side effect, and an append-only authorization audit log (enforced by database grants and policies — it is *not* cryptographically signed or hash-chained). The LLM is one bounded component — a *planner* — wired in behind a hard trust boundary, not the thing in control.
 
 It runs as **one container image in three roles** (`api`, `worker`, `scheduler`) behind a TLS reverse proxy, on top of PostgreSQL and Redis, and ships with encrypted off-host backups, Prometheus/Alertmanager observability, and a provenance-verified, phased deployment pipeline.
 
@@ -66,7 +68,7 @@ It runs as **one container image in three roles** (`api`, `worker`, `scheduler`)
 "Let an LLM run your workflows" is easy to demo and terrifying to operate. The moment a model can trigger side effects against real systems, three hard requirements collide:
 
 - It has to be **safe** — a hallucinated tool, a forged tenant id, or an unbounded SQL query must be *impossible*, not merely unlikely.
-- It has to be **durable** — a workflow that is halfway through sending a Slack message when the worker crashes must resolve to a known, non-duplicated outcome.
+- It has to be **durable** — a workflow that is halfway through sending a Slack message when the worker crashes must resolve to a known outcome that is never silently re-sent.
 - It has to be **multi-tenant** — one customer must never see, touch, or schedule against another's data, even if the model is tricked into trying.
 
 Most projects show the happy path. The point of this one is the **boundary that keeps an LLM useful without letting it become the authority** — and proving that boundary holds with tests and an adversarial evaluation. That "**judgment from models, invariants from code**" split is the entire thesis; everything below is an instance of it.
@@ -80,13 +82,14 @@ An end-to-end flow from an English sentence to a durably-executed, audited workf
 2.  api authenticates + resolves tenant     →  Supabase JWKS verify → signed, purpose-bound DB context
 3.  LLM planner proposes a structured plan  →  strict typed JSON: steps, tools, args, dependency DAG
 4.  Feasibility engine decides (in code)    →  PASS / REJECT / NEEDS_CLARIFICATION / NEEDS_APPROVAL
-5.  Plan is persisted as an immutable audit →  plan_proposals row (no raw prompt or response stored)
+5.  Plan is persisted as an immutable record →  plan_proposals row: the bounded, tenant-scoped request
+                                                 text + its SHA-256 digest (never logged, never in metrics)
 6.  Materialize re-earns PASS, pins a version→  workflow_version bound to exact connectors + schedule
-7.  Scheduler creates one run per occurrence →  FOR UPDATE SKIP LOCKED, UNIQUE(schedule_id, fired_for)
+7.  Scheduler creates one run per occurrence →  FOR UPDATE SKIP LOCKED, UNIQUE(schedule_id, scheduled_for)
 8.  Worker advances the run, one step / txn  →  durable, checkpointed, idempotent, crash-safe resume
 9.  Side-effecting step parks for approval   →  admin/owner four-eyes review before anything is sent
 10. Connector executes under strict guards   →  read-only SQL / SSRF-guarded HTTPS / at-least-once
-11. Every transition is audited              →  signed context, provenance, no secrets in logs or traces
+11. Authorization events are audited         →  append-only authz_audit_events; no secrets in logs
 ```
 
 Steps 3 is the only place the model is in the loop. Steps 4 and 8–11 — every decision that can touch data, money, or another tenant — are deterministic Python.
@@ -121,52 +124,56 @@ Concretely, the guarantees the model **cannot** violate, because the model is ne
 | Forged tenant / user identity | **Signed, expiring HMAC context** (ADR-024) — Postgres recomputes the tag in a `SECURITY DEFINER` verifier; a forged GUC is rejected |
 | Destructive or unbounded SQL | Single **sqlglot** validator: read-only, schema/table allowlist, default-deny functions, row/byte caps, RO role, timeouts |
 | SSRF / data exfiltration via webhooks | Connect-time IP validation, DNS-rebinding-safe pinning, HTTPS-only, RFC1918/metadata blocked |
-| Secret leakage into the model | Secrets are **references** in the DB, resolved worker-side at execution; never in prompts, plans, logs, or traces |
-| Duplicate side effects after a crash | Two-transaction lease + idempotency key; ambiguous outcomes resolve to a terminal `ACTION_OUTCOME_UNKNOWN`, never silently retried |
+| Secret leakage into the model | Secrets are **references** in the DB, resolved worker-side at execution; never in prompts, plans, or logs |
+| Automatic re-send after an ambiguous delivery | Two-transaction lease + idempotency key; an outcome that cannot be proven resolves to a terminal `ACTION_OUTCOME_UNKNOWN` and is never automatically re-sent. Delivery is at-least-once: whether the *receiver* performed a duplicate effect depends on the receiver honoring the idempotency key |
 | Self-approval / privilege abuse | **Four-eyes** approvals (requester ≠ decider), enforced in the API *and* a DB `WITH CHECK`; owner-count invariant guarded by a trigger |
 
 ## The Request Lifecycle
 
-**Planning (API process).** The LLM planner is an `async LLMProvider` (BYOK — Anthropic reference implementation, keyless stub for CI). It turns a prompt into a strict, contract-versioned `PlannerOutput`. The pure `feasibility.engine` then assigns a verdict from tool availability, connector ownership/type/status, argument models, the SQL validator, the DAG, and platform limits. Planning persists an **immutable `plan_proposals` audit row** — storing only `prompt_len`, never the raw prompt or provider response. The platform LLM key lives **only** in the API process — never the worker or scheduler, never in model context.
+**Planning (API process).** The LLM planner is an `async LLMProvider` (BYOK — Anthropic reference implementation, keyless stub for CI). It turns a prompt into a strict, contract-versioned `PlannerOutput`. The pure `feasibility.engine` then assigns a verdict from tool availability, connector ownership/type/status, argument models, the SQL validator, the DAG, and platform limits. Planning persists an **immutable `plan_proposals` row** carrying the original natural-language request (bounded, tenant-scoped `request_text`) together with its SHA-256 digest, which is re-verified before the request is ever served back; the raw provider response is not stored, and the request text is never logged or exported to metrics. The platform LLM key lives **only** in the API process — never the worker or scheduler, never in model context.
 
 **Materialization.** `POST /plans/{id}/materialize` **re-earns PASS** against the *current* capability view under `FOR UPDATE`, then creates a `workflow_version`. Since migration `0019`, the version is **identity-pinned** to its connectors via a config fingerprint — renaming or recreating a connector is detected as a stale plan, not silently re-bound.
 
 **State & transport.** **PostgreSQL is the system of record.** Redis + Dramatiq is *transport only* — it carries `run_id`s, not state. Losing Redis loses no workflow. Enqueue happens strictly **after commit**.
 
-**Durable execution.** The worker's `advance_run(run_id)` executes **one step per transaction** under `FOR UPDATE` serialization, checkpointing to Postgres and enqueuing the next step only after commit. A crash mid-run resumes idempotently from the last durable checkpoint. Side effects run **outside** the run lock via a claim → commit → external-call → lease-guarded-finalize pattern, with bounded retry; anything ambiguous becomes a terminal `UNKNOWN` rather than a duplicate send.
+**Durable execution.** The worker's `advance_run(run_id)` executes **one step per transaction** under `FOR UPDATE` serialization, checkpointing to Postgres and enqueuing the next step only after commit. A crash mid-run resumes idempotently from the last durable checkpoint. Side effects run **outside** the run lock via a claim → commit → external-call → lease-guarded-finalize pattern, with bounded retry; anything ambiguous becomes a terminal `UNKNOWN` that the platform never automatically re-sends. This is at-least-once delivery: `UNKNOWN` prevents *automatic* re-transmission, it does not guarantee the receiver performed no duplicate side effect.
+
+**Run summaries** are deterministic projections of the persisted run/step/action state (`nlw.engine.summary`) — no model call is involved, and `UNKNOWN`/`FAILED`/`SKIPPED` steps are never reported as success.
 
 **Scheduling.** Structured schedules (IANA timezone, no cron strings) pin an immutable `workflow_version`. A due-scan claims with `FOR UPDATE SKIP LOCKED` and creates **exactly one** durable run row per occurrence via `UNIQUE(schedule_id, scheduled_for)`, surviving concurrency and restarts. A separate reconciler re-drives stuck runs from Postgres alone, with per-tenant fairness caps so a noisy tenant can't starve a quiet one. Since migration `0020`, schedule authorization is **fail-closed**: a schedule whose creator has lost access is blocked, not run.
 
 ## Live Evaluation Results
 
-The planner is graded against a **34-case natural-language corpus** (v2) with an *independent, deterministic safety oracle* — the grader never trusts the model's self-report; it inspects the structured plan. Below is a real run against `claude-haiku-4-5`, 3 repeats per case (102 calls), fully reproducible from a committed, sanitized evidence artifact ([`docs/evaluation/`](docs/evaluation/)).
+The planner is graded against a **34-case natural-language corpus** (v2). The grader never trusts the model's self-report: it classifies the structured plan through the deterministic feasibility engine. Below is a real **planning-only** run against `claude-haiku-4-5-20251001` — 3 repeats per case, 102 calls — from the committed, sanitized evidence artifact in [`docs/evaluation/`](docs/evaluation/). No plan was executed, and no external side effect was performed.
 
-**Safety (the part that must be perfect) — it is:**
+**Safety (planning outcomes that the deterministic layer certified):**
 
-| Safety property | Rate |
+| Safety property | Result (numerator / denominator) |
 |-----------------|:----:|
 | Unsafe executable outcomes | **0 / 102** |
-| Prompt-injection resistance | **100%** |
-| Secret-exfiltration safety | **100%** |
-| Tenant / connector isolation | **100%** |
-| Approval-policy safety | **100%** |
-| Argument-schema validity | **100%** |
-| Dependency (DAG) validity | **100%** |
-| Useful clarification when under-specified | **100%** |
+| Prompt-injection resistance (injection cases) | **9 / 9** |
+| Secret-exfiltration safety (exfiltration cases) | **3 / 3** |
+| Tenant / connector isolation (isolation cases) | **6 / 6** |
+| Approval-policy safety (approval cases) | **12 / 12** |
+| Argument-schema validity | **102 / 102** |
+| Dependency (DAG) validity | **102 / 102** |
 
 **Planning quality:**
 
-| Quality metric | Rate |
+| Quality metric | Result |
 |----------------|:----:|
-| Schema-valid plans | 98% |
-| Correct tool selection | 98% |
-| Correct rejection of unsupported requests | 88% |
-| Immediately-feasible plan (when one exists) | 73% |
-| Exact product-decision match (strict PLAN/CLARIFY/REJECT) | 39% |
-| Fully consistent across repeats | 31 / 34 cases |
+| Schema-valid plans | 100 / 102 (98%) |
+| Correct tool selection | 100 / 102 (98%) |
+| Correct rejection of unsupported requests | 45 / 51 (88%) |
+| Immediately-feasible plan (sufficiently specified supported cases) | 33 / 45 (73%) |
+| Useful clarification when under-specified | 6 / 6 — *keyword-matched during the run; question text not retained, so not independently verifiable from the artifact* |
+| Exact product-decision match (strict PLAN/CLARIFY/REJECT contract) | 40 / 102 (39%) |
+| Fully consistent classified outcome across 3 repeats | 31 / 34 cases |
 | Median planning latency | **1.67s** (p95 2.58s) |
 
-The headline is the split: the model's *product judgment* is imperfect (a strict exact-match decision metric lands at 39%), yet **zero unsafe actions ever reach execution** and every safety-critical property holds at 100%. That is the thesis, measured — the deterministic layer makes model imperfection *safe* rather than *dangerous*.
+**What this run does and does not prove.** Every rate above recomputes from the artifact's `per_run` records (`tests/unit/test_live_benchmark_v2_committed.py` enforces this). However, this run predates the runner's sanitized plan projection and clarification-text capture, so the six *executable* injection outcomes are certified safe **by construction** of the deterministic engine (every step used a tool in the tenant's view; every SQL passed the read-only allowlist validator) rather than by an independent per-plan oracle applied to the recorded plan, and the useful-clarification rate cannot be re-derived from the file. The 39% strict decision rate mostly measures corpus-contract strictness — the model's only refusal channel for unsupported requests is a clarification — not planner error. The evidence README records the full limitations.
+
+The headline is still the split: the model's *product judgment* is imperfect, yet **no unsafe plan was ever certified executable**. The deterministic layer is what turns model imperfection into a safe outcome rather than a dangerous one.
 
 ## Security & Multi-Tenancy Model
 
@@ -188,11 +195,11 @@ The headline is the split: the model's *product judgment* is imperfect (a strict
 | **Durable execution** | Custom executor | One step per txn, `FOR UPDATE`, checkpoint, idempotent resume |
 | **Auth** | Supabase Auth · PyJWT | JWKS (RS256/ES256) token verification behind an `AuthProvider` abstraction |
 | **Frontend** | Next.js | Workflows, approvals, connectors, members & invitations |
-| **Observability** | structlog · OpenTelemetry · Prometheus · Alertmanager | JSON logs, spans, metrics, request↔run↔step correlation |
+| **Observability** | structlog · Prometheus · Alertmanager | JSON structured logs, metrics, request↔run↔step correlation ids. OpenTelemetry tracing is planned, not implemented |
 | **Backup / DR** | restic (encrypted, off-host) | Verified before every migration; restore-validated |
 | **Delivery** | Docker · GitHub Actions · GHCR | One image, three roles; attested, phased, gated rollout |
 | **Reverse proxy** | Caddy | TLS termination, automatic certificates |
-| **Quality gates** | Ruff · mypy (strict) · pytest · testcontainers | Format, lint, type-check, 142 test suites incl. adversarial integration tests |
+| **Quality gates** | Ruff · mypy (strict) · pytest · testcontainers | Format, lint, type-check; unit, integration (real PostgreSQL, incl. adversarial), evaluation, DR-drill and E2E suites enforced in CI |
 
 ## Where the Code Lives
 
@@ -213,16 +220,16 @@ One installable package, `nlw`:
 | Domain | `nlw.domain` | Pydantic models, enums, state machines *(mypy strict)* |
 | Ops | `nlw.ops` · `nlw.backup` | Release manifest/provenance, phased rollout, backup evidence, DR |
 | Evaluation | `nlw.eval` | NL corpus, live planner benchmark, independent safety oracle |
-| Cross-cutting | `nlw.core` · `nlw.observability` · `nlw.ratelimit` | Config, logging, errors, tracing/metrics, resource limits |
+| Cross-cutting | `nlw.core` · `nlw.observability` · `nlw.ratelimit` | Config, logging, errors, metrics + correlation ids, resource limits |
 
 ## Key Engineering Decisions
 
-Every non-trivial decision is recorded as an [ADR](docs/adr/) (27 in total). A few load-bearing ones:
+Every non-trivial decision is recorded as an [ADR](docs/adr/) (26 in total). A few load-bearing ones:
 
 - **[ADR-004] Planner / feasibility separation** — the model proposes; a pure engine decides. The LLM never approves its own plan.
 - **[ADR-001 / ADR-002] Postgres is the system of record; Redis is transport only** — losing the queue loses no workflow state.
 - **[ADR-010] Durable execution** — one step per `advance_run`, `FOR UPDATE`, commit-before-enqueue, idempotent replay.
-- **[ADR-013] Action side-effect safety** — two-transaction lease, at-least-once with a terminal `UNKNOWN` for ambiguous outcomes; no silent duplicate sends.
+- **[ADR-013] Action side-effect safety** — two-transaction lease, at-least-once delivery with a terminal `UNKNOWN` for ambiguous outcomes that is never automatically re-sent (receiver-side duplicates remain possible unless the receiver honors the idempotency key).
 - **[ADR-024] Signed database context** — closes the forgeable-GUC threat; RLS trusts only a database-verified HMAC context.
 - **[ADR-009 / ADR-014] SQL safety & SSRF** — one validator shared across planning, materialization, and runtime; egress fails closed before any credential leaves the host.
 - **[ADR-025] Release manifest & provenance** — attested, immutable image digests; nothing deploys without verified provenance.
@@ -238,7 +245,7 @@ uv sync
 uv run ruff format --check .   # formatting
 uv run ruff check .            # lint
 uv run mypy                    # type-check (strict on domain / feasibility / engine)
-uv run pytest                  # 142 test files: unit, integration, eval, DR drills
+uv run pytest                  # unit, integration, eval, DR drills
 ```
 
 ```bash
@@ -253,16 +260,16 @@ The planner runs against a keyless **stub provider** by default, so the whole te
 
 - [`docs/PROJECT_INDEX.md`](docs/PROJECT_INDEX.md) — navigation, milestones, and status
 - [`docs/architecture/overview.md`](docs/architecture/overview.md) — the living architecture document
-- [`docs/adr/`](docs/adr/) — 27 architecture decision records
+- [`docs/adr/`](docs/adr/) — 26 architecture decision records
 - [`docs/evaluation/`](docs/evaluation/) — the sanitized live-benchmark evidence artifacts
 - [`docs/runbooks/`](docs/runbooks/) · [`docs/security/`](docs/security/) · [`docs/ops/`](docs/ops/) — operations, security, and rollout
 - [`CLAUDE.md`](CLAUDE.md) — the non-negotiable architectural invariants, in one page
 
 ## Resume Bullets
 
-- Built a **production-grade natural-language workflow engine** where an LLM proposes structured plans and **deterministic Python enforces every invariant** (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling) — 134 modules, 142 test suites, 27 ADRs.
-- Designed a **hard LLM trust boundary**: a static tool registry, an independent feasibility engine, and an adversarial evaluation that measured **0 unsafe executions across 102 live planner calls** with prompt-injection, secret-exfiltration, and tenant-isolation resistance all at **100%**.
-- Engineered **durable, crash-safe execution** on PostgreSQL (system of record) with Redis as pure transport — one step per transaction, `FOR UPDATE` serialization, commit-before-enqueue, idempotent resume, and a terminal `UNKNOWN` state that eliminates duplicate side effects.
+- Built a **production-hardened natural-language workflow engine (pilot candidate)** where an LLM proposes structured plans and **deterministic Python enforces every invariant** (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling) — 26 ADRs and a CI-enforced backend, integration, frontend, migration, recovery and E2E test suite.
+- Designed a **hard LLM trust boundary**: a static tool registry, an independent feasibility engine, and an adversarial planning-only evaluation that measured **0 unsafe executable plans across 102 live planner calls**, with every prompt-injection (9/9), secret-exfiltration (3/3), and tenant-isolation (6/6) case certified safe by the deterministic layer.
+- Engineered **durable, crash-safe execution** on PostgreSQL (system of record) with Redis as pure transport — one step per transaction, `FOR UPDATE` serialization, commit-before-enqueue, idempotent resume, and a terminal `UNKNOWN` state that stops automatic re-sends after an ambiguous delivery.
 - Hardened **multi-tenant isolation** with a **signed, expiring HMAC database context** verified inside PostgreSQL, 51 RLS policies trusting only verified accessors, three `NOBYPASSRLS` least-privilege roles, and four-eyes approval separation of duties.
 - Shipped the **full operational surface**: encrypted off-host backups verified before every migration, Prometheus/Alertmanager observability, and a **provenance-attested (SLSA), phased, gated** deployment pipeline on Docker + GitHub Actions + GHCR.
 

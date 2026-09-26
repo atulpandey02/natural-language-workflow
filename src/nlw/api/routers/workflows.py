@@ -213,7 +213,11 @@ async def create_run(
         # before any tool is invoked when a referenced connector/tool changed.
         version = await repo.get_version(workflow.current_version_id, ctx.tenant_id)
         if version is not None:
-            view, all_tool_names = await build_tenant_view(session, ctx.tenant_id)
+            # Registry compatibility for an ALREADY-materialized version: demo tools
+            # stay executable here even when hidden from new planning.
+            view, all_tool_names = await build_tenant_view(
+                session, ctx.tenant_id, settings, purpose="execution_compat"
+            )
             reval = revalidate_plan(
                 WorkflowPlan.model_validate(version.plan), view, DEFAULT_LIMITS, all_tool_names
             )

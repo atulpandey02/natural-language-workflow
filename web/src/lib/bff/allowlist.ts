@@ -27,12 +27,16 @@ const RULES: Rule[] = [
   { method: "GET", pattern: /^\/workflows$/ },
   { method: "GET", pattern: new RegExp(`^/workflows/${UUID}$`) },
   { method: "GET", pattern: new RegExp(`^/workflow-versions/${UUID}$`) },
+  // Consumed by useWorkflowProvenance (workflow detail "Original request" card).
+  { method: "GET", pattern: new RegExp(`^/workflow-versions/${UUID}/provenance$`) },
   { method: "POST", pattern: new RegExp(`^/workflows/${UUID}/runs$`) },
   // Runs
   { method: "GET", pattern: /^\/runs$/ },
   { method: "GET", pattern: new RegExp(`^/runs/${UUID}$`) },
   { method: "GET", pattern: new RegExp(`^/runs/${UUID}/steps$`) },
   { method: "GET", pattern: new RegExp(`^/runs/${UUID}/actions$`) },
+  // Consumed by useRunSummary (run detail result-summary card).
+  { method: "GET", pattern: new RegExp(`^/runs/${UUID}/summary$`) },
   // Approvals
   { method: "GET", pattern: /^\/approvals$/ },
   { method: "POST", pattern: new RegExp(`^/approvals/${UUID}/approve$`) },

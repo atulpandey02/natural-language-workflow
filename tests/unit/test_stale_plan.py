@@ -40,7 +40,7 @@ PLAN = PlannerOutput.model_validate(
 
 
 def _check(connectors: list[SafeConnector]) -> FeasibilityStatus:
-    view = build_capability_view(REGISTRY.all(), connectors)
+    view = build_capability_view(REGISTRY.all(), connectors, include_demo=True)
     return check_plan(PLAN.to_workflow_plan(), view, DEFAULT_LIMITS, ALL).status
 
 
@@ -49,7 +49,10 @@ def test_plan_passes_then_rejects_when_connector_removed() -> None:
     assert _check([PG_ACTIVE]) == FeasibilityStatus.PASS
     # t1: the connector no longer exists -> the SAME plan is not executable.
     report = check_plan(
-        PLAN.to_workflow_plan(), build_capability_view(REGISTRY.all(), []), DEFAULT_LIMITS, ALL
+        PLAN.to_workflow_plan(),
+        build_capability_view(REGISTRY.all(), [], include_demo=True),
+        DEFAULT_LIMITS,
+        ALL,
     )
     assert report.status == FeasibilityStatus.REJECT
     codes = {f.code.value for f in report.findings}
@@ -70,7 +73,7 @@ def test_plan_rejects_when_connector_disabled() -> None:
     # explicit reference is rejected — a clean, deterministic stop.
     report = check_plan(
         PLAN.to_workflow_plan(),
-        build_capability_view(REGISTRY.all(), [disabled]),
+        build_capability_view(REGISTRY.all(), [disabled], include_demo=True),
         DEFAULT_LIMITS,
         ALL,
     )
