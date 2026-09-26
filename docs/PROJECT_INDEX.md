@@ -518,10 +518,6 @@ warning).
 Honest, current list (each item is either a documented limitation or a tracked
 correction). "Correction pending" items are being fixed in dedicated commits.
 
-- **Blocked schedules in the UI — correction pending.** The API returns
-  `blocked_reason`/`blocked_at`, but the frontend type omits them, so an
-  authorization-blocked schedule renders as *active*; a successful unblock writes
-  no authorization audit event.
 - **Demo tools visible to production planning — correction pending.** `fake.*` and
   `static.*` demo tools are registered in every environment and appear in the
   planner capability view (`fake.*` with no connector at all).

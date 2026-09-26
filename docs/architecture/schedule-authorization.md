@@ -39,6 +39,19 @@ its continued authority derives from a currently-authorized human:
   **no** run, and increments the low-cardinality metric
   `nlw_scheduler_blocked_total{reason}`. The blocked state is exposed to authorized
   users on `GET /schedules/{id}` (`blocked_reason`, `blocked_at`).
+- **Status precedence in the UI** is `blocked` → `active` (enabled) → `disabled`:
+  a blocked schedule is never shown as active, even while `enabled=true`, and the
+  reason is rendered as a fixed human-readable sentence keyed on the stable reason
+  code (an unknown code gets a generic sentence — no SQL/policy internals reach the
+  screen). There is no unblock UI; `POST /schedules/{id}/unblock` is deliberately
+  NOT in the BFF allowlist until one exists.
+- **A successful unblock is audited**: the state transition and an append-only
+  `authz_audit_events` row (`event_type='schedule.unblocked'`, actor = the
+  admin/owner, subject = the schedule id, detail = the prior reason code — nothing
+  else) commit in the same transaction, or neither does. A refused unblock (409) or
+  a forbidden one (403) writes nothing; unblocking a schedule that is not blocked is
+  an idempotent no-op (no event, no `next_run_at` change). `created_by` stays
+  immutable and the next occurrence is forward-only (no catch-up).
 
 ## What each requirement maps to
 

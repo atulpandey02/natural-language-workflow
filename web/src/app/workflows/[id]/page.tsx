@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { ScheduleForm } from "@/components/ScheduleForm";
 import { ErrorBanner, Empty, Loading, RoleGate, StatusBadge } from "@/components/ui";
+import { blockedReasonText, scheduleStatus } from "@/lib/schedules";
 import {
   useCurrentWorkspace,
   useRunNow,
@@ -151,10 +152,15 @@ export default function WorkflowDetailPage({ params }: { params: Promise<{ id: s
                   {s.hour !== null ? `, hour ${s.hour}` : ""})
                 </span>
                 <span>
-                  <StatusBadge status={s.enabled ? "active" : "disabled"} /> next{" "}
+                  <StatusBadge status={scheduleStatus(s)} /> next{" "}
                   {new Date(s.next_run_at).toLocaleString()}
                 </span>
               </div>
+              {s.blocked_reason ? (
+                <p className="muted" data-testid="schedule-blocked-reason">
+                  {blockedReasonText(s.blocked_reason)}
+                </p>
+              ) : null}
             </div>
           ))}
 

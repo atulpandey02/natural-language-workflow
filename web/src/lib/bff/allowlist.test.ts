@@ -58,6 +58,13 @@ describe("BFF allowlist", () => {
     expect(isAllowed("GET", "/workflow-versions/1/provenance")).toBe(false);
   });
 
+  it("does not expose the backend-only schedule unblock endpoint (no UI consumes it)", () => {
+    // Deliberate: a backend endpoint is not exposed merely because it exists.
+    // Add an exact POST rule here only together with a real unblock UI.
+    expect(isAllowed("POST", `/schedules/${UUID}/unblock`)).toBe(false);
+    expect(isAllowed("GET", `/schedules/${UUID}/unblock`)).toBe(false);
+  });
+
   it("is not a generic tunnel", () => {
     expect(isAllowed("DELETE", `/workflows/${UUID}`)).toBe(false); // no such method
     expect(isAllowed("GET", "/admin")).toBe(false);

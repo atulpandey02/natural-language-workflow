@@ -26,7 +26,7 @@ from nlw.api.schemas import ScheduleCreate, ScheduleOut, ScheduleUpdate
 from nlw.core.config import Settings
 from nlw.db.models import Schedule, Workflow
 from nlw.db.quota import QuotaExceededError, enforce_cap, schedules_count_stmt
-from nlw.db.repositories import ScheduleRepository
+from nlw.db.repositories import AuditRepository, ScheduleRepository
 from nlw.scheduler.recurrence import Frequency, Recurrence, RecurrenceError, next_occurrence
 from nlw.tenancy.context import Role, TenantContext
 
@@ -218,11 +218,25 @@ async def unblock_schedule(
                 ),
             },
         )
+    if s.blocked_reason is None:
+        # Idempotent: nothing to clear -> no state transition, no audit event and no
+        # next_run_at churn. The current (truthful) state is simply returned.
+        return _to_out(s)
+    prior_reason = s.blocked_reason
     s.blocked_reason = None
     s.blocked_at = None
     # Resume from the next future occurrence (no retroactive catch-up burst).
     rec = _recurrence(s.timezone, s.frequency, s.minute, s.hour, s.day_of_week)
     s.next_run_at = next_occurrence(rec, datetime.now(UTC))
+    # Append-only authorization audit of the transition, in the SAME transaction as
+    # the state change (identifiers + the stable prior reason code only).
+    await AuditRepository(session).emit(
+        tenant_id=ctx.tenant_id,
+        event_type="schedule.unblocked",
+        actor_user_id=ctx.user_id,
+        subject_id=s.id,
+        detail=prior_reason,
+    )
     await session.flush()
     return _to_out(s)
 

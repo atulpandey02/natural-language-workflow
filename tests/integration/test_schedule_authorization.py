@@ -360,3 +360,119 @@ def test_11_unblock_refused_while_creator_still_unauthorized(pg_stack: SimpleNam
     r = client.post(f"/schedules/{sid}/unblock", headers=headers)
     assert r.status_code == 200, r.text
     assert r.json()["blocked_reason"] is None
+
+
+# --- 12-16. truthful unblock: audited, idempotent, forward-only, atomic ---------------
+def _events(owner: str, tenant: uuid.UUID) -> list[tuple[str, str | None, str | None, str | None]]:
+    with psycopg.connect(owner) as c:
+        rows = c.execute(
+            "SELECT event_type, actor_user_id::text, subject_id::text, detail "
+            "FROM authz_audit_events WHERE tenant_id=%s AND event_type LIKE 'schedule.%%' "
+            "ORDER BY created_at",
+            (tenant,),
+        ).fetchall()
+    return [(r[0], r[1], r[2], r[3]) for r in rows]
+
+
+def _blocked_at(owner: str, sid: uuid.UUID) -> datetime | None:
+    with psycopg.connect(owner) as c:
+        row = c.execute("SELECT blocked_at FROM schedules WHERE id=%s", (sid,)).fetchone()
+    return row[0] if row else None
+
+
+def _block(pg_stack: SimpleNamespace) -> tuple[Setup, uuid.UUID]:
+    s = _setup(pg_stack)
+    wf, ver = _seed_workflow(pg_stack.owner_libpq, s.tenant_id, _PLAN)
+    sid = _seed_schedule(pg_stack.owner_libpq, s.tenant_id, wf, ver, s.creator_id)
+    _set_role(pg_stack.owner_libpq, s.creator_id, s.tenant_id, "member")
+    assert _scan(pg_stack) == 0
+    assert _blocked(pg_stack.owner_libpq, sid) == "CREATOR_ROLE_INSUFFICIENT"
+    assert _blocked_at(pg_stack.owner_libpq, sid) is not None
+    return s, sid
+
+
+def test_12_successful_unblock_is_audited_in_the_same_transaction(
+    pg_stack: SimpleNamespace,
+) -> None:
+    s, sid = _block(pg_stack)
+    _set_role(pg_stack.owner_libpq, s.creator_id, s.tenant_id, "admin")  # authorization restored
+    client = _client(pg_stack)
+    before = datetime.now(UTC)
+    r = client.post(f"/schedules/{sid}/unblock", headers=_auth(pg_stack, s.owner_id, s.tenant_id))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # The API reports the truthful state: both fields cleared, still enabled.
+    assert body["blocked_reason"] is None and body["blocked_at"] is None
+    assert body["enabled"] is True
+    assert _blocked_at(pg_stack.owner_libpq, sid) is None
+    # Forward-only: the next occurrence is strictly in the future (no catch-up).
+    assert datetime.fromisoformat(body["next_run_at"]) > before
+    # Exactly one append-only event: stable type, actor, subject, prior reason code —
+    # nothing else (no emails, no policy internals).
+    events = _events(pg_stack.owner_libpq, s.tenant_id)
+    assert events == [
+        ("schedule.unblocked", str(s.owner_id), str(sid), "CREATOR_ROLE_INSUFFICIENT")
+    ]
+    # created_by is immutable across the unblock.
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        row = c.execute("SELECT created_by FROM schedules WHERE id=%s", (sid,)).fetchone()
+    assert row is not None and uuid.UUID(str(row[0])) == s.creator_id
+
+
+def test_13_member_cannot_unblock_and_nothing_is_audited(pg_stack: SimpleNamespace) -> None:
+    s, sid = _block(pg_stack)
+    _set_role(pg_stack.owner_libpq, s.creator_id, s.tenant_id, "admin")
+    member = pg_stack.add_membership(s.tenant_id, "member")
+    client = _client(pg_stack)
+    r = client.post(f"/schedules/{sid}/unblock", headers=_auth(pg_stack, member, s.tenant_id))
+    assert r.status_code == 403, r.text
+    assert _blocked(pg_stack.owner_libpq, sid) == "CREATOR_ROLE_INSUFFICIENT"
+    assert _events(pg_stack.owner_libpq, s.tenant_id) == []
+
+
+def test_14_refused_unblock_writes_no_audit_event(pg_stack: SimpleNamespace) -> None:
+    s, sid = _block(pg_stack)  # creator still demoted
+    client = _client(pg_stack)
+    r = client.post(f"/schedules/{sid}/unblock", headers=_auth(pg_stack, s.owner_id, s.tenant_id))
+    assert r.status_code == 409, r.text
+    assert _events(pg_stack.owner_libpq, s.tenant_id) == []
+    assert _blocked_at(pg_stack.owner_libpq, sid) is not None
+
+
+def test_15_unblocking_an_unblocked_schedule_is_a_no_op(pg_stack: SimpleNamespace) -> None:
+    """No state transition -> no audit event and no next_run_at churn (idempotent)."""
+    s = _setup(pg_stack)
+    wf, ver = _seed_workflow(pg_stack.owner_libpq, s.tenant_id, _PLAN)
+    sid = _seed_schedule(pg_stack.owner_libpq, s.tenant_id, wf, ver, s.creator_id)
+    client = _client(pg_stack)
+    headers = _auth(pg_stack, s.owner_id, s.tenant_id)
+    before = client.get(f"/schedules/{sid}", headers=headers).json()
+    assert before["blocked_reason"] is None
+    r = client.post(f"/schedules/{sid}/unblock", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["next_run_at"] == before["next_run_at"]
+    assert _events(pg_stack.owner_libpq, s.tenant_id) == []
+
+
+def test_16_unblock_and_its_audit_event_are_atomic(
+    pg_stack: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the audit write fails, the unblock does not happen either."""
+    from sqlalchemy.exc import OperationalError
+
+    from nlw.db.repositories import AuditRepository
+
+    s, sid = _block(pg_stack)
+    _set_role(pg_stack.owner_libpq, s.creator_id, s.tenant_id, "admin")
+
+    async def _boom(*_a: object, **_k: object) -> None:
+        raise OperationalError("INSERT", {}, Exception("connection lost"))
+
+    monkeypatch.setattr(AuditRepository, "emit", _boom)
+    client = TestClient(create_app(pg_stack.settings), raise_server_exceptions=False)
+    client.__enter__()
+    r = client.post(f"/schedules/{sid}/unblock", headers=_auth(pg_stack, s.owner_id, s.tenant_id))
+    assert r.status_code >= 500, r.text
+    assert "connection lost" not in r.text
+    assert _blocked(pg_stack.owner_libpq, sid) == "CREATOR_ROLE_INSUFFICIENT"  # rolled back
+    assert _events(pg_stack.owner_libpq, s.tenant_id) == []
