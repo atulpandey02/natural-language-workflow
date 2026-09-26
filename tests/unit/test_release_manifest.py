@@ -83,14 +83,23 @@ def test_generator_derives_target_revision_from_this_checkout() -> None:
     assert doc["target_revision"] == "0020_schedule_authorization"
 
 
-def test_committed_target_env_is_at_the_live_revision_and_needs_a_new_migration_to_roll() -> None:
-    """The host is at 0020 (first rollout done). A release WITHOUT a new migration
-    has nothing for the phased rollout to roll: the generator refuses instead of
-    producing a manifest whose expected == target (known limitation)."""
+def test_committed_target_env_yields_a_code_only_release_for_this_checkout() -> None:
+    """The host is at 0020 (first rollout done) and this checkout's head is 0020:
+    CI must still produce an attested manifest for a CODE-ONLY release —
+    expected == target, `migrate` a verified no-op. The image gate needs no
+    migration files for an empty range and the live-revision gate stays."""
     text = COMMITTED_TARGET_ENV.read_text()
     assert "NLW_STAGING_CURRENT_REVISION=0020_schedule_authorization" in text
-    with pytest.raises(rm.ReleaseManifestError, match="nothing to roll"):
-        _gen(target_env=COMMITTED_TARGET_ENV, target_revision=None)
+    doc = _gen(target_env=COMMITTED_TARGET_ENV, target_revision=None)
+    assert (
+        doc["expected_current_revision"] == doc["target_revision"] == "0020_schedule_authorization"
+    )
+    m = rm.parse_manifest(doc, raw_bytes=json.dumps(doc).encode())
+    info = dict(GOOD_INFO, alembic_head="0020_schedule_authorization",
+                migrations=[f"{n:04d}_x.py" for n in range(1, 21)])  # fmt: skip
+    gates.check_image_info(info, m)
+    with pytest.raises(GateError, match="unknown migration state"):
+        gates.check_current_revision("0019_connector_bindings", m.expected_current_revision)
 
 
 def test_committed_example_is_rejected_in_every_mode() -> None:
@@ -119,7 +128,6 @@ def test_local_rehearsal_manifest_is_not_authority_for_a_real_target() -> None:
         lambda d: d.update(format_version=1),
         lambda d: d.update(key_ids={"api": "x", "worker": "x", "scheduler": "x"}),
         lambda d: d.update(escrow_secret="abc"),
-        lambda d: d.update(expected_current_revision="0016_signed_database_context"),
     ],
 )
 def test_malformed_or_secret_bearing_manifests_are_rejected(mutate: Any) -> None:

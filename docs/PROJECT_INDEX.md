@@ -538,9 +538,9 @@ correction). "Correction pending" items are being fixed in dedicated commits.
   first staging rollout completed (schema `0020`); every phase reads, stops and
   clones through `current`, fetches the release SHA from `NLW_STAGING_GIT_REMOTE`
   and re-points `current` on activation (rehearsed N → N+1). Mismatches between
-  the target and the host layout fail closed. Still open: a release **without a
-  new migration** cannot be rolled out (the manifest generator refuses
-  `expected_current_revision == target_revision`).
+  the target and the host layout fail closed. Code-only releases (no new
+  migration, `expected_current_revision == target_revision`) are supported:
+  `migrate` is a verified no-op and every other gate applies unchanged.
 - **Operator Alertmanager authority is host-side, named in `target.env`.**
   The receiver config, its credential files (`root:65534 0750/0640` — Alertmanager
   runs as uid 65534) and the Compose override live outside every checkout;

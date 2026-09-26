@@ -1337,6 +1337,50 @@ def test_second_rollout_follows_current_and_expects_the_live_revision() -> None:
         _rollout_op(act).preflight()
 
 
+def test_code_only_release_migrates_as_a_verified_noop() -> None:
+    """expected == target (no new migration): migrate still runs `alembic upgrade
+    head` through the staged one-shot, verifies the revision and records the
+    phase; a database at another revision is refused exactly as before."""
+    same = replace(REL, expected_current_revision="0016_signed_database_context")
+    table = _base_table(roles=ROLES_ALL, rev="0016_signed_database_context") + [
+        (r"--profile migration run --rm --no-deps -T  migrate $", ""),
+        (r"FROM pg_policies", "51|0"),
+        (r"tablename=", "nlw_ctx_verifier"),
+        (r"has_table_privilege", "f"),
+    ]
+    fake = FakeRemote(table, state=_done("verify-backup", "drain", "prepare-roles"))
+    r = Rollout(
+        release=same,
+        target=TGT,
+        remote=fake,
+        operator=Operator(authorization=AUTHORIZATION_PHRASE),
+        log=lambda _m: None,
+        now=lambda: NOW,
+        receipt=RECEIPT,
+    )
+    r.migrate()
+    assert (
+        fake.ran(r"--profile migration run --rm --no-deps -T  migrate")
+        and "migrate" in fake.state_doc["phases"]
+    )
+    behind = FakeRemote(
+        _base_table(roles=ROLES_ALL, rev="0015_membership_approval_sod"),
+        state=_done("verify-backup", "drain", "prepare-roles"),
+    )
+    r2 = Rollout(
+        release=same,
+        target=TGT,
+        remote=behind,
+        operator=Operator(authorization=AUTHORIZATION_PHRASE),
+        log=lambda _m: None,
+        now=lambda: NOW,
+        receipt=RECEIPT,
+    )
+    with pytest.raises(GateError, match="unknown migration state"):
+        r2.migrate()
+    assert not behind.ran(r"--profile migration run")
+
+
 def test_prepare_keys_reuses_existing_host_keys_on_a_follow_up_release() -> None:
     """N+1 keeps the installed keys: prepare-keys must verify + fingerprint the
     existing files instead of refusing (`ctxkeys prepare` never overwrites)."""

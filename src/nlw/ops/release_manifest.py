@@ -196,10 +196,10 @@ def parse_manifest(
     )
     if m.backend_image == m.web_image:
         raise ReleaseManifestError("backend and web images must differ")
-    if m.expected_current_revision == m.target_revision:
-        raise ReleaseManifestError(
-            "expected_current_revision equals target_revision (nothing to roll)"
-        )
+    # expected_current_revision == target_revision is a CODE-ONLY release (no new
+    # migration): `migrate` is then a verified no-op. A stale or premature
+    # target.env is caught by the rollout itself (preflight compares the LIVE
+    # alembic_version with expected_current_revision), not by refusing here.
     return m
 
 

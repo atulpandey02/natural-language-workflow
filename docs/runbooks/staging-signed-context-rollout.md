@@ -226,9 +226,11 @@ of a `0600` file and **never** echoed, logged, passed on argv, or committed.
   `releases/`; a release SHA not reachable from the git remote ("merge/push it
   first"). Re-running a phase for the release that is already active is
   allowed (`current_link: THIS_RELEASE`).
-* Known limitation (unchanged): the manifest generator refuses
-  `expected_current_revision == target_revision`, so a release **without a new
-  migration** cannot be rolled out with this tooling yet.
+* **Code-only releases** (no new migration, `expected_current_revision ==
+  target_revision` — the shape of a hotfix) are supported: CI generates the
+  manifest as usual, `migrate` runs `alembic upgrade head` as a verified no-op
+  and every other gate (verified backup, live revision, keys, activation,
+  effective alerting) applies unchanged. Rehearsed as the N → N+1 cycle.
 * `/opt/nlw/app` is a rollback artefact of the first rollout only; nothing
   reads it any more.
 * Install the systemd backup units only now (`docs/ops/backup-systemd.md`): the
