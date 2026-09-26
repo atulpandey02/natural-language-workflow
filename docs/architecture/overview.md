@@ -52,8 +52,10 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   `nlw.feasibility.engine` assigns `PASS`/`REJECT`/`NEEDS_CLARIFICATION`/`NEEDS_APPROVAL`
   from tool availability, connector ownership/type/status, argument models, the M5 SQL
   validator, the DAG (Kahn), and platform limits. Planning runs API-side and persists an
-  immutable `plan_proposals` audit row (no raw prompt: only `prompt_len`; no raw provider
-  response). `POST /plans/{id}/materialize` re-earns PASS against the current capability
+  immutable `plan_proposals` row (since migration `0017` it carries the bounded,
+  tenant-scoped `request_text` plus its SHA-256 digest — verified on read, never logged or
+  exported to metrics; no raw provider response is stored; logs keep only `prompt_len`).
+  `POST /plans/{id}/materialize` re-earns PASS against the current capability
   view (`FOR UPDATE`, idempotent) before creating a `workflow_version`. The platform LLM
   key lives in the API process only (never worker/scheduler, never in model context).
 - **Action connectors + approvals** — [ADR-013](../adr/ADR-013-action-side-effect-safety.md) +

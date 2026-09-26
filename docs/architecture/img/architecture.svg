@@ -88,7 +88,7 @@
   <text class="body" x="64" y="296">BYOK · Anthropic reference</text>
   <text class="body" x="64" y="312">(keyless stub in CI)</text>
   <text class="mono" x="64" y="334">prompt → strict JSON plan</text>
-  <text class="body" x="64" y="356">reasons; proposes; summarizes</text>
+  <text class="body" x="64" y="356">reasons and proposes — nothing more</text>
 
   <!-- planner output -->
   <rect x="300" y="252" width="180" height="120" rx="10" class="det"/>
@@ -122,8 +122,8 @@
   <!-- audit + version -->
   <rect x="1050" y="250" width="298" height="58" rx="10" class="det"/>
   <text class="title" x="1062" y="272">plan_proposals</text>
-  <text class="body" x="1062" y="291">immutable audit · no raw prompt / response stored</text>
-  <text class="mono" x="1062" y="304" fill="#94a3b8">prompt_len only</text>
+  <text class="body" x="1062" y="291">immutable · bounded request text + SHA-256 digest</text>
+  <text class="mono" x="1062" y="304" fill="#94a3b8">never logged · never in metrics</text>
 
   <rect x="1050" y="320" width="298" height="58" rx="10" class="det"/>
   <text class="title" x="1062" y="342">workflow_version</text>
@@ -259,7 +259,7 @@
   <text class="band" x="34" y="1058">CROSS-CUTTING · OPERATIONS</text>
   <rect x="34" y="1070" width="420" height="86" rx="10" class="cross"/>
   <text class="title" x="48" y="1094">Observability</text>
-  <text class="body" x="48" y="1114">structlog (JSON) · OpenTelemetry spans</text>
+  <text class="body" x="48" y="1114">structlog (JSON) · correlation ids (OTel planned)</text>
   <text class="body" x="48" y="1132">Prometheus + Alertmanager</text>
   <text class="body" x="48" y="1150">request ↔ run ↔ step correlation ids</text>
 

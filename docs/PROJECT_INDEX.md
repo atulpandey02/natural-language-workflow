@@ -7,11 +7,11 @@ this and know exactly where the project stands. Update it after each milestone.
 
 | Field | Value |
 |---|---|
-| Current phase | M11.5 — Pre-M12 hardening (external review remediation) |
-| Current milestone | **M12A-Prep** — signed-context deployment tooling: CI-generated release manifest (`nlw.ops.release_manifest`, schema) with **GitHub artifact-attestation provenance** verified by `nlw.ops.release_provenance` before any host contact (ADR-025: repository/workflow/main/push/commit/subject-digest/both image digests; state bound to the manifest digest; SHA-pinned CI chain; the committed example and any unattested or hand-written manifest are rejected), phased, gated `python -m nlw.ops.rollout` (read-only by default; instance-id + digest identity; `verify-release` proves the exact image; escrow attestation; release staged inactive under `/opt/nlw/releases/<sha>`; **real off-host backup taken and verified before any database mutation**; drain → roles → migrate 0010→0016 → install keys → activate/recreate → validate → reopen; `go-check`), idempotent role provisioning, production key preparation (`nlw.ctxkeys prepare/fingerprint`), Prometheus rule mounting + Alertmanager skeleton with the null receiver recorded as an **open launch gate** (`nlw.ops.rollout.alerting`), backup evidence bound to instance/db/release (`nlw.ops.rollout.backup_evidence`), disposable 0010→0016 rehearsal. M11.5 P3B (migration `0016`, ADR-024) is **merged** (`1eebf2e`). |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 |
-| Next milestone | M12 — limited production launch (blocked; see ADR-020 + independent GPT-6/Fable reviews) |
-| Release status | pre-alpha; real-VPS validated (CONDITIONAL GO); external review = NO-GO for customer data pending M11.5 |
+| Current phase | Pre-launch hardening: M12B delivered on `main`; evidence-backed corrections from three independent repository audits in progress |
+| Current milestone | **M12B — AI core production readiness** (merged to `main` as `9d1bff0`, PR #32): request→plan provenance (`0017`: bounded `request_text` + SHA-256 digest), durable transmission boundary (`0018`), connector identity binding (`0019`), fail-closed schedule authorization (`0020`), deterministic (non-LLM) run summaries, NL evaluation corpus v2 with committed sanitized live-benchmark evidence — see the M12B-A section below. Builds on **M12A-Prep** (merged as `aa7d1cd`, PR #31): CI-generated release manifests with GitHub artifact-attestation provenance verified before any host contact (ADR-025) and the phased, gated, read-only-by-default `python -m nlw.ops.rollout` (real off-host backup taken and verified before any database mutation; drain → roles → migrate to the release's target head → install keys → activate → validate → reopen; `go-check`), idempotent role provisioning, `nlw.ctxkeys prepare/fingerprint`, Prometheus rule mounting + Alertmanager skeleton (null receiver = open launch gate), backup evidence bound to instance/db/release. M11.5 P3B (migration `0016`, ADR-024) is merged (`1eebf2e`). |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 · M11.5 (P0 · P1A–P1D · P2 · P3A · P3B) · M12A-Prep · M12B |
+| Next milestone | M12C — controlled pilot launch. Blocked on open launch gates: a real, verified off-host backup provider on the pilot host; verified alert delivery (Alertmanager receiver); production signing-key preparation + escrow evidence; GitHub `main` branch protection + a production-environment approval gate. |
+| Release status | **production-hardened pilot candidate** — not a launched production platform. Real-VPS validated (CONDITIONAL GO); the first M12C read-only preflight was NO-GO (READY TO PREPARE). See *Open risks* and *Known technical debt* below. |
 
 M11.5 P0 (runtime credential isolation) closes the top verified review finding:
 the privileged `DATABASE_MIGRATION_URL` (owner) is removed from every long-running
@@ -211,7 +211,8 @@ SECURITY DEFINER functions into a privilege-escalation vector), then runs
 runs/steps → `FAILED`/`DR_RESTORE_UNCERTAIN`, ambiguous external actions →
 `unknown` (P1C UNKNOWN semantics, so already-delivered side effects are never
 blindly re-driven), stale schedules recomputed after the recovery cutoff;
-idempotent and audited via `dr_restore_events` (outside RLS, non-forgeable). A
+idempotent and audited via `dr_restore_events` (outside RLS; runtime roles cannot
+write it). A
 deep **validation** asserts the restored security posture (RLS+FORCE, roles
 NOSUPERUSER/NOBYPASSRLS, SECURITY DEFINER owners + search_path, ownership) and
 invariants before a runtime-start gate opens. A disposable MinIO drill
@@ -236,10 +237,10 @@ extended drill proving startup is blocked pre-gate, a new post-restore run runs 
 COMPLETED, no restored work is replayed, and the gate cannot be reused. A follow-up
 correction makes the runtime-start gate **database-authoritative**: `dr_restore_events`
 (migration `0014`, runtime roles have only column-scoped SELECT) carries a
-validated→enabled state machine; api/worker/scheduler run a **mandatory** startup
-preflight (API lifespan, scheduler main, worker `before_worker_boot`) that fails
-closed unless the newest restore generation is operator-enabled — regardless of
-`NLW_RESTORE_MODE`, profile, or file. A separate `nlw.backup enable-runtime`
+validated→enabled state machine; the API (lifespan) and scheduler (main) run a
+**mandatory** startup preflight that fails closed unless the newest restore
+generation is operator-enabled — regardless of `NLW_RESTORE_MODE`, profile, or
+file (the worker's boot-time enforcement is tracked under *Known technical debt*). A separate `nlw.backup enable-runtime`
 operator command performs the audited, conditional enable; a later restore re-locks.
 The file gate / `NLW_RESTORE_MODE` are now defense-in-depth only. Because the API
 can stay alive for DB-independent liveness, it carries a **live** recovery gate
@@ -268,9 +269,10 @@ streamed request-body cap, CORS/TrustedHost/security headers, production docs
 gating, a schema-compat readiness check, a bounded reconciler recovery horizon
 (poisoned-run guard), non-root hardened containers, a Caddy-fronted production
 compose with GHCR immutable-digest delivery + Trivy, and backup/restore +
-runbooks (ADR-018). Non-forgeable DB context (since delivered by M11.5 P3B,
-ADR-024), a cloud secret manager, and OTel/Langfuse were recorded as explicit
-pre-production items.
+runbooks (ADR-018). A signed DB context (since delivered by M11.5 P3B,
+ADR-024 — symmetric HMAC, deliberately not described as "non-forgeable"), a cloud
+secret manager, and OTel/Langfuse (still not implemented) were recorded as
+explicit pre-production items.
 
 M8 makes the scheduler a durable, restart-safe system of record for recurrence.
 Structured schedules (IANA timezone + hourly/daily/weekly, no cron) pin an
@@ -383,8 +385,11 @@ the components they protect — not deferred to the end.
 | M8 | Scheduler (explicit timezone, single-firing) + reconciliation | `feat/scheduling-reconciliation` | ADR-015 |
 | M9 | Production hardening + operational readiness (observability, rate/resource limits, container/HTTP/DB hardening, backups, runbooks, GHCR delivery) | `feat/production-hardening` | ADR-016, ADR-017, ADR-018 |
 | M10 | Frontend / Product UX (Next.js App Router + BFF; read-only support endpoints + idempotent manual run) | `feat/frontend-product-ux` | ADR-019 |
-| M11 | Staging + CD + load/failure testing | tbd | ADR-008 |
-| M12 | Production deployment | tbd | — |
+| M11 | Staging + CD + load/failure testing | delivered | ADR-020 |
+| M11.5 | Pre-M12 hardening from external reviews (P0 credential isolation · P1A–D authorization, SQL/egress, action delivery, scheduler · P2 encrypted off-host backup/DR · P3A membership/approval SoD · P3B signed DB context) | delivered | ADR-021, ADR-022, ADR-023, ADR-024 |
+| M12A-Prep | Attested release manifests + phased, gated rollout tooling | delivered | ADR-025 |
+| M12B | AI core production readiness (provenance, transmission boundary, connector binding, schedule authorization, deterministic summaries, eval v2) | delivered | ADR-026 |
+| M12C | Controlled pilot launch | tbd (launch gates open) | — |
 
 **First-release connector scope:** PostgreSQL (source), Webhook + Slack (actions).
 Demonstration workflow target:
@@ -392,7 +397,9 @@ Demonstration workflow target:
 
 ## Architecture docs
 
-- [`docs/architecture/`](architecture/) — component & data-flow docs (pending)
+- [`docs/architecture/`](architecture/) — `overview.md` (living shape + boundaries),
+  the AI-core audit / recovery / observability matrices, `ai-provenance-and-stale-plan.md`,
+  `schedule-authorization.md`, and the system diagram in `img/architecture.svg`
 - Target: FastAPI control plane · Postgres system of record · Redis/Dramatiq
   transport · stateless workers · one Docker image per role.
 
@@ -492,7 +499,7 @@ warning).
 ## Open risks
 
 - **Forgeable GUC context — closed by M11.5 P3B (migration `0016`, ADR-024;
-  local branch, unmerged).** RLS now trusts only the signed `app.ctx_*` claims;
+  merged to `main`).** RLS now trusts only the signed `app.ctx_*` claims;
   `app.user_id`/`app.tenant_id` grant nothing. Residual (documented, not claimed
   away): a runtime compromised together with its key file, the owner/migration
   credential, bypass roles, superuser, or host root can still mint or bypass
@@ -505,4 +512,40 @@ warning).
 
 ## Known technical debt
 
-None (greenfield).
+Honest, current list (each item is either a documented limitation or a tracked
+correction). "Correction pending" items are being fixed in dedicated commits.
+
+- **Worker recovery-lock enforcement at boot — correction pending.** The worker's
+  `before_worker_boot` middleware raises a plain exception; the pinned Dramatiq
+  version logs and swallows it, so a locked database does **not** abort worker
+  boot (the API lifespan and scheduler main do abort). Until fixed, keep the
+  worker stopped after a restore until `enable-runtime` has run.
+- **Invitation / membership error classification — correction pending.** Database
+  connection, RLS-denial and unrelated integrity failures are translated into the
+  business responses (duplicate invitation `409`, owner-retention `409`, invalid
+  invitation `400`) instead of sanitized `5xx`.
+- **Blocked schedules in the UI — correction pending.** The API returns
+  `blocked_reason`/`blocked_at`, but the frontend type omits them, so an
+  authorization-blocked schedule renders as *active*; a successful unblock writes
+  no authorization audit event.
+- **Demo tools visible to production planning — correction pending.** `fake.*` and
+  `static.*` demo tools are registered in every environment and appear in the
+  planner capability view (`fake.*` with no connector at all).
+- **No OpenTelemetry tracing / Langfuse.** Observability is structured logs
+  (structlog) + Prometheus metrics + correlation ids only.
+- **Audit log is append-only by grants/policies, not tamper-evident.**
+  `authz_audit_events` has no UPDATE/DELETE for runtime roles, but it is not
+  hash-chained or signed; the owner/superuser can rewrite it. It is a separate
+  control from the signed database context (ADR-024).
+- **At-least-once external delivery.** A terminal `UNKNOWN` stops *automatic*
+  re-sends after an ambiguous transmission; it does not guarantee the receiver
+  performed no duplicate effect (Slack `chat.postMessage` has no idempotency key
+  at all) — ADR-013.
+- **Symmetric signed context.** The HMAC key is signing-capable; a runtime
+  compromised together with its key file, the owner credential, bypass roles,
+  superuser or host root can mint context (ADR-024).
+- **Legacy workflow versions predating `0019`** are name-resolved, not
+  identity-pinned, until re-materialized (the rollout go-live report counts them).
+- **Deferred:** cloud/encrypted secret storage and self-service secret onboarding,
+  HttpOnly/opaque sessions, PITR, typed step-output references, additional
+  connectors.

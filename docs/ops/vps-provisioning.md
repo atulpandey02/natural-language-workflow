@@ -289,20 +289,23 @@ timedatectl show -p NTP -p NTPSynchronized
 
 ### 1.7 Backup client tooling
 
-The backup path is `pg_dump` (custom format) → `gpg` (AES256) → off-host copy
-(see `docker/scripts/backup.sh`, `docs/ops/backup-restore.md`). Install the
-encryption tool plus your chosen off-host client:
+The backup path is **restic** — encrypted, off-host, verified-success snapshots —
+run by `python -m nlw.backup` inside the application image through the Compose
+`backup` profile (`docker-compose.prod.yml`, env file `/opt/nlw/.env.backup`) and
+driven by a systemd timer. It is documented in
+[`docs/runbooks/backup-operations.md`](../runbooks/backup-operations.md),
+[`docs/ops/backup-systemd.md`](backup-systemd.md) and
+[`docs/ops/backup-providers.md`](backup-providers.md) (ADR-022).
 
-```bash
-sudo apt-get -y install gnupg
-# Off-host destination — install ONE (matches OFFSITE_DEST in backup.sh):
-sudo apt-get -y install rclone      # for rclone remotes, or:
-# sudo apt-get -y install awscli    # for s3://... destinations
-```
+Nothing extra needs to be installed on the host for backups: no `gnupg`, no
+`rclone`/`awscli`. The former `pg_dump` → `gpg` path (`docker/scripts/backup.sh`,
+`docker/scripts/restore.sh`, `docs/ops/backup-restore.md`) is **deprecated**; the
+scripts are kept only as refusal stubs that exit non-zero and must not be used.
 
-**Verify:** `gpg --version` and `rclone version` (or `aws --version`) print
-versions. (Configuring the remote credentials happens in the later backup stage,
-stored in root-owned, `chmod 600` config — never committed.)
+**Verify (later, in the backup stage):** the provider credentials and the restic
+password live only in the root-owned, `chmod 600` `/opt/nlw/.env.backup` (never
+committed), the password is escrowed, and the first snapshot is verified per the
+runbook before the host is considered protected.
 
 ### 1.8 Docker log rotation / disk controls
 
@@ -337,7 +340,7 @@ Create an operator-owned tree. Secrets are `chmod 600`; nothing world-readable.
 ```bash
 sudo install -d -m 750 -o OPERATOR -g OPERATOR /opt/nlw
 install -d -m 750 /opt/nlw/app        # compose files + docker/ (from the repo)
-install -d -m 700 /opt/nlw/backups    # local backup staging (pre off-host copy)
+install -d -m 700 /opt/nlw/backups    # local scratch for backup evidence (snapshots live off-host, restic)
 install -d -m 750 /opt/nlw/logs       # operational logs
 ```
 
@@ -573,8 +576,9 @@ report). Do this from a fresh terminal, then close your original root session.
       (`apt-config dump` shows `Automatic-Reboot "false"` +
       `APT::Periodic::Unattended-Upgrade "1"`); time sync `NTP=yes` /
       `NTPSynchronized=yes`.
-- [ ] Backup tooling (`gpg` + off-host client, once the provider is chosen)
-      installed.
+- [ ] Backup tooling configured per `docs/runbooks/backup-operations.md` (restic,
+      encrypted off-host provider, escrowed password — never the deprecated gpg
+      scripts).
 - [ ] Docker `json-file` logging with `max-size`/`max-file`; `daemon.json` valid.
 - [ ] `/opt/nlw` layout created, operator-owned, secrets slots `chmod 600`
       (values created in a later stage — NOT now).
