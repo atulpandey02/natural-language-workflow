@@ -16,6 +16,9 @@
 x-app-env: &app-env
   APP_ENV: local
   LOG_LEVEL: info
+  # Local development stack: demo tools (fake.*, static.*) are offered to new
+  # planning EXPLICITLY. Unset = hidden (production/staging leave it unset).
+  DEMO_TOOLS_ENABLED: "true"
   DATABASE_URL: postgresql+psycopg://nlw_app:nlw_app@postgres:5432/nlw
   DATABASE_MIGRATION_URL: postgresql+psycopg://nlw:nlw@postgres:5432/nlw
   REDIS_URL: redis://redis:6379/0

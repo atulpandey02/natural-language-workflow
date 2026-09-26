@@ -34,7 +34,7 @@ class ScriptedProvider:
 
 
 def _view() -> CapabilityView:
-    return build_capability_view(REGISTRY.all(), [])
+    return build_capability_view(REGISTRY.all(), [], include_demo=True)
 
 
 def _tool_names() -> set[str]:

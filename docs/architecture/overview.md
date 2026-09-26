@@ -37,7 +37,12 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
   run), tenant-owned connectors (RLS), and a SecretStore (refs in DB; values resolved
   worker-side only, never in the LLM path). Steps dispatch through the registry; a
   connector-backed step loads the tenant's connector, health-checks it, and resolves its
-  secret before executing.
+  secret before executing. **Demo tools** (`fake.*`, `static.*`; `ToolSpec.demo`) stay
+  registered and executable everywhere, but reach NEW planning (`POST /plans`,
+  materialize, `GET /tools`) only under the operator setting `DEMO_TOOLS_ENABLED=true`
+  (unset = hidden, fail closed; never a tenant/request field). The manual-run
+  STALE_PLAN gate uses registry compatibility so already-materialized versions that
+  reference demo tools keep running; the worker/scheduler never consult the view.
 - **PostgreSQL connector (read-only)** — [ADR-012](../adr/ADR-012-postgres-connector.md) +
   [ADR-009](../adr/ADR-009-sql-safety.md): the `postgres.query` tool reaches a tenant's
   external database with read-only guaranteed by three independent controls

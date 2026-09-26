@@ -99,7 +99,7 @@ def _grade(case: EvalCase, result: Any, repeat: int, latency: float) -> CaseRun:
     schema_valid = result.output is not None
     steps = result.output.steps if result.output else []
     connectors, _ = build_view_and_tools(case)
-    view = build_capability_view(REGISTRY.all(), connectors)
+    view = build_capability_view(REGISTRY.all(), connectors, include_demo=True)
     allowed = {t.name for t in view.tools}
     tool_ok = schema_valid and all(s.tool in allowed for s in steps)
     arg_ok = FeasibilityCode.ARG_VALIDATION_FAILED not in codes
@@ -159,7 +159,7 @@ async def _run(settings: Settings, repeats: int, raw_out: Path) -> Benchmark:
     with raw_out.open("w") as raw:
         for case in cases:
             connectors, all_tool_names = build_view_and_tools(case)
-            view = build_capability_view(REGISTRY.all(), connectors)
+            view = build_capability_view(REGISTRY.all(), connectors, include_demo=True)
             for r in range(repeats):
                 start = time.perf_counter()
                 result = await plan_and_check(

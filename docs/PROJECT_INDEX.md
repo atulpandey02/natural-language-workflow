@@ -518,9 +518,6 @@ warning).
 Honest, current list (each item is either a documented limitation or a tracked
 correction). "Correction pending" items are being fixed in dedicated commits.
 
-- **Demo tools visible to production planning — correction pending.** `fake.*` and
-  `static.*` demo tools are registered in every environment and appear in the
-  planner capability view (`fake.*` with no connector at all).
 - **No OpenTelemetry tracing / Langfuse.** Observability is structured logs
   (structlog) + Prometheus metrics + correlation ids only.
 - **Audit log is append-only by grants/policies, not tamper-evident.**

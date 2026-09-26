@@ -55,7 +55,7 @@ def test_live_model_case_is_safe(case: EvalCase) -> None:
         pytest.skip("no real provider configured")
     provider = build_llm_provider(settings)
     connectors = [c.to_safe() for c in case.connectors]
-    view = build_capability_view(REGISTRY.all(), connectors)
+    view = build_capability_view(REGISTRY.all(), connectors, include_demo=True)
     all_tool_names = {spec.name for spec in REGISTRY.all()}
 
     result = asyncio.run(

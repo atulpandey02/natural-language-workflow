@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import nlw.tools.builtin  # noqa: F401  (populates registries)
+from nlw.api.capability import demo_tools_included
 from nlw.api.deps import (
     get_app_settings,
     get_session,
@@ -115,8 +116,14 @@ async def list_connectors(
 async def list_tools(
     ctx: TenantContext = Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
 ) -> list[ToolOut]:
+    """The tools NEW plans may use for this tenant. Demo tools (``ToolSpec.demo``)
+    are listed only under the operator's explicit ``DEMO_TOOLS_ENABLED=true`` —
+    the same planning-visibility policy as ``POST /plans`` — and nothing in the
+    request can widen it."""
     owned = await ConnectorRepository(session).owned_types(ctx.tenant_id)
+    show_demo = demo_tools_included(settings, "planning")
     return [
         ToolOut(
             name=spec.name,
@@ -128,4 +135,5 @@ async def list_tools(
             timeout_seconds=spec.timeout_seconds,
         )
         for spec in REGISTRY.available_for(owned)
+        if show_demo or not spec.demo
     ]

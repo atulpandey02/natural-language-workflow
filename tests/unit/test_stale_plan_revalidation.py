@@ -35,7 +35,7 @@ def _plan(sql: str = "SELECT id FROM public.people", tool: str = "postgres.query
 
 
 def _reval(plan: WorkflowPlan, connectors: list[SafeConnector]) -> RevalidationOutcome:
-    view = build_capability_view(REGISTRY.all(), connectors)
+    view = build_capability_view(REGISTRY.all(), connectors, include_demo=True)
     return revalidate_plan(plan, view, DEFAULT_LIMITS, ALL).outcome
 
 
@@ -44,7 +44,9 @@ def test_fresh_when_state_unchanged() -> None:
 
 
 def test_stale_when_connector_removed() -> None:
-    r = revalidate_plan(_plan(), build_capability_view(REGISTRY.all(), []), DEFAULT_LIMITS, ALL)
+    r = revalidate_plan(
+        _plan(), build_capability_view(REGISTRY.all(), [], include_demo=True), DEFAULT_LIMITS, ALL
+    )
     assert r.outcome == RevalidationOutcome.STALE_PLAN
     assert r.reason_code == "TOOL_NOT_AVAILABLE"  # stable, low-cardinality
     assert "connector or tool" in r.message.lower()
@@ -72,7 +74,7 @@ def test_policy_denied_is_not_stale() -> None:
     # A SQL-policy rejection is forbidden regardless of freshness.
     r = revalidate_plan(
         _plan("DELETE FROM public.people"),
-        build_capability_view(REGISTRY.all(), [PG]),
+        build_capability_view(REGISTRY.all(), [PG], include_demo=True),
         DEFAULT_LIMITS,
         ALL,
     )
@@ -92,7 +94,9 @@ def test_invalid_plan_is_distinct_from_stale() -> None:
             ],
         }
     ).to_workflow_plan()
-    r = revalidate_plan(cyclic, build_capability_view(REGISTRY.all(), []), DEFAULT_LIMITS, ALL)
+    r = revalidate_plan(
+        cyclic, build_capability_view(REGISTRY.all(), [], include_demo=True), DEFAULT_LIMITS, ALL
+    )
     assert r.outcome == RevalidationOutcome.INVALID_PLAN
 
 

@@ -188,6 +188,21 @@ class Settings(BaseSettings):
     # at a specific CA bundle path inside the container; it is NOT tenant-supplied.
     postgres_ssl_root_cert: str | None = None
 
+    # --- Planner capability policy: demo / test tools ---
+    # ``fake.*`` and ``static.*`` stay REGISTERED in every environment (existing
+    # workflow versions must remain executable), but they are offered to NEW
+    # planning (POST /plans, materialize, GET /tools) only when this is explicitly
+    # true. Unset = hidden in EVERY environment (fail closed); an invalid value
+    # refuses to start. Operator-controlled through the environment only — never
+    # a tenant/request field. Local dev, the E2E stack and the test fixtures set
+    # it explicitly; staging/production leave it unset or set it to false.
+    demo_tools_enabled: bool | None = None
+
+    @property
+    def demo_tools_visible(self) -> bool:
+        """Demo tools reach new planning only on an explicit operator ``true``."""
+        return self.demo_tools_enabled is True
+
     @model_validator(mode="after")
     def _validate_reconcile_fairness(self) -> "Settings":
         """The per-tenant reconcile cap must be a positive share of the global

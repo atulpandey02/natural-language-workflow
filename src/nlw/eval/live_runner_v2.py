@@ -45,7 +45,9 @@ from nlw.registry.registry import REGISTRY
 
 
 def _view(case: V2Case) -> Any:
-    return build_capability_view(REGISTRY.all(), [c.to_safe() for c in case.connectors])
+    return build_capability_view(
+        REGISTRY.all(), [c.to_safe() for c in case.connectors], include_demo=True
+    )
 
 
 async def _run(settings: Settings, repeats: int) -> dict[str, Any]:

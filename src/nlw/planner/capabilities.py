@@ -72,17 +72,29 @@ class CapabilityView:
 
 
 def build_capability_view(
-    registry_tools: list[ToolSpec], connectors: list[SafeConnector]
+    registry_tools: list[ToolSpec],
+    connectors: list[SafeConnector],
+    *,
+    include_demo: bool = False,
 ) -> CapabilityView:
     """Project the registry against the tenant's usable connectors.
 
     Connector-less tools are always available. A connector-backed tool is
     available only if the tenant owns at least one NON-disabled connector of its
     type. Deterministic and ordering-stable (registry insertion order).
+
+    ``include_demo`` is the planner-visibility policy for demo/test tools
+    (``ToolSpec.demo``: ``fake.*``, ``static.*``). It defaults to **False** (fail
+    closed): a demo tool reaches the model and feasibility only when the caller
+    explicitly opts in — the API from the operator setting ``DEMO_TOOLS_ENABLED``
+    (never from a tenant request), the deterministic evaluation harnesses and
+    tests explicitly. Registry membership and execution are unaffected.
     """
     usable_types = {c.type for c in connectors if c.usable}
     tools: list[ToolCapability] = []
     for spec in registry_tools:
+        if spec.demo and not include_demo:
+            continue
         if spec.connector_type is not None and spec.connector_type not in usable_types:
             continue
         tools.append(

@@ -133,7 +133,7 @@ def v2_digest() -> str:
 
 def _view(case: V2Case) -> Any:
     connectors = [c.to_safe() for c in case.connectors]
-    return build_capability_view(REGISTRY.all(), connectors)
+    return build_capability_view(REGISTRY.all(), connectors, include_demo=True)
 
 
 def _all_tool_names() -> set[str]:
