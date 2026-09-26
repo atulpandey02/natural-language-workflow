@@ -198,7 +198,13 @@ async def unblock_schedule(
     every tick regardless. Cross-tenant use is impossible — RLS scopes the
     schedule to the caller's tenant and ``_require_admin`` proves the caller's
     current role here."""
-    s = await ScheduleRepository(session).get(schedule_id, ctx.tenant_id)
+    # Serialize the transition: the schedule row is locked (SELECT ... FOR UPDATE)
+    # for the whole request transaction, so of two concurrent unblocks exactly one
+    # observes blocked -> clears it, recomputes next_run_at and writes the single
+    # audit event; the other waits for that commit, re-reads the already-cleared
+    # row and takes the idempotent no-op path below. Authorization and creator
+    # revalidation run against the locked/current row.
+    s = await ScheduleRepository(session).get_for_update(schedule_id, ctx.tenant_id)
     if s is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "schedule not found")
     still_blocked = (
@@ -219,8 +225,9 @@ async def unblock_schedule(
             },
         )
     if s.blocked_reason is None:
-        # Idempotent: nothing to clear -> no state transition, no audit event and no
-        # next_run_at churn. The current (truthful) state is simply returned.
+        # Idempotent: nothing to clear (never blocked, or a concurrent request
+        # already cleared it before our lock was granted) -> no state transition,
+        # no audit event and no next_run_at churn. The committed state is returned.
         return _to_out(s)
     prior_reason = s.blocked_reason
     s.blocked_reason = None

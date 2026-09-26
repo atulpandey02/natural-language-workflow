@@ -18,7 +18,7 @@
 
 <br/>
 
-**134 source modules &nbsp;·&nbsp; 142 test files (76 unit · 62 integration · eval + DR drills) &nbsp;·&nbsp; 20 database migrations &nbsp;·&nbsp; 26 ADRs &nbsp;·&nbsp; 51 RLS policies &nbsp;·&nbsp; 3 least-privilege DB roles**
+**A CI-enforced backend, integration (real PostgreSQL), frontend, migration-reversibility, recovery-drill and E2E test suite &nbsp;·&nbsp; 20 database migrations &nbsp;·&nbsp; 26 ADRs &nbsp;·&nbsp; 51 RLS policies &nbsp;·&nbsp; 3 least-privilege DB roles**
 
 <br/>
 
@@ -199,7 +199,7 @@ The headline is still the split: the model's *product judgment* is imperfect, ye
 | **Backup / DR** | restic (encrypted, off-host) | Verified before every migration; restore-validated |
 | **Delivery** | Docker · GitHub Actions · GHCR | One image, three roles; attested, phased, gated rollout |
 | **Reverse proxy** | Caddy | TLS termination, automatic certificates |
-| **Quality gates** | Ruff · mypy (strict) · pytest · testcontainers | Format, lint, type-check, 142 test suites incl. adversarial integration tests |
+| **Quality gates** | Ruff · mypy (strict) · pytest · testcontainers | Format, lint, type-check; unit, integration (real PostgreSQL, incl. adversarial), evaluation, DR-drill and E2E suites enforced in CI |
 
 ## Where the Code Lives
 
@@ -245,7 +245,7 @@ uv sync
 uv run ruff format --check .   # formatting
 uv run ruff check .            # lint
 uv run mypy                    # type-check (strict on domain / feasibility / engine)
-uv run pytest                  # 142 test files: unit, integration, eval, DR drills
+uv run pytest                  # unit, integration, eval, DR drills
 ```
 
 ```bash
@@ -267,7 +267,7 @@ The planner runs against a keyless **stub provider** by default, so the whole te
 
 ## Resume Bullets
 
-- Built a **production-hardened natural-language workflow engine (pilot candidate)** where an LLM proposes structured plans and **deterministic Python enforces every invariant** (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling) — 134 modules, 142 test files, 26 ADRs.
+- Built a **production-hardened natural-language workflow engine (pilot candidate)** where an LLM proposes structured plans and **deterministic Python enforces every invariant** (auth, tenancy, state, retries, idempotency, SQL safety, secrets, scheduling) — 26 ADRs and a CI-enforced backend, integration, frontend, migration, recovery and E2E test suite.
 - Designed a **hard LLM trust boundary**: a static tool registry, an independent feasibility engine, and an adversarial planning-only evaluation that measured **0 unsafe executable plans across 102 live planner calls**, with every prompt-injection (9/9), secret-exfiltration (3/3), and tenant-isolation (6/6) case certified safe by the deterministic layer.
 - Engineered **durable, crash-safe execution** on PostgreSQL (system of record) with Redis as pure transport — one step per transaction, `FOR UPDATE` serialization, commit-before-enqueue, idempotent resume, and a terminal `UNKNOWN` state that stops automatic re-sends after an ambiguous delivery.
 - Hardened **multi-tenant isolation** with a **signed, expiring HMAC database context** verified inside PostgreSQL, 51 RLS policies trusting only verified accessors, three `NOBYPASSRLS` least-privilege roles, and four-eyes approval separation of duties.

@@ -616,6 +616,21 @@ class ScheduleRepository:
             )
         ).scalar_one_or_none()
 
+    async def get_for_update(
+        self, schedule_id: uuid.UUID, tenant_id: uuid.UUID
+    ) -> "Schedule | None":
+        """Row-locked read (``SELECT ... FOR UPDATE``) for a state transition that
+        must happen at most once per logical change (e.g. unblock): a concurrent
+        transaction blocks until this one commits and then sees the COMMITTED row,
+        never the pre-transition snapshot. RLS + the tenant filter still apply."""
+        return (
+            await self.session.execute(
+                select(Schedule)
+                .where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+
     async def list_for_tenant(self, tenant_id: uuid.UUID) -> "list[Schedule]":
         rows = await self.session.execute(
             select(Schedule)

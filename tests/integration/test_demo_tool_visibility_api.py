@@ -22,9 +22,12 @@ from fastapi.testclient import TestClient
 import nlw.api.routers.plans as plans_mod
 import nlw.api.routers.workflows as workflows_mod
 from nlw.api.app import create_app
+from nlw.api.deps import get_llm_provider
 from nlw.core.config import Settings
 from nlw.db.session import create_sync_engine, create_sync_sessionmaker
 from nlw.engine.execution import process_advance
+from nlw.planner.provider import LLMRequest, LLMResult
+from nlw.planner.schema import PlannerOutput
 
 pytestmark = pytest.mark.integration
 
@@ -179,3 +182,94 @@ def test_existing_materialized_demo_workflow_remains_executable_in_production(
     with psycopg.connect(pg_stack.owner_libpq) as c:
         row = c.execute("SELECT status FROM workflow_runs WHERE id=%s", (run_id,)).fetchone()
     assert row is not None and row[0] == "COMPLETED"
+
+
+# --- materialization after demo tools are disabled (real /plans -> /materialize path) ---
+
+
+class _ScriptedProvider:
+    """Deterministic planner: returns a fixed, valid plan (no live model)."""
+
+    model = "scripted"
+
+    def __init__(self, output: PlannerOutput) -> None:
+        self._raw = output.model_dump_json()
+
+    async def generate_plan(self, req: LLMRequest) -> LLMResult:
+        return LLMResult(raw_json=self._raw, model=self.model)
+
+
+def _client_with(settings: Settings, provider: object) -> TestClient:
+    app = create_app(settings)
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+    client = TestClient(app, raise_server_exceptions=False)
+    client.__enter__()
+    return client
+
+
+def _tenant_counts(owner_libpq: str, tid: uuid.UUID) -> dict[str, int]:
+    with psycopg.connect(owner_libpq) as c:
+        out: dict[str, int] = {}
+        for table in (
+            "workflows",
+            "workflow_versions",
+            "workflow_runs",
+            "step_runs",
+            "external_actions",
+        ):
+            row = c.execute(f"SELECT count(*) FROM {table} WHERE tenant_id=%s", (tid,)).fetchone()
+            assert row is not None
+            out[table] = int(row[0])
+    return out
+
+
+def test_proposal_with_demo_tool_cannot_materialize_after_demo_tools_are_disabled(
+    pg_stack: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lifecycle: demo tools enabled -> a valid fake.echo proposal is ACCEPTED ->
+    demo tools disabled for planning -> materialization is refused as STALE
+    (TOOL_NOT_AVAILABLE) BEFORE any workflow version exists; nothing runnable is
+    created and nothing is enqueued. An already-materialized demo version keeps
+    running through execution_compat."""
+    plan = PlannerOutput.model_validate(
+        {"workflow_name": "echo", "steps": [{"id": "a", "tool": "fake.echo", "args": {"x": 1}}]}
+    )
+    enqueued: list[object] = []
+    monkeypatch.setattr(workflows_mod, "_enqueue_advance", enqueued.append)
+
+    # 1-2. Demo tools explicitly enabled (fixture settings): the proposal is accepted.
+    dev = _client_with(pg_stack.settings, _ScriptedProvider(plan))
+    h, tid = _owner(dev, "mat1")
+    r = dev.post("/plans", headers=h, json={"prompt": "echo x"})
+    assert r.status_code == 201, r.text
+    assert r.json()["status"] == "PASS"
+    proposal_id = r.json()["id"]
+    baseline = _tenant_counts(pg_stack.owner_libpq, tid)
+
+    # 3-6. Demo tools disabled for planning/materialization: refused, nothing created.
+    prod = _client_with(_prod(pg_stack), _ScriptedProvider(plan))
+    m = prod.post(f"/plans/{proposal_id}/materialize", headers=h)
+    assert m.status_code == 409, m.text
+    err = m.json()["error"]
+    assert err["code"] == "STALE_PLAN", err
+    assert "fake.echo" not in m.text  # sanitized member-safe reason only
+    assert _tenant_counts(pg_stack.owner_libpq, tid) == baseline
+    assert enqueued == []
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        row = c.execute(
+            "SELECT workflow_version_id FROM plan_proposals WHERE id=%s", (proposal_id,)
+        ).fetchone()
+    assert row is not None and row[0] is None  # proposal not bound to any version
+
+    # A NEW plan under the disabled policy cannot even be accepted with a demo tool.
+    r2 = prod.post("/plans", headers=h, json={"prompt": "echo again"})
+    assert r2.status_code == 201, r2.text
+    assert r2.json()["status"] == "REJECT"
+
+    # 7. Materialized while enabled -> still runnable when disabled (execution_compat).
+    ok = dev.post(f"/plans/{proposal_id}/materialize", headers=h)
+    assert ok.status_code == 200, ok.text
+    wf_id = ok.json()["workflow_id"]
+    run = prod.post(f"/workflows/{wf_id}/runs", headers={**h, "Idempotency-Key": uuid.uuid4().hex})
+    assert run.status_code in (200, 201, 202), run.text  # NOT 409 STALE_PLAN
+    assert len(enqueued) == 1

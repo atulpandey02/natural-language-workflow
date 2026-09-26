@@ -12,6 +12,7 @@ test can remove/demote the creator without tripping the last-owner guard.
 """
 
 import json
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -475,4 +476,115 @@ def test_16_unblock_and_its_audit_event_are_atomic(
     assert r.status_code >= 500, r.text
     assert "connection lost" not in r.text
     assert _blocked(pg_stack.owner_libpq, sid) == "CREATOR_ROLE_INSUFFICIENT"  # rolled back
+    assert _events(pg_stack.owner_libpq, s.tenant_id) == []
+
+
+# --- 17-18. concurrent unblock: exactly one transition, exactly one audit event -----
+def _synchronized_read(monkeypatch: pytest.MonkeyPatch, parties: int) -> threading.Barrier:
+    """Inject a deterministic barrier at the handler's schedule READ so every
+    concurrent request has read the row before any of them writes.
+
+    Without a row lock (the reported race) all readers pass the barrier holding the
+    same blocked snapshot and each performs the transition. With ``SELECT ... FOR
+    UPDATE`` the second read blocks inside PostgreSQL until the first request
+    commits, so the lock holder's wait simply times out (a release valve, not the
+    proof) and the loser reads the already-cleared row. The correctness assertions
+    never depend on timing: only the lock decides who transitions."""
+    from nlw.db.repositories import ScheduleRepository
+
+    target = "get_for_update" if hasattr(ScheduleRepository, "get_for_update") else "get"
+    real = getattr(ScheduleRepository, target)
+    barrier = threading.Barrier(parties)
+
+    async def synced(self: Any, *args: Any, **kwargs: Any) -> Any:
+        row = await real(self, *args, **kwargs)
+        try:
+            barrier.wait(timeout=3)
+        except threading.BrokenBarrierError:
+            pass
+        return row
+
+    monkeypatch.setattr(ScheduleRepository, target, synced)
+    return barrier
+
+
+def _post_unblock(pg_stack: SimpleNamespace, sid: uuid.UUID, headers: dict[str, str]) -> Any:
+    with TestClient(create_app(pg_stack.settings), raise_server_exceptions=False) as c:
+        return c.post(f"/schedules/{sid}/unblock", headers=headers)
+
+
+def _run_concurrently(fns: list[Callable[[], Any]]) -> list[Any]:
+    results: list[Any] = [None] * len(fns)
+    start = threading.Barrier(len(fns))
+
+    def runner(i: int) -> None:
+        start.wait()  # all requests are in flight together
+        results[i] = fns[i]()
+
+    threads = [threading.Thread(target=runner, args=(i,)) for i in range(len(fns))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert all(not t.is_alive() for t in threads), "a concurrent request never returned"
+    return results
+
+
+def test_17_concurrent_authorized_unblocks_commit_exactly_one_transition(
+    pg_stack: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s, sid = _block(pg_stack)
+    _set_role(pg_stack.owner_libpq, s.creator_id, s.tenant_id, "admin")  # restored
+    owner_h = _auth(pg_stack, s.owner_id, s.tenant_id)
+    admin_h = _auth(pg_stack, s.creator_id, s.tenant_id)  # a second authorized actor
+    _synchronized_read(monkeypatch, parties=2)
+    before = datetime.now(UTC)
+
+    ra, rb = _run_concurrently(
+        [
+            lambda: _post_unblock(pg_stack, sid, owner_h),
+            lambda: _post_unblock(pg_stack, sid, admin_h),
+        ]
+    )
+    assert ra.status_code == 200 and rb.status_code == 200, (ra.text, rb.text)
+    a, b = ra.json(), rb.json()
+    # Both observe the same committed, unblocked state (the loser is a no-op that
+    # returns what the winner committed) — one forward next_run_at, no partial state.
+    assert a["blocked_reason"] is None and b["blocked_reason"] is None
+    assert a["blocked_at"] is None and b["blocked_at"] is None
+    assert a["next_run_at"] == b["next_run_at"]
+    assert datetime.fromisoformat(a["next_run_at"]) > before
+    with psycopg.connect(pg_stack.owner_libpq) as c:
+        row = c.execute(
+            "SELECT blocked_reason, blocked_at, next_run_at, created_by FROM schedules WHERE id=%s",
+            (sid,),
+        ).fetchone()
+    assert row is not None and row[0] is None and row[1] is None
+    assert row[2].isoformat() == a["next_run_at"]
+    assert uuid.UUID(str(row[3])) == s.creator_id  # created_by untouched
+    # EXACTLY one audit event for the one logical transition.
+    events = _events(pg_stack.owner_libpq, s.tenant_id)
+    assert len(events) == 1, events
+    assert events[0][0] == "schedule.unblocked"
+    assert events[0][1] in {str(s.owner_id), str(s.creator_id)}
+    assert events[0][2] == str(sid) and events[0][3] == "CREATOR_ROLE_INSUFFICIENT"
+
+
+def test_18_concurrent_unauthorized_unblocks_write_no_audit(
+    pg_stack: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s, sid = _block(pg_stack)
+    _set_role(pg_stack.owner_libpq, s.creator_id, s.tenant_id, "admin")
+    m1 = pg_stack.add_membership(s.tenant_id, "member")
+    m2 = pg_stack.add_membership(s.tenant_id, "member")
+    h1 = _auth(pg_stack, m1, s.tenant_id)
+    h2 = _auth(pg_stack, m2, s.tenant_id)
+    _synchronized_read(monkeypatch, parties=2)  # never reached: 403 precedes the read
+
+    ra, rb = _run_concurrently(
+        [lambda: _post_unblock(pg_stack, sid, h1), lambda: _post_unblock(pg_stack, sid, h2)]
+    )
+    assert ra.status_code == 403 and rb.status_code == 403
+    assert _blocked(pg_stack.owner_libpq, sid) == "CREATOR_ROLE_INSUFFICIENT"
+    assert _blocked_at(pg_stack.owner_libpq, sid) is not None
     assert _events(pg_stack.owner_libpq, s.tenant_id) == []
