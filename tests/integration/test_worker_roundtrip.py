@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import uuid
+from types import SimpleNamespace
 
 import pytest
 import redis
@@ -23,7 +24,10 @@ from nlw.worker.broker import make_broker
 pytestmark = pytest.mark.integration
 
 
-def test_enqueue_ping_is_processed_by_worker() -> None:
+def test_enqueue_ping_is_processed_by_worker(pg_stack: SimpleNamespace) -> None:
+    # The worker's mandatory boot preflight reads the DR recovery lock, so a real
+    # (never-restored) database is required for the worker to boot at all: with no
+    # reachable database the state is UNKNOWN and boot is refused (fail closed).
     with RedisContainer("redis:7") as container:
         url = f"redis://{container.get_container_host_ip()}:{container.get_exposed_port(6379)}/0"
 
@@ -38,7 +42,13 @@ def test_enqueue_ping_is_processed_by_worker() -> None:
                 "--threads",
                 "1",
             ],
-            env={**os.environ, "REDIS_URL": url, "APP_ENV": "local"},
+            env={
+                **os.environ,
+                "REDIS_URL": url,
+                "DATABASE_URL": pg_stack.worker_settings.database_url,
+                "APP_ENV": "local",
+                "METRICS_ENABLED": "false",
+            },
         )
         try:
             broker = make_broker(Settings(_env_file=None, redis_url=url))  # type: ignore[call-arg]

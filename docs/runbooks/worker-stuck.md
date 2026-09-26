@@ -4,8 +4,14 @@
 depth rising; worker healthcheck failing.
 
 **Do:**
+0. If the container is *Restarting* and the log shows
+   `worker.recovery_lock_refused` / `WorkerBootRefused`, the worker is refusing
+   to boot on purpose: the database's DR recovery lock is engaged. That is not a
+   stuck worker — see backup-failure-troubleshooting ("startup blocked by the
+   recovery lock") and `nlw.backup enable-runtime`.
 1. Check the worker: `docker compose ps`, `docker logs <worker>`. Confirm the
-   metrics port is up (the healthcheck covers DB + Redis + metrics port).
+   metrics port is up (the healthcheck covers DB + recovery lock + Redis +
+   metrics port + signed context).
 2. Confirm Postgres and Redis reachable from the worker (healthcheck output).
 3. Restart the worker. Dramatiq redelivers in-flight messages; the M7 two-phase
    lease + idempotency make redelivery safe on OUR side: an ambiguous send becomes

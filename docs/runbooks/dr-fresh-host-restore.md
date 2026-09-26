@@ -88,15 +88,17 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
 
 6. **Runtime is DATABASE-LOCKED until you explicitly enable it.** The restore
    marked this generation *validated* in `dr_restore_events` but left
-   `runtime_enabled_at` NULL, so it is **locked**. The api and scheduler run a
+   `runtime_enabled_at` NULL, so it is **locked**. api/worker/scheduler run a
    **mandatory** startup preflight that reads this DB state — **regardless of any
    env flag, compose profile, or mounted file** — and refuse to start while the
    newest generation is not enabled. (The file gate / `NLW_RESTORE_MODE` /
    `gate-check` are now defense-in-depth and a binding artifact; the **database is
-   the authority**.) Attempting to start one of those services now fails closed
-   (non-zero exit; `nlw.backup startup-check` exits 6). **Do not start the worker
-   until step 7 is complete** (its boot-time enforcement is tracked under *Known
-   technical debt* in `docs/PROJECT_INDEX.md`).
+   the authority**.) Attempting to start a service now fails closed: the process
+   exits non-zero (`nlw.backup startup-check` exits 6; the worker exits 1 with
+   `WorkerBootRefused` before any consumer thread starts). Under Compose
+   (`restart: unless-stopped`) a service started too early simply restart-loops —
+   visible in `docker compose ps` as *Restarting* — and never processes anything;
+   its healthcheck reports `recovery_lock failed: RecoveryLocked`.
 
 7. **Operator ENABLE — a separate, explicit command (operator credential).** Get the
    generation id and enable exactly it:
@@ -118,8 +120,8 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
 
 8. **Start the runtime** with each service's signed-context key file mounted
    (`python -m nlw.ctxkeys check --class ...` first if in doubt; readiness reports
-   `signed_context`). Bring up api → worker → scheduler. The scheduler checks
-   the lock once at boot and starts only when enabled. The **API** may already be
+   `signed_context`). Bring up api → worker → scheduler. Worker/scheduler check
+   the lock once at boot and start only when enabled. The **API** may already be
    running (it stays alive for liveness): it carries a **live** recovery gate that
    re-reads `dr_restore_events` on a short bounded cache
    (`recovery_gate_ttl_s`, default 5s), so it becomes ready and serves business

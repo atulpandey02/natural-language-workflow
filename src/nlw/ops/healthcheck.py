@@ -30,6 +30,20 @@ def _check_postgres(settings: Settings) -> None:
         conn.execute("SELECT 1")
 
 
+def _check_recovery_lock(settings: Settings) -> None:
+    """The authoritative DR recovery lock (``dr_restore_events``) must permit this
+    role to run. A worker/scheduler whose boot was refused by the lock — or that is
+    restart-looping against a locked database — must never be reported healthy."""
+    from nlw.backup.recovery_lock import assert_startup_allowed_sync
+    from nlw.db.session import create_sync_engine
+
+    engine = create_sync_engine(settings)
+    try:
+        assert_startup_allowed_sync(engine)
+    finally:
+        engine.dispose()
+
+
 def _check_redis(settings: Settings) -> None:
     client = redis.from_url(settings.redis_url, socket_connect_timeout=3, socket_timeout=3)
     try:
@@ -93,6 +107,7 @@ def main() -> int:
     settings = get_settings()
     checks = (
         ("postgres", _check_postgres),
+        ("recovery_lock", _check_recovery_lock),
         ("redis", _check_redis),
         ("metrics", _check_metrics_port),
         ("signed_context", _check_signed_context),

@@ -196,11 +196,23 @@ change (migration `0014` unchanged).
   Compose project on a fresh host (where those services are not defined).
 - **(C) Enforceable runtime-start gate — DATABASE-authoritative.** The gate is
   `dr_restore_events` itself (runtime roles cannot write it). The restore leaves the
-  newest generation *validated* but with `runtime_enabled_at` NULL (LOCKED). The
-  API lifespan and the scheduler main run a **mandatory** startup preflight
-  (`nlw.backup.recovery_lock`) that reads this state and fails closed (the
-  process exits non-zero; the standalone `nlw.backup startup-check` preflight
-  exits **6**) unless the newest generation is validated **and** operator-enabled —
+  newest generation *validated* but with `runtime_enabled_at` NULL (LOCKED). Every
+  api/worker/scheduler process runs a **mandatory** startup preflight
+  (`nlw.backup.recovery_lock`, via the API lifespan, the scheduler main, and the
+  worker's `RecoveryLockMiddleware.before_worker_boot`) that reads this state and
+  fails closed unless the newest generation is validated **and** operator-enabled.
+  The worker hook raises `WorkerBootRefused`, a subclass of Dramatiq's
+  `MiddlewareError` — the one exception class the pinned framework's
+  `Broker.emit_before` re-raises instead of logging and swallowing — so
+  `Worker.start()` aborts before any consumer or worker thread exists and the
+  `dramatiq` process exits non-zero (exit 1 under the CLI; the standalone
+  `nlw.backup startup-check` preflight exits **6**). Under Compose
+  (`restart: unless-stopped`) a locked worker therefore restart-loops without ever
+  consuming, and the container healthcheck (`nlw.ops.healthcheck`) independently
+  fails with `recovery_lock failed: RecoveryLocked`. Proven by
+  `tests/unit/test_worker_boot_recovery_lock.py` (real `Worker.start()`, every
+  lock state) and `tests/integration/test_worker_boot_recovery_lock.py` (the real
+  `dramatiq nlw.worker.actors` entrypoint against a locked/unreachable database) —
   **regardless of `NLW_RESTORE_MODE`, compose profile, or any mounted file**. This
   closes the earlier fail-open where an omitted `NLW_RESTORE_MODE` let services start
   against a restored DB. A never-restored DB (no event) starts normally; a reachable
@@ -216,7 +228,7 @@ change (migration `0014` unchanged).
   `system_identifier`, verified by `gate-check`, exit **4**) and the
   `NLW_RESTORE_MODE` entrypoint wrapper remain as **defense in depth** and a binding
   artifact — never the sole authority.
-  - **Live API gate.** The scheduler evaluates the lock once at boot and refuses
+  - **Live API gate.** The worker/scheduler evaluate the lock once at boot and refuse
     to start; the API instead may stay ALIVE for DB-independent liveness, so it must
     not treat a boot-time connection failure as "allowed" and then serve forever. A
     live gate (`nlw.api.recovery_gate.RecoveryGate`) holds a three-valued state —

@@ -237,10 +237,13 @@ extended drill proving startup is blocked pre-gate, a new post-restore run runs 
 COMPLETED, no restored work is replayed, and the gate cannot be reused. A follow-up
 correction makes the runtime-start gate **database-authoritative**: `dr_restore_events`
 (migration `0014`, runtime roles have only column-scoped SELECT) carries a
-validated→enabled state machine; the API (lifespan) and scheduler (main) run a
-**mandatory** startup preflight that fails closed unless the newest restore
-generation is operator-enabled — regardless of `NLW_RESTORE_MODE`, profile, or
-file (the worker's boot-time enforcement is tracked under *Known technical debt*). A separate `nlw.backup enable-runtime`
+validated→enabled state machine; api/worker/scheduler run a **mandatory** startup
+preflight (API lifespan, scheduler main, worker `before_worker_boot` raising the
+framework-fatal `WorkerBootRefused(MiddlewareError)` so Dramatiq aborts before any
+consumer thread starts) that fails closed unless the newest restore generation is
+operator-enabled — regardless of `NLW_RESTORE_MODE`, profile, or file; the
+container healthcheck also fails on the lock, so a restart-looping worker is never
+reported healthy. A separate `nlw.backup enable-runtime`
 operator command performs the audited, conditional enable; a later restore re-locks.
 The file gate / `NLW_RESTORE_MODE` are now defense-in-depth only. Because the API
 can stay alive for DB-independent liveness, it carries a **live** recovery gate
@@ -515,11 +518,6 @@ warning).
 Honest, current list (each item is either a documented limitation or a tracked
 correction). "Correction pending" items are being fixed in dedicated commits.
 
-- **Worker recovery-lock enforcement at boot — correction pending.** The worker's
-  `before_worker_boot` middleware raises a plain exception; the pinned Dramatiq
-  version logs and swallows it, so a locked database does **not** abort worker
-  boot (the API lifespan and scheduler main do abort). Until fixed, keep the
-  worker stopped after a restore until `enable-runtime` has run.
 - **Invitation / membership error classification — correction pending.** Database
   connection, RLS-denial and unrelated integrity failures are translated into the
   business responses (duplicate invitation `409`, owner-retention `409`, invalid
