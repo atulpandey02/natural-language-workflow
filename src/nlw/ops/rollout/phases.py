@@ -205,6 +205,36 @@ class Rollout:
     def read_active_sha(self) -> str:
         return self._run(f"git -C '{self.target.remote_app}' rev-parse HEAD")
 
+    def refuse_foreign_activation(self) -> str:
+        """Pre-activation phases assume the checkout named by ``target.env``
+        (``<ops_root>/app``) IS the active deployment. Once a release has been
+        activated, ``<ops_root>/current`` points at ``releases/<sha>`` and that
+        assumption is false: evidence would bind to the obsolete legacy SHA and
+        the staged ``.env.prod`` would derive from the legacy file. Until the
+        tooling follows ``current``, a host whose ``current`` points anywhere but
+        THIS release's staged directory is refused (fail closed, explicit).
+        Returns the observed shape: ABSENT / THIS_RELEASE."""
+        cur = self.target.current_link
+        out = self._run(
+            f"if [ -L '{cur}' ]; then readlink '{cur}'; "
+            f"elif [ -e '{cur}' ]; then echo NOT_A_SYMLINK; else echo ABSENT; fi"
+        ).strip()
+        if out == "ABSENT":
+            return "ABSENT"
+        if out == self.staged:
+            return "THIS_RELEASE"
+        if out == "NOT_A_SYMLINK":
+            raise GateError(
+                f"{cur} exists but is not a symlink: activation would not be able to "
+                "switch it atomically — remove or rename it by hand (nothing was changed)"
+            )
+        raise GateError(
+            f"{cur} already points at {out!r}: this host has an activated release and "
+            f"the tooling's active checkout is still {self.target.remote_app} "
+            "(deploy/staging/target.env). A second rollout is not supported until the "
+            "rollout follows `current` — STOP (nothing was changed)"
+        )
+
     def check_backup_env_file(self) -> str:
         """The backup job's env file (restic repository + provider credentials) is
         read CLIENT-SIDE by ``docker compose --env-file`` as the rollout's SSH user
@@ -215,10 +245,17 @@ class Rollout:
         # Portable (GNU + BSD): readability via the shell test, the permission
         # string via `ls -ld` (never `stat -c`, which BSD stat does not know).
         res = self.remote.run(
-            f"if [ -r '{path}' ] && [ -f '{path}' ]; then ls -ld '{path}' | cut -c1-10; "
+            f"if [ -r '{path}' ] && [ -f '{path}' ]; then "
+            f"if [ -s '{path}' ]; then ls -ld '{path}' | cut -c1-10; else echo EMPTY; fi; "
             f"else echo MISSING_OR_UNREADABLE; fi"
         )
         perms = res.text.strip()
+        if perms == "EMPTY":
+            raise GateError(
+                f"backup env file {path} is empty: the backup job would fail closed inside "
+                "the backup phase (missing RESTIC_REPOSITORY / RESTIC_PASSWORD / provider "
+                "credentials / NLW_BACKUP_DATABASE_URL); fill it from .env.backup.example first"
+            )
         if not res.ok or perms == "MISSING_OR_UNREADABLE" or len(perms) != 10:
             raise GateError(
                 f"backup env file {path} is missing or not readable by the rollout user "
@@ -304,12 +341,14 @@ class Rollout:
         roles = self.read_roles()
         gates.check_roles(roles, require_provisioned=False)
         drain = self.read_drain()
+        current_shape = self.refuse_foreign_activation()
         backup_env_mode = self.check_backup_env_file()
         doc = self._state()
         if not state.phase_done(doc, "migrate"):
             gates.check_current_revision(rev, self.release.expected_current_revision)
         report = {
             "backup_env_mode": backup_env_mode,
+            "current_link": current_shape,
             "manifest_sha256": self.release.sha256,
             "release_sha": self.release.release_sha,
             "instance_id": imds.get("instance-id"),
@@ -458,6 +497,7 @@ class Rollout:
         doc = self._state()
         state.require_phases(doc, "verify-release", "verify-escrow")
         self.check_identity()
+        self.refuse_foreign_activation()
         active = self.target.remote_app
         active_env_hash_before = self._run(f"sha256sum '{active}/.env.prod' | cut -d' ' -f1")
         self._run(
@@ -531,6 +571,7 @@ class Rollout:
         doc = self._state()
         state.require_phases(doc, "stage-release")
         self.check_identity()
+        self.refuse_foreign_activation()
         self.verify_checkout(self.staged)
         self.check_backup_env_file()
         gates.check_current_revision(self.read_revision(), self.release.expected_current_revision)
@@ -550,6 +591,7 @@ class Rollout:
         self._require_mutation_authority()
         doc = self._state()
         state.require_phases(doc, "stage-release")
+        self.refuse_foreign_activation()
         self.verify_checkout(self.staged)
         res = self.remote.run(
             f"{self.target.dc_backup_in(self.staged)} run --rm --no-deps -T backup evidence",

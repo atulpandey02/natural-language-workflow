@@ -537,7 +537,9 @@ correction). "Correction pending" items are being fixed in dedicated commits.
   `/opt/nlw/current`.** `deploy/staging/target.env` names `/opt/nlw/app`; that is
   correct for the FIRST rollout only. After activation the next release needs the
   tooling to follow `current` (and to fetch from the GitHub origin rather than
-  the local clone chain) — do not start a second rollout before that lands.
+  the local clone chain). Enforced: the pre-activation phases refuse a host whose
+  `current` points at another release (fail closed, nothing changed) — a second
+  rollout cannot start before that lands.
 - **Timer backups carry no release binding.** The rollout's `backup` phase binds
   instance/environment/release per run; systemd-timer backups bind only the
   instance/environment set in `.env.backup` (a static release would go stale).

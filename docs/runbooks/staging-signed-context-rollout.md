@@ -152,21 +152,26 @@ of a `0600` file and **never** echoed, logged, passed on argv, or committed.
    `/opt/nlw/.env.backup` (or the path set in `NLW_STAGING_BACKUP_ENV_FILE`,
    which must then also be the path in the systemd unit). It is read
    *client-side* by `docker compose --env-file` as **nlwops**, so a `root:root
-   0600` file makes `preflight` stop with "not readable by the rollout user".
+   0600` file makes `preflight` stop with "not readable by the rollout user",
+   and an **empty** file (the host's current state: created, never filled)
+   stops it with "is empty" — the mode and size are checked, never the
+   contents.
    Decision to record: `root:nlwops 0640` (recommended — `nlwops` is in the
    `docker` group and is therefore already root-equivalent on this host) **or**
    `nlwops:nlwops 0600`. Fill it from `.env.backup.example`: the DB host is the
    Compose service name `postgres` (not `db`); `RESTIC_PASSWORD` is the inline
    repository passphrase (a separate password *file* is not read by the job);
    set `NLW_BACKUP_SOURCE_INSTANCE_ID` and `NLW_BACKUP_ENVIRONMENT`.
-2. **Retention mode vs the IAM writer** — the documented least-privilege policy
-   has **no `s3:DeleteObject`**; with it the default `NLW_BACKUP_RETENTION_MODE=simple`
-   fails at `forget --prune` *after* a verified upload (exit 2, gate fails).
-   Decide explicitly before the first backup: `immutable` (no in-job prune;
-   prune later off-host with a delete-capable key) **or** grant delete and keep
-   `simple`. See `docs/ops/backup-providers.md` (restic also deletes its own
-   `locks/*` objects — verify lock cleanup with your provider before relying on
-   a no-delete writer).
+2. **Retention mode vs the IAM writer** — measured (disposable MinIO, restic
+   0.18): every writer needs `s3:DeleteObject` on `<prefix>/locks/*`, otherwise
+   restic cannot remove its own lock and the job's post-upload `restic check`
+   fails ("repository is already locked") — **every backup fails**. With a
+   locks-only delete writer, `NLW_BACKUP_RETENTION_MODE=immutable` works;
+   `simple` fails at `forget --prune` *after* the verified upload (`Fatal:
+   Access Denied`, `nlw_backup_success 0`, gate refuses). Decide explicitly
+   before the first backup: `immutable` (prune later off-host with a
+   delete-capable key) **or** grant delete on the whole prefix and keep
+   `simple`. See `docs/ops/backup-providers.md`.
 3. **Image pull access** — `verify-release` runs `docker pull` as `nlwops`; if
    the GHCR packages are private, `docker login ghcr.io` (read:packages) first.
 4. **Keys** — `--keys-dir` defaults to `/srv/nlw/ctx-keys`; the parent
@@ -200,8 +205,13 @@ of a `0600` file and **never** echoed, logged, passed on argv, or committed.
 * `target.env` still names `/opt/nlw/app` as the active checkout. That is
   correct for **this** rollout (`validate`/`reopen` only `exec` into the same
   project). It is **not** correct for the next release: the tooling does not
-  yet follow `current` (recorded under *Known technical debt*); do not start a
-  second rollout until that is addressed.
+  yet follow `current` (recorded under *Known technical debt*). This is
+  **enforced**, not merely documented: once `current` points at any release
+  other than the one being rolled out, `preflight`, `stage-release`, `backup`
+  and `verify-backup` stop with "A second rollout is not supported until the
+  rollout follows `current`" and change nothing. Re-running a phase for the
+  release that is already active is still allowed (`current_link:
+  THIS_RELEASE` in the preflight report).
 * Install the systemd backup units only now (`docs/ops/backup-systemd.md`): the
   unit runs from `/opt/nlw/current`, which exists only after activation, and the
   pre-M12A checkout has no `backup` service. The rollout's own `backup` phase
@@ -234,7 +244,7 @@ uv run python -m nlw.ops.rollout go-check              --release M   # READ-ONLY
 | phase | mutates | gates re-checked | what it does |
 |---|---|---|---|
 | *(every invocation)* | no | manifest schema; **provenance** (GitHub attestation policy; fixture only under `--local`) | stops before any host contact when the manifest is not release authority |
-| `preflight` | no | manifest schema/kind/deployability; instance id + region; hostname ↔ public IPv4; active `.env.prod` hostname; roles model (M11 set acceptable); drain counters; current revision = expected; backup env file readable by the rollout user and not world-readable (mode only, contents never read) | prints a sanitized report (manifest sha256, active checkout SHA, backup env mode); run it as often as you like |
+| `preflight` | no | manifest schema/kind/deployability; instance id + region; hostname ↔ public IPv4; active `.env.prod` hostname; roles model (M11 set acceptable); drain counters; current revision = expected; backup env file readable by the rollout user, not world-readable and not empty (mode and size only, contents never read); `current` absent or pointing at this release | prints a sanitized report (manifest sha256, active checkout SHA, backup env mode); run it as often as you like |
 | `verify-release` | host image cache, evidence dir | authorization; provenance receipt for this exact manifest digest; identity | `docker pull` both digests; `org.opencontainers.image.revision` label == release SHA on both; runs `nlw.ops.rollout.image_info` in the backend image and checks reported git SHA, every migration from expected+1 to the target present, Alembic head == `target_revision`; runs `--help` of `nlw.ops.rollout`, `nlw.ops.roles`, `nlw.ctxkeys prepare/fingerprint/verify-files`, `nlw.backup evidence` inside the exact image. An older image (e.g. `1eebf2e`, no label, no tooling) is refused |
 | `prepare-keys` | host files | authorization; identity | generates three independent 32-byte keys **on the host** through the release image running as root (`nlw.ctxkeys prepare`): dir `0700` root, files `0400` uid 10001, never overwrites, prints fingerprints only |
 | `verify-escrow` | state only | authorization; **escrow phrase**; attestation fingerprints == host fingerprints; release SHA/env; ≤ 30 days old | the operator must have escrowed the files first — see the escrow section of [signed-context-keys](signed-context-keys.md) |

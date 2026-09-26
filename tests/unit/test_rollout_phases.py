@@ -209,6 +209,8 @@ def _base_table(
         (r"docker/worker\.secrets\.env", "absent"),
         # <ops_root>/current shape + post-activation readlink.
         (r"echo DIRECTORY; elif \[ -L", "ABSENT"),
+        # Pre-activation phases: current is ABSENT on the legacy host.
+        (r"if \[ -L '/opt/nlw/current' \]; then readlink", "ABSENT"),
         (r"readlink '/opt/nlw/current'", STAGED),
     ]
 
@@ -841,3 +843,39 @@ def test_activation_and_key_install_recheck_host_identity() -> None:
         with pytest.raises(GateError, match="instance"):
             _all_phase_calls(r)[phase]()
         assert not fake.ran(r"ctxkeys install|ln -sfn|up -d")
+
+
+def test_preflight_refuses_an_empty_backup_env_file() -> None:
+    table = [(r"ls -ld '/opt/nlw/\.env\.backup' \| cut -c1-10", "EMPTY")] + _base_table()
+    fake = FakeRemote(table)
+    with pytest.raises(GateError, match="is empty"):
+        _rollout(fake).preflight()
+
+
+def test_pre_activation_phases_refuse_a_host_activated_for_another_release() -> None:
+    """Second-rollout guard: target.env still names /opt/nlw/app as active; once
+    current -> releases/<other>, evidence and the staged env would derive from
+    the obsolete legacy checkout. Fail closed with an actionable message."""
+    other = "/opt/nlw/releases/" + "9" * 40
+    foreign = [(r"if \[ -L '/opt/nlw/current' \]; then readlink", other)]
+    with pytest.raises(GateError, match="already points at"):
+        _rollout(FakeRemote(foreign + _base_table())).preflight()
+    fake = FakeRemote(foreign + _stage_table(), state=_done("verify-release", "verify-escrow"))
+    with pytest.raises(GateError, match="second rollout is not supported"):
+        _rollout(fake, authorization=AUTHORIZATION_PHRASE).stage_release(keys_dir=KEYS)
+    assert not fake.ran(r"git clone|releases.*\.env\.prod")
+    for phase in ("backup", "verify-backup"):
+        fake = FakeRemote(foreign + _stage_table(), state=_done("stage-release"))
+        with pytest.raises(GateError, match="already points at"):
+            _all_phase_calls(_rollout(fake, authorization=AUTHORIZATION_PHRASE))[phase]()
+        assert not fake.ran(r"--profile backup run")
+    # Re-running a pre-activation phase for THIS release after its own activation
+    # (current -> this staged dir) is allowed; the report records the shape.
+    this = [(r"if \[ -L '/opt/nlw/current' \]; then readlink", STAGED)]
+    assert _rollout(FakeRemote(this + _base_table())).preflight()["current_link"] == "THIS_RELEASE"
+    assert _rollout(FakeRemote(_base_table())).preflight()["current_link"] == "ABSENT"
+    # A real directory (or file) at current cannot be switched atomically: its own
+    # explicit message, before any phase touches the host.
+    plain = [(r"if \[ -L '/opt/nlw/current' \]; then readlink", "NOT_A_SYMLINK")]
+    with pytest.raises(GateError, match="exists but is not a symlink"):
+        _rollout(FakeRemote(plain + _base_table())).preflight()

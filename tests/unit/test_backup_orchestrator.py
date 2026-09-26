@@ -167,3 +167,20 @@ def test_manifest_written_with_required_metadata(tmp_path: Path) -> None:
     assert seen["pg_version"] == "16.2"
     blob = json.dumps(seen).lower()
     assert "password" not in blob and "://" not in blob  # secret-free
+
+
+def test_prune_failure_after_verified_upload_reports_failure_but_keeps_the_verified_point(
+    tmp_path: Path,
+) -> None:
+    """Pinned behavior for the retention/IAM decision: in `simple` mode a writer
+    without delete rights fails at `forget --prune` AFTER the snapshot was
+    uploaded and verified. The run reports failure (exit non-zero, success=0 —
+    the rollout gate refuses it) while the last-success timestamp reflects the
+    verified off-host snapshot that does exist."""
+    restic = FakeRestic(fail_on="forget_prune")
+    with pytest.raises(RuntimeError, match="forget_prune"):
+        _run(tmp_path, restic)
+    assert restic.calls == ["ensure_repository", "backup_dir", "check", "forget_prune"]
+    text = _metrics(tmp_path)
+    assert "nlw_backup_success 0" in text
+    assert _LAST_SUCCESS_RE.search(text) is not None  # verified upload -> timestamp present

@@ -92,7 +92,10 @@ assert_untouched() {  # the M11 side is exactly as before: schema, roles, config
 
 # The rollout must never recreate the live datastores nor create a second Compose
 # project / database volume (explicit -p on both sides; --no-deps on one-shots).
-snapshot_docker() { docker volume ls -q | sort > "$TMP/volumes.$1"; docker compose ls -aq 2>/dev/null | sort > "$TMP/projects.$1"; }
+# Only Compose-labelled volumes are compared: an anonymous volume created by an
+# unrelated container on the developer machine (e.g. an image VOLUME) must not
+# fail the invariant, which is about a SECOND project / database volume.
+snapshot_docker() { docker volume ls -q --filter label=com.docker.compose.project | sort > "$TMP/volumes.$1"; docker compose ls -aq 2>/dev/null | sort > "$TMP/projects.$1"; }
 assert_datastores_untouched() {
   local pg redis
   pg="$(docker ps -q --no-trunc --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=postgres")"
@@ -102,7 +105,7 @@ assert_datastores_untouched() {
   snapshot_docker after
   local added; added="$(comm -13 "$TMP/volumes.before" "$TMP/volumes.after")"
   ! grep -q '_pgdata$' <<<"$added" || die "$1: a NEW database volume appeared: $added"
-  [ -z "$(grep -v "^${PROJ}_" <<<"$added" | grep -v '^$')" ] || die "$1: volumes outside the project were created: $added"
+  [ -z "$(grep -v "^${PROJ}_" <<<"$added" | grep -v '^$')" ] || die "$1: Compose volumes outside the project were created: $added"
   [ -z "$(comm -13 "$TMP/projects.before" "$TMP/projects.after")" ] || die "$1: a second Compose project appeared"
   [ "$(docker volume ls -q | grep -c "^${PROJ}_pgdata$")" = "1" ] || die "$1: pgdata volume count != 1"
   ok "$1: postgres/redis containers, the single pgdata volume and the project are untouched"
@@ -311,7 +314,11 @@ chmod 644 "$OPS/.env.backup"
 must_fail "preflight passed with a world-readable backup env file" "${ROLLOUT[@]}" preflight
 grep -q "world-readable" <<<"$LAST_OUT" || die "world-readable backup env rejected for the wrong reason: $LAST_OUT"
 chmod 600 "$OPS/.env.backup"
-ok "preflight: backup env file must be readable by the rollout user and not world-readable (contents never read)"
+: > "$OPS/.env.backup"   # the live host's starting state: present, root-created, EMPTY
+must_fail "preflight passed with an EMPTY backup env file" "${ROLLOUT[@]}" preflight
+grep -q "is empty" <<<"$LAST_OUT" || die "empty backup env rejected for the wrong reason: $LAST_OUT"
+write_backup_env "$PGPW"
+ok "preflight: backup env file must be readable by the rollout user, not world-readable, and non-empty (contents never read)"
 must_fail "verify-release accepted the OLD image" uv run python -m nlw.ops.rollout --local \
   --release "$OLD_IMAGE_MANIFEST" --provenance-fixture "$OLD_IMAGE_PROV" --target "$TMP/target.env" --keys-dir "$KEYS" verify-release --authorize "$AUTH"
 grep -q "revision label" <<<"$LAST_OUT" || die "old image rejected for the wrong reason: $LAST_OUT"
@@ -436,6 +443,17 @@ ok "rollout state lives in $OPS/rollout (outside both checkouts); both checkouts
 curl -fsS http://127.0.0.1:8000/health/ready | grep -q '"signed_context":"ok"' || die "signed_context not ok"
 ok "NEW runtime ready with signed_context: ok"
 assert_datastores_untouched "after reopen"
+# Second-rollout guard: with current -> THIS release, pre-activation phases still
+# run; with current -> ANOTHER release the tooling refuses (target.env still names
+# the legacy checkout as active) instead of binding evidence to the wrong SHA.
+"${ROLLOUT[@]}" preflight >/dev/null
+ln -sfn "$OPS/releases/0000000000000000000000000000000000000000" "$OPS/current"
+must_fail "preflight accepted a host activated for another release" "${ROLLOUT[@]}" preflight
+grep -q "second rollout is not supported" <<<"$LAST_OUT" || die "foreign activation rejected for the wrong reason: $LAST_OUT"
+must_fail "stage-release accepted a host activated for another release" "${ROLLOUT[@]}" stage-release --authorize "$AUTH"
+ln -sfn "$STAGED" "$OPS/current"
+[ "$(readlink "$OPS/current")" = "$STAGED" ] || die "current not restored"
+ok "second-rollout guard: current -> another release is refused by preflight/stage-release (nothing changed); current -> this release passes"
 ok "LOCAL TIMING: preflight -> reopen took $(( $(date +%s) - T_ROLLOUT_START )) s (local rehearsal, not the VPS)"
 
 log "9/10 post-upgrade proofs: invitation + four-eyes (signed), worker run, scheduler occurrence, rules"
