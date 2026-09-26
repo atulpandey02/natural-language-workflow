@@ -13,6 +13,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# SAFETY: this script runs `docker compose down -v` (volume deletion) against the
+# project derived from the checkout directory. On an ops host (/opt/nlw/app ->
+# project "app") that would DELETE the live database volume. Refuse there.
+case "$(pwd -P)" in /opt/*|/srv/*) echo "refusing: smoke scripts never run on an ops host ($(pwd -P))" >&2; exit 2;; esac
+[ ! -f .env.prod ] || { echo "refusing: .env.prod present — this looks like a deployed checkout" >&2; exit 2; }
 
 OWNER_MIGRATION_URL="postgresql+psycopg://nlw:nlw@postgres:5432/nlw"
 export OWNER_LIBPQ="postgresql://nlw:nlw@localhost:5433/nlw"

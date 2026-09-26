@@ -47,8 +47,13 @@ set -euo pipefail
 # functions) loads no release identity.
 load_release_identity() {
   RELEASE_FILE="${NLW_STAGING_RELEASE_FILE:?set NLW_STAGING_RELEASE_FILE to the downloaded release manifest}"
+  # Schema validity is not authority: the manifest bytes must carry the GitHub
+  # artifact attestation of the Delivery workflow on main (ADR-025) — the same
+  # check `python -m nlw.ops.rollout` performs before any host contact.
   (cd "$NLW_REPO_ROOT" && uv run python -m nlw.ops.release_manifest validate "$RELEASE_FILE" >/dev/null) \
     || { echo "release manifest rejected: $RELEASE_FILE" >&2; exit 3; }
+  (cd "$NLW_REPO_ROOT" && uv run python -m nlw.ops.release_provenance verify "$RELEASE_FILE" >/dev/null) \
+    || { echo "release provenance REJECTED for $RELEASE_FILE — not release authority; STOP" >&2; exit 3; }
   release_field() {  # pure: read one top-level field from the release manifest
     python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d[sys.argv[2]]; print(v["api"]+" "+v["worker"]+" "+v["scheduler"] if isinstance(v,dict) else v)' "$RELEASE_FILE" "$1"
   }
@@ -139,6 +144,13 @@ preflight() {
     || die "docker not usable as nlwops. Open a FRESH SSH session (docker group applies on next login), or check the daemon."
   log "Preflight: /opt/nlw/app present …"
   rsh "test -d '$REMOTE_APP'" || die "$REMOTE_APP missing — run bootstrap-staging-host.sh first."
+  # This script re-pins the ACTIVE checkout in place (first-deploy path). A host
+  # that already uses the release-directory layout must only be changed by the
+  # phased rollout (staging -> verified backup -> migrate -> activation).
+  log "Preflight: legacy (first-deploy) layout — no release directories/current …"
+  local ops_root; ops_root="$(dirname "$REMOTE_APP")"
+  rsh "! test -e '$ops_root/current' && ! test -d '$ops_root/releases'" \
+    || die "$ops_root/current or $ops_root/releases exists: release-directory layout in use — use \`python -m nlw.ops.rollout\` (docs/runbooks/staging-signed-context-rollout.md), never this script."
   log "Preflight: free disk ≥ 10 GiB on / …"
   local free_kb
   free_kb="$(rsh "df -Pk / | awk 'NR==2{print \$4}'")"

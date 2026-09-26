@@ -139,3 +139,32 @@ def test_validated_work_dir_refuses_dangerous_targets(tmp_path: Path) -> None:
             validated_work_dir(bad)
     good = validated_work_dir(str(tmp_path / "wd"))
     assert good.exists() and (good.stat().st_mode & 0o777) == 0o700
+
+
+def test_validation_errors_never_echo_supplied_credential_values() -> None:
+    """The CLI prints the validation error to the journal; a partly filled env
+    file must not leak the values that WERE supplied (pydantic input echo)."""
+    from pydantic import SecretStr, ValidationError
+
+    from nlw.backup.config import BackupSettings, RestoreSettings
+
+    with pytest.raises(ValidationError) as info:
+        BackupSettings(
+            app_env="production",
+            RESTIC_REPOSITORY="s3:https://s3.example/b/nlw",
+            RESTIC_PASSWORD=SecretStr("hunter2-repo-passphrase"),
+            AWS_ACCESS_KEY_ID=SecretStr("AKIAEXAMPLEEXAMPLE"),
+            AWS_SECRET_ACCESS_KEY=SecretStr(""),  # missing -> fail closed
+            NLW_BACKUP_DATABASE_URL=SecretStr(""),
+        )
+    text = str(info.value)
+    assert "fail-closed" in text
+    for secret in ("hunter2-repo-passphrase", "AKIAEXAMPLEEXAMPLE", "s3.example"):
+        assert secret not in text
+    with pytest.raises(ValidationError) as info2:
+        RestoreSettings(
+            app_env="production",
+            NLW_RESTORE_RUNTIME_GUARD="off",
+            RESTIC_PASSWORD=SecretStr("another-passphrase-value"),
+        )
+    assert "another-passphrase-value" not in str(info2.value)

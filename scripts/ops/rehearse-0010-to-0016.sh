@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# DISPOSABLE upgrade rehearsal: M11 runtime + schema 0010  ->  P3B runtime + schema 0016
+# DISPOSABLE upgrade rehearsal: M11 runtime + schema 0010  ->  the CURRENT release
+# (target head derived from the working tree's migrations; the file name keeps the
+# historical 0010->0016 boundary it was written for, the checks are head-agnostic).
 # (M12A-Prep §N, revised for the release-manifest / backup-first sequencing).
 # Everything is local and thrown away; NOTHING touches a real host, a real
 # backup provider, or production keys.
@@ -38,7 +40,7 @@
 #   6  post-upgrade proofs: invitation accept + four-eyes approval under signed
 #      contexts, a worker-executed synthetic run, one scheduler occurrence,
 #      Prometheus rule groups loaded;
-#   7  a SEPARATE disposable downgrade 0016 -> 0015 proving the legacy policies
+#   7  a SEPARATE disposable downgrade <head> -> 0015 proving the legacy policies
 #      come back (documented rollback warning), then cleanup of keys, manifests,
 #      volumes and the registry.
 #
@@ -88,6 +90,24 @@ assert_untouched() {  # the M11 side is exactly as before: schema, roles, config
   ok "$1: no roles, no migration, no active-config switch; OLD runtime still serving"
 }
 
+# The rollout must never recreate the live datastores nor create a second Compose
+# project / database volume (explicit -p on both sides; --no-deps on one-shots).
+snapshot_docker() { docker volume ls -q | sort > "$TMP/volumes.$1"; docker compose ls -aq 2>/dev/null | sort > "$TMP/projects.$1"; }
+assert_datastores_untouched() {
+  local pg redis
+  pg="$(docker ps -q --no-trunc --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=postgres")"
+  redis="$(docker ps -q --no-trunc --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=redis")"
+  [ "$pg" = "$PG_CID" ] || die "$1: the postgres CONTAINER was recreated (${PG_CID:0:12} -> ${pg:0:12})"
+  [ "$redis" = "$REDIS_CID" ] || die "$1: the redis CONTAINER was recreated"
+  snapshot_docker after
+  local added; added="$(comm -13 "$TMP/volumes.before" "$TMP/volumes.after")"
+  ! grep -q '_pgdata$' <<<"$added" || die "$1: a NEW database volume appeared: $added"
+  [ -z "$(grep -v "^${PROJ}_" <<<"$added" | grep -v '^$')" ] || die "$1: volumes outside the project were created: $added"
+  [ -z "$(comm -13 "$TMP/projects.before" "$TMP/projects.after")" ] || die "$1: a second Compose project appeared"
+  [ "$(docker volume ls -q | grep -c "^${PROJ}_pgdata$")" = "1" ] || die "$1: pgdata volume count != 1"
+  ok "$1: postgres/redis containers, the single pgdata volume and the project are untouched"
+}
+
 cleanup() {
   log "cleanup (${PROJ}) — keys, manifests, volumes, registry, worktrees"
   docker compose -p "$PROJ" --env-file "$APP/.env.prod" -f "$APP/docker-compose.prod.yml" -f "$OVERLAY" down -v --remove-orphans >/dev/null 2>&1 || true
@@ -113,6 +133,12 @@ rsync -a --exclude .git --exclude .venv --exclude node_modules --exclude "web/.n
   --exclude "docker/ctx-keys" --exclude ".env*" --exclude "/supabase/" --exclude ".rollout" "$REPO/" "$SRC/"
 git -C "$SRC" add -A >/dev/null && git -C "$SRC" -c user.name=rehearsal -c user.email=r@localhost commit -q -m "rehearsal snapshot" --allow-empty
 NEW_SHA="$(git -C "$SRC" rev-parse HEAD)"
+# The rollout is head-agnostic (migrate -> `alembic upgrade head`, verified against the
+# manifest's target_revision, which the generator derives from the migrations). The
+# rehearsal asserts the SAME derived values instead of a hard-coded revision.
+TARGET_HEAD="$(uv run python -c 'from nlw.ops.release_manifest import alembic_head; print(alembic_head())')"
+EXPECTED_POLICIES="$(uv run python -c 'from nlw.ops.rollout.phases import EXPECTED_SIGNED_POLICIES as n; print(n)')"
+ok "target head ${TARGET_HEAD} (expected signed policies after migrate: ${EXPECTED_POLICIES})"
 git -C "$SRC" worktree add -q --detach "$OLD" "$OLD_SHA"
 mkdir -p "$OPS"
 git clone -q "$SRC" "$APP" && git -C "$APP" checkout -q --detach "$OLD_SHA"
@@ -151,6 +177,10 @@ SUPABASE_JWKS_URL=https://proj.supabase.co/auth/v1/.well-known/jwks.json
 SUPABASE_JWT_ISSUER=https://proj.supabase.co/auth/v1
 EOF
 ACTIVE_ENV_HASH="$(shasum -a 256 "$APP/.env.prod" | cut -d' ' -f1)"
+# The legacy host keeps the worker's connector secrets in a git-IGNORED env file
+# that `git clone` never carries; the rollout must stage it explicitly.
+printf 'NLW_SECRET_REHEARSAL=rehearsal-not-a-secret\n' > "$APP/docker/worker.secrets.env"
+chmod 600 "$APP/docker/worker.secrets.env"
 write_backup_env() {  # $1 = dump credential (a WRONG one forces the backup job to fail at once)
   cat > "$OPS/.env.backup" <<EOF
 APP_ENV=local
@@ -267,7 +297,21 @@ EOF
 ok "seeded user/workspace/workflow/terminal run"
 
 log "6/10 ROLLOUT: preflight -> verify-release (OLD image REJECTED, current image OK) -> prepare-keys -> verify-escrow"
+T_ROLLOUT_START=$(date +%s)
 "${ROLLOUT[@]}" preflight
+PG_CID="$(docker ps -q --no-trunc --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=postgres")"
+REDIS_CID="$(docker ps -q --no-trunc --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=redis")"
+snapshot_docker before
+# The backup env file is read CLIENT-SIDE by the rollout user: unreadable or
+# world-readable files stop the rollout at preflight, before anything is staged.
+chmod 000 "$OPS/.env.backup"
+must_fail "preflight passed with an unreadable backup env file" "${ROLLOUT[@]}" preflight
+grep -q "not readable" <<<"$LAST_OUT" || die "unreadable backup env rejected for the wrong reason: $LAST_OUT"
+chmod 644 "$OPS/.env.backup"
+must_fail "preflight passed with a world-readable backup env file" "${ROLLOUT[@]}" preflight
+grep -q "world-readable" <<<"$LAST_OUT" || die "world-readable backup env rejected for the wrong reason: $LAST_OUT"
+chmod 600 "$OPS/.env.backup"
+ok "preflight: backup env file must be readable by the rollout user and not world-readable (contents never read)"
 must_fail "verify-release accepted the OLD image" uv run python -m nlw.ops.rollout --local \
   --release "$OLD_IMAGE_MANIFEST" --provenance-fixture "$OLD_IMAGE_PROV" --target "$TMP/target.env" --keys-dir "$KEYS" verify-release --authorize "$AUTH"
 grep -q "revision label" <<<"$LAST_OUT" || die "old image rejected for the wrong reason: $LAST_OUT"
@@ -275,7 +319,7 @@ ok "verify-release: a manifest naming the OLD (unlabelled, pre-tooling) image is
 "${ROLLOUT[@]}" verify-release --authorize "$AUTH"
 grep -q '"verify-release"' "$OPS/rollout/$NEW_SHA.json" || die "verify-release not recorded"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["evidence"]["verify-release"]; assert d["image_git_sha"]==sys.argv[2], d; assert len(d["commands_verified"])==6, d' "$OPS/rollout/$NEW_SHA.json" "$NEW_SHA"
-ok "verify-release: current image carries the release SHA, migrations 0011-0016, head 0016, all 6 required commands"
+ok "verify-release: current image carries the release SHA, migrations 0011-${TARGET_HEAD:0:4}, head ${TARGET_HEAD}, all 6 required commands"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["manifest_sha256"]==sys.argv[2], d; assert d["evidence"]["verify-release"]["provenance"]["fixture"] is True' "$OPS/rollout/$NEW_SHA.json" "$(shasum -a 256 "$MANIFEST" | cut -d" " -f1)"
 [ -f "$OPS/rollout/$NEW_SHA.receipt.json" ] && cmp -s "$OPS/rollout/$NEW_SHA.manifest.json" "$MANIFEST" || die "verified manifest + receipt not stored as evidence"
 ok "state bound to the manifest digest; verified manifest + provenance receipt stored under $OPS/rollout (evidence dir, outside checkouts)"
@@ -318,6 +362,11 @@ log "7/10 stage-release (INACTIVE) -> forced backup failures -> real backup -> v
 STAGED="$OPS/releases/$NEW_SHA"
 [ "$(git -C "$STAGED" rev-parse HEAD)" = "$NEW_SHA" ] || die "staged release is not at the release SHA"
 grep -q "^NLW_IMAGE=$NEW_BACKEND$" "$STAGED/.env.prod" || die "staged .env.prod not pinned to the new digest"
+[ -f "$STAGED/docker/worker.secrets.env" ] || die "worker connector secrets file was NOT carried into the staged release"
+[ "$(stat -f %Lp "$STAGED/docker/worker.secrets.env" 2>/dev/null || stat -c %a "$STAGED/docker/worker.secrets.env")" = "600" ] || die "staged worker secrets file is not 0600"
+cmp -s "$APP/docker/worker.secrets.env" "$STAGED/docker/worker.secrets.env" || die "staged worker secrets file differs from the active one"
+[ -z "$(git -C "$STAGED" status --porcelain)" ] || die "staging the worker secrets file dirtied the release checkout"
+ok "worker connector secrets file staged (0600, git-ignored, checkout still clean)"
 assert_untouched "after stage-release (release staged inactive)"
 # Forced failure 1: verify-backup with NO backup evidence yet.
 must_fail "verify-backup passed without any backup" "${ROLLOUT[@]}" verify-backup --authorize "$AUTH" --allow-fixture-repository
@@ -340,24 +389,39 @@ must_fail "fixture repository accepted without the rehearsal switch" "${ROLLOUT[
 grep -qi "fixture\|off-host\|https" <<<"$LAST_OUT" || die "fixture refused for the wrong reason: $LAST_OUT"
 "${ROLLOUT[@]}" verify-backup --authorize "$AUTH" --allow-fixture-repository
 assert_untouched "after verify-backup (backup verified BEFORE any role/migration)"
+assert_datastores_untouched "after verify-backup"
 
-log "8/10 drain -> prepare-roles -> migrate 0010->0016 -> install keys -> recreate (ACTIVATE) -> validate -> reopen -> go-check"
+log "8/10 drain -> prepare-roles -> migrate 0010->${TARGET_HEAD} -> install keys -> recreate (ACTIVATE) -> validate -> reopen -> go-check"
 "${ROLLOUT[@]}" drain --authorize "$AUTH"
 curl -sS -o /dev/null -w '%{http_code}' -k --resolve rehearsal.localhost:8443:127.0.0.1 https://rehearsal.localhost:8443/login | grep -q '^503$' && ok "maintenance mode: edge serves 503" || die "maintenance 503 not served"
 "${ROLLOUT[@]}" prepare-roles --authorize "$AUTH"
 [ "$(psql_owner "SELECT count(*) FROM pg_roles WHERE rolname IN ('nlw_membership_admin','nlw_ctx_verifier')")" = "2" ] || die "roles not provisioned"
 ok "roles provisioned — only after the verified backup"
 "${ROLLOUT[@]}" migrate --authorize "$AUTH"
-[ "$(psql_owner "SELECT version_num FROM alembic_version")" = "0016_signed_database_context" ] || die "not at 0016"
-[ "$(psql_owner "SELECT count(*) FROM pg_policies")" = "51" ] || die "policy count != 51"
-ok "schema 0016; 51 signed policies"
+[ "$(psql_owner "SELECT version_num FROM alembic_version")" = "$TARGET_HEAD" ] || die "not at ${TARGET_HEAD}"
+[ "$(psql_owner "SELECT count(*) FROM pg_policies")" = "$EXPECTED_POLICIES" ] || die "policy count != ${EXPECTED_POLICIES}"
+ok "schema ${TARGET_HEAD}; ${EXPECTED_POLICIES} signed policies"
+assert_datastores_untouched "after prepare-roles + migrate (one-shot runs use --no-deps)"
 "${ROLLOUT[@]}" install-context-keys --authorize "$AUTH"
 [ ! -e "$OPS/current" ] || die "active release switched before recreate-runtime"
+# A real DIRECTORY at <ops_root>/current must refuse activation (a link would
+# otherwise be created INSIDE it and nothing would actually switch).
+mkdir "$OPS/current"
+must_fail "activated over a directory at current" "${ROLLOUT[@]}" recreate-runtime --authorize "$AUTH"
+grep -q "not a symlink" <<<"$LAST_OUT" || die "directory at current rejected for the wrong reason: $LAST_OUT"
+rmdir "$OPS/current"
+# api/worker are STOPPED since drain; the (stopped) api container must still be the OLD image
+[ "$(docker inspect --format '{{index .Config.Image}}' "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=api" | head -1)")" = "$OLD_BACKEND" ] || die "runtimes were recreated despite the refused activation"
+ok "recreate-runtime refuses a directory at current; nothing recreated"
 "${ROLLOUT[@]}" recreate-runtime --authorize "$AUTH"
 [ "$(readlink "$OPS/current")" = "$STAGED" ] || die "current symlink does not point at the staged release"
 [ "$(running_api_image)" = "$NEW_BACKEND" ] || die "api is not running the NEW image after activation"
 [ "$(git -C "$APP" rev-parse HEAD)" = "$OLD_SHA" ] || die "the old checkout was modified (it must stay available for rollback)"
 ok "ACTIVATED: current -> releases/$NEW_SHA; api runs the NEW digest; old checkout intact"
+assert_datastores_untouched "after activation"
+WORKER_CID="$(docker ps -q --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=worker")"
+docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$WORKER_CID" | grep -q '^NLW_SECRET_REHEARSAL=' || die "recreated worker lost its connector secrets env file"
+ok "recreated worker carries the connector secrets env file (variable name checked, value never printed)"
 DC="docker compose -p $PROJ --env-file $STAGED/.env.prod -f $STAGED/docker-compose.prod.yml -f $STAGED/docker-compose.staging.yml -f $OVERLAY"
 "${ROLLOUT[@]}" validate --authorize "$AUTH"
 REOPEN_OUT="$("${ROLLOUT[@]}" reopen --authorize "$AUTH" 2>&1)"; printf '%s\n' "$REOPEN_OUT"
@@ -371,6 +435,8 @@ ok "go-check: NO-GO — the null receiver is never 'alert delivery configured'"
 ok "rollout state lives in $OPS/rollout (outside both checkouts); both checkouts are clean"
 curl -fsS http://127.0.0.1:8000/health/ready | grep -q '"signed_context":"ok"' || die "signed_context not ok"
 ok "NEW runtime ready with signed_context: ok"
+assert_datastores_untouched "after reopen"
+ok "LOCAL TIMING: preflight -> reopen took $(( $(date +%s) - T_ROLLOUT_START )) s (local rehearsal, not the VPS)"
 
 log "9/10 post-upgrade proofs: invitation + four-eyes (signed), worker run, scheduler occurrence, rules"
 APPR=$(uuidgen | tr A-F a-f); RUN2=$(uuidgen | tr A-F a-f); TOKEN="$(openssl rand -hex 24)"
@@ -398,14 +464,14 @@ RULE_GROUPS="$($DC exec -T prometheus wget -qO- http://127.0.0.1:9090/api/v1/rul
 $DC exec -T alertmanager wget -qO- http://127.0.0.1:9093/-/healthy | grep -qi ok || die "alertmanager unhealthy"
 ok "prometheus rule groups loaded (nlw-backup, nlw-signed-context); alertmanager healthy (null receiver: delivery UNVERIFIED)"
 
-log "10/10 SEPARATE disposable downgrade 0016 -> 0015: legacy policies return (documented rollback warning)"
+log "10/10 SEPARATE disposable downgrade ${TARGET_HEAD} -> 0015: legacy policies return (documented rollback warning)"
 $DC stop api worker scheduler >/dev/null
 $DC --profile migration run --rm -T migrate sh -c 'alembic downgrade 0015_membership_approval_sod' >/dev/null
 LEGACY="$(psql_owner "SELECT count(*) FROM pg_policies WHERE qual LIKE '%app.user_id%' OR qual LIKE '%app.tenant_id%' OR with_check LIKE '%app.user_id%' OR with_check LIKE '%app.tenant_id%'")"
 [ "$LEGACY" -gt 0 ] || die "downgrade did not restore legacy policies"
 ok "downgrade re-installs $LEGACY legacy unsigned-GUC policies — exactly why downgrade below 0016 is security-sensitive"
 $DC --profile migration run --rm -T migrate >/dev/null
-[ "$(psql_owner "SELECT version_num FROM alembic_version")" = "0016_signed_database_context" ] || die "re-upgrade failed"
-ok "re-upgraded to 0016 (up -> down -> up)"
+[ "$(psql_owner "SELECT version_num FROM alembic_version")" = "$TARGET_HEAD" ] || die "re-upgrade failed"
+ok "re-upgraded to ${TARGET_HEAD} (up -> down -> up)"
 
 printf '\n\033[1;32mREHEARSAL PASSED\033[0m — local, disposable, MinIO fixture (NOT DR evidence), null Alertmanager (delivery UNVERIFIED); keys, manifests and volumes are removed on exit.\n'

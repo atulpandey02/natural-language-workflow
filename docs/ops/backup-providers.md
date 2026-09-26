@@ -38,7 +38,15 @@ not from this platform.
    }
    ```
    Note: the write path intentionally has **no `s3:DeleteObject`** — see
-   ransomware resistance below.
+   ransomware resistance below. **Consequences you must decide before the
+   first backup:** (a) this policy is only consistent with
+   `NLW_BACKUP_RETENTION_MODE=immutable` — the default `simple` mode runs
+   `forget --prune` after each verified upload and FAILS the run (exit 2,
+   `nlw_backup_success 0`, the rollout's backup gate refuses) when delete is
+   denied; (b) restic removes its own transient `locks/*` objects after every
+   operation, so verify with your provider that lock cleanup works (or grant
+   `s3:DeleteObject` on `<prefix>/locks/*` only) before relying on a
+   no-delete writer.
 3. Environment:
    ```
    RESTIC_REPOSITORY=s3:https://s3.eu-west-1.amazonaws.com/YOUR-BUCKET/nlw

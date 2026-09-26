@@ -29,10 +29,15 @@ TimeoutStartSec=1800
 # EVERY service at render time, so the backup profile cannot render from
 # .env.backup alone. The backup credentials (BACKUP_AWS_*, RESTIC_*) are the only
 # additions; the `backup` service never receives runtime key mounts.
-# /opt/nlw/current is the ACTIVE release (symlink managed by the rollout; before
-# M12A point it at /opt/nlw/app). The compose project name is explicit.
+# /opt/nlw/current is the ACTIVE release (symlink created by the rollout's
+# recreate-runtime phase). Install this unit only AFTER the first activation: the
+# pre-M12A checkout has no `backup` service and the rollout takes the first
+# verified backup itself. The compose project name is explicit.
+# --no-deps is REQUIRED: the running postgres container was created from another
+# checkout directory (its relative bind mounts differ), and `run` without it
+# converges the diverged dependency by RECREATING the live database container.
 ExecStart=/usr/bin/docker compose -p app --env-file /opt/nlw/current/.env.prod --env-file /opt/nlw/.env.backup \
-    -f /opt/nlw/current/docker-compose.prod.yml --profile backup run --rm backup
+    -f /opt/nlw/current/docker-compose.prod.yml --profile backup run --rm --no-deps backup
 # Logs flow to the journal (the existing operational logging approach).
 StandardOutput=journal
 StandardError=journal

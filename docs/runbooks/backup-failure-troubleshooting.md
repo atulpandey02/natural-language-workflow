@@ -21,7 +21,10 @@ Read `journalctl -u nlw-backup.service`. Common causes:
 
 - **Fail-closed config** in staging/production: a missing `RESTIC_REPOSITORY` /
   `RESTIC_PASSWORD` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
-  `NLW_BACKUP_DATABASE_URL` raises at startup. Fix `.env.backup`.
+  `NLW_BACKUP_DATABASE_URL` raises at startup (exit 2) **before** the lock,
+  dump, upload or metrics write — so this case shows up as `NlwBackupStale`
+  (no fresh metrics), not `NlwBackupFailed`. The message names the missing
+  variables only; supplied values are never echoed. Fix `.env.backup`.
 - **Object store unreachable / 403:** bad keys, wrong bucket/region, or the
   provider rejecting the request. Verify with
   `--entrypoint restic backup snapshots`.

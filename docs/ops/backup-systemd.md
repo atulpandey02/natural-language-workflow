@@ -20,15 +20,19 @@ the thing it exists to recover would be self-defeating.
 ## Install
 
 ```bash
-# 1. Backup credentials in a root-only env file (never committed, never on argv).
-sudo install -m 0600 /dev/null /opt/nlw/.env.backup
-sudo editor /opt/nlw/.env.backup     # fill from .env.backup.example
+# 1. Backup credentials in an env file (never committed, never on argv). The
+#    SAME file is read client-side by `docker compose --env-file` in the rollout's
+#    backup/verify-backup phases, which run as the SSH user (nlwops, no sudo):
+#    it must be readable by that user and must not be world-readable
+#    (preflight refuses otherwise). Recorded decision: root:nlwops 0640.
+sudo install -m 0640 -o root -g nlwops /dev/null /opt/nlw/.env.backup
+sudo editor /opt/nlw/.env.backup     # fill from .env.backup.example (DB host = `postgres`)
 
-# 2. Install the units.
-# The unit runs Compose from /opt/nlw/current (the ACTIVE release symlink the
-# rollout's recreate-runtime phase points at /opt/nlw/releases/<sha>); on a host
-# that has never been through the rollout, create it first:
-#   sudo ln -sfn /opt/nlw/app /opt/nlw/current
+# 2. Install the units — ONLY AFTER the first activation.
+# The unit runs Compose from /opt/nlw/current, which the rollout's
+# recreate-runtime phase creates (-> /opt/nlw/releases/<sha>). Do NOT pre-create
+# `current -> app`: the pre-M12A checkout has no `backup` service, and the
+# rollout takes (and verifies) the first backup itself from the staged release.
 sudo cp /opt/nlw/current/docker/systemd/nlw-backup.service /etc/systemd/system/
 sudo cp /opt/nlw/current/docker/systemd/nlw-backup.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -56,6 +60,11 @@ process holds it.
 > defense in depth, and restic's lock still prevents repository corruption in the
 > worst case. The manual `docker compose run backup` and the systemd unit use the
 > SAME lock path (both run the same container against the same `backup_run` volume).
+
+The unit passes `--no-deps`: the live `postgres` container was created from a
+different checkout directory, so its relative bind mounts differ from the
+staged one; without `--no-deps` Compose "converges" the dependency by
+**recreating the database container** on every backup (reproduced on Compose v5).
 
 A failed run exits non-zero, so the unit shows `failed` in journald and the
 freshness metric (`nlw_backup_last_success_timestamp_seconds`) is **not** advanced

@@ -281,6 +281,18 @@ def test_backup_systemd_unit_renders_with_both_env_files() -> None:
     unit = (ROOT / "docker/systemd/nlw-backup.service").read_text()
     assert "--env-file /opt/nlw/current/.env.prod --env-file /opt/nlw/.env.backup" in unit
     assert "/opt/nlw/current/docker-compose.prod.yml" in unit and "-p app" in unit
+    # The timer runs from a different checkout directory than the one the live
+    # postgres container was created from; without --no-deps Compose recreates it.
+    assert "--profile backup run --rm --no-deps backup" in unit
+
+
+def test_backup_env_examples_name_the_compose_postgres_service() -> None:
+    compose = (ROOT / "docker-compose.prod.yml").read_text()
+    assert re.search(r"^  postgres:$", compose, re.M) and not re.search(r"^  db:$", compose, re.M)
+    for name in (".env.backup.example", ".env.restore.example"):
+        example = (ROOT / name).read_text()
+        urls = re.findall(r"DATABASE_URL=postgresql://[^@]+@([a-z]+):5432/nlw", example)
+        assert urls and all(host == "postgres" for host in urls), (name, urls)
 
 
 def test_rollout_backup_gate_is_wired_before_migration() -> None:

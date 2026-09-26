@@ -72,10 +72,14 @@ all boxes are ticked.
       the intended instance (`i-0d1e65cdc9401dbb9`): revision
       `0010_readiness_schema_grant`, M11 roles, zero non-terminal work.
 - [ ] `verify-release` passed: both digests pulled, revision labels == release
-      SHA, backend image reports the SHA, migrations 0011–0016, head `0016`, all
-      rollout commands present (an older image such as `1eebf2e` is refused).
+      SHA, backend image reports the SHA, every migration up to the manifest's
+      `target_revision` (the `7c3d350` release: `0020_schedule_authorization`),
+      head == target, all rollout commands present (an older image such as
+      `1eebf2e` is refused).
 - [ ] Off-host backup provider configured (`docs/ops/backup-providers.md`),
-      `/opt/nlw/.env.backup` in place, `nlw-backup.timer` active; the release
+      `/opt/nlw/.env.backup` in place **and readable by `nlwops`, not
+      world-readable** (preflight checks the mode), retention mode chosen to
+      match the IAM writer; the release
       staged inactive (`stage-release`, `/opt/nlw/releases/<sha>`); the rollout
       `backup` phase ran and **`verify-backup` passed** on evidence bound to
       this instance, environment, database identifier, active release and
@@ -93,9 +97,12 @@ all boxes are ticked.
       completed; state file (`/opt/nlw/rollout/<sha>.json`) kept as evidence;
       `signed_context: ok`; the open launch gates recorded by `reopen` listed
       verbatim in the report.
-- [ ] `scripts/ops/verify-staging-deployment.sh` green after reopen (instance id,
-      release digests, roles incl. `nlw_ctx_verifier`, schema `0016`, registry
-      posture, TLS).
+- [ ] Post-reopen verification: `readlink /opt/nlw/current` == `/opt/nlw/releases/<sha>`,
+      the rollout `validate` record (`signed_context: ok`, roles incl.
+      `nlw_ctx_verifier`, schema == `target_revision`, registry posture) and the
+      TLS check. (`scripts/ops/verify-staging-deployment.sh` still inspects the
+      legacy `/opt/nlw/app` checkout and FLAGs after activation — known limitation;
+      install `nlw-backup.timer` only now.)
 - [ ] Prometheus rule groups `nlw-backup` + `nlw-signed-context` loaded;
       Alertmanager reachable; **a real alert receiver wired, credential files
       present, and a controlled test alert delivered and recorded** —
