@@ -54,6 +54,12 @@ const STATUS_CLASS: Record<string, string> = {
   // cannot be proven. Distinct from a definite failure — surfaced as a warning.
   unknown: "warn",
   UNKNOWN: "warn",
+  SKIPPED: "skip",
+  FAILED_WITH_UNKNOWN: "warn",
+  NEEDS_APPROVAL: "warn",
+  NEEDS_CLARIFICATION: "warn",
+  PASS: "ok",
+  REJECT: "fail",
 };
 
 export function StatusBadge({ status }: { status: string }) {

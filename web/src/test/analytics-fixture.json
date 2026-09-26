@@ -1,0 +1,230 @@
+{
+  "contract_version": "analytics-1",
+  "title": "Analysis results",
+  "status": "READY",
+  "run_outcome": "COMPLETED",
+  "metrics": [
+    {
+      "label": "Revenue",
+      "value": 280617.2,
+      "unit": "USD",
+      "source_step_ids": ["analyze"]
+    },
+    {
+      "label": "Orders",
+      "value": 1257,
+      "unit": "count",
+      "source_step_ids": ["analyze"]
+    },
+    {
+      "label": "Average order value",
+      "value": 223.24,
+      "unit": "USD",
+      "source_step_ids": ["analyze"]
+    },
+    {
+      "label": "Units",
+      "value": 3889,
+      "unit": "count",
+      "source_step_ids": ["analyze"]
+    }
+  ],
+  "visualizations": [
+    {
+      "kind": "line",
+      "title": "Monthly revenue",
+      "labels": ["2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08"],
+      "series": [
+        {
+          "label": "Revenue",
+          "unit": "USD",
+          "values": [40647.45, 47522.8, 47090.65, 43789.15, 53931.15, 47636.0]
+        }
+      ],
+      "source_step_ids": ["analyze"]
+    },
+    {
+      "kind": "line",
+      "title": "Order trend",
+      "labels": ["2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08"],
+      "series": [
+        {
+          "label": "Orders",
+          "unit": "count",
+          "values": [204, 212, 220, 211, 207, 203]
+        }
+      ],
+      "source_step_ids": ["analyze"]
+    },
+    {
+      "kind": "bar",
+      "title": "Category performance",
+      "labels": ["Accessories", "Electronics", "Home", "Office"],
+      "series": [
+        {
+          "label": "Revenue",
+          "unit": "USD",
+          "values": [17128.8, 165840.0, 61222.4, 36426.0]
+        }
+      ],
+      "source_step_ids": ["analyze"]
+    },
+    {
+      "kind": "bar",
+      "title": "Regional revenue",
+      "labels": ["East", "North", "South", "West"],
+      "series": [
+        {
+          "label": "Revenue",
+          "unit": "USD",
+          "values": [59831.4, 76740.2, 71465.5, 72580.1]
+        }
+      ],
+      "source_step_ids": ["analyze"]
+    }
+  ],
+  "tables": [
+    {
+      "title": "Monthly supporting data",
+      "dimension": "Month",
+      "labels": ["2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08"],
+      "series": [
+        {
+          "label": "Revenue",
+          "unit": "USD",
+          "values": [40647.45, 47522.8, 47090.65, 43789.15, 53931.15, 47636.0]
+        },
+        {
+          "label": "Orders",
+          "unit": "count",
+          "values": [204, 212, 220, 211, 207, 203]
+        },
+        {
+          "label": "Average order value",
+          "unit": "USD",
+          "values": [199.25, 224.16, 214.05, 207.53, 260.54, 234.66]
+        },
+        {
+          "label": "Units",
+          "unit": "count",
+          "values": [611, 662, 691, 631, 689, 605]
+        }
+      ],
+      "source_step_ids": ["analyze"]
+    },
+    {
+      "title": "Categories",
+      "dimension": "Category",
+      "labels": ["Accessories", "Electronics", "Home", "Office"],
+      "series": [
+        {
+          "label": "Revenue",
+          "unit": "USD",
+          "values": [17128.8, 165840.0, 61222.4, 36426.0]
+        },
+        {
+          "label": "Orders",
+          "unit": "count",
+          "values": [249, 336, 336, 336]
+        },
+        {
+          "label": "Revenue change",
+          "unit": "percent",
+          "values": [-69.04, 23.31, 46.77, 5.68]
+        },
+        {
+          "label": "Units",
+          "unit": "count",
+          "values": [763, 1113, 1022, 991]
+        }
+      ],
+      "source_step_ids": ["analyze"]
+    },
+    {
+      "title": "Regional performance",
+      "dimension": "Region",
+      "labels": ["East", "North", "South", "West"],
+      "series": [
+        {
+          "label": "Revenue",
+          "unit": "USD",
+          "values": [59831.4, 76740.2, 71465.5, 72580.1]
+        },
+        {
+          "label": "Orders",
+          "unit": "count",
+          "values": [285, 344, 303, 325]
+        },
+        {
+          "label": "Average order value",
+          "unit": "USD",
+          "values": [209.93, 223.08, 235.86, 223.32]
+        },
+        {
+          "label": "Units",
+          "unit": "count",
+          "values": [836, 1097, 951, 1005]
+        }
+      ],
+      "source_step_ids": ["analyze"]
+    },
+    {
+      "title": "Product performance",
+      "dimension": "Product",
+      "labels": [
+        "Everyday Accessories",
+        "Premium Accessories",
+        "Everyday Electronics",
+        "Premium Electronics",
+        "Everyday Home",
+        "Premium Home",
+        "Everyday Office",
+        "Premium Office"
+      ],
+      "series": [
+        {
+          "label": "Revenue",
+          "unit": "USD",
+          "values": [8758.8, 8370.0, 91480.0, 74360.0, 31888.0, 29334.4, 17776.2, 18649.8]
+        },
+        {
+          "label": "Orders",
+          "unit": "count",
+          "values": [126, 123, 171, 165, 171, 165, 171, 165]
+        },
+        {
+          "label": "Average order value",
+          "unit": "USD",
+          "values": [69.51, 68.05, 534.97, 450.67, 186.48, 177.78, 103.95, 113.03]
+        },
+        {
+          "label": "Units",
+          "unit": "count",
+          "values": [391, 372, 613, 500, 531, 491, 480, 511]
+        }
+      ],
+      "source_step_ids": ["analyze"]
+    }
+  ],
+  "findings": [
+    {
+      "text": "Electronics has the highest revenue; Accessories has the lowest in this period.",
+      "source_step_ids": ["analyze"]
+    },
+    {
+      "text": "Accessories revenue declined 69.0% between the first and last month. This is a comparison, not a causal explanation.",
+      "source_step_ids": ["analyze"]
+    }
+  ],
+  "freshness": [
+    {
+      "dataset": "sales-v1",
+      "as_of": "2026-09-01",
+      "period_start": "2026-03-01",
+      "period_end": "2026-08-31",
+      "synthetic": true
+    }
+  ],
+  "source_step_ids": ["analyze"],
+  "summary_digest": "37e729d2de25141369442b51dc640e611ab679754f73d8a06186c9d02129007f"
+}

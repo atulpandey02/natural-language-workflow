@@ -41,6 +41,7 @@ decision, numbered and never deleted (supersede instead of removing).
 | [024](ADR-024-signed-database-context.md) | Signed (HMAC) database context — design + threat model; RLS trusts only verified claims | Accepted — implemented (migration `0016`, M11.5 P3B) |
 | [025](ADR-025-release-manifest-provenance.md) | Release-manifest provenance — GitHub artifact attestations bound to repository / workflow / main / push / commit and to the manifest + both image digests, verified before any host contact; explicit trust boundary | Accepted |
 | [026](ADR-026-ai-execution-architecture.md) | AI execution architecture — planner/executor with deterministic feasibility, not an agent loop; provenance, stale-plan detection, deterministic summaries | Accepted (M12B-A) |
+| [027](ADR-027-grounded-pilot-analytics.md) | Bounded grounded analytics, Recharts rendering and immutable two-proposal Slack handoff | Accepted for M12C; pending visual UX review |
 
 ## Template
 

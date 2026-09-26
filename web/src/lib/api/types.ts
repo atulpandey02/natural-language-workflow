@@ -1,3 +1,4 @@
+import type { AnalyticsSource } from "@/lib/analytics";
 // TypeScript mirrors of the backend response models (nlw.api.schemas).
 
 export interface UserOut {
@@ -39,6 +40,7 @@ export interface ToolOut {
 export type FeasibilityStatus = "PASS" | "REJECT" | "NEEDS_CLARIFICATION" | "NEEDS_APPROVAL";
 
 export interface PlanProposalOut {
+  analytics_source?: AnalyticsSource | null;
   id: string;
   status: FeasibilityStatus;
   workflow_name: string;
@@ -200,6 +202,7 @@ export interface RunCreateOut {
 
 // Request→plan provenance (M12B-A): what caused a workflow version to exist.
 export interface WorkflowProvenanceOut {
+  analytics_source?: AnalyticsSource | null;
   workflow_version_id: string;
   request_text: string | null;
   request_sha256: string | null;

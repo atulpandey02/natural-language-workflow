@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { PlanProposalOut } from "@/lib/api/types";
 import { useMaterialize } from "@/lib/api/hooks";
@@ -24,8 +25,12 @@ export function PlanReview({ proposal }: { proposal: PlanProposalOut }) {
   const clarifications = proposal.clarification_questions ?? [];
 
   async function onMaterialize() {
-    const result = await materialize.mutateAsync(proposal.id);
-    router.push(`/workflows/${result.workflow_id}`);
+    try {
+      const result = await materialize.mutateAsync(proposal.id);
+      router.push(`/workflows/${result.workflow_id}`);
+    } catch {
+      /* mutation exposes the error */
+    }
   }
 
   return (
@@ -35,6 +40,29 @@ export function PlanReview({ proposal }: { proposal: PlanProposalOut }) {
         <StatusBadge status={proposal.status} />
       </div>
 
+      {proposal.analytics_source ? (
+        <section className="handoff-evidence" aria-label="Slack proposal evidence">
+          <h3>Exact message for approval</h3>
+          <p>
+            Destination: <strong>{proposal.analytics_source.channel}</strong>
+          </p>
+          <pre>
+            {String(
+              (
+                proposal.proposed_plan?.steps as Array<{ args?: { text?: string } }> | undefined
+              )?.[0]?.args?.text ?? "Message unavailable",
+            )}
+          </pre>
+          <Link href={`/runs/${proposal.analytics_source.source_run_id}`}>
+            Open source analysis run
+          </Link>
+          <p className="muted small">
+            {proposal.analytics_source.contract_version} · message digest{" "}
+            <code>{proposal.analytics_source.message_digest}</code>
+          </p>
+          <p>A separate run will request approval from a different admin or owner.</p>
+        </section>
+      ) : null}
       {proposal.proposed_plan ? (
         <>
           <h3 style={{ fontSize: 14 }}>Proposed steps</h3>

@@ -11,6 +11,11 @@ vi.mock("@/lib/api/hooks", () => ({
   useRunSteps: vi.fn(),
   useRunActions: vi.fn(),
   useRunSummary: vi.fn(),
+  useWorkflowProvenance: vi.fn(() => ({ data: undefined })),
+}));
+
+vi.mock("@/components/AnalyticsPanel", () => ({
+  AnalyticsPanel: () => <div>Analytics panel</div>,
 }));
 
 import RunDetailPage from "./page";
