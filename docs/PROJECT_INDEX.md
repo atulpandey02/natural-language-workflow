@@ -533,13 +533,20 @@ correction). "Correction pending" items are being fixed in dedicated commits.
   superuser or host root can mint context (ADR-024).
 - **Legacy workflow versions predating `0019`** are name-resolved, not
   identity-pinned, until re-materialized (the rollout go-live report counts them).
-- **Rollout tooling binds the active checkout by configuration, not by
-  `/opt/nlw/current`.** `deploy/staging/target.env` names `/opt/nlw/app`; that is
-  correct for the FIRST rollout only. After activation the next release needs the
-  tooling to follow `current` (and to fetch from the GitHub origin rather than
-  the local clone chain). Enforced: the pre-activation phases refuse a host whose
-  `current` points at another release (fail closed, nothing changed) — a second
-  rollout cannot start before that lands.
+- **Rollout tooling binds the active checkout by configuration.**
+  `deploy/staging/target.env` names it explicitly — `/opt/nlw/current` since the
+  first staging rollout completed (schema `0020`); every phase reads, stops and
+  clones through `current`, fetches the release SHA from `NLW_STAGING_GIT_REMOTE`
+  and re-points `current` on activation (rehearsed N → N+1). Mismatches between
+  the target and the host layout fail closed. Still open: a release **without a
+  new migration** cannot be rolled out (the manifest generator refuses
+  `expected_current_revision == target_revision`).
+- **Operator Alertmanager authority is host-side, named in `target.env`.**
+  The receiver config, its credential files (`root:65534 0750/0640` — Alertmanager
+  runs as uid 65534) and the Compose override live outside every checkout;
+  `reopen`/`go-check` evaluate the RUNNING container (mounts, mounted bytes,
+  loaded config), never the committed null file. The delivery record stays a
+  human-written file (`scripts/ops/record-alert-delivery.sh`, `root:nlwops 0640`).
 - **Timer backups carry no release binding.** The rollout's `backup` phase binds
   instance/environment/release per run; systemd-timer backups bind only the
   instance/environment set in `.env.backup` (a static release would go stale).
