@@ -21,7 +21,7 @@ from nlw.ops import release_manifest as rm
 from nlw.ops.release_provenance import ProvenanceReceipt
 from nlw.ops.rollout.gates import AUTHORIZATION_PHRASE, ESCROW_PHRASE, GateError
 from nlw.ops.rollout.phases import Operator, Rollout, RolloutStop
-from nlw.ops.rollout.remote import CommandResult, TargetConfig
+from nlw.ops.rollout.remote import CommandResult, OperatorAlerting, TargetConfig
 from nlw.ops.rollout.state import PHASES, PRE_BACKUP_PHASES, StateError
 
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
@@ -58,6 +58,17 @@ REL = replace(
     raw=REL_RAW,
     source_path="release-manifest.json",
 )
+# Operator Alertmanager authority: host paths OUTSIDE every release checkout.
+OVR = "/opt/nlw/docker-compose.operator.yml"
+AMCFG = "/opt/nlw/alertmanager/alertmanager.yml"
+AMSEC = "/opt/nlw/alertmanager.secrets"
+CFG_MOUNT = "/etc/alertmanager/alertmanager.yml"
+SEC_MOUNT = "/etc/alertmanager/secrets"
+STAT_AM = r"--entrypoint stat -v '/opt/nlw/alertmanager\.secrets:/probe:ro' .* "
+FPS_LINES = (
+    f"api stg-api-1 {'1' * 64}\nworker stg-worker-1 {'2' * 64}\nscheduler stg-sched-1 {'3' * 64}"
+)
+OPERATOR = OperatorAlerting(config_path=AMCFG, secrets_dir=AMSEC, override_path=OVR)
 TGT = TargetConfig(
     instance_id=REL.instance_id,
     ssh_host="32.197.83.193",
@@ -66,7 +77,9 @@ TGT = TargetConfig(
     remote_app="/opt/nlw/app",
     compose_project="app",
     ops_root="/opt/nlw",
+    operator_alerting=OPERATOR,
 )
+TGT_LEGACY_NO_OPERATOR = replace(TGT, operator_alerting=None)
 STAGED = "/opt/nlw/releases/" + SHA
 IMDS = "instance-id=i-0d1e65cdc9401dbb9\nplacement/region=us-east-1\npublic-ipv4=32.197.83.193\n"
 ROLES_M11 = (
@@ -183,6 +196,71 @@ class FakeRemote:
         return any(re.search(pattern, c) for c in self.commands)
 
 
+OVERRIDE_YAML = (
+    "services:\n  alertmanager:\n    volumes:\n"
+    f"      - {AMCFG}:/etc/alertmanager/alertmanager.yml:ro\n"
+    f"      - {AMSEC}:/etc/alertmanager/secrets:ro\n"
+)
+OPERATOR_CFG = (
+    'route:\n  receiver: ops-slack\nreceivers:\n  - name: "null"\n  - name: ops-slack\n'
+    "    slack_configs:\n      - api_url_file: /etc/alertmanager/secrets/slack.url\n"
+)
+NULL_CFG = (
+    Path(__file__).resolve().parents[2] / "docker/alertmanager/alertmanager.yml"
+).read_text()
+CFG_SHA = "c" * 64
+TGT_OP = TGT
+# The N+1 target: the active deployment IS the activation symlink.
+TGT_CURRENT = replace(
+    TGT_OP, remote_app="/opt/nlw/current", git_remote="https://github.com/o/r.git"
+)
+PREVIOUS = "/opt/nlw/releases/" + "9" * 40
+RENDERED_AM = json.dumps(
+    {
+        "services": {
+            "alertmanager": {
+                "volumes": [
+                    {"type": "bind", "source": AMCFG, "target": CFG_MOUNT, "read_only": True},
+                    {"type": "bind", "source": AMSEC, "target": SEC_MOUNT, "read_only": True},
+                    {"type": "volume", "source": "alertmanager_data", "target": "/alertmanager"},
+                ]
+            }
+        }
+    }
+)  # fmt: skip
+
+
+def _operator_table(
+    *, cfg: str = OPERATOR_CFG, loaded: str | None = None, record: str = "__ABSENT__"
+) -> list[tuple[str, str | int]]:
+    """Host + running-container facts for a correctly wired operator Alertmanager."""
+    status = json.dumps({"config": {"original": loaded if loaded is not None else cfg}})
+    mounts = (
+        f"{AMCFG}:/etc/alertmanager/alertmanager.yml:false "
+        f"{AMSEC}:{SEC_MOUNT}:false /var/lib/docker/volumes/x/_data:/alertmanager:true"
+    )
+    return [
+        (r"cat '/opt/nlw/docker-compose\.operator\.yml'", OVERRIDE_YAML),
+        (r"cat '/opt/nlw/alertmanager/alertmanager\.yml'", cfg),
+        (r"sha256sum '/opt/nlw/alertmanager/alertmanager\.yml'", CFG_SHA),
+        (
+            r"--entrypoint stat -v '/opt/nlw/alertmanager/alertmanager\.yml:/probe/f:ro'",
+            "f|regular file|644|0|0|200",
+        ),
+        (STAT_AM + r"'/probe/\.'", ".|directory|750|0|65534|4096"),
+        (STAT_AM + r"'/probe/slack\.url'", "slack.url|regular file|640|0|65534|80"),
+        (r"--user 65534:65534 .* -v '/opt/nlw/alertmanager\.secrets:/probe:ro'", "slack.url R"),
+        (r"docker inspect --format '\{\{range \.Mounts\}\}[^|]*ps -q alertmanager", mounts),
+        (r"readlink -f '/opt/nlw/alertmanager/alertmanager\.yml'", "/private" + AMCFG),
+        (r"readlink -f '/opt/nlw/alertmanager\.secrets'", "/private" + AMSEC),
+        (r"exec -T alertmanager sha256sum /etc/alertmanager/alertmanager\.yml", CFG_SHA),
+        (r"api/v2/status", status),
+        (r"exec -T alertmanager sh -c 'for f in", "/etc/alertmanager/secrets/slack.url R"),
+        (r"alert-delivery\.json", record),
+        (r"config --format json", RENDERED_AM),
+    ]  # fmt: skip
+
+
 def _base_table(
     *,
     roles: str = ROLES_M11,
@@ -212,6 +290,7 @@ def _base_table(
         # Pre-activation phases: current is ABSENT on the legacy host.
         (r"if \[ -L '/opt/nlw/current' \]; then readlink", "ABSENT"),
         (r"readlink '/opt/nlw/current'", STAGED),
+        *_operator_table(),
     ]
 
 
@@ -382,7 +461,7 @@ def _pre_backup_table() -> list[tuple[str, str | int]]:
             f"scheduler stg-sched-1 {'3' * 64}",
         ),
         (r"sha256sum '/opt/nlw/app/\.env\.prod'", "abc"),
-        (r"git clone|git checkout -q --detach|git -C .* fetch", ""),
+        (r"git clone|checkout -q --detach|git -C .* fetch", ""),
         (r"grep -Ev .* > '.*releases.*\.env\.prod\.tmp'", ""),
         (r"config >/dev/null", ""),
         (r"--profile backup build -q backup", ""),
@@ -642,56 +721,20 @@ def test_reopen_blocked_without_signed_context_readiness() -> None:
     assert not fake.ran(r"rm -f /srv/maint/MAINTENANCE")
 
 
-def _alerting_table(null_receiver: bool) -> list[tuple[str, str | int]]:
-    cfg = (Path(__file__).resolve().parents[2] / "docker/alertmanager/alertmanager.yml").read_text()
-    if not null_receiver:
-        cfg = (
-            "route:\n  receiver: ops\nreceivers:\n  - name: ops\n    pagerduty_configs:\n"
-            "      - routing_key_file: /etc/alertmanager/secrets/pd.key\n"
-        )
-    return [
-        (
-            r"curl -sS -m 5 http://127.0.0.1:8000/health/ready",
-            '{"status":"ready","checks":{"signed_context":"ok"}}',
-        ),
-        (
-            r"api/v1/rules",
-            json.dumps(
-                {"data": {"groups": [{"name": "nlw-backup"}, {"name": "nlw-signed-context"}]}}
-            ),
-        ),
-        (
-            r"api/v1/alertmanagers",
-            json.dumps(
-                {
-                    "data": {
-                        "activeAlertmanagers": [{"url": "http://alertmanager:9093/api/v2/alerts"}]
-                    }
-                }
-            ),
-        ),
-        (r"9093/-/healthy", "OK"),
-        (r"cat '.*alertmanager\.yml'", cfg),
-        (r"ls -1 '/opt/nlw/alertmanager\.secrets'", "pd.key" if not null_receiver else ""),
-        (r"exec -T caddy rm -f /srv/maint/MAINTENANCE", ""),
-    ]
-
-
-def test_reopen_with_null_receiver_records_open_launch_gate_and_go_check_fails() -> None:
-    fake = FakeRemote(_base_table() + _alerting_table(null_receiver=True), state=_done("validate"))
-    r = _rollout(fake, authorization=AUTHORIZATION_PHRASE)
-    gates_open = r.reopen()
-    assert gates_open == ["alert delivery unverified"]
-    assert fake.state_doc["evidence"]["reopen"]["alerting"]["delivery_verified"] is False
-    assert fake.state_doc["evidence"]["reopen"]["alerting"]["alertmanager_reachable"] is True
+def test_null_operator_config_is_refused_and_technical_reopen_records_the_open_gate() -> None:
+    # The committed null receiver can never be the operator's configuration.
+    fake = FakeRemote(_reopen_table(cfg=NULL_CFG), state=_done("validate"))
     with pytest.raises(GateError, match="null receiver"):
-        r.go_check()
-
-
-def test_go_check_passes_only_with_real_receiver_credentials_and_confirmed_delivery() -> None:
-    fake = FakeRemote(_base_table() + _alerting_table(null_receiver=False), state=_done("validate"))
-    r = _rollout(fake, authorization=AUTHORIZATION_PHRASE)
-    assert r.reopen() == ["alert delivery unverified"]  # credentials present, no confirmed test yet
+        _rollout(fake, authorization=AUTHORIZATION_PHRASE).reopen()
+    assert not fake.ran(r"rm -f /srv/maint/MAINTENANCE")
+    # A real, credentialed receiver without a confirmed controlled delivery: the
+    # technical deployment reopens, the launch gate is RECORDED, go-check is NO-GO.
+    fake2 = FakeRemote(_reopen_table(), state=_done("validate"))
+    r = _rollout(fake2, authorization=AUTHORIZATION_PHRASE)
+    assert r.reopen() == ["alert delivery unverified"]
+    ev = fake2.state_doc["evidence"]["reopen"]["alerting"]
+    assert ev["delivery_verified"] is False and ev["alertmanager_reachable"] is True
+    assert ev["rules_loaded"] is True and ev["receiver_is_null"] is False
     with pytest.raises(GateError, match="no verified controlled test"):
         r.go_check()
 
@@ -749,7 +792,7 @@ def _stage_table() -> list[tuple[str, str | int]]:
             f"scheduler stg-sched-1 {'3' * 64}",
         ),
         (r"sha256sum '/opt/nlw/app/\.env\.prod'", "abc"),
-        (r"git clone|git checkout -q --detach|git -C .* fetch", ""),
+        (r"git clone|checkout -q --detach|git -C .* fetch", ""),
         (r"grep -Ev .* > '.*releases.*\.env\.prod\.tmp'", ""),
         (r"config >/dev/null", ""),
         (r"--profile backup build -q backup", ""),
@@ -853,15 +896,15 @@ def test_preflight_refuses_an_empty_backup_env_file() -> None:
 
 
 def test_pre_activation_phases_refuse_a_host_activated_for_another_release() -> None:
-    """Second-rollout guard: target.env still names /opt/nlw/app as active; once
-    current -> releases/<other>, evidence and the staged env would derive from
-    the obsolete legacy checkout. Fail closed with an actionable message."""
+    """A LEGACY target (remote_app = /opt/nlw/app) on a host whose current ->
+    releases/<other>: evidence and the staged env would derive from the obsolete
+    legacy checkout. Fail closed, naming the follows-current configuration."""
     other = "/opt/nlw/releases/" + "9" * 40
     foreign = [(r"if \[ -L '/opt/nlw/current' \]; then readlink", other)]
     with pytest.raises(GateError, match="already points at"):
         _rollout(FakeRemote(foreign + _base_table())).preflight()
     fake = FakeRemote(foreign + _stage_table(), state=_done("verify-release", "verify-escrow"))
-    with pytest.raises(GateError, match="second rollout is not supported"):
+    with pytest.raises(GateError, match="NLW_STAGING_REMOTE_APP=/opt/nlw/current"):
         _rollout(fake, authorization=AUTHORIZATION_PHRASE).stage_release(keys_dir=KEYS)
     assert not fake.ran(r"git clone|releases.*\.env\.prod")
     for phase in ("backup", "verify-backup"):
@@ -879,3 +922,456 @@ def test_pre_activation_phases_refuse_a_host_activated_for_another_release() -> 
     plain = [(r"if \[ -L '/opt/nlw/current' \]; then readlink", "NOT_A_SYMLINK")]
     with pytest.raises(GateError, match="exists but is not a symlink"):
         _rollout(FakeRemote(plain + _base_table())).preflight()
+
+
+# --- post-rollout hotfix: reproduced on the first real staging rollout ------------------
+# Operator Alertmanager authority (host paths OUTSIDE every release checkout) and the
+# effective configuration of the RUNNING container; individual key-file mounts;
+# N -> N+1 rollouts that follow <ops_root>/current.
+def _rollout_op(remote: FakeRemote, target: TargetConfig = TGT_OP, **op: object) -> Rollout:
+    return Rollout(
+        release=REL,
+        target=target,
+        remote=remote,
+        operator=Operator(**op),  # type: ignore[arg-type]
+        log=lambda _m: None,
+        now=lambda: NOW,
+        receipt=RECEIPT,
+    )
+
+
+def _reopen_table(**kw: Any) -> list[tuple[str, str | int]]:
+    return (
+        _operator_table(**kw)
+        + _base_table()
+        + [
+            (
+                r"curl -sS -m 5 http://127.0.0.1:8000/health/ready",
+                '{"status":"ready","checks":{"signed_context":"ok"}}',
+            ),
+            (
+                r"api/v1/rules",
+                json.dumps(
+                    {"data": {"groups": [{"name": "nlw-backup"}, {"name": "nlw-signed-context"}]}}
+                ),
+            ),
+            (
+                r"api/v1/alertmanagers",
+                json.dumps(
+                    {
+                        "data": {
+                            "activeAlertmanagers": [
+                                {"url": "http://alertmanager:9093/api/v2/alerts"}
+                            ]
+                        }
+                    }
+                ),
+            ),
+            (r"9093/-/healthy", "OK"),
+            (r"exec -T caddy rm -f /srv/maint/MAINTENANCE", ""),
+        ]
+    )
+
+
+# J.1 / J.2 — defect 1: the migrate container runs as uid 10001 and cannot traverse the
+# root:root 0700 key directory; only the required key FILE may be mounted.
+def test_key_install_and_check_mount_only_each_required_key_file() -> None:
+    table = _base_table(roles=ROLES_ALL, rev="0016_signed_database_context") + [
+        (r"ctxkeys install --class (\w+)", "installed: k"),
+        (r"ctxkeys check --class (\w+)", "ok: k"),
+        (r"FROM ctx_keys WHERE status", "3"),
+        (r"FROM ctx_key_events", "0"),
+    ]
+    fake = FakeRemote(table, state=_done("migrate"))
+    _rollout_op(fake, authorization=AUTHORIZATION_PHRASE).install_context_keys(keys_dir=KEYS)
+    one_shots = [c for c in fake.commands if "ctxkeys install" in c or "ctxkeys check" in c]
+    assert len(one_shots) == 6
+    for cmd in one_shots:
+        cls = re.search(r"--class (\w+)", cmd).group(1)  # type: ignore[union-attr]
+        assert f"-v '{KEYS}/{cls}.key:/run/nlw/keys/{cls}.key:ro'" in cmd
+        assert f"--secret-file /run/nlw/keys/{cls}.key" in cmd
+        assert f"'{KEYS}:/run/nlw/keys" not in cmd, "the whole 0700 key directory was mounted"
+        assert cmd.count("/run/nlw/keys/") == 2, "exactly one key mounted per one-shot"
+        assert "--no-deps" in cmd
+    assert not fake.ran(r"chmod|chown")  # no permission workaround on the host
+    assert fake.state_doc["phases"].get("install-context-keys")
+
+
+# J.3 / J.4 — defect 3: reopen/go-check evaluate the RUNNING Alertmanager (mounts,
+# mounted bytes, loaded config), never the committed null file in the staged checkout.
+def test_reopen_and_go_check_evaluate_the_running_alertmanager_not_the_staged_file() -> None:
+    fake = FakeRemote(_reopen_table(), state=_done("validate"))
+    r = _rollout_op(fake, authorization=AUTHORIZATION_PHRASE)
+    assert r.reopen() == ["alert delivery unverified"]  # no controlled-delivery record yet
+    ev = fake.state_doc["evidence"]["reopen"]["alerting"]
+    assert ev["receiver"] == "ops-slack" and ev["receiver_is_null"] is False
+    assert ev["credential_files_present"] is True and ev["delivery_verified"] is False
+    assert ev["config_source"] == "running-alertmanager" and ev["delivery_status"] == "absent"
+    assert not fake.ran(r"cat '.*releases/.*/docker/alertmanager/alertmanager\.yml'")
+    assert fake.ran(r"api/v2/status") and fake.ran(r"exec -T alertmanager sha256sum")
+    with pytest.raises(GateError, match="no verified controlled test"):
+        r.go_check()
+    # A fresh, matching, confirmed record closes the gate — the only way it closes.
+    good = json.dumps(
+        {
+            "receiver": "ops-slack",
+            "delivered_at": (NOW - timedelta(hours=2)).isoformat(),
+            "confirmed_by": "ops-lead",
+        }
+    )
+    fake2 = FakeRemote(_reopen_table(record="__OK__\n" + good), state=_done("validate"))
+    r2 = _rollout_op(fake2, authorization=AUTHORIZATION_PHRASE)
+    assert r2.reopen() == []
+    r2.go_check()
+    assert fake2.state_doc["evidence"]["reopen"]["alerting"]["delivery_status"] == "verified"
+
+
+@pytest.mark.parametrize(
+    "record, status, msg",
+    [
+        ("__UNREADABLE__", "unreadable", "not readable"),
+        ("__OK__\n{not json", "malformed", "malformed"),
+        ("__OK__\n[1, 2]", "malformed", "malformed"),
+    ],
+)
+def test_unreadable_or_malformed_delivery_evidence_fails_closed(
+    record: str, status: str, msg: str
+) -> None:
+    fake = FakeRemote(_reopen_table(record=record), state=_done("validate"))
+    with pytest.raises(GateError, match=msg):
+        _rollout_op(fake, authorization=AUTHORIZATION_PHRASE).reopen()
+    assert not fake.ran(r"rm -f /srv/maint/MAINTENANCE")
+    fake2 = FakeRemote(_reopen_table(record=record), state=_done("reopen"))
+    with pytest.raises(GateError, match=msg):
+        _rollout_op(fake2, authorization=AUTHORIZATION_PHRASE).go_check()
+
+
+@pytest.mark.parametrize(
+    "over, status",
+    [
+        ({"delivered_at": (NOW - timedelta(days=8)).isoformat()}, "stale"),
+        ({"receiver": "null"}, "receiver-mismatch"),
+        ({"receiver": "other-team"}, "receiver-mismatch"),
+        ({"confirmed_by": ""}, "unconfirmed"),
+        ({"delivered_at": "2026-09-20T10:00:00"}, "stale"),  # naive timestamp never counts
+    ],
+)
+def test_stale_or_mismatched_delivery_evidence_never_verifies(
+    over: dict[str, str], status: str
+) -> None:
+    doc = {
+        "receiver": "ops-slack",
+        "delivered_at": (NOW - timedelta(hours=2)).isoformat(),
+        "confirmed_by": "ops",
+    }
+    doc.update(over)
+    fake = FakeRemote(_reopen_table(record="__OK__\n" + json.dumps(doc)), state=_done("validate"))
+    r = _rollout_op(fake, authorization=AUTHORIZATION_PHRASE)
+    assert r.reopen() == ["alert delivery unverified"]
+    assert fake.state_doc["evidence"]["reopen"]["alerting"]["delivery_status"] == status
+    with pytest.raises(GateError, match=status):
+        r.go_check()
+
+
+def test_committed_null_config_cannot_misrepresent_the_running_config() -> None:
+    # (a) the running container LOADED the null config while the operator file is real:
+    fake = FakeRemote(_reopen_table(loaded=NULL_CFG), state=_done("validate"))
+    with pytest.raises(GateError, match="loaded configuration"):
+        _rollout_op(fake, authorization=AUTHORIZATION_PHRASE).reopen()
+    assert not fake.ran(r"rm -f /srv/maint/MAINTENANCE")
+    # (b) the container mounts the committed staged file, not the operator file:
+    staged_mounts = (
+        f"{STAGED}/docker/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:false "
+        f"{AMSEC}:/etc/alertmanager/secrets:false"
+    )
+    table = [
+        (r"docker inspect --format '\{\{range \.Mounts\}\}[^|]*ps -q alertmanager", staged_mounts)
+    ] + _reopen_table()
+    fake2 = FakeRemote(table, state=_done("validate"))
+    with pytest.raises(GateError, match="mount"):
+        _rollout_op(fake2, authorization=AUTHORIZATION_PHRASE).reopen()
+    # (c) mounted bytes differ from the operator file (edited after the container started):
+    table3 = [(r"exec -T alertmanager sha256sum", "d" * 64)] + _reopen_table()
+    with pytest.raises(GateError, match="differ"):
+        _rollout_op(
+            FakeRemote(table3, state=_done("validate")), authorization=AUTHORIZATION_PHRASE
+        ).reopen()
+    # (d) the OPERATOR file itself routes to null: refused outright (never a "technical" reopen).
+    with pytest.raises(GateError, match="null receiver"):
+        _rollout_op(
+            FakeRemote(_reopen_table(cfg=NULL_CFG), state=_done("validate")),
+            authorization=AUTHORIZATION_PHRASE,
+        ).reopen()
+
+
+# J.5 / J.6 — the operator override is required BEFORE Alertmanager is recreated and
+# every recreation keeps the external config + secrets mounts.
+def _activation_table(**kw: Any) -> list[tuple[str, str | int]]:
+    return (
+        _operator_table(**kw)
+        + _base_table(roles=ROLES_ALL, rev="0016_signed_database_context")
+        + [
+            (r"config >/dev/null", ""),
+            (r"ln -sfn", ""),
+            (r"up -d --force-recreate", ""),
+            (
+                r"join \.RepoDigests",
+                f"api {REL.backend_image}\nworker {REL.backend_image}\n"
+                f"scheduler {REL.backend_image}\nweb {REL.web_image}",
+            ),
+            (
+                r"for s in api worker scheduler web postgres redis caddy prometheus alertmanager",
+                "",
+            ),
+            (r"docker ps -a --filter name=app-migrate", ""),
+        ]
+    )
+
+
+def test_missing_operator_override_fails_before_alertmanager_recreation() -> None:
+    for phase, done in (("preflight", None), ("recreate-runtime", "install-context-keys")):
+        fake = FakeRemote(_activation_table(), state=_done(done) if done else None)
+        r = _rollout_op(fake, target=TGT_LEGACY_NO_OPERATOR, authorization=AUTHORIZATION_PHRASE)
+        with pytest.raises(GateError, match="operator Alertmanager configuration is required"):
+            if phase == "preflight":
+                r.preflight()
+            else:
+                r.recreate_runtime(keys_dir=KEYS)
+        assert not fake.ran(r"up -d|ln -sfn")
+    # Configured but the override file is missing/unreadable -> stop before activation.
+    fake = FakeRemote(
+        [(r"cat '/opt/nlw/docker-compose\.operator\.yml'", "__UNREADABLE__")] + _activation_table(),
+        state=_done("install-context-keys"),
+    )
+    with pytest.raises(GateError, match="override"):
+        _rollout_op(fake, authorization=AUTHORIZATION_PHRASE).recreate_runtime(keys_dir=KEYS)
+    assert not fake.ran(r"up -d|ln -sfn")
+    # The rendered Compose config no longer carries the operator mounts (override
+    # dropped from the invocation) -> stop before activation.
+    rendered_null = json.dumps(
+        {
+            "services": {
+                "alertmanager": {
+                    "volumes": [
+                        {
+                            "type": "bind",
+                            "source": f"{STAGED}/docker/alertmanager/alertmanager.yml",
+                            "target": "/etc/alertmanager/alertmanager.yml",
+                            "read_only": True,
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    fake2 = FakeRemote(
+        [(r"config --format json", rendered_null)] + _activation_table(),
+        state=_done("install-context-keys"),
+    )
+    with pytest.raises(GateError, match="rendered"):
+        _rollout_op(fake2, authorization=AUTHORIZATION_PHRASE).recreate_runtime(keys_dir=KEYS)
+    assert not fake2.ran(r"up -d|ln -sfn")
+
+
+def test_running_mount_sources_accept_only_the_operator_path_or_its_realpath() -> None:
+    # Docker Desktop (rehearsal) reports /host_mnt<realpath>; Linux reports the path.
+    desktop = (
+        f"/host_mnt/private{AMCFG}:/etc/alertmanager/alertmanager.yml:false "
+        f"/host_mnt/private{AMSEC}:/etc/alertmanager/secrets:false"
+    )
+    table = [(r"docker inspect --format '\{\{range \.Mounts\}\}[^|]*ps -q alertmanager", desktop)]
+    fake = FakeRemote(table + _reopen_table(), state=_done("validate"))
+    assert _rollout_op(fake, authorization=AUTHORIZATION_PHRASE).reopen() == [
+        "alert delivery unverified"
+    ]
+    # A different directory that merely shares the prefix is still a disagreement.
+    other = desktop.replace(f"/host_mnt/private{AMSEC}:", f"/host_mnt/private{AMSEC}-old:")
+    table2 = [(r"docker inspect --format '\{\{range \.Mounts\}\}[^|]*ps -q alertmanager", other)]
+    with pytest.raises(GateError, match="mount disagreement"):
+        _rollout_op(
+            FakeRemote(table2 + _reopen_table(), state=_done("validate")),
+            authorization=AUTHORIZATION_PHRASE,
+        ).reopen()
+
+
+def test_recreation_uses_the_operator_override_and_verifies_the_running_mounts() -> None:
+    fake = FakeRemote(_activation_table(), state=_done("install-context-keys"))
+    _rollout_op(fake, authorization=AUTHORIZATION_PHRASE).recreate_runtime(keys_dir=KEYS)
+    ups = [c for c in fake.commands if "up -d --force-recreate" in c]
+    assert ups and all(f"-f {OVR}" in c for c in ups), ups
+    assert any("alertmanager" in c for c in ups)
+    assert fake.ran(r"docker inspect --format '\{\{range \.Mounts\}\}[^|]*ps -q alertmanager")
+    assert (
+        fake.state_doc["evidence"]["recreate-runtime"]["alertmanager"]["config_source"]
+        == "running-alertmanager"
+    )
+    # Every reviewed Compose invocation from a release directory carries the override.
+    assert f"-f {OVR}" in TGT_OP.dc_in(STAGED) and f"-f {OVR}" in TGT_CURRENT.dc
+    # ...except the LEGACY active checkout (no alertmanager service there): exec/stop only.
+    assert f"-f {OVR}" not in TGT_OP.dc
+
+
+# J.7 — the host-side permission matrix (probed through a root container; readability
+# proved as the Alertmanager user 65534). Nothing world-readable, nothing inline.
+@pytest.mark.parametrize(
+    "pattern, line, msg",
+    [
+        (r"'/probe/slack\.url'", "slack.url|regular file|644|0|65534|80", "world-readable"),
+        (
+            r"'/probe/slack\.url'",
+            "slack.url|regular file|600|0|0|80",
+            "readable by the Alertmanager user",
+        ),
+        (r"'/probe/slack\.url'", "slack.url|regular file|640|0|65534|0", "empty"),
+        (r"'/probe/slack\.url'", "slack.url|symbolic link|777|0|0|20", "regular file"),
+        (r"'/probe/\.'", ".|directory|755|0|65534|4096", "world"),
+        (r"'/probe/\.'", ".|directory|700|0|0|4096", "readable by the Alertmanager user"),
+        (r"alertmanager\.yml:/probe/f:ro'", "f|regular file|664|0|0|200", "writable"),
+        (r"alertmanager\.yml:/probe/f:ro'", "f|regular file|644|1000|1000|200", "owned by root"),
+    ],
+)
+def test_permission_matrix_fails_closed(pattern: str, line: str, msg: str) -> None:
+    table = [(pattern, line)] + _base_table()
+    if "readable by the Alertmanager user" in msg:
+        table = [
+            (r"--user 65534:65534 .* -v '/opt/nlw/alertmanager\.secrets:/probe:ro'", "slack.url X")
+        ] + table
+    with pytest.raises(GateError, match=msg):
+        _rollout_op(FakeRemote(table)).preflight()
+
+
+def test_inline_credential_and_foreign_credential_paths_are_refused() -> None:
+    inline = "route:\n  receiver: s\nreceivers:\n  - name: s\n    slack_configs:\n      - api_url: https://hooks.example.invalid/x\n"
+    with pytest.raises(GateError, match="inline credential"):
+        _rollout_op(FakeRemote(_operator_table(cfg=inline) + _base_table())).preflight()
+    outside = OPERATOR_CFG.replace(
+        "/etc/alertmanager/secrets/slack.url", "/etc/alertmanager/alertmanager.yml"
+    )
+    with pytest.raises(GateError, match="secrets mount"):
+        _rollout_op(FakeRemote(_operator_table(cfg=outside) + _base_table())).preflight()
+    # Operator config placed INSIDE a release checkout is not operator authority.
+    inside = replace(OPERATOR, config_path=f"{STAGED}/docker/alertmanager/alertmanager.yml")
+    with pytest.raises(GateError, match="release"):
+        _rollout_op(
+            FakeRemote(_base_table()), target=replace(TGT, operator_alerting=inside)
+        ).preflight()
+
+
+# J.9 — the second rollout follows <ops_root>/current and expects the live revision.
+def test_second_rollout_follows_current_and_expects_the_live_revision() -> None:
+    from nlw.ops.rollout.remote import parse_target_env
+
+    tgt = parse_target_env(
+        (Path(__file__).resolve().parents[2] / "deploy/staging/target.env").read_text()
+    )
+    assert tgt["NLW_STAGING_REMOTE_APP"] == "/opt/nlw/current"
+    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0020_schedule_authorization"
+    assert (
+        tgt["NLW_STAGING_COMPOSE_PROJECT"] == "app"
+        and tgt["NLW_STAGING_INSTANCE_ID"] == "i-0d1e65cdc9401dbb9"
+    )
+    assert all(
+        k in tgt
+        for k in (
+            "NLW_STAGING_ALERTMANAGER_CONFIG",
+            "NLW_STAGING_ALERTMANAGER_SECRETS_DIR",
+            "NLW_STAGING_COMPOSE_OVERRIDE",
+        )
+    )
+    assert not re.search(
+        r"(?i)(password|secret_key|token|hooks\.slack)",
+        "\n".join(f"{k}={v}" for k, v in tgt.items()),
+    )
+    # current -> the PREVIOUS release is the normal N state: preflight passes and reads the
+    # active checkout through current; pins/sha/env all come from the active release.
+    cur = [
+        (r"if \[ -L '/opt/nlw/current' \]; then readlink", PREVIOUS),
+        (r"grep -E '\^\(NLW_IMAGE.*'/opt/nlw/current/\.env\.prod'", PINS_ACTIVE),
+        (r"git -C '/opt/nlw/current' rev-parse HEAD", OLD_SHA),
+    ]
+    fake = FakeRemote(cur + _base_table())
+    report = _rollout_op(fake, target=TGT_CURRENT).preflight()
+    assert report["current_link"] == "PREVIOUS_RELEASE" and report["active_checkout"] == OLD_SHA
+    assert not fake.ran(r"/opt/nlw/app")
+    # stage-release clones from current and fetches the release from the reviewed git remote.
+    stage = (
+        cur
+        + [
+            (r"sha256sum '/opt/nlw/current/\.env\.prod'", "abc"),
+            (r"git clone -q '/opt/nlw/current'", ""),
+            (r"git -C .* fetch -q 'https://github\.com/o/r\.git'", ""),
+            (r"checkout -q --detach", ""),
+            (r"grep -Ev .* > '.*releases.*\.env\.prod\.tmp'", ""),
+            (r"docker/worker\.secrets\.env", "staged"),
+            (r"config >/dev/null", ""),
+            (r"--profile backup build -q backup", ""),
+            (
+                r"ctxkeys fingerprint",
+                FPS_LINES,
+            ),
+        ]
+        + _base_table()
+    )
+    fake2 = FakeRemote(stage, state=_done("verify-release", "verify-escrow"))
+    _rollout_op(fake2, target=TGT_CURRENT, authorization=AUTHORIZATION_PHRASE).stage_release(
+        keys_dir=KEYS
+    )
+    assert fake2.ran(r"git clone -q '/opt/nlw/current' '/opt/nlw/releases/")
+    assert fake2.ran(r"fetch -q 'https://github\.com/o/r\.git'")
+    assert fake2.ran(r"grep -Ev .* '/opt/nlw/current/\.env\.prod' > ")
+    assert fake2.ran(r"cp '/opt/nlw/current/docker/worker\.secrets\.env'")
+    assert not fake2.ran(r"/opt/nlw/app")
+    # A legacy layout under a follows-current target is a configuration error, not a rollout.
+    legacy = FakeRemote(
+        [(r"if \[ -L '/opt/nlw/current' \]; then readlink", "ABSENT")] + cur[1:] + _base_table()
+    )
+    with pytest.raises(GateError, match="no activated release"):
+        _rollout_op(legacy, target=TGT_CURRENT).preflight()
+    # And the reverse: a legacy target on a host that already has an activated release.
+    act = FakeRemote(
+        [(r"if \[ -L '/opt/nlw/current' \]; then readlink", PREVIOUS)]
+        + _base_table()
+        + _operator_table()
+    )
+    with pytest.raises(GateError, match="NLW_STAGING_REMOTE_APP=/opt/nlw/current"):
+        _rollout_op(act).preflight()
+
+
+def test_prepare_keys_reuses_existing_host_keys_on_a_follow_up_release() -> None:
+    """N+1 keeps the installed keys: prepare-keys must verify + fingerprint the
+    existing files instead of refusing (`ctxkeys prepare` never overwrites)."""
+    table: list[tuple[str, str | int]] = [
+        (r"ctxkeys prepare", 1),  # would refuse: the files exist
+        (r"--entrypoint stat .* '/keys/\.'", ".|directory|700|0|0|4096"),
+        (
+            r"--entrypoint stat .* '/keys/(api|worker|scheduler)\.key'",
+            "api.key|regular file|400|10001|10001|65",
+        ),
+        (
+            r"ctxkeys fingerprint",
+            FPS_LINES,
+        ),
+        *_base_table(),
+    ]
+    fake = FakeRemote(table, state=_done("verify-release"))
+    _rollout_op(fake, target=TGT_CURRENT, authorization=AUTHORIZATION_PHRASE).prepare_keys(
+        keys_dir=KEYS
+    )
+    assert not fake.ran(r"ctxkeys prepare")
+    ev = fake.state_doc["evidence"]["prepare-keys"]
+    assert ev["reused_existing"] is True and set(ev["fingerprints"]) == {
+        "api",
+        "worker",
+        "scheduler",
+    }
+    # A PARTIAL set is never silently completed.
+    partial: list[tuple[str, str | int]] = [
+        (r"--entrypoint stat .* '/keys/scheduler\.key'", 1),
+        *table,
+    ]
+    with pytest.raises(GateError, match="partial"):
+        _rollout_op(
+            FakeRemote(partial, state=_done("verify-release")),
+            target=TGT_CURRENT,
+            authorization=AUTHORIZATION_PHRASE,
+        ).prepare_keys(keys_dir=KEYS)

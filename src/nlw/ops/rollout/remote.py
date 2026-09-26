@@ -6,11 +6,19 @@ disposable rehearsal. Both return sanitized results; callers never place
 secrets on the command line — anything sensitive travels on stdin or stays in
 host-side files.
 
-Host layout (``TargetConfig``): ``<ops_root>/app`` is the ACTIVE checkout the
-running services were started from; a release is STAGED in
-``<ops_root>/releases/<sha>`` with its own ``.env.prod`` and is only activated
-(``<ops_root>/current`` symlink + container recreation) after the verified
-backup and the migration; rollout state lives in ``<ops_root>/rollout``.
+Host layout (``TargetConfig``): ``NLW_STAGING_REMOTE_APP`` names the ACTIVE
+checkout the running services were started from — the legacy ``<ops_root>/app``
+for the very first rollout, ``<ops_root>/current`` (the activation symlink) for
+every rollout after it; a release is STAGED in ``<ops_root>/releases/<sha>`` with
+its own ``.env.prod`` and is only activated (``current`` re-pointed + container
+recreation) after the verified backup and the migration; rollout state lives in
+``<ops_root>/rollout``.
+
+Operator Alertmanager authority (``OperatorAlerting``): the receiver
+configuration, its credential files and the Compose override that mounts them
+live on the host OUTSIDE every release checkout and are named explicitly in
+``target.env``; the committed ``docker/alertmanager/alertmanager.yml`` (null
+receiver) is never authority for staging/production.
 """
 
 from __future__ import annotations
@@ -31,10 +39,31 @@ _TARGET_KEYS = (
     "NLW_STAGING_REMOTE_APP",
     "NLW_STAGING_COMPOSE_PROJECT",
 )
+_OPERATOR_ALERTING_KEYS = (
+    "NLW_STAGING_ALERTMANAGER_CONFIG",
+    "NLW_STAGING_ALERTMANAGER_SECRETS_DIR",
+    "NLW_STAGING_COMPOSE_OVERRIDE",
+)
 
 
 class TargetConfigError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class OperatorAlerting:
+    """Host paths of the operator-owned Alertmanager configuration (never inside
+    a release directory): the config file (root:root 0644, ``*_file`` credential
+    references only), the secrets directory (root:65534 0750, files root:65534
+    0640 — Alertmanager runs as uid 65534) and the Compose override that mounts
+    both into the ``alertmanager`` service read-only."""
+
+    config_path: str
+    secrets_dir: str
+    override_path: str
+
+    def paths(self) -> tuple[str, str, str]:
+        return (self.config_path, self.secrets_dir, self.override_path)
 
 
 @dataclass(frozen=True)
@@ -50,6 +79,11 @@ class TargetConfig:
     # The backup job's env file (restic repository + credentials) — the SAME file
     # the systemd timer uses; never merged into .env.prod.
     backup_env_file: str = "/opt/nlw/.env.backup"
+    # Where stage-release fetches the release SHA from (the reviewed GitHub URL);
+    # None = the active checkout's own `origin` (the legacy local clone chain).
+    git_remote: str | None = None
+    # Operator Alertmanager authority; required for staging/production targets.
+    operator_alerting: OperatorAlerting | None = None
 
     # ---- layout ---------------------------------------------------------------
     def release_dir(self, sha: str) -> str:
@@ -60,6 +94,13 @@ class TargetConfig:
         return f"{self.ops_root}/current"
 
     @property
+    def follows_current(self) -> bool:
+        """True once the active checkout IS the activation symlink (every rollout
+        after the first): the previous release is read, stopped and cloned
+        through ``current``; activation re-points the same link."""
+        return self.remote_app.rstrip("/") == self.current_link
+
+    @property
     def state_dir(self) -> str:
         return f"{self.ops_root}/rollout"
 
@@ -67,10 +108,16 @@ class TargetConfig:
         return f"{self.state_dir}/{sha}.json"
 
     # ---- compose invocations --------------------------------------------------
-    def dc_in(self, directory: str) -> str:
+    def dc_in(self, directory: str, *, operator: bool = True) -> str:
         """The reviewed Compose invocation from ``directory`` (explicit project
-        name so a staged release joins the running project; never e2e)."""
-        files = " ".join(f"-f {f}" for f in self.compose_files)
+        name so a staged release joins the running project; never e2e). The
+        operator override — when configured — is part of EVERY invocation from a
+        release directory, so a later recreation can never silently replace the
+        operator's Alertmanager with the committed null receiver."""
+        names: list[str] = list(self.compose_files)
+        if operator and self.operator_alerting is not None:
+            names.append(self.operator_alerting.override_path)
+        files = " ".join(f"-f {f}" for f in names)
         return (
             f"cd '{directory}' && docker compose -p {self.compose_project} "
             f"--env-file .env.prod {files}"
@@ -78,8 +125,10 @@ class TargetConfig:
 
     @property
     def dc(self) -> str:
-        """Compose against the ACTIVE checkout (read/stop/exec only)."""
-        return self.dc_in(self.remote_app)
+        """Compose against the ACTIVE checkout (read/stop/exec only). The legacy
+        M11 checkout has no ``alertmanager`` service, so the override applies
+        only once the active checkout is a release (``follows_current``)."""
+        return self.dc_in(self.remote_app, operator=self.follows_current)
 
     def dc_backup_in(self, directory: str) -> str:
         """Backup profile from ``directory``, mirroring docker/systemd/nlw-backup.service."""
@@ -107,6 +156,18 @@ def parse_target_env(text: str) -> dict[str, str]:
         raise TargetConfigError("NLW_STAGING_SSH_HOST must be a hostname or IP")
     if not values["NLW_STAGING_REMOTE_APP"].startswith("/"):
         raise TargetConfigError("NLW_STAGING_REMOTE_APP must be absolute")
+    for key in _OPERATOR_ALERTING_KEYS:
+        if values.get(key) and not values[key].startswith("/"):
+            raise TargetConfigError(f"{key} must be an absolute host path")
+    present = [k for k in _OPERATOR_ALERTING_KEYS if values.get(k)]
+    if present and len(present) != len(_OPERATOR_ALERTING_KEYS):
+        raise TargetConfigError(
+            "operator Alertmanager authority needs all of "
+            f"{list(_OPERATOR_ALERTING_KEYS)} (got {present})"
+        )
+    for key in _OPERATOR_ALERTING_KEYS + ("NLW_STAGING_GIT_REMOTE",):
+        if re.search(r"(?i)(password|secret_key|token|hooks\.slack|@)", values.get(key, "")):
+            raise TargetConfigError(f"{key} must not carry a credential")
     return values
 
 
@@ -135,6 +196,16 @@ def load_target(path: Path, *, ssh_key: Path | None = None) -> TargetConfig:
         ops_root=ops_root,
         compose_files=compose_files,
         backup_env_file=values.get("NLW_STAGING_BACKUP_ENV_FILE") or f"{ops_root}/.env.backup",
+        git_remote=values.get("NLW_STAGING_GIT_REMOTE") or None,
+        operator_alerting=(
+            OperatorAlerting(
+                config_path=values["NLW_STAGING_ALERTMANAGER_CONFIG"],
+                secrets_dir=values["NLW_STAGING_ALERTMANAGER_SECRETS_DIR"].rstrip("/"),
+                override_path=values["NLW_STAGING_COMPOSE_OVERRIDE"],
+            )
+            if values.get("NLW_STAGING_ALERTMANAGER_CONFIG")
+            else None
+        ),
     )
 
 
