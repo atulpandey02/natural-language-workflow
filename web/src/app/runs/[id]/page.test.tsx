@@ -185,4 +185,68 @@ describe("RunDetailPage result summary", () => {
     expect(screen.queryByText("Analytics panel")).toBeNull();
     expect(screen.getByRole("link", { name: "Back to runs" })).toHaveAttribute("href", "/runs");
   });
+
+  describe("outcome without an authoritative summary (F1)", () => {
+    const FAILED_RUN = { ...RUN, status: "FAILED", error: "raw engine text" };
+    const unknownAction = {
+      step_id: "send_summary",
+      tool: "slack.send_message",
+      destination_summary: "CPILOT",
+      status: "unknown",
+      attempts: 1,
+      error_class: "ACTION_OUTCOME_UNKNOWN",
+      http_status: null,
+      last_attempt_at: null,
+      next_attempt_at: null,
+    };
+    const outage = new ApiError({
+      status: 503,
+      code: "service_unavailable",
+      message: "upstream",
+      method: "GET",
+    });
+
+    function arrange(summary: { error?: unknown; isLoading?: boolean }, actions: unknown) {
+      setup(summary);
+      mockRun.mockReturnValue({ isLoading: false, error: null, data: FAILED_RUN });
+      mockActions.mockReturnValue(actions);
+    }
+
+    function expectNoRetryAdvice() {
+      const text = document.body.textContent ?? "";
+      expect(text).not.toMatch(/You can try again now|You can run the workflow again/);
+      expect(text).not.toContain("This run didn't finish");
+      expect(document.querySelector(".badge.ok[data-status]")).toBeNull();
+    }
+
+    it("shows UNKNOWN from action evidence while the summary is loading", async () => {
+      arrange({ isLoading: true }, { isLoading: false, error: null, data: [unknownAction] });
+      renderPage();
+      expect(await screen.findByText("We can't confirm whether the action happened")).toBeVisible();
+      expect(document.querySelector(".run-strip [data-status]")).toHaveAttribute(
+        "data-status",
+        "ACTION_OUTCOME_UNKNOWN",
+      );
+      expectNoRetryAdvice();
+    });
+
+    it("shows UNKNOWN from action evidence when the summary read returns 503", async () => {
+      arrange({ error: outage }, { isLoading: false, error: null, data: [unknownAction] });
+      renderPage();
+      expect(await screen.findByText("We can't confirm whether the action happened")).toBeVisible();
+      expect(screen.getAllByText(/Don't simply run it again/).length).toBeGreaterThan(0);
+      expectNoRetryAdvice();
+    });
+
+    it("uses a neutral unconfirmed state when the outcome can't be determined", async () => {
+      arrange({ error: outage }, { isLoading: false, error: outage, data: undefined });
+      renderPage();
+      expect(await screen.findByText("We can't confirm this run's full outcome")).toBeVisible();
+      const text = document.body.textContent ?? "";
+      expect(text).toContain("Some steps may have run, including actions outside NLW.");
+      expect(text).toMatch(/ask an administrator, before running it again/);
+      expect(text).not.toContain("Nothing was changed");
+      expectNoRetryAdvice();
+    });
+  });
 });

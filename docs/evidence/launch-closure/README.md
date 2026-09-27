@@ -166,3 +166,63 @@ Validation for the refinement:
 The golden spec's layout check was updated for the new chart layout. It still verifies
 tooltip bounds, keyboard chart inspection, reduced motion and the absence of page-level
 horizontal scroll at 1440, 1280, 768 and 390 px.
+
+## 8. Correction pass after independent review (F1–F5)
+
+Starting tip `c6d39b8`. Frontend and test changes only; no backend, migration or API-contract file
+changed.
+
+| # | Reproduced defect | Root cause | Correction |
+| --- | --- | --- | --- |
+| F1 | After a genuine `ACTION_OUTCOME_UNKNOWN`, a failed run-summary read (503) made the run page fall back to the persisted run status `FAILED` and show "You can try again now". | The page used `summary.outcome ?? run.status`, so the raw status stood in for the authoritative outcome. | New `lib/run-outcome.ts`: the summary stays the authority. Persisted action evidence can only escalate (`unknown` → UNKNOWN, including over a `FAILED` summary). Without the summary, a raw `FAILED` becomes the neutral `OUTCOME_UNAVAILABLE` ("We can't confirm this run's full outcome"; "Some steps may have run…"; review evidence or ask an administrator; retry "no"). While the first summary read is in flight, the page makes no claim. UNKNOWN or unconfirmed states never get success styling, and the evidence chain marks them amber. An UNKNOWN step's checkpoint now reads "Checkpoint recorded". |
+| F2 | A committed connector with a lost response said "Nothing was changed". An approval enqueue failure (503) said both "Decision saved" and "Nothing was changed". | Every error was assumed to mean no mutation, and the 503 explanation hard-coded "Nothing was changed". | Explicit mutation state on each error: `unchanged`, `changed` or `unknown`. The API client now records the HTTP method and turns dropped connections and cut-off bodies into `RequestInterruptedError`. 4xx rejections are `unchanged`. For writes, 5xx (including ambiguous 502–504), `TypeError`, `AbortError` and interrupted requests are `unknown`: "We couldn't confirm whether your change was saved", then check the list or record before retrying, never "try again now". Reads make no mutation claim. The approval enqueue failure is `changed`: "Your decision was saved. Scheduling the run to continue did not complete." Hard-coded "Nothing was changed" and "Nothing was shared" copy was removed. Mutation hooks now refresh their lists after any outcome, so the user can check. |
+| F3 | At 768 px, `$280,617.20` wrapped as `$280,617.2` / `0`. | `overflow-wrap: anywhere` on KPI values, and a 4-column grid kept at tablet widths. | KPI values never wrap (`white-space: nowrap`). They size to their own card with container-query units, capped at the previous sizes, and tablets (601–1200 px) use a 2 × 2 KPI block. The dominant first KPI and first chart are unchanged. |
+| F4 | Coral 11 px eyebrows were 2.78:1 on the canvas; placeholders were 3.05:1 on white. | Accent colors were used as small text. | Ink tokens for small text: `--coral-ink`, `--primary-ink`, `--success-ink` and `--placeholder`. `--muted` was darkened slightly (`#667085` → `#5f6b7e`) and `--cyan-ink` adjusted, so secondary text passes on every tint. Coral stays decorative. The new token test (`src/app/contrast.test.ts`, 27 pairs) found and fixed four more failing pairs: green badge, Approve button, cyan tag and indigo-tint text. |
+| F5 | Hitting the connector cap showed "A connector with this name already exists." | Every 409 was treated as a duplicate name. | The duplicate-name copy appears only for the stable message `a connector with this name already exists`. The cap (`connectors limit of N reached for this workspace`) gets its own workspace-limit copy. Any other 409 gets the generic conflict message, and the raw body is never shown. The API contract was unchanged; both discriminators already existed. |
+
+### Contrast ratios (WCAG, from the real tokens)
+
+| Pair | Before | After |
+| --- | --- | --- |
+| Coral eyebrow on canvas | 2.78 | 5.32 (`--coral-ink`) |
+| Coral eyebrow on white | — | 5.70 |
+| PILOT tag on coral tint | — | 5.06 |
+| Placeholder on white | 3.05 | 5.40 |
+| Secondary text on canvas / white | 4.64 / 4.97 | 5.03 / 5.40 |
+| Secondary text on red tint / indigo tint | 4.42 / 4.39 | 4.79 / 4.76 |
+| Green badge on green tint | 3.86 | 5.57 |
+| Approve (white on green) | 4.33 | 6.24 |
+| Cyan tag on cyan tint | 4.47 | 5.33 |
+| Indigo text on indigo tint | 4.43 | 5.79 |
+| Focus outline on white / canvas (≥ 3:1) | 5.02 / 4.68 | unchanged |
+
+### Tests (all run locally on the final tree)
+
+- Prettier, ESLint (0 warnings), `tsc` and `next build`: clean.
+- Vitest: 43 files, 296 tests. New or extended:
+  - `run-outcome.test.ts`;
+  - run-page summary loading, 503 and undetermined cases;
+  - the mutation-state suite (`TypeError`, `AbortError`, interrupted write, 500/502/503/504, validation, 403, approval enqueue, reads);
+  - `contrast.test.ts`;
+  - connector 409 cases (duplicate, cap, unknown) and the lost-response case.
+- Seeded-stack Playwright (local Compose + local Supabase): 8 tests collected in 3 files, no pilot specs; 8 passed, 0 skipped or flaky.
+- Pilot harness, 0 skipped in each:
+  - launch 4 passed, now including the connector whose response is lost after it commits;
+  - golden 2 passed, now asserting every KPI value is one line inside its card at 1440, 1280, 834, 800, 768, 744 and 390 px with no page overflow;
+  - failed / partial / UNKNOWN 1 passed, now including a summary 503 after UNKNOWN (and an actions outage giving the neutral unconfirmed state) plus "Checkpoint recorded".
+- Backend (no backend file changed): `test_quota_caps.py` (connector cap), `test_approvals_api.py` (including `test_enqueue_failure_returns_503`, unchanged) and `test_connectors_api.py`: 15 passed.
+
+### Screenshots
+
+Every `visual/` screenshot was regenerated, because the token changes visibly alter secondary text,
+eyebrows, badges and the Approve button on every screen. `07-sales-report-tablet.png` shows the
+2 × 2 KPI block. The two new captures are `17-unknown-with-summary-503.png` and
+`18-connector-lost-response.png`.
+
+### Remaining limitations
+
+- The F1 and F2 browser failures are injected in the browser (Playwright route interception).
+  The committed-then-lost connector case really commits on the API; only the reply is dropped.
+- The KPI no-wrap check runs in Chromium only.
+- When the summary itself is unavailable, its own panel still offers the ordinary retry for
+  re-reading it. That retry is a read, not the run.

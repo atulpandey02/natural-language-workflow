@@ -15,7 +15,9 @@
   --sidebar-muted: #8e9ab1;
 
   --text: #182134;
-  --muted: #667085;
+  /* Secondary text: dark enough for >= 4.5:1 on white, canvas and every tint. */
+  --muted: #5f6b7e;
+  --placeholder: #5f6b7e;
   --subtle: #8a94a7;
   --border: #e3e8f0;
   --border-strong: #cfd6e2;
@@ -23,15 +25,19 @@
   --primary: #5165d6;
   --primary-hover: #4153bd;
   --primary-soft: #eef0fd;
+  --primary-ink: #4153bd;
   --coral: #f26b5e;
   --coral-soft: #fdeeec;
+  /* Coral as small text (eyebrows, tags). Plain --coral stays decorative. */
+  --coral-ink: #b83a2e;
   --cyan: #21afc0;
-  --cyan-ink: #0d7c8a;
+  --cyan-ink: #0b6f7c;
   --cyan-soft: #e7f7f9;
   --violet: #8b5cf6;
   --violet-ink: #6d3fd9;
   --violet-soft: #f3eefe;
   --success: #168a63;
+  --success-ink: #0f6e4f;
   --success-soft: #e8f5ef;
   --warning: #c17a18;
   --warning-ink: #93590a;
@@ -152,7 +158,7 @@ textarea {
 }
 input::placeholder,
 textarea::placeholder {
-  color: var(--subtle);
+  color: var(--placeholder);
 }
 input:focus,
 select:focus,
@@ -253,7 +259,7 @@ tbody tr:hover {
   background: currentColor;
 }
 .badge.ok {
-  color: var(--success);
+  color: var(--success-ink);
   background: var(--success-soft);
   border-color: #bfe3d3;
 }
@@ -268,7 +274,7 @@ tbody tr:hover {
   border-color: #efd7ae;
 }
 .badge.run {
-  color: var(--primary);
+  color: var(--primary-ink);
   background: var(--primary-soft);
   border-color: #cfd5f6;
 }
@@ -376,7 +382,7 @@ pre {
   font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.12em;
-  color: var(--coral);
+  color: var(--coral-ink);
   margin-left: auto;
   border: 1px solid #f7c3bd;
   background: var(--coral-soft);
@@ -493,7 +499,7 @@ pre {
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--coral);
+  color: var(--coral-ink);
   margin: 0 0 8px;
 }
 .lead {
@@ -661,7 +667,7 @@ pre {
   margin: 24px 0 16px;
 }
 .request-bubble .eyebrow {
-  color: var(--primary);
+  color: var(--primary-ink);
 }
 .request-bubble p {
   margin: 6px 0 0;
@@ -718,7 +724,9 @@ pre {
 .kpi-card strong {
   font-size: clamp(18px, 1.8vw, 27px);
   font-weight: 700;
-  overflow-wrap: anywhere;
+  /* A number is one unit: never break inside "$280,617.20". Size scales instead. */
+  white-space: nowrap;
+  overflow-wrap: normal;
   letter-spacing: -0.03em;
 }
 .evidence-links {

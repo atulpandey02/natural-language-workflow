@@ -6,6 +6,7 @@ import { AppShell } from "@/components/AppShell";
 import { ErrorBanner, Empty, Loading, OutcomeNotice, StatusBadge } from "@/components/ui";
 import { RunSummaryCard } from "@/components/RunSummaryCard";
 import { EvidenceChain, runChain } from "@/components/EvidenceChain";
+import { deriveRunOutcome } from "@/lib/run-outcome";
 import { AnalyticsPanel } from "@/components/AnalyticsPanel";
 import {
   useRun,
@@ -21,6 +22,13 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
     actions = useRunActions(id),
     summary = useRunSummary(id);
   const provenance = useWorkflowProvenance(run.data?.workflow_version_id);
+  // Never infer a safe retry from raw FAILED while the summary is loading or unavailable.
+  const outcome = deriveRunOutcome({
+    runStatus: run.data?.status,
+    summaryOutcome: summary.data?.outcome,
+    summaryLoading: summary.isLoading,
+    actionStatuses: actions.data?.map((a) => a.status),
+  });
   const source = provenance.data?.analytics_source;
   return (
     <AppShell>
@@ -31,12 +39,10 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
         </div>
         {run.isLoading ? <Loading /> : null}
         <ErrorBanner error={run.error} />
-        {run.data ? (
-          <EvidenceChain {...runChain(summary.data?.outcome ?? run.data.status)} />
-        ) : null}
+        {run.data ? <EvidenceChain {...runChain(outcome)} /> : null}
         {run.data ? (
           <div className="run-strip">
-            <StatusBadge status={summary.data?.outcome ?? run.data.status} />
+            <StatusBadge status={outcome ?? run.data.status} />
             <span className="muted">
               Run {id.slice(0, 8)} · {new Date(run.data.created_at).toLocaleString()}
             </span>
@@ -44,7 +50,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
           </div>
         ) : null}
         {/* The engine's raw error text is diagnostic, not user copy: explain the outcome instead. */}
-        {run.data ? <OutcomeNotice outcome={summary.data?.outcome ?? run.data.status} /> : null}
+        {run.data ? <OutcomeNotice outcome={outcome} /> : null}
         {/* A run that can't be loaded (missing, or another workspace's) gets one
             explanation, not a cascade of identical errors from every panel. */}
         {run.error ? (
@@ -93,7 +99,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
                       <p>{s.detail}</p>
                       {steps.data?.find((step) => step.step_id === s.step_id)?.finished_at ? (
                         <p className="small muted">
-                          Checkpoint completed{" "}
+                          {s.outcome === "UNKNOWN" ? "Checkpoint recorded" : "Checkpoint completed"}{" "}
                           {new Date(
                             steps.data.find((step) => step.step_id === s.step_id)!.finished_at!,
                           ).toLocaleString()}

@@ -26,6 +26,36 @@ async function assertLayout(page: Page, width: number, height: number) {
   await expect(page.locator(".workflow-details")).not.toHaveAttribute("open", "");
 }
 
+const KPI_WIDTHS = [1440, 1280, 834, 800, 768, 744, 390];
+
+/** Every KPI value renders on exactly one line, inside its card, with no page overflow. */
+async function assertKpisOneLine(page: Page) {
+  for (const width of KPI_WIDTHS) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+      .toBe(true);
+    const kpis = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="analytics-kpi"] strong')].map((el) => {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const lines = new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+        const text = range.getBoundingClientRect();
+        const card = el.closest(".kpi-card")!.getBoundingClientRect();
+        return {
+          value: el.textContent,
+          lines,
+          inside: text.left >= card.left - 0.5 && text.right <= card.right + 0.5,
+        };
+      }),
+    );
+    expect(kpis.length).toBe(4);
+    for (const k of kpis) {
+      expect(k, `${k.value} at ${width}px`).toEqual({ value: k.value, lines: 1, inside: true });
+    }
+  }
+}
+
 async function inspectRevenue(page: Page) {
   const chart = page.getByTestId("analytics-chart").first();
   await chart.locator(".recharts-line-dot").nth(2).hover();
@@ -96,6 +126,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.keyboard.press("Enter");
     await expect(page.getByRole("table", { name: "Monthly supporting data" })).toBeVisible();
     await expect(page.getByTestId("analytics-kpi").first()).toContainText("$280,617.20");
+    await assertKpisOneLine(page);
     await assertLayout(page, 1440, 900);
     await expect(page.locator(".table-scroll-cue")).toHaveCount(0);
     await page.emulateMedia({ reducedMotion: "reduce" });
@@ -254,6 +285,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await expect(page.getByTestId("analytics-kpi")).toHaveCount(4);
     await expect(page.getByTestId("analytics-chart")).toHaveCount(5);
     await expect(page.getByRole("heading", { name: "SLA compliance trend" })).toBeVisible();
+    await assertKpisOneLine(page);
     await assertLayout(page, 1440, 900);
     for (const value of ["49.79%", "25", "23.03 h", "4.23 / 5"]) {
       await expect(page.getByTestId("analytics-kpi").filter({ hasText: value })).toHaveCount(1);

@@ -1,4 +1,4 @@
-import { toApiError } from "@/lib/errors";
+import { RequestInterruptedError, toApiError } from "@/lib/errors";
 
 // Browser -> same-origin BFF client. Never talks to FastAPI directly and never
 // handles bearer tokens (the BFF injects them server-side). Centralizes base
@@ -21,18 +21,30 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
   }
   if (opts.idempotencyKey) headers["Idempotency-Key"] = opts.idempotencyKey;
 
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers,
-    body,
-    signal: opts.signal,
-    cache: "no-store",
-  });
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method,
+      headers,
+      body,
+      signal: opts.signal,
+      cache: "no-store",
+    });
+    text = await res.text();
+  } catch (cause) {
+    // No complete response: for a write, the server may still have committed it.
+    throw new RequestInterruptedError(method, cause);
+  }
   const requestId = res.headers.get("X-Request-Id") ?? undefined;
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  let data: unknown = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch (cause) {
+    if (res.ok) throw new RequestInterruptedError(method, cause);
+  }
   if (!res.ok) {
-    throw toApiError(res.status, data, requestId);
+    throw toApiError(res.status, data, requestId, method);
   }
   return data as T;
 }

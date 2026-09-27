@@ -8,6 +8,7 @@ import { ApiError } from "@/lib/errors";
 import {
   SLACK_CHANNEL_ID_RE,
   buildConnectorPayload,
+  isDuplicateConnectorName,
   secretRefProblem,
   type ConnectorFormValues,
   type ConnectorType,
@@ -72,7 +73,9 @@ export function ConnectorForm({ onCreated }: { onCreated?: () => void }) {
     try {
       await create.mutateAsync(buildConnectorPayload(values));
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
+      // Only the duplicate-name conflict belongs on the Name field. The cap and
+      // any other conflict are shown as form-level messages (see lib/connector-form).
+      if (e instanceof ApiError && isDuplicateConnectorName(e)) {
         setError("name", { message: "A connector with this name already exists." });
         return;
       }

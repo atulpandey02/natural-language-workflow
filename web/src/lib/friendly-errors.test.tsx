@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { ApiError } from "@/lib/errors";
+import { ApiError, RequestInterruptedError } from "@/lib/errors";
 import { ErrorBanner, OutcomeNotice } from "@/components/ui";
 import {
   RETRY_TEXT,
@@ -44,7 +44,7 @@ describe("describeError: every expected failure class has friendly copy", () => 
       "server",
       "Something went wrong on our side",
     ],
-    [new TypeError("Failed to fetch"), "network", "Can't reach NLW"],
+    [new TypeError("Failed to fetch"), "interrupted", "We couldn't confirm the result"],
     [new Error("anything"), "unexpected", "Something went wrong"],
   ])("%#: %s -> %s", (error, kind, title) => {
     const f = describeError(error);
@@ -205,24 +205,86 @@ describe("analysis journey copy", () => {
   });
 });
 
-describe("every state says whether anything changed", () => {
-  it("reads and rejected requests changed nothing; server errors say to check", () => {
-    expect(describeError(api(404, "not_found", "x"))?.changed).toBe("Nothing was changed.");
-    expect(describeError(api(422, "validation_error", "x"))?.changed).toBe("Nothing was changed.");
-    expect(describeError(new TypeError("Failed to fetch"))?.changed).toBe("Nothing was changed.");
-    expect(describeError(api(500, "internal_error", "x"))?.changed).toMatch(/check whether/);
+describe("mutation state: never claim nothing changed unless it's proven", () => {
+  const write = (status: number, code: string, message: string) =>
+    new ApiError({ status, code, message, method: "POST" });
+  const UNCONFIRMED = "We couldn't confirm whether your change was saved.";
+
+  it.each([
+    ["TypeError", new TypeError("Failed to fetch")],
+    ["AbortError", Object.assign(new Error("aborted"), { name: "AbortError" })],
+    ["interrupted write", new RequestInterruptedError("POST")],
+  ])("%s is an unknown outcome with check-before-retry guidance", (_n, error) => {
+    const f = describeError(error)!;
+    expect(f.mutation).toBe("unknown");
+    expect(f.changed).toBe(UNCONFIRMED);
+    expect(f.retry).toBe("no");
+    expect(f.action).toMatch(/check the relevant list or record before trying again/);
+    expect(JSON.stringify(f)).not.toContain("Nothing was changed");
+  });
+
+  it.each([502, 503, 504, 500])(
+    "an ambiguous %i on a write is unknown, never 'nothing changed'",
+    (status) => {
+      const f = describeError(write(status, "service_unavailable", "upstream"))!;
+      expect(f.mutation).toBe("unknown");
+      expect(f.changed).toBe(UNCONFIRMED);
+      expect(f.retry).toBe("no");
+      expect(`${f.action} ${RETRY_TEXT[f.retry]}`).not.toMatch(/try again now/i);
+    },
+  );
+
+  it("a definite validation rejection changed nothing", () => {
+    const f = describeError(write(422, "validation_error", "request validation failed"))!;
+    expect(f.mutation).toBe("unchanged");
+    expect(f.changed).toBe("Nothing was changed.");
+  });
+
+  it("an authorization denial changed nothing", () => {
+    expect(describeError(write(403, "forbidden", "insufficient role"))?.changed).toBe(
+      "Nothing was changed.",
+    );
+  });
+
+  it("the approval enqueue failure says the decision was saved, and nothing else", () => {
+    const f = describeError(
+      write(503, "service_unavailable", "decision saved but resume could not be scheduled"),
+    )!;
+    expect(f.mutation).toBe("changed");
+    expect(f.changed).toBe(
+      "Your decision was saved. Scheduling the run to continue did not complete.",
+    );
+    expect(f.retry).toBe("no");
+    expect(JSON.stringify(f)).not.toMatch(/Nothing was changed|couldn't confirm/);
+  });
+
+  it("reads make no claim about changes and keep ordinary retry guidance", () => {
+    const read = new ApiError({
+      status: 503,
+      code: "service_unavailable",
+      message: "x",
+      method: "GET",
+    });
+    const f = describeError(read)!;
+    expect(f.mutation).toBeUndefined();
+    expect(f.changed).toBeUndefined();
+    expect(describeError(new RequestInterruptedError("GET"))?.kind).toBe("network");
   });
 
   it("outcomes state what ran; UNKNOWN is explicitly not a success", () => {
     expect(describeOutcome("FAILED")?.changed).toMatch(/Completed steps .* kept/);
-    expect(describeOutcome("PARTIAL")?.changed).toMatch(/Nothing was shared/);
+    expect(describeOutcome("PARTIAL")?.changed).toMatch(/completed steps ran/);
     expect(describeOutcome("FAILED_WITH_UNKNOWN")?.changed).toBe(
       "The external action may have happened. This is not a success.",
     );
+    const unavailable = describeOutcome("OUTCOME_UNAVAILABLE")!;
+    expect(unavailable.retry).toBe("no");
+    expect(unavailable.changed).toMatch(/may have run/);
+    expect(JSON.stringify(unavailable)).not.toMatch(/Nothing was changed|try again now/i);
   });
 
-  it("renders the changed line in the panel", () => {
-    render(<ErrorBanner error={api(403, "forbidden", "insufficient role")} />);
+  it("renders the mutation line in the panel", () => {
+    render(<ErrorBanner error={write(403, "forbidden", "insufficient role")} />);
     expect(screen.getByRole("alert")).toHaveTextContent("Nothing was changed.");
   });
 });

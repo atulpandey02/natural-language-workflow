@@ -2,11 +2,13 @@
 // describeError(): a short title, a plain-language explanation, a safe next
 // action and retry guidance — never raw provider/API/Pydantic/SQL text, internal
 // identifiers or stack traces. Only a sanitized request reference is shown.
-import { ApiError } from "@/lib/errors";
+import { ApiError, RequestInterruptedError } from "@/lib/errors";
+import { OUTCOME_UNAVAILABLE } from "@/lib/run-outcome";
 
 export type Tone = "error" | "warn" | "info";
 /** now = safe to retry immediately; later = wait first; no = do not blindly retry. */
 export type Retry = "now" | "later" | "no";
+export type Mutation = "unchanged" | "changed" | "unknown";
 
 export interface FriendlyError {
   title: string;
@@ -14,7 +16,14 @@ export interface FriendlyError {
   action: string;
   retry: Retry;
   tone: Tone;
-  /** Whether anything changed as a result — always stated, never implied. */
+  /**
+   * Whether the failed request changed anything: `unchanged` (proven not
+   * committed), `changed` (known committed, then something later failed) or
+   * `unknown` (completion can't be established). Absent for reads, which change
+   * nothing, and for run outcomes, which state it in `changed`.
+   */
+  mutation?: Mutation;
+  /** The sentence shown for `mutation`/outcome — never implied, always stated. */
   changed?: string;
   reference?: string;
   /** Friendly per-field messages from a 422 validation response (field -> text). */
@@ -44,7 +53,7 @@ export class UserFacingError extends Error {
 const GENERIC: Record<string, Copy> = {
   network: {
     title: "Can't reach NLW",
-    explanation: "Your browser couldn't connect to NLW.",
+    explanation: "Your browser couldn't load this from NLW.",
     action: "Check your connection, then try again.",
     retry: "now",
     tone: "error",
@@ -100,7 +109,7 @@ const GENERIC: Record<string, Copy> = {
   },
   unavailable: {
     title: "Temporarily unavailable",
-    explanation: "A service NLW depends on isn't responding right now. Nothing was changed.",
+    explanation: "A service NLW depends on isn't responding right now.",
     action: "Try again in a minute.",
     retry: "later",
     tone: "warn",
@@ -120,6 +129,21 @@ const GENERIC: Record<string, Copy> = {
     tone: "error",
   },
 };
+
+// Parameterised stable messages, matched by pattern (never echoed).
+const PATTERNS: Array<[RegExp, number, Copy]> = [
+  [
+    /^connectors limit of \d+ reached for this workspace$/,
+    409,
+    {
+      title: "This workspace has reached its connector limit",
+      explanation: "No more connectors can be added to this workspace in the pilot.",
+      action: "Remove a connector you no longer need, or ask your operator about the limit.",
+      retry: "no",
+      tone: "warn",
+    },
+  ],
+];
 
 // Stable, author-controlled backend codes/messages -> purpose-written copy.
 const KNOWN: Record<string, Copy> = {
@@ -203,9 +227,12 @@ const KNOWN: Record<string, Copy> = {
     tone: "warn",
   },
   "decision saved but resume could not be scheduled": {
-    title: "Decision saved — the run will continue shortly",
-    explanation: "Your decision was recorded, but the run couldn't be resumed right away.",
+    title: "Decision saved — resuming the run didn't complete",
+    explanation:
+      "Your approval decision was recorded, but NLW couldn't schedule the run to continue.",
     action: "Check the run in a minute. Don't decide again.",
+    mutation: "changed",
+    changed: "Your decision was saved. Scheduling the run to continue did not complete.",
     retry: "no",
     tone: "info",
   },
@@ -285,16 +312,54 @@ function fieldErrors(details: unknown): Record<string, string> | undefined {
 }
 
 const NOTHING_CHANGED = "Nothing was changed.";
-// A server error or an unclassified failure can't prove nothing was saved.
-const MAYBE_CHANGED =
-  "If you were saving something, check whether it was saved before trying again.";
+const OUTCOME_UNCONFIRMED = "We couldn't confirm whether your change was saved.";
+const CHECK_BEFORE_RETRY =
+  "Refresh and check the relevant list or record before trying again, so nothing is done twice.";
 
-function changedFor(kind: string): string {
-  return kind === "server" || kind === "unexpected" ? MAYBE_CHANGED : NOTHING_CHANGED;
+const INTERRUPTED: Copy = {
+  title: "We couldn't confirm the result",
+  explanation: "The connection was interrupted before NLW replied.",
+  action: CHECK_BEFORE_RETRY,
+  retry: "no",
+  tone: "warn",
+};
+
+function isInterrupted(error: unknown): boolean {
+  return (
+    error instanceof RequestInterruptedError ||
+    error instanceof TypeError ||
+    (error instanceof Error && error.name === "AbortError")
+  );
 }
 
-function isNetworkError(error: unknown): boolean {
-  return error instanceof TypeError || (error instanceof Error && error.name === "AbortError");
+function isRead(method: string | undefined): boolean {
+  return method === "GET" || method === "HEAD";
+}
+
+/**
+ * What a failed request did to server state. A 4xx is a definite rejection. A
+ * 5xx (including 502–504 from a proxy) may arrive after the work committed, so
+ * it is unknown unless the endpoint's contract says otherwise.
+ */
+function mutationFor(status: number, method: string | undefined, copy: Copy): Mutation | undefined {
+  if (isRead(method)) return undefined;
+  if (copy.mutation) return copy.mutation;
+  return status >= 500 || status === 408 ? "unknown" : "unchanged";
+}
+
+function withMutation(f: FriendlyError, mutation: Mutation | undefined): FriendlyError {
+  if (!mutation) return { ...f, mutation: undefined, changed: undefined };
+  if (mutation === "unknown") {
+    return {
+      ...f,
+      mutation,
+      changed: OUTCOME_UNCONFIRMED,
+      action: CHECK_BEFORE_RETRY,
+      retry: "no",
+    };
+  }
+  if (mutation === "changed") return { ...f, mutation, retry: "no" };
+  return { ...f, mutation, changed: f.changed ?? NOTHING_CHANGED };
 }
 
 export function describeError(error: unknown): FriendlyError | null {
@@ -305,22 +370,28 @@ export function describeError(error: unknown): FriendlyError | null {
     const known =
       KNOWN[error.code] ??
       KNOWN[error.message] ??
-      (lastOwner ? KNOWN["workspace must keep an owner"] : undefined);
+      (lastOwner ? KNOWN["workspace must keep an owner"] : undefined) ??
+      PATTERNS.find(([re, status]) => status === error.status && re.test(error.message))?.[2];
     const kind = known ? (KNOWN[error.code] ? error.code : "known") : toKind(error.status);
     const copy = known ?? GENERIC[kind] ?? GENERIC.unexpected;
-    return {
-      ...copy,
-      kind,
-      changed: copy.changed ?? changedFor(known ? "known" : kind),
-      reference: safeReference(error.requestId),
-      fields: error.status === 422 ? fieldErrors(error.details) : undefined,
-    };
+    return withMutation(
+      {
+        ...copy,
+        kind,
+        reference: safeReference(error.requestId),
+        fields: error.status === 422 ? fieldErrors(error.details) : undefined,
+      },
+      mutationFor(error.status, error.method, copy),
+    );
   }
-  if (error instanceof UserFacingError)
-    return { changed: NOTHING_CHANGED, ...error.copy, kind: error.kind };
-  if (isNetworkError(error))
-    return { ...GENERIC.network, kind: "network", changed: NOTHING_CHANGED };
-  return { ...GENERIC.unexpected, kind: "unexpected", changed: MAYBE_CHANGED };
+  if (error instanceof UserFacingError) return { ...error.copy, kind: error.kind };
+  if (isInterrupted(error)) {
+    const method = error instanceof RequestInterruptedError ? error.method : undefined;
+    // A read that never completed changed nothing; anything else may have committed.
+    if (isRead(method)) return { ...GENERIC.network, kind: "network" };
+    return withMutation({ ...INTERRUPTED, kind: "interrupted" }, "unknown");
+  }
+  return withMutation({ ...GENERIC.unexpected, kind: "unexpected" }, "unknown");
 }
 
 // ---- workflow outcomes (not HTTP errors, but the same language) --------------
@@ -343,7 +414,7 @@ export function describeOutcome(outcome: string | undefined): FriendlyError | nu
         explanation:
           "Some steps completed and others did not. Only verified results are shown and they can't be shared.",
         action: "Review which steps failed before relying on these results.",
-        changed: "Only the completed steps ran. Nothing was shared outside NLW.",
+        changed: "Only the completed steps ran; their results are kept.",
         retry: "now",
         tone: "warn",
       };
@@ -358,6 +429,18 @@ export function describeOutcome(outcome: string | undefined): FriendlyError | nu
         action:
           "Check the destination (for example, the Slack channel) first. Don't simply run it again — that could send a duplicate.",
         changed: "The external action may have happened. This is not a success.",
+        retry: "no",
+        tone: "warn",
+      };
+    case OUTCOME_UNAVAILABLE:
+      return {
+        kind: "outcome_unavailable",
+        title: "We can't confirm this run's full outcome",
+        explanation:
+          "The result summary couldn't be loaded, so NLW can't show exactly what each step did.",
+        action:
+          "Review the evidence and action audit below, or ask an administrator, before running it again.",
+        changed: "Some steps may have run, including actions outside NLW.",
         retry: "no",
         tone: "warn",
       };

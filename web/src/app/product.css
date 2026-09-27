@@ -22,13 +22,13 @@ button.danger:hover:not(:disabled) {
   border-color: var(--danger);
 }
 button.approve {
-  background: var(--success);
-  border-color: var(--success);
+  background: var(--success-ink);
+  border-color: var(--success-ink);
   color: #fff;
 }
 button.approve:hover:not(:disabled) {
-  background: #0f7552;
-  border-color: #0f7552;
+  background: #0b5a40;
+  border-color: #0b5a40;
 }
 
 .field-error {
@@ -62,7 +62,7 @@ select[aria-invalid="true"] {
   border-color: #f7c3bd;
 }
 .role-pill.admin {
-  color: var(--primary);
+  color: var(--primary-ink);
   background: var(--primary-soft);
   border-color: #cfd5f6;
 }

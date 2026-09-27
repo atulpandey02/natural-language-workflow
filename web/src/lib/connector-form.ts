@@ -86,3 +86,10 @@ export function buildConnectorPayload(v: ConnectorFormValues) {
     secret_ref: ref || null,
   };
 }
+
+// Stable backend messages (src/nlw/api/routers/connectors.py, nlw.db.quota).
+const DUPLICATE_NAME = "a connector with this name already exists";
+
+export function isDuplicateConnectorName(e: { status: number; message: string }): boolean {
+  return e.status === 409 && e.message === DUPLICATE_NAME;
+}

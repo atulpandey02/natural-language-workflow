@@ -91,6 +91,7 @@ const STATUS_CLASS: Record<string, string> = {
   SKIPPED: "skip",
   FAILED_WITH_UNKNOWN: "warn",
   ACTION_OUTCOME_UNKNOWN: "warn",
+  OUTCOME_UNAVAILABLE: "warn",
   PARTIAL: "warn",
   NEEDS_APPROVAL: "warn",
   NEEDS_CLARIFICATION: "warn",

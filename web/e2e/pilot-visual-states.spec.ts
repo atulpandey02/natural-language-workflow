@@ -82,6 +82,49 @@ test("real failed/partial checkpoints and immutable Slack UNKNOWN outcome", asyn
   await expect(page.getByText("Destination: CPILOT", { exact: true }).first()).toBeVisible();
   await page.screenshot({ path: "test-results/pilot-unknown.png" });
   await expect(page.locator(".workflow-details")).toHaveAttribute("open", "");
+  // An UNKNOWN step's checkpoint is "recorded", never "completed".
+  await expect(page.getByText(/Checkpoint recorded/).first()).toBeVisible();
+
+  // F1: after UNKNOWN, the summary read fails (503). The persisted action
+  // evidence must keep the page on UNKNOWN, never fall back to a retryable FAILED.
+  const outage = {
+    status: 503,
+    contentType: "application/json",
+    body: JSON.stringify({
+      error: { code: "service_unavailable", message: "service temporarily unavailable" },
+    }),
+  };
+  await page.route("**/api/nlw/runs/*/summary", (route) => route.fulfill(outage));
+  await page.goto(slackRun);
+  await expect(page.getByText("We can't confirm whether the action happened")).toBeVisible({
+    timeout: 30000,
+  });
+  await expect(page.locator(".run-strip [data-status]")).toHaveAttribute(
+    "data-status",
+    "ACTION_OUTCOME_UNKNOWN",
+  );
+  await expect(page.locator(".run-strip .badge.ok")).toHaveCount(0);
+  await expect(page.getByText(/You can try again now|You can run the workflow again/)).toHaveCount(
+    0,
+  );
+  await expect(page.getByText("This run didn't finish")).toHaveCount(0);
+  await page.screenshot({ path: "test-results/pilot-unknown-summary-503.png" });
+
+  // With neither the summary nor the action evidence, the outcome is unconfirmed:
+  // no claim that nothing happened, and no retry advice.
+  await page.route("**/api/nlw/runs/*/actions", (route) => route.fulfill(outage));
+  await page.goto(slackRun);
+  await expect(page.getByText("We can't confirm this run's full outcome")).toBeVisible({
+    timeout: 30000,
+  });
+  await expect(
+    page.getByText("Some steps may have run, including actions outside NLW."),
+  ).toBeVisible();
+  await expect(page.getByText(/You can try again now|You can run the workflow again/)).toHaveCount(
+    0,
+  );
+  await page.unroute("**/api/nlw/runs/*/summary");
+  await page.unroute("**/api/nlw/runs/*/actions");
   await page.goto(sourceRun);
   await expect(page.getByTestId("analytics-result")).toContainText("Completed");
   await second.close();

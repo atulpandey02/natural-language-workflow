@@ -273,6 +273,29 @@ test.describe("launch closure journeys (synthetic pilot)", () => {
     await expect(page.getByText("A connector with this name already exists.")).toBeVisible();
     await expect(page.locator("main")).not.toContainText(/uq_connector|IntegrityError|psycopg/);
     await page.screenshot({ path: `${SHOT}-connector-duplicate.png`, fullPage: true });
+
+    // F2: the server commits the connector but the response never arrives.
+    // The UI must not claim nothing changed, and the refreshed list shows the truth.
+    await page.route("**/api/nlw/connectors", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      await route.fetch(); // the request reaches the API and commits
+      await route.abort("connectionreset"); // …but the browser never gets the reply
+    });
+    await page.getByLabel("Name").fill("committed-slack");
+    await page.getByLabel("Slack workspace").fill("NLW Product Demo");
+    await page.getByLabel("Default channel ID").fill("C0123ABCD");
+    await page.getByLabel("Secret reference").fill("SLACK_DEMO_BOT_TOKEN");
+    await page.getByRole("button", { name: "Create connector" }).click();
+    const lost = page.getByTestId("friendly-error");
+    await expect(lost).toContainText("We couldn't confirm whether your change was saved.");
+    await expect(lost).toContainText("check the relevant list or record before trying again");
+    await expect(lost).not.toContainText("Nothing was changed");
+    await page.unroute("**/api/nlw/connectors");
+    await expect(page.getByRole("cell", { name: "committed-slack", exact: true })).toBeVisible({
+      timeout: 15000,
+    });
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.screenshot({ path: `${SHOT}-connector-lost-response.png`, fullPage: true });
   });
 
   test("mobile and keyboard: sign in and navigate without a pointer", async ({ page }) => {

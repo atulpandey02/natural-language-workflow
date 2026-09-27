@@ -29,6 +29,9 @@ import type {
   WorkspaceOut,
 } from "@/lib/api/types";
 
+// Mutations refresh their list whether they succeed or not: after an
+// unconfirmed write, the refreshed list is how the user checks what happened.
+
 // Bounded polling intervals (M10 D4). No WebSockets.
 const RUN_POLL_MS = 4000;
 const APPROVALS_POLL_MS = 10000;
@@ -58,7 +61,7 @@ export function useCreateWorkspace() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (name: string) => api.post<WorkspaceOut>("/workspaces", { name }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["workspaces"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["workspaces"] }),
   });
 }
 
@@ -82,7 +85,7 @@ export function useCreateConnector() {
       config: Record<string, unknown>;
       secret_ref: string | null;
     }) => api.post<ConnectorOut>("/connectors", body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["connectors"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["connectors"] }),
   });
 }
 
@@ -109,7 +112,7 @@ export function useMaterialize() {
   return useMutation({
     mutationFn: (proposalId: string) =>
       api.post<MaterializeOut>(`/plans/${proposalId}/materialize`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["workflows"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["workflows"] }),
   });
 }
 
@@ -172,7 +175,7 @@ export function useCreateRun(workflowId: string) {
   return useMutation({
     mutationFn: (idempotencyKey: string) =>
       api.post<RunCreateOut>(`/workflows/${workflowId}/runs`, undefined, idempotencyKey),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["runs"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["runs"] }),
   });
 }
 
@@ -220,7 +223,7 @@ export function useDecideApproval() {
   return useMutation({
     mutationFn: ({ id, decision }: { id: string; decision: "approve" | "reject" }) =>
       api.post<ApprovalDecisionOut>(`/approvals/${id}/${decision}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["approvals"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["approvals"] }),
   });
 }
 
@@ -243,7 +246,7 @@ export function useCreateSchedule() {
       hour: number | null;
       day_of_week: number | null;
     }) => api.post<ScheduleOut>("/schedules", body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
   });
 }
 
@@ -252,7 +255,7 @@ export function useUpdateSchedule() {
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
       api.patch<ScheduleOut>(`/schedules/${id}`, body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
   });
 }
 
@@ -267,7 +270,7 @@ export function useChangeMemberRole() {
   return useMutation({
     mutationFn: ({ userId, role }: { userId: string; role: MemberRole }) =>
       api.patch<MemberOut>(`/members/${userId}`, { role }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["members"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["members"] }),
   });
 }
 
@@ -275,7 +278,7 @@ export function useRemoveMember() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (userId: string) => api.del<void>(`/members/${userId}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["members"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["members"] }),
   });
 }
 
@@ -294,7 +297,7 @@ export function useCreateInvitation() {
   return useMutation({
     mutationFn: (body: { email: string; role: "admin" | "member" }) =>
       api.post<InvitationCreatedOut>("/invitations", body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["invitations"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["invitations"] }),
   });
 }
 
@@ -302,7 +305,7 @@ export function useRevokeInvitation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.post<void>(`/invitations/${id}/revoke`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["invitations"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["invitations"] }),
   });
 }
 
@@ -312,6 +315,6 @@ export function useAcceptInvitation() {
     mutationFn: (token: string) =>
       api.post<InvitationAcceptedOut>("/invitations/accept", { token }),
     // Accepting creates a fresh membership → the caller's workspace list changes.
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["workspaces"] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["workspaces"] }),
   });
 }

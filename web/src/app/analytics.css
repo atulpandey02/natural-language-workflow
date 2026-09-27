@@ -88,6 +88,9 @@
   overflow: hidden;
 }
 .analytics-workspace .kpi-card {
+  /* Values size to their own card (container query units), so they never
+     wrap and never overflow, whatever the grid does. */
+  container-type: inline-size;
   background: var(--surface);
   border: 0;
   border-radius: 0;
@@ -109,7 +112,7 @@
   color: var(--muted);
 }
 .analytics-workspace .kpi-card strong {
-  font-size: clamp(26px, 2.4vw, 36px);
+  font-size: clamp(20px, 13cqi, 36px);
   font-weight: 700;
   letter-spacing: -0.035em;
   line-height: 1.15;
@@ -118,7 +121,7 @@
   font-variant-numeric: tabular-nums;
 }
 .analytics-workspace .kpi-card:first-child strong {
-  font-size: clamp(32px, 3vw, 44px);
+  font-size: clamp(24px, 14cqi, 44px);
 }
 .analytics-workspace .metric-kind {
   font-size: 11.5px;
@@ -555,6 +558,18 @@
     padding-inline: 14px;
   }
 }
+@media (max-width: 1200px) and (min-width: 601px) {
+  /* Tablet: a 2 × 2 KPI block keeps each value large and on one line. */
+  .analytics-workspace .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .analytics-workspace .kpi-card:nth-child(2n) {
+    border-right: 0;
+  }
+  .analytics-workspace .kpi-card:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--border);
+  }
+}
 @media (max-width: 600px) {
   .analytics-result {
     padding: 18px 14px 14px;
@@ -597,7 +612,7 @@
     padding-block: 18px;
   }
   .analytics-workspace .kpi-card:first-child strong {
-    font-size: 40px;
+    font-size: clamp(26px, 13cqi, 40px);
     margin: 6px 0;
   }
   .analytics-workspace .kpi-card .evidence-links {

@@ -134,6 +134,50 @@ describe("ConnectorForm: Slack", () => {
     expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true");
   });
 
+  it("shows the connector cap as a workspace limit, not a name problem", async () => {
+    mockFetch(409, {
+      error: { code: "conflict", message: "connectors limit of 20 reached for this workspace" },
+    });
+    renderForm();
+    await fillSlack({});
+    await submit();
+    expect(await screen.findByTestId("friendly-error")).toHaveTextContent(
+      "This workspace has reached its connector limit",
+    );
+    expect(screen.queryByText("A connector with this name already exists.")).toBeNull();
+    expect(screen.getByLabelText("Name")).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("uses a generic conflict message for an unrecognised 409", async () => {
+    mockFetch(409, { error: { code: "conflict", message: "some future conflict" } });
+    const { container } = renderForm();
+    await fillSlack({});
+    await submit();
+    expect(await screen.findByTestId("friendly-error")).toHaveTextContent(
+      "That conflicts with the current state",
+    );
+    expect(screen.queryByText("A connector with this name already exists.")).toBeNull();
+    expect(container.textContent).not.toContain("some future conflict");
+  });
+
+  it("never claims nothing changed when the response is lost", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+    renderForm();
+    await fillSlack({});
+    await submit();
+    const panel = await screen.findByTestId("friendly-error");
+    expect(panel).toHaveTextContent("We couldn't confirm whether your change was saved.");
+    expect(panel).toHaveTextContent(/check the relevant list or record before trying again/);
+    expect(panel).not.toHaveTextContent("Nothing was changed");
+    // The entered values stay put so the user can compare against the list.
+    expect(screen.getByLabelText("Name")).toHaveValue("product-slack");
+  });
+
   it("never renders raw Pydantic validation text from the API", async () => {
     const raw =
       "1 validation error for SlackConnectorConfig\ndefault_channel\n  Value error, default_channel must be a canonical Slack channel ID";

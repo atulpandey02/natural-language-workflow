@@ -59,6 +59,7 @@ export function runChain(status: string | undefined): {
     case "ACTION_OUTCOME_UNKNOWN":
     case "UNKNOWN":
     case "PARTIAL":
+    case "OUTCOME_UNAVAILABLE":
       return { current: "Execution", tone: "attention" };
     default:
       return { current: "Execution" };
