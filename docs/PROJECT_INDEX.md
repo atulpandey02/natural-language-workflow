@@ -3,9 +3,9 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
-## M12C — pilot analytics experience (local branch)
+## M12C — pilot analytics experience and rollout correction
 
-`feat/pilot-analytics-experience` adds two deterministic synthetic datasets,
+M12C merged to `main` as `549b19f` (#37), adding two deterministic synthetic datasets,
 registered analytical tools, the bounded `analytics-1` result contract, authorized
 results and an immutable two-proposal Slack journey. The responsive Next.js
 interface renders KPIs, fixed Recharts charts, supporting tables and source-step
@@ -17,14 +17,23 @@ Real seeded browser captures cover desktop, laptop, tablet, mobile and failure
 states. Independent review returned `READY WITH NON-BLOCKING NOTES`. The three
 final corrections restore forbidden catalog-text test coverage, keep mobile
 table identifiers on one line with an accessible scroll cue, and gate Slack
-sharing on validated READY analytics. The corrections are local and awaiting
-review. This package does not complete the separate pilot-launch gates below.
+sharing on validated READY analytics. A local follow-up on
+`fix/staging-demo-tool-enablement` addresses a deployment blocker: the reviewed
+target now explicitly selects demo-tool visibility, stage-release writes it only
+to the staged environment, and Compose forwards it only to API with a default
+of false. A follow-up authority correction removes ambient shell overrides,
+checks target/state/staged pins on every later phase, and verifies rendered and
+running API values before reopening. Worker execution remains independent of
+the visibility flag. This fix awaits review and a new Delivery-attested release;
+`549b19f` must not be used for deployment. The `0020` → `0021` migration path and
+the separate pilot-launch gates below are unchanged. No VPS was contacted.
 
 - [Architecture, dataset grains, metric definitions and contract](development/pilot-analytics.md)
 - [Golden workflows and demo script](runbooks/pilot-analytics-demo.md)
 - [ADR-027: grounded analytics and immutable summary handoff](adr/ADR-027-grounded-pilot-analytics.md)
 - [Inspection and implementation note](development/m12c-implementation-note.md)
 - [Validation and browser evidence](evidence/m12c/validation.md)
+- [Demo-tool rollout correction and local validation](evidence/m12c/demo-tool-enablement.md)
 
 ## Status
 

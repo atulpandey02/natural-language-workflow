@@ -94,10 +94,55 @@ satisfies the staging/production policy.
 | Release SHA, backend/web image **digests**, expected current + target revisions, key ids | the CI manifest | mutable tags are never deployment authority |
 | Compose project | `target.env` / manifest (`app`) | leftover-container and state-file scoping; every Compose call passes `-p` explicitly |
 | Ops root layout | `target.env` (`NLW_STAGING_OPS_ROOT=/opt/nlw`) | `app` = active checkout, `releases/<sha>` = staged release, `current` = activation symlink, `rollout/` = state |
+| Demo-tool policy | `target.env` (`NLW_STAGING_DEMO_TOOLS_ENABLED`) | required non-secret `true` or `false`; copied to the staged environment only and recorded in stage-release evidence |
 
 Every Mac-side ops script sources `scripts/ops/lib/staging-target.sh`; none
 hard-codes an address. `deploy-staging.sh` / `verify-staging-deployment.sh`
 take the manifest from `NLW_STAGING_RELEASE_FILE` and validate it first.
+
+The phased rollout requires `NLW_STAGING_DEMO_TOOLS_ENABLED` exactly once, using
+lowercase `true` or `false`. Missing, empty, quoted, duplicate or noncanonical
+values fail target validation before any host contact. The reviewed staging
+target explicitly uses `true` for the Sales/Support pilot. A production target
+should explicitly use `false` unless enabling demo tools has been reviewed for
+that environment. The setting enables all existing demo-tagged tools, including
+`fake.*`, `static.*` and `pilot.*`; it does not change their execution semantics.
+
+During `stage-release`, the active `.env.prod` is read and hash-checked but never
+edited. The staged copy receives `DEMO_TOOLS_ENABLED` from the validated target,
+replacing any inherited value. The phase evidence records `demo_tools_enabled`
+as a boolean and binds it to the release SHA and existing manifest digest, without
+environment contents or credentials. Compose forwards it only to API, the sole
+visibility-policy consumer. Worker execution and scheduler enqueueing do not
+depend on receiving it. A missing or empty ordinary Compose value defaults to
+`false`.
+
+Every reviewed rollout Compose command uses `env -u DEMO_TOOLS_ENABLED` so an
+exported shell value cannot override the staged environment file. Other required
+environment variables remain available. From `backup` onward, every phase
+requires agreement between the current target, manifest-bound staging evidence
+and canonical staged pin; disagreement stops with `re-run stage-release`.
+Re-stage the inactive release explicitly after reviewing a target change. This
+updates the policy and clears prior recreation/validation/reopening evidence;
+the existing backup, database and escrow gates still apply. An active release
+cannot be re-staged: use a new reviewed release instead.
+
+Before activation, the full Compose render must put the exact boolean only on
+API, including checks of inactive service profiles. Existing image/key pins and
+operator Alertmanager checks remain mandatory. After recreation, during
+validation, and again before reopening or a GO check, Docker's inspection
+formatter compares only the running API's flag and returns a sanitized
+match/mismatch. No complete container environment is returned or logged. A
+mismatch blocks reopening even if an earlier validation succeeded.
+
+Do not edit active/staged release files or broaden the Alertmanager-only operator
+override to set this flag.
+
+Release `549b19f` lacks this wiring. Deployment must use a new Delivery-attested
+release containing the correction, with its own escrow attestation. The recorded
+source revision remains `0020_schedule_authorization` and the checkout head remains
+`0021_analytics_handoff`; no new migration is needed. The release manifest and
+provenance policy retain their existing authority.
 
 ## Host layout: staging is separate from activation
 
@@ -269,7 +314,7 @@ uv run python -m nlw.ops.rollout go-check              --release M   # READ-ONLY
 | `verify-release` | host image cache, evidence dir | authorization; provenance receipt for this exact manifest digest; identity | `docker pull` both digests; `org.opencontainers.image.revision` label == release SHA on both; runs `nlw.ops.rollout.image_info` in the backend image and checks reported git SHA, every migration from expected+1 to the target present, Alembic head == `target_revision`; runs `--help` of `nlw.ops.rollout`, `nlw.ops.roles`, `nlw.ctxkeys prepare/fingerprint/verify-files`, `nlw.backup evidence` inside the exact image. An older image (e.g. `1eebf2e`, no label, no tooling) is refused |
 | `prepare-keys` | host files | authorization; identity | generates three independent 32-byte keys **on the host** through the release image running as root (`nlw.ctxkeys prepare`): dir `0700` root, files `0400` uid 10001, never overwrites, prints fingerprints only. On a follow-up release the complete existing set is verified + fingerprinted instead (`reused_existing`); a partial set stops |
 | `verify-escrow` | state only | authorization; **escrow phrase**; attestation fingerprints == host fingerprints; release SHA/env; ≤ 30 days old | the operator must have escrowed the files first — see the escrow section of [signed-context-keys](signed-context-keys.md) |
-| `stage-release` | `releases/<sha>` only | authorization; verify-release + verify-escrow done; identity | clone the active checkout into `releases/<sha>`, `git checkout --detach <release_sha>` (clean), write the staged `.env.prod` (active copy with only digests/key ids/key dir rewritten; temp-file rewrite, 0600), copy the git-ignored `docker/worker.secrets.env` (0600) when present (recorded as `staged`/`absent`), render `config`, build the backup image from the pinned digest; verifies the active `.env.prod` hash is unchanged afterwards |
+| `stage-release` | `releases/<sha>` only | authorization; verify-release + verify-escrow done; identity | clone the active checkout into `releases/<sha>`, `git checkout --detach <release_sha>` (clean), write the staged `.env.prod` (active copy with digests/key ids/key dir and reviewed demo-tool policy rewritten; temp-file rewrite, 0600), copy the git-ignored `docker/worker.secrets.env` (0600) when present (recorded as `staged`/`absent`), render `config`, build the backup image from the pinned digest; verifies the active `.env.prod` hash is unchanged afterwards |
 | `backup` | nothing on the host DB | authorization; stage-release done; staged checkout clean; revision = expected | runs the real off-host backup job from the staged release (`--profile backup run --rm --no-deps`, owner credential, read-only dump) with the source binding `instance id / environment / active release SHA`; the backup manifest records the DB system identifier and revision |
 | `verify-backup` | state only | authorization; stage-release done | `nlw.backup evidence` from the staged release; requires: real `s3:https://` off-host repository (MinIO/loopback/private/same-host refused), `nlw_backup_success=1`, `repository_verify_success=1`, verified within 26 h, newest `nlw-db` snapshot tagged `rev-<expected current revision>` within 1 h of the metrics timestamp, the manifest **inside the snapshot** bound to this instance id, environment, `pg_control_system()` identifier, active release SHA and revision, no key-like artifacts. Operator-edited JSON is never accepted alone |
 | `drain` | runtime | authorization; **verify-backup done**; identity; staged checkout | recreate **caddy only** from the staged config (`--no-deps --force-recreate`, brief edge blip) so the maintenance matcher exists; maintenance 503 (`caddy_maint` flag, no reload); stop scheduler; wait ≤ 120 s for non-terminal runs / queue to reach zero (never force-retries ambiguous work); stop worker + api; require zero runtime DB sessions |

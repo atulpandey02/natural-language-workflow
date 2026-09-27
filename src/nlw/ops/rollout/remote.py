@@ -38,6 +38,7 @@ _TARGET_KEYS = (
     "NLW_STAGING_SSH_USER",
     "NLW_STAGING_REMOTE_APP",
     "NLW_STAGING_COMPOSE_PROJECT",
+    "NLW_STAGING_DEMO_TOOLS_ENABLED",
 )
 _OPERATOR_ALERTING_KEYS = (
     "NLW_STAGING_ALERTMANAGER_CONFIG",
@@ -74,6 +75,7 @@ class TargetConfig:
     ssh_key: Path
     remote_app: str  # the ACTIVE checkout (M11 today)
     compose_project: str
+    demo_tools_enabled: bool  # required reviewed target policy; never inherited from active env
     ops_root: str = "/opt/nlw"
     compose_files: tuple[str, ...] = ("docker-compose.prod.yml", "docker-compose.staging.yml")
     # The backup job's env file (restic repository + credentials) — the SAME file
@@ -119,7 +121,8 @@ class TargetConfig:
             names.append(self.operator_alerting.override_path)
         files = " ".join(f"-f {f}" for f in names)
         return (
-            f"cd '{directory}' && docker compose -p {self.compose_project} "
+            f"cd '{directory}' && env -u DEMO_TOOLS_ENABLED "
+            f"docker compose -p {self.compose_project} "
             f"--env-file .env.prod {files}"
         )
 
@@ -133,7 +136,8 @@ class TargetConfig:
     def dc_backup_in(self, directory: str) -> str:
         """Backup profile from ``directory``, mirroring docker/systemd/nlw-backup.service."""
         return (
-            f"cd '{directory}' && docker compose -p {self.compose_project} "
+            f"cd '{directory}' && env -u DEMO_TOOLS_ENABLED "
+            f"docker compose -p {self.compose_project} "
             f"--env-file .env.prod --env-file '{self.backup_env_file}' "
             f"-f docker-compose.prod.yml --profile backup"
         )
@@ -146,6 +150,12 @@ def parse_target_env(text: str) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
+        if k.strip() == "NLW_STAGING_DEMO_TOOLS_ENABLED" and (
+            k.strip() in values or v.strip() not in ("true", "false")
+        ):
+            raise TargetConfigError(
+                "NLW_STAGING_DEMO_TOOLS_ENABLED must occur once and be exactly true or false"
+            )
         values[k.strip()] = v.strip().strip('"')
     missing = [k for k in _TARGET_KEYS if not values.get(k)]
     if missing:
@@ -193,6 +203,7 @@ def load_target(path: Path, *, ssh_key: Path | None = None) -> TargetConfig:
         ssh_key=key.expanduser(),
         remote_app=remote_app,
         compose_project=values["NLW_STAGING_COMPOSE_PROJECT"],
+        demo_tools_enabled=values["NLW_STAGING_DEMO_TOOLS_ENABLED"] == "true",
         ops_root=ops_root,
         compose_files=compose_files,
         backup_env_file=values.get("NLW_STAGING_BACKUP_ENV_FILE") or f"{ops_root}/.env.backup",

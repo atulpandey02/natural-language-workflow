@@ -75,17 +75,28 @@ def parse_env_pins(env_text: str) -> dict[str, str]:
         "NLW_CTX_API_KEY_ID",
         "NLW_CTX_WORKER_KEY_ID",
         "NLW_CTX_SCHEDULER_KEY_ID",
+        "DEMO_TOOLS_ENABLED",
     }
     out: dict[str, str] = {}
     for line in env_text.splitlines():
         if "=" in line and not line.startswith("#"):
             k, v = line.split("=", 1)
+            if re.fullmatch(r"\s*(?:export\s+)?DEMO_TOOLS_ENABLED\s*", k) and (
+                k != "DEMO_TOOLS_ENABLED" or v not in ("true", "false") or k in out
+            ):
+                raise GateError("noncanonical demo-tool pin; re-run stage-release")
             if k.strip() in wanted:
                 out[k.strip()] = v.strip()
     return out
 
 
-def check_release_pins(pins: dict[str, str], release: ReleaseSpec, *, post_pin: bool) -> None:
+def check_release_pins(
+    pins: dict[str, str],
+    release: ReleaseSpec,
+    *,
+    post_pin: bool,
+    demo_tools_enabled: bool | None = None,
+) -> None:
     """Before ``migrate`` the host must ALREADY be pinned to the release images
     (pin_release does that); the hostname must always match."""
     if pins.get("PUBLIC_HOSTNAME") != release.public_hostname:
@@ -100,6 +111,9 @@ def check_release_pins(pins: dict[str, str], release: ReleaseSpec, *, post_pin: 
                 raise GateError(f"NLW_CTX_{cls.upper()}_KEY_ID in .env.prod is not {kid!r}")
         if not pins.get("NLW_CTX_KEYS_DIR", "").startswith("/"):
             raise GateError("NLW_CTX_KEYS_DIR in .env.prod must be an absolute path")
+        expected = "true" if demo_tools_enabled else "false"
+        if type(demo_tools_enabled) is not bool or pins.get("DEMO_TOOLS_ENABLED") != expected:
+            raise GateError("staged demo-tool policy mismatch; re-run stage-release")
 
 
 def check_current_revision(current: str, expected: str) -> None:

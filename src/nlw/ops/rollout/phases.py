@@ -166,10 +166,32 @@ class Rollout:
     def _psql(self, sql: str) -> str:
         return self._run(f"{self.dc} exec -T postgres psql -U nlw -d nlw -tAc {shlex.quote(sql)}")
 
-    def _state(self) -> dict[str, Any]:
+    def _state(self, *, require_staged: bool = False) -> dict[str, Any]:
         doc = state.load_state(self.remote, self.target, self.release.release_sha)
+        if require_staged and not doc.get("manifest_sha256"):
+            raise state.StateError("staged policy has no manifest binding; re-run stage-release")
         state.bind_manifest(doc, self.release.sha256)
+        if require_staged:
+            state.require_phases(doc, "stage-release")
+            records = doc.get("evidence")
+            evidence = records.get("stage-release") if isinstance(records, dict) else None
+            if (
+                not isinstance(evidence, dict)
+                or evidence.get("release_sha") != self.release.release_sha
+                or type(evidence.get("demo_tools_enabled")) is not bool
+                or evidence["demo_tools_enabled"] != self.target.demo_tools_enabled
+            ):
+                raise GateError("reviewed/staged demo-tool policy mismatch; re-run stage-release")
+            self.check_staged_pins()
         return doc
+
+    def check_staged_pins(self) -> None:
+        gates.check_release_pins(
+            self.read_pins(self.staged),
+            self.release,
+            post_pin=True,
+            demo_tools_enabled=self.target.demo_tools_enabled,
+        )
 
     def _save(self, doc: dict[str, Any]) -> None:
         state.save_state(self.remote, self.target, self.release.release_sha, doc)
@@ -222,7 +244,9 @@ class Rollout:
     def read_pins(self, directory: str) -> dict[str, str]:
         text = self._run(
             f"grep -E '^(NLW_IMAGE|NLW_WEB_IMAGE|PUBLIC_HOSTNAME|NLW_CTX_KEYS_DIR|"
-            f"NLW_CTX_(API|WORKER|SCHEDULER)_KEY_ID)=' '{directory}/.env.prod'"
+            f"NLW_CTX_(API|WORKER|SCHEDULER)_KEY_ID)=|"
+            f"^[[:space:]]*(export[[:space:]]+)?DEMO_TOOLS_ENABLED[[:space:]]*=' "
+            f"'{directory}/.env.prod'"
         )
         return gates.parse_env_pins(text)
 
@@ -422,6 +446,42 @@ class Rollout:
             secrets_dir=contract.secrets_dir,
             what="rendered Compose config",
         )
+
+    def check_rendered_demo_policy(self) -> None:
+        # Include inactive profiles too: a flag in migrate/backup/restore is a
+        # scope violation even though those services will not be activated.
+        raw = self._run(f"{self.dc_staged} --profile '*' config --format json")
+        expected = "true" if self.target.demo_tools_enabled else "false"
+        try:
+            services = json.loads(raw)["services"]
+            holders = {
+                name: svc.get("environment", {}).get("DEMO_TOOLS_ENABLED")
+                for name, svc in services.items()
+                if "DEMO_TOOLS_ENABLED" in svc.get("environment", {})
+            }
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise GateError(
+                "cannot verify rendered demo-tool policy; re-run stage-release"
+            ) from exc
+        if holders != {"api": expected}:
+            raise GateError("rendered demo-tool policy/scope mismatch; re-run stage-release")
+
+    def verify_running_demo_policy(self) -> None:
+        # Filter inside Docker's formatter: never return other environment
+        # entries or even an invalid flag value. Duplicate matches also fail.
+        expected = "true" if self.target.demo_tools_enabled else "false"
+        template = (
+            "{{if .State.Running}}{{range .Config.Env}}"
+            f'{{{{if eq . "DEMO_TOOLS_ENABLED={expected}"}}}}match{{{{println}}}}'
+            '{{else if and (ge (len .) 19) (eq (slice . 0 19) "DEMO_TOOLS_ENABLED=")}}'
+            "mismatch{{println}}{{end}}{{end}}{{else}}mismatch{{end}}"
+        )
+        result = self._run(
+            f"docker inspect --format {shlex.quote(template)} $({self.dc_staged} ps -q api)"
+        )
+        if result != "match":
+            raise GateError("running API demo-tool policy mismatch; keep traffic closed")
+        self.log("running API demo-tool policy: match")
 
     def verify_alertmanager_runtime(self, facts: OperatorConfigFacts) -> None:
         """The RUNNING container is the authority: its mounts come from the operator
@@ -792,14 +852,15 @@ class Rollout:
     # ---- host staging (no database, no active config, no running container) ---
     def stage_release(self, *, keys_dir: str) -> None:
         """Clone + check out the release SHA into <ops_root>/releases/<sha>, write
-        ITS .env.prod (a copy of the active one with the pins rewritten), build
+        ITS .env.prod (active copy with reviewed pins and demo policy), build
         the backup image from the pinned digest. The active checkout, its
         .env.prod, Caddy and every running container are untouched."""
         self._require_mutation_authority()
         doc = self._state()
         state.require_phases(doc, "verify-release", "verify-escrow")
         self.check_identity()
-        self.refuse_foreign_activation()
+        if self.refuse_foreign_activation() == "THIS_RELEASE":
+            raise GateError("cannot re-stage the active release; use a new reviewed release")
         active = self.target.remote_app
         active_env_hash_before = self._run(f"sha256sum '{active}/.env.prod' | cut -d' ' -f1")
         # Objects come from the active checkout (local, fast); the release SHA itself
@@ -830,14 +891,21 @@ class Rollout:
         active_env_hash_after = self._run(f"sha256sum '{active}/.env.prod' | cut -d' ' -f1")
         if active_env_hash_before != active_env_hash_after:
             raise RolloutStop("active .env.prod changed during staging — aborting")
-        gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
+        self.check_staged_pins()
         state.mark_phase(
             doc,
             "stage-release",
             staged_dir=self.staged,
             active_checkout=self.read_active_sha(),
             worker_env_file=worker_secrets,
+            demo_tools_enabled=self.target.demo_tools_enabled,
+            release_sha=self.release.release_sha,
         )
+        # A new staged policy needs fresh activation/readiness evidence. Database,
+        # backup and escrow facts remain governed by their existing gates.
+        for phase in ("recreate-runtime", "validate", "reopen"):
+            doc["phases"].pop(phase, None)
+            doc["evidence"].pop(phase, None)
         self._save(doc)
 
     # The worker's connector secrets live in a git-IGNORED file next to the active
@@ -861,17 +929,19 @@ class Rollout:
         return verdict
 
     def _write_staged_env(self, *, keys_dir: str) -> None:
-        """Staged .env.prod = active .env.prod with ONLY the pins rewritten
-        (digests/ids/paths); portable temp-file rewrite, never `sed -i`."""
+        """Rewrite release pins and the reviewed demo-tool policy in the staged
+        copy only; portable temp-file rewrite, never `sed -i`."""
         lines = {
             "NLW_IMAGE": self.release.backend_image,
             "NLW_WEB_IMAGE": self.release.web_image,
             "NLW_CTX_KEYS_DIR": keys_dir,
+            "DEMO_TOOLS_ENABLED": "true" if self.target.demo_tools_enabled else "false",
             **{f"NLW_CTX_{c.upper()}_KEY_ID": self.release.key_ids[c] for c in KEY_CLASSES},
         }
         src, dst = f"{self.target.remote_app}/.env.prod", f"{self.staged}/.env.prod"
         pattern = "|".join(lines)
-        script = f"set -e; umask 077; grep -Ev '^({pattern})=' '{src}' > '{dst}.tmp' || true; "
+        pattern = f"^({pattern})=|^[[:space:]]*(export[[:space:]]+)?DEMO_TOOLS_ENABLED[[:space:]]*="
+        script = f"set -e; umask 077; grep -Ev '{pattern}' '{src}' > '{dst}.tmp' || true; "
         for k, v in lines.items():
             script += f"printf '%s=%s\\n' '{k}' '{v}' >> '{dst}.tmp'; "
         script += f"chmod 600 '{dst}.tmp'; mv '{dst}.tmp' '{dst}'"
@@ -882,7 +952,7 @@ class Rollout:
         release (new backup image, owner credential, read-only dump). Binds the
         manifest to this instance/environment/source release."""
         self._require_mutation_authority()
-        doc = self._state()
+        doc = self._state(require_staged=True)
         state.require_phases(doc, "stage-release")
         self.check_identity()
         self.refuse_foreign_activation()
@@ -903,7 +973,7 @@ class Rollout:
 
     def verify_backup(self) -> None:
         self._require_mutation_authority()
-        doc = self._state()
+        doc = self._state(require_staged=True)
         state.require_phases(doc, "stage-release")
         self.refuse_foreign_activation()
         self.verify_checkout(self.staged)
@@ -959,11 +1029,11 @@ class Rollout:
     # ---- mutation (only after the verified backup) ----------------------------
     def drain(self) -> None:
         self._require_mutation_authority()
-        doc = self._state()
+        doc = self._state(require_staged=True)
         state.require_phases(doc, "verify-backup")
         self.check_identity()
         self.verify_checkout(self.staged)
-        gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
+        self.check_staged_pins()
         gates.check_current_revision(self.read_revision(), self.release.expected_current_revision)
         # The edge must run the RELEASE config (maintenance matcher + caddy_maint
         # volume) before the flag means anything: recreate caddy alone, no deps.
@@ -988,7 +1058,7 @@ class Rollout:
         """First database mutation of the rollout — only after drain (which itself
         requires the verified backup)."""
         self._require_mutation_authority()
-        doc = self._state()
+        doc = self._state(require_staged=True)
         state.require_phases(doc, "verify-backup", "drain")
         self.check_identity()
         self.verify_checkout(self.staged)
@@ -1003,14 +1073,14 @@ class Rollout:
 
     def migrate(self) -> None:
         self._require_mutation_authority()
-        doc = self._state()
+        doc = self._state(require_staged=True)
         state.require_phases(doc, "verify-backup", "drain", "prepare-roles")
         self.check_identity()
         self.verify_checkout(self.staged)
         gates.check_no_runtime_sessions(self.read_runtime_sessions())
         gates.check_current_revision(self.read_revision(), self.release.expected_current_revision)
         gates.check_roles(self.read_roles(), require_provisioned=True)
-        gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
+        self.check_staged_pins()
         self._migrate_run("", "", timeout=900)  # the service's own command: alembic upgrade head
         rev = self.read_revision()
         gates.check_current_revision(rev, self.release.target_revision)
@@ -1037,7 +1107,7 @@ class Rollout:
 
     def install_context_keys(self, *, keys_dir: str) -> None:
         self._require_mutation_authority()
-        doc = self._state()
+        doc = self._state(require_staged=True)
         state.require_phases(doc, "migrate")
         self.check_identity()
         gates.check_no_runtime_sessions(self.read_runtime_sessions())
@@ -1086,18 +1156,19 @@ class Rollout:
         """ACTIVATION: point <ops_root>/current at the staged release and recreate
         the runtimes (and monitoring) from it. Only after keys are installed."""
         self._require_mutation_authority()
-        doc = self._state()
+        doc = self._state(require_staged=True)
         state.require_phases(doc, "install-context-keys")
         self.check_identity()
         self.verify_checkout(self.staged)
         gates.check_current_revision(self.read_revision(), self.release.target_revision)
-        gates.check_release_pins(self.read_pins(self.staged), self.release, post_pin=True)
+        self.check_staged_pins()
         self._run(f"{self.dc_staged} config >/dev/null")
         # Operator Alertmanager authority is proven BEFORE anything is recreated: the
         # host files, the override and the rendered Compose config (which carries the
         # override on every invocation from a release directory).
         am = self.check_alertmanager_authority()
         self.check_rendered_alertmanager_mounts(am)
+        self.check_rendered_demo_policy()
         # <ops_root>/current must be absent (first activation from the legacy
         # layout) or an existing SYMLINK (`ln -sfn` replaces it). A real directory
         # would silently receive a link INSIDE it and activation would be a lie.
@@ -1125,6 +1196,7 @@ class Rollout:
                 f"{self.dc_staged} up -d --force-recreate --no-deps {' '.join(monitoring)}",
                 timeout=300,
             )
+        self.verify_running_demo_policy()
         images = self.read_running_images()
         gates.check_running_images(images, self.release)
         self.verify_mount_isolation(keys_dir)
@@ -1196,8 +1268,9 @@ class Rollout:
 
     def validate(self, *, keys_dir: str) -> alerting.AlertingStatus:
         self._require_mutation_authority()
-        doc = self._state()
+        doc = self._state(require_staged=True)
         state.require_phases(doc, "recreate-runtime")
+        self.verify_running_demo_policy()
         body = ""
         for _ in range(45):
             res = self.remote.run("curl -sS -m 5 http://127.0.0.1:8000/health/ready")
@@ -1290,8 +1363,9 @@ class Rollout:
 
     def reopen(self) -> list[str]:
         self._require_mutation_authority()
-        doc = self._state()
+        doc = self._state(require_staged=True)
         state.require_phases(doc, "validate")
+        self.verify_running_demo_policy()
         gates.check_readiness_body(self._run("curl -sS -m 5 http://127.0.0.1:8000/health/ready"))
         status = self.alerting_status()
         alerting.check_rules_and_connectivity(status)
@@ -1306,7 +1380,8 @@ class Rollout:
 
     def go_check(self) -> None:
         """Read-only M12 GO evaluation of the recorded evidence + live alerting."""
-        doc = self._state()
+        doc = self._state(require_staged=True)
         state.require_phases(doc, "reopen")
+        self.verify_running_demo_policy()
         status = self.alerting_status()
         alerting.check_go(status, environment=self.release.environment)
