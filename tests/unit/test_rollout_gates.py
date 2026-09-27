@@ -30,7 +30,7 @@ from nlw.ops.rollout.backup_evidence import (
 )
 from nlw.ops.rollout.gates import GateError
 from nlw.ops.rollout.release import ReleaseSpecError, load_release, parse_release
-from nlw.ops.rollout.remote import TargetConfigError, parse_target_env
+from nlw.ops.rollout.remote import TargetConfigError, load_target, parse_target_env
 
 ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
@@ -102,6 +102,64 @@ def test_target_env_rejects_e2e_overlay_and_bad_instance() -> None:
     text = (ROOT / "deploy" / "staging" / "target.env").read_text()
     with pytest.raises(TargetConfigError):
         parse_target_env(text.replace("i-0d1e65cdc9401dbb9", "staging-box"))
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_target_requires_explicit_canonical_demo_policy(
+    tmp_path: Path, value: str, environment: str
+) -> None:
+    text = (ROOT / "deploy/staging/target.env").read_text()
+    assert "NLW_STAGING_DEMO_TOOLS_ENABLED=true" in text
+    text = text.replace(
+        "NLW_STAGING_DEMO_TOOLS_ENABLED=true", f"NLW_STAGING_DEMO_TOOLS_ENABLED={value}"
+    )
+    text = text.replace("NLW_STAGING_ENVIRONMENT=staging", f"NLW_STAGING_ENVIRONMENT={environment}")
+    path = tmp_path / "target.env"
+    path.write_text(text)
+    assert load_target(path).demo_tools_enabled is (value == "true")
+
+
+@pytest.mark.parametrize("phase", ["preflight", "stage-release", "recreate-runtime"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "TRUE",
+        "False",
+        "1",
+        "0",
+        "yes",
+        "on",
+        "maybe",
+        '"true"',
+        "true\nNLW_STAGING_DEMO_TOOLS_ENABLED=false",
+    ],
+)
+def test_bad_demo_target_fails_before_host_contact_or_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, value: str | None
+) -> None:
+    from unittest.mock import Mock
+
+    from nlw.ops.rollout import __main__ as cli
+
+    text = (ROOT / "deploy/staging/target.env").read_text()
+    line = "" if value is None else f"NLW_STAGING_DEMO_TOOLS_ENABLED={value}\n"
+    path = tmp_path / "target.env"
+    path.write_text(text.replace("NLW_STAGING_DEMO_TOOLS_ENABLED=true\n", line))
+    # Provenance still precedes target parsing; no actual verifier/network in this test.
+    verified = Mock(return_value=(Mock(), Mock(manifest_sha256="0" * 64, fixture=False)))
+    remote = Mock(side_effect=AssertionError("must not construct a remote"))
+    rollout = Mock(side_effect=AssertionError("must not start a rollout"))
+    monkeypatch.setattr(cli, "verify_manifest_file", verified)
+    monkeypatch.setattr(cli, "SshRemote", remote)
+    monkeypatch.setattr(cli, "LocalRemote", remote)
+    monkeypatch.setattr(cli, "Rollout", rollout)
+    assert cli.main([phase, "--release", "unused.json", "--target", str(path)]) == 2
+    verified.assert_called_once()
+    remote.assert_not_called()
+    rollout.assert_not_called()
 
 
 # --- identity + pins (§B, O.2, O.3) --------------------------------------------

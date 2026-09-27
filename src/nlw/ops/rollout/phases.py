@@ -792,7 +792,7 @@ class Rollout:
     # ---- host staging (no database, no active config, no running container) ---
     def stage_release(self, *, keys_dir: str) -> None:
         """Clone + check out the release SHA into <ops_root>/releases/<sha>, write
-        ITS .env.prod (a copy of the active one with the pins rewritten), build
+        ITS .env.prod (active copy with reviewed pins and demo policy), build
         the backup image from the pinned digest. The active checkout, its
         .env.prod, Caddy and every running container are untouched."""
         self._require_mutation_authority()
@@ -837,6 +837,7 @@ class Rollout:
             staged_dir=self.staged,
             active_checkout=self.read_active_sha(),
             worker_env_file=worker_secrets,
+            demo_tools_enabled=self.target.demo_tools_enabled,
         )
         self._save(doc)
 
@@ -861,12 +862,13 @@ class Rollout:
         return verdict
 
     def _write_staged_env(self, *, keys_dir: str) -> None:
-        """Staged .env.prod = active .env.prod with ONLY the pins rewritten
-        (digests/ids/paths); portable temp-file rewrite, never `sed -i`."""
+        """Rewrite release pins and the reviewed demo-tool policy in the staged
+        copy only; portable temp-file rewrite, never `sed -i`."""
         lines = {
             "NLW_IMAGE": self.release.backend_image,
             "NLW_WEB_IMAGE": self.release.web_image,
             "NLW_CTX_KEYS_DIR": keys_dir,
+            "DEMO_TOOLS_ENABLED": "true" if self.target.demo_tools_enabled else "false",
             **{f"NLW_CTX_{c.upper()}_KEY_ID": self.release.key_ids[c] for c in KEY_CLASSES},
         }
         src, dst = f"{self.target.remote_app}/.env.prod", f"{self.staged}/.env.prod"

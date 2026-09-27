@@ -21,6 +21,9 @@
 #   POSTGRES_PASSWORD  WORKSPACE_COOKIE_SECRET  NLW_*_DB_PASSWORD
 
 x-app-env: &app-env
+  # Only api/worker/scheduler consume this anchor and initialize the tool registry.
+  # stage-release writes the reviewed target policy; ordinary renders default off.
+  DEMO_TOOLS_ENABLED: ${DEMO_TOOLS_ENABLED:-false}
   APP_ENV: production
   LOG_LEVEL: info
   DATABASE_URL: ${DATABASE_URL}

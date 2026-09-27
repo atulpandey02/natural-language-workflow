@@ -21,7 +21,7 @@ from nlw.ops import release_manifest as rm
 from nlw.ops.release_provenance import ProvenanceReceipt
 from nlw.ops.rollout.gates import AUTHORIZATION_PHRASE, ESCROW_PHRASE, GateError
 from nlw.ops.rollout.phases import Operator, Rollout, RolloutStop
-from nlw.ops.rollout.remote import CommandResult, OperatorAlerting, TargetConfig
+from nlw.ops.rollout.remote import CommandResult, LocalRemote, OperatorAlerting, TargetConfig
 from nlw.ops.rollout.state import PHASES, PRE_BACKUP_PHASES, StateError
 
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
@@ -76,6 +76,7 @@ TGT = TargetConfig(
     ssh_key=Path("/dev/null"),
     remote_app="/opt/nlw/app",
     compose_project="app",
+    demo_tools_enabled=False,
     ops_root="/opt/nlw",
     operator_alerting=OPERATOR,
 )
@@ -529,6 +530,49 @@ def test_mutating_phases_require_verified_backup_recorded_on_host() -> None:
         with pytest.raises(StateError, match="verify-backup"):
             _all_phase_calls(r)[name]()
     assert not any(DB_MUTATION.search(c) or ACTIVE_MUTATION.search(c) for c in fake.commands)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_stage_release_records_reviewed_demo_policy(enabled: bool) -> None:
+    fake = FakeRemote(_pre_backup_table(), state=_done("verify-release", "verify-escrow"))
+    rollout = _rollout(fake, authorization=AUTHORIZATION_PHRASE)
+    rollout.target = replace(TGT, demo_tools_enabled=enabled)
+    rollout.stage_release(keys_dir=KEYS)
+    assert fake.state_doc["evidence"]["stage-release"]["demo_tools_enabled"] is enabled
+    value = "true" if enabled else "false"
+    assert fake.ran(rf"'DEMO_TOOLS_ENABLED' '{value}' >> '{STAGED}/\.env\.prod\.tmp'")
+    assert not any(ACTIVE_MUTATION.search(c) or DB_MUTATION.search(c) for c in fake.commands)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("active_value", [None, "true", "false", "foreign-manual-value"])
+def test_staged_demo_policy_overrides_active_value_without_changing_active_bytes(
+    tmp_path: Path, enabled: bool, active_value: str | None
+) -> None:
+    active = tmp_path / "active"
+    active.mkdir()
+    target = replace(
+        TGT, remote_app=str(active), ops_root=str(tmp_path), demo_tools_enabled=enabled
+    )
+    staged = Path(target.release_dir(SHA))
+    staged.mkdir(parents=True)
+    original = b"# active environment\nUNRELATED_SETTING=preserved\n"
+    if active_value is not None:
+        original += f"DEMO_TOOLS_ENABLED={active_value}\n".encode()
+    env_file = active / ".env.prod"
+    env_file.write_bytes(original)
+    rollout = Rollout(
+        release=REL, target=target, remote=LocalRemote(), operator=Operator(), log=lambda _: None
+    )
+    # Execute only the real env-file rewrite against temporary fixture directories.
+    rollout._write_staged_env(keys_dir=KEYS)
+    assert env_file.read_bytes() == original
+    result = (staged / ".env.prod").read_text()
+    assert result.count("DEMO_TOOLS_ENABLED=") == 1
+    assert f"DEMO_TOOLS_ENABLED={'true' if enabled else 'false'}\n" in result
+    assert result.startswith("# active environment\nUNRELATED_SETTING=preserved\n")
+    assert (staged / ".env.prod").stat().st_mode & 0o777 == 0o600
+    assert not (staged / ".env.prod.tmp").exists()
 
 
 def test_prepare_roles_is_the_first_db_mutation_and_needs_drain() -> None:
