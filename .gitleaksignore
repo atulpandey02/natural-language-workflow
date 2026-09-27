@@ -1,0 +1,5 @@
+# Verified false positive: the synthetic token-shaped fixture "xoxb-1234-5678-abcdefghijkl"
+# in ConnectorForm.test.tsx (commit 5f3abd0), used to prove the connector form refuses
+# credential material. Not a real credential. The fixture is now assembled at runtime;
+# this entry only covers that one historical commit/line (history is not rewritten).
+5f3abd03ae9a843b7709a908065ab8de1f97e179:web/src/components/ConnectorForm.test.tsx:generic-api-key:84

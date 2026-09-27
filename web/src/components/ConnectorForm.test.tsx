@@ -81,7 +81,9 @@ describe("ConnectorForm: Slack", () => {
 
   it.each([
     ["a Slack webhook URL", "https://hooks.slack.com/services/T000/B000/XXXXXXXX"],
-    ["a bot token", "xoxb-1234-5678-abcdefghijkl"],
+    // Synthetic, token-shaped only: assembled at runtime so no credential-shaped
+    // literal sits in source for secret scanners to (rightly) flag.
+    ["a bot token", ["xoxb", "1234", "5678", "abcdefghijkl"].join("-")],
   ])("refuses and clears %s pasted as the secret reference", async (_what, material) => {
     const fetch = mockFetch(201, {});
     const { container } = renderForm();
