@@ -64,8 +64,8 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.goto("/workflows/new");
     await page.getByRole("button", { name: /Sales operations/ }).click();
     await expect(page.getByLabel(/what should this workflow do/i)).toContainText("sales-v1");
-    await page.getByRole("button", { name: /^Plan$/ }).click();
-    await expect(page.getByText("pilot.sales_analysis", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: /^Prepare plan$/ }).click();
+    await expect(page.getByText("Analyze synthetic sales data", { exact: true })).toBeVisible();
     await expect(page.locator('[data-status="PASS"]')).toBeVisible();
     await page.screenshot({ path: "test-results/pilot-proposal-desktop.png", fullPage: true });
     await page.getByRole("button", { name: "Save workflow" }).click();
@@ -220,8 +220,9 @@ test.describe("synthetic pilot golden analytics", () => {
     await signIn(approver, process.env.E2E_APPROVER_EMAIL!, process.env.E2E_APPROVER_PASSWORD!);
     await approver.goto("/approvals");
     await expect(approver.getByText("CPILOT", { exact: false }).first()).toBeVisible();
-    const approvalPreview = JSON.parse((await approver.locator("pre").textContent())!);
-    expect(approvalPreview.args.text).toBe(immutable.proposed_plan.steps[0].args.text);
+    expect(await approver.getByLabel("Exact message to be sent").textContent()).toBe(
+      immutable.proposed_plan.steps[0].args.text,
+    );
     await approver.getByRole("button", { name: /^approve$/i }).click();
     await page.goto(`/runs/${slackRun}`);
     await expect(page.locator('[data-status="COMPLETED"]').first()).toBeVisible({ timeout: 30000 });
@@ -241,7 +242,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await signIn(page, env.adminEmail, env.adminPassword);
     await page.goto("/workflows/new");
     await page.getByRole("button", { name: /Support operations/ }).click();
-    await page.getByRole("button", { name: /^Plan$/ }).click();
+    await page.getByRole("button", { name: /^Prepare plan$/ }).click();
     await page.getByRole("button", { name: "Save workflow" }).click();
     await page.getByRole("button", { name: /run now/i }).click();
     await expect(page.getByTestId("analytics-result")).toBeVisible({ timeout: 30000 });

@@ -1,13 +1,39 @@
 "use client";
 
+import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { ErrorBanner, Empty, Loading, RoleGate, canApprove } from "@/components/ui";
-import { useApprovals, useCurrentWorkspace, useDecideApproval } from "@/lib/api/hooks";
+import { useApprovals, useCurrentWorkspace, useDecideApproval, useMe } from "@/lib/api/hooks";
+import { toolLabel } from "@/lib/plan-language";
+
+/** The reviewed content: a Slack message verbatim, otherwise the exact payload. */
+function ActionPreview({ preview }: { preview: unknown }) {
+  const args = (preview as { args?: Record<string, unknown> | null } | null)?.args;
+  if (args && typeof args.text === "string") {
+    return (
+      <>
+        <p className="muted small">Exact message that will be sent:</p>
+        <pre style={{ whiteSpace: "pre-wrap" }} aria-label="Exact message to be sent">
+          {args.text}
+        </pre>
+      </>
+    );
+  }
+  return (
+    <>
+      <p className="muted small">Exact content that will be sent:</p>
+      <pre style={{ whiteSpace: "pre-wrap" }} aria-label="Exact content to be sent">
+        {JSON.stringify(args ?? {}, null, 2)}
+      </pre>
+    </>
+  );
+}
 
 export default function ApprovalsPage() {
   const approvals = useApprovals();
   const current = useCurrentWorkspace();
   const decide = useDecideApproval();
+  const me = useMe();
   const role = current.data?.role;
 
   return (
@@ -25,18 +51,21 @@ export default function ApprovalsPage() {
       {(approvals.data ?? []).map((a) => (
         <div key={a.id} className="card">
           <div className="row" style={{ justifyContent: "space-between" }}>
-            <strong>{a.tool}</strong>
-            <span className="muted">connector: {a.connector_name}</span>
+            <h2 style={{ margin: 0, fontSize: 16 }}>{toolLabel(a.tool)}</h2>
+            <span className="muted">Connector: {a.connector_name}</span>
           </div>
           <p className="muted">
-            run {a.run_id.slice(0, 8)} · step {a.step_id}
-            {a.requested_at ? ` · requested ${new Date(a.requested_at).toLocaleString()}` : ""}
+            Requested by{" "}
+            <strong>
+              {a.requested_by_user_id && a.requested_by_user_id === me.data?.id
+                ? "you"
+                : "another workspace member"}
+            </strong>
+            {a.requested_at ? ` · ${new Date(a.requested_at).toLocaleString()}` : ""} ·{" "}
+            <Link href={`/runs/${a.run_id}`}>Open the run</Link>
           </p>
           <p className="muted">
-            requested by: <strong>{a.requested_by_user_id ?? "unknown"}</strong>
-          </p>
-          <p className="muted">
-            destination: <strong>{a.destination ?? "unresolved"}</strong>
+            Destination: <strong>{a.destination ?? "Can't be confirmed"}</strong>
           </p>
           {a.payload_review_blocked ? (
             <p className="badge warn" role="alert">
@@ -44,7 +73,7 @@ export default function ApprovalsPage() {
               or reduce the payload and re-run.
             </p>
           ) : (
-            <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(a.preview, null, 2)}</pre>
+            <ActionPreview preview={a.preview} />
           )}
           <RoleGate role={role} allow={["owner", "admin"]}>
             {/* Separation of duties: the backend forbids deciding an approval you
