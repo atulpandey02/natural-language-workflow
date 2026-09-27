@@ -1,6 +1,9 @@
 """Capability projection: tenant-scoped, secret-free, deterministic (M6)."""
 
 import json
+import re
+
+import pytest
 
 import nlw.tools.builtin  # noqa: F401,E402  (populate the registry)
 from nlw.planner.capabilities import (
@@ -9,6 +12,42 @@ from nlw.planner.capabilities import (
     capability_view_to_prompt_json,
 )
 from nlw.registry.registry import REGISTRY
+
+
+def _assert_no_forbidden_catalog_text(payload: object) -> None:
+    blob = json.dumps(payload).lower()
+    # Preserve the original substring checks for credential-like tokens.
+    for forbidden in ("secret", "password", "secret_ref", "host", "sslmode"):
+        assert forbidden not in blob, f"Forbidden catalog token: {forbidden}"
+    # Check keys AND free text. Letter boundaries exclude support/transport,
+    # while still detecting port=5432, PORT:5432 and database_port metadata.
+    assert not re.search(r"(?<![a-z])port(?![a-z])", blob), "Forbidden catalog token: port"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"port": 5432},
+        {"tools": [{"description": "Connect using port 5432."}]},
+        {"connectors": [{"schema_hint": {"notes": "Endpoint PORT:5432"}}]},
+        {"connectors": [{"schema_hint": {"database_port": 5432}}]},
+        {"tools": [{"input_schema": {"description": "Endpoint port=5432"}}]},
+        {"description": "Credentials include password=test-only"},
+        {"schema_hint": {"notes": "Use host=test.invalid"}},
+        {"schema_hint": {"notes": "Use sslmode=require"}},
+        {"description": "Credential secret_ref=test-only"},
+    ],
+)
+def test_forbidden_catalog_content_is_detected(payload: object) -> None:
+    with pytest.raises(AssertionError, match="Forbidden catalog token"):
+        _assert_no_forbidden_catalog_text(payload)
+
+
+@pytest.mark.parametrize(
+    "word", ["supported", "support-v1", "transport", "export", "report", "portfolio"]
+)
+def test_benign_port_substrings_are_allowed(word: str) -> None:
+    _assert_no_forbidden_catalog_text({"description": word, "schema_hint": {"notes": word}})
 
 
 def test_connector_backed_tool_hidden_without_usable_connector() -> None:
@@ -62,11 +101,10 @@ def test_prompt_json_is_secret_free_and_has_input_schema() -> None:
         include_demo=True,
     )
     payload = capability_view_to_prompt_json(view)
-    blob = json.dumps(payload)
-    # No credential/infrastructure fields leak into the model-facing projection.
-    # Match complete JSON names: the harmless word "support" contains "port".
-    for forbidden in ("secret", "password", "secret_ref", "host", "port", "sslmode"):
-        assert f'"{forbidden}"' not in blob
+    _assert_no_forbidden_catalog_text(payload)
+    assert {"pilot.sales_analysis", "pilot.support_analysis"} <= {
+        t["name"] for t in payload["tools"]
+    }
     assert set(payload) == {"tools", "connectors"}
     # Each tool exposes its input JSON schema.
     for tool in payload["tools"]:

@@ -350,6 +350,15 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.analytics-workspace .supporting-table th[scope="row"] {
+  white-space: nowrap;
+}
+.analytics-workspace .table-scroll-cue {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+  padding: 0 18px 8px;
+}
 .analytics-workspace .table-scroll th,
 .analytics-workspace .table-scroll td {
   font-size: 12px;

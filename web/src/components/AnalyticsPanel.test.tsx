@@ -51,6 +51,7 @@ describe("analytics result states and server-owned Slack message", () => {
     fireEvent.change(screen.getByLabelText("Slack destination"), {
       target: { value: "connector:CPILOT" },
     });
+    expect(screen.getByRole("button", { name: "Send summary to Slack" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Send summary to Slack" }));
     await waitFor(() =>
       expect(mutateAsync).toHaveBeenCalledWith({ connector_id: "connector", channel: "CPILOT" }),
@@ -61,5 +62,55 @@ describe("analytics result states and server-owned Slack message", () => {
     state.data = { ...fixture, status: "PARTIAL", run_outcome: "FAILED" };
     render(<AnalyticsPanel runId="r" />);
     expect(screen.queryByRole("button", { name: "Send summary to Slack" })).toBeNull();
+  });
+  it.each([
+    [
+      "INVALID",
+      {
+        ...fixture,
+        status: "INVALID",
+        metrics: [],
+        tables: [],
+        visualizations: [],
+        findings: [],
+        source_step_ids: [],
+      },
+    ],
+    ["malformed READY", { status: "READY" }],
+    ["rejected contract", { ...fixture, contract_version: "analytics-2" }],
+    ["rejected markup", { ...fixture, title: "<script>alert(1)</script>" }],
+    ["unexpected raw fields", { ...fixture, raw_output: "confidential" }],
+    ["partial", { ...fixture, status: "PARTIAL", run_outcome: "FAILED" }],
+    ["failed READY", { ...fixture, run_outcome: "FAILED" }],
+    ["partial UNKNOWN", { ...fixture, status: "PARTIAL", run_outcome: "FAILED_WITH_UNKNOWN" }],
+    ["UNKNOWN READY", { ...fixture, run_outcome: "FAILED_WITH_UNKNOWN" }],
+  ])("does not expose sharing for %s analytics", (_label, data) => {
+    state.data = data;
+    render(<AnalyticsPanel runId="r" />);
+    expect(screen.queryByLabelText("Slack destination")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send summary to Slack" })).toBeNull();
+    expect(mutateAsync).not.toHaveBeenCalled();
+  });
+  it("hides cached READY sharing when the latest query rejects its result", () => {
+    state.data = fixture;
+    state.error = new Error("This analysis could not be validated.");
+    render(<AnalyticsPanel runId="r" />);
+    expect(screen.getByRole("alert")).toHaveTextContent("could not be validated");
+    expect(screen.queryByRole("button", { name: "Send summary to Slack" })).toBeNull();
+  });
+  it("hides the share action and existing proposal review if analytics becomes invalid", async () => {
+    state.data = fixture;
+    mutateAsync.mockResolvedValue({ id: "proposal" });
+    const { rerender } = render(<AnalyticsPanel runId="r" />);
+    fireEvent.change(screen.getByLabelText("Slack destination"), {
+      target: { value: "connector:CPILOT" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send summary to Slack" }));
+    expect(await screen.findByText("Immutable proposal review")).toBeVisible();
+    state.data = { status: "READY" };
+    rerender(<AnalyticsPanel runId="r" />);
+    expect(screen.queryByRole("button", { name: "Send summary to Slack" })).toBeNull();
+    expect(screen.queryByText("Immutable proposal review")).toBeNull();
+    expect(mutateAsync).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState, type CSSProperties } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import {
   Bar,
   BarChart,
@@ -225,13 +225,41 @@ function Chart({ chart, index }: { chart: Visualization; index: number }) {
   );
 }
 function SupportingTable({ table }: { table: AnalyticsTable }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const cueId = useId();
+  const [overflows, setOverflows] = useState(false);
+  useEffect(() => {
+    const region = scrollRef.current;
+    if (!region) return;
+    const observer = new ResizeObserver(() => {
+      setOverflows(region.clientWidth > 0 && region.scrollWidth > region.clientWidth + 1);
+    });
+    observer.observe(region);
+    // Disclosure opening, viewport changes and table content/font sizing can
+    // each change whether the region needs horizontal scrolling.
+    const content = region.querySelector("table");
+    if (content) observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
   return (
     <details className="supporting-table">
       <summary>
         {table.title}
         <span className="table-count">{table.labels.length} rows</span>
       </summary>
-      <div className="table-scroll" tabIndex={0} role="region" aria-label={table.title}>
+      {overflows ? (
+        <p className="table-scroll-cue" id={cueId}>
+          More columns: scroll horizontally or use ← / → when focused.
+        </p>
+      ) : null}
+      <div
+        ref={scrollRef}
+        className="table-scroll"
+        tabIndex={0}
+        role="region"
+        aria-label={table.title}
+        aria-describedby={overflows ? cueId : undefined}
+      >
         <table>
           <caption>{table.title}</caption>
           <thead>

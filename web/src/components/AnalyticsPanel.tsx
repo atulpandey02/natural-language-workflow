@@ -4,12 +4,15 @@ import { useState } from "react";
 import { useRunAnalytics, useSlackProposal } from "@/lib/api/analytics-hooks";
 import { useConnectors } from "@/lib/api/hooks";
 import type { PlanProposalOut } from "@/lib/api/types";
+import { analyticsSchema } from "@/lib/analytics";
 import { AnalyticsResultView } from "./AnalyticsResult";
 import { ErrorBanner, Loading } from "./ui";
 import { PlanReview } from "./PlanReview";
 
 export function AnalyticsPanel({ runId }: { runId: string }) {
   const result = useRunAnalytics(runId);
+  const parsed = analyticsSchema.safeParse(result.data);
+  const canShare = parsed.success && parsed.data.status === "READY" && !result.error;
   const connectors = useConnectors();
   const create = useSlackProposal(runId);
   const [selection, setSelection] = useState("");
@@ -29,6 +32,7 @@ export function AnalyticsPanel({ runId }: { runId: string }) {
       }));
     });
   async function propose() {
+    if (!canShare) return;
     const selected = choices.find((c) => c.key === selection);
     if (!selected) return;
     try {
@@ -44,7 +48,7 @@ export function AnalyticsPanel({ runId }: { runId: string }) {
       {result.isLoading ? <Loading label="Loading analytical evidence…" /> : null}
       <ErrorBanner error={result.error} />
       {result.data ? <AnalyticsResultView value={result.data} /> : null}
-      {result.data?.status === "READY" ? (
+      {canShare ? (
         <section className="card handoff">
           <div className="handoff-intro">
             <p className="eyebrow">NEXT / SHARE INSIGHTS</p>
@@ -85,7 +89,7 @@ export function AnalyticsPanel({ runId }: { runId: string }) {
           </div>
         </section>
       ) : null}
-      {proposal ? <PlanReview proposal={proposal} /> : null}
+      {canShare && proposal ? <PlanReview proposal={proposal} /> : null}
     </>
   );
 }

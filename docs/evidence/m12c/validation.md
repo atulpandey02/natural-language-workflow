@@ -5,6 +5,84 @@ Baseline: `6507d0b1250ccc6134d27ff01354881fdec561f4` (clean at start).
 All execution was local. No VPS, live model provider or real Slack transport was
 used. No push, PR, merge or deployment was performed.
 
+## Final delta corrections — 2026-09-26
+
+Baseline: `c6f67033a353a115e29ca97a874191151ea87fa8`. Independent review returned
+`READY WITH NON-BLOCKING NOTES`; this pass addresses only its three requested
+corrections. Earlier validation sections remain historical evidence.
+
+### Causes and corrections
+
+- The catalog security assertion matched quoted JSON keys, missing forbidden
+  text in descriptions and schema hints. The test now checks the whole serialized
+  catalog, preserves credential-token substring checks and uses letter boundaries
+  for `port`. Focused cases cover forbidden keys/text and benign words such as
+  `supported`; the real pilot catalog and existing exact key-set checks pass.
+- Supporting table row headers could wrap month identifiers. Row headers now
+  use `white-space: nowrap`. An overflow observer shows a text scroll cue above
+  the cells and associates it with the existing focusable internal scroll region.
+  The cue disappears when the table fits.
+- The share panel checked raw `result.data.status` independently of validation.
+  Eligibility now requires successful parsing by the existing analytics schema,
+  READY status and no query error. Invalid state also hides an existing proposal
+  review. Proposal creation arguments and backend enforcement are unchanged.
+
+### Checks for these corrections
+
+| Check | Result |
+|---|---|
+| Focused Python security module | **20 passed**; Ruff format/check passed |
+| Focused analytics frontend tests | **40 passed** (15 panel, 25 result) |
+| Complete frontend Vitest suite | **144 passed across 30 files** |
+| Frontend Prettier / ESLint / TypeScript | Passed |
+| Next.js production build | Passed |
+| Existing real Playwright journeys | **2/2 passed** through the unchanged integration harness: Sales → separate Slack proposal → independent approval; Support |
+| Mobile Sales assertions | 390×844; `2026-03` occupies one DOM text line; internal overflow and ArrowRight scrolling verified; no page overflow |
+| Desktop table assertion | No scroll cue when the columns fit |
+| `git diff --check` | Passed |
+| Protected implementation / contract diff against baseline | Empty |
+
+The browser harness passed in 23.66 seconds with one existing Starlette/AnyIO
+deprecation warning. It retains the exact immutable Slack message/destination
+checks, requester self-approval denial, independent approval and mocked delivery.
+The Slack transport is `httpx.MockTransport`; no live Slack delivery occurred.
+Other expensive backend suites were not rerun for these frontend/test changes.
+
+The unit cases cover validated READY, INVALID, malformed READY, rejected contract,
+markup and extra fields, partial/failed/UNKNOWN outcomes, query rejection with
+cached READY data, and an existing proposal becoming unavailable after malformed
+analytics arrives.
+
+### Updated mobile evidence
+
+[Unedited 390×844 Sales supporting table](final-delta/pilot-sales-mobile-table.png)
+shows `2026-03` on one line, the visible keyboard focus outline and the text cue
+outside the scrolling cells. The cue does not cover values or rely on color.
+The browser checks both the computed nowrap style and a single text rectangle.
+This capture uses the real local seeded workflow; datasets and expected values
+are unchanged.
+
+### Exact changed files
+
+```text
+tests/unit/test_planner_capabilities.py
+web/src/components/AnalyticsPanel.tsx
+web/src/components/AnalyticsPanel.test.tsx
+web/src/components/AnalyticsResult.tsx
+web/src/components/AnalyticsResult.test.tsx
+web/src/app/analytics.css
+web/e2e/pilot-analytics.spec.ts
+docs/PROJECT_INDEX.md
+docs/evidence/m12c/validation.md
+docs/evidence/m12c/final-delta/pilot-sales-mobile-table.png
+```
+
+Backend code, API contracts, migrations, seeds, analytics/chart limits, planner,
+feasibility, execution, queue, checkpoints, approvals, authorization, four-eyes
+policy, Slack formatting/proposal/digest/binding/delivery/retry/UNKNOWN semantics,
+rate limiting, metrics and deployment/infrastructure files are unchanged.
+No push, merge, deployment or external delivery was performed. Stopped for review.
+
 ## Final visual refinement — 2026-09-26
 
 This pass starts at accepted functional commit `6b8605b`. The earlier functional

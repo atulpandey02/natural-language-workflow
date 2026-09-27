@@ -1,11 +1,28 @@
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import fixture from "@/test/analytics-fixture.json";
 import { AnalyticsResultView } from "./AnalyticsResult";
 import { StatusBadge } from "./ui";
 import { formatValue } from "@/lib/analytics";
 import { seriesStyle } from "@/lib/analytics-presentation";
+
+let resizeCallbacks: ResizeObserverCallback[];
+beforeEach(() => {
+  resizeCallbacks = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallbacks.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
+afterEach(() => vi.unstubAllGlobals());
 
 // Keep actual Recharts SVGs/tooltips; give jsdom a deterministic container size.
 vi.mock("recharts", async (original) => {
@@ -18,6 +35,31 @@ vi.mock("recharts", async (original) => {
   };
 });
 describe("validated analytics presentation", () => {
+  it("announces horizontal overflow outside the focusable table region and removes the cue when it fits", () => {
+    render(<AnalyticsResultView value={fixture} />);
+    fireEvent.click(screen.getByText("Monthly supporting data", { selector: "summary" }));
+    const region = screen.getByRole("region", { name: "Monthly supporting data" });
+    expect(region).toHaveAttribute("tabindex", "0");
+    expect(region).not.toHaveAttribute("aria-describedby");
+    Object.defineProperties(region, {
+      clientWidth: { value: 338, configurable: true },
+      scrollWidth: { value: 460, configurable: true },
+    });
+    act(() => resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver)));
+    expect(region).toHaveAccessibleDescription(
+      "More columns: scroll horizontally or use ← / → when focused.",
+    );
+    const cue = screen.getByText(/More columns: scroll horizontally/);
+    expect(cue).toBeVisible();
+    expect(region).not.toContainElement(cue);
+    region.focus();
+    expect(region).toHaveFocus();
+    expect(within(region).getByRole("rowheader", { name: "2026-03" })).toHaveTextContent("2026-03");
+    Object.defineProperty(region, "clientWidth", { value: 600 });
+    act(() => resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver)));
+    expect(region).not.toHaveAttribute("aria-describedby");
+    expect(screen.queryByText(/More columns: scroll horizontally/)).toBeNull();
+  });
   it("keeps every KPI and supporting cell equal to the authorized value", async () => {
     render(<AnalyticsResultView value={fixture} />);
     const kpis = screen.getAllByTestId("analytics-kpi");

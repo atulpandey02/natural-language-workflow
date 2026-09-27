@@ -92,6 +92,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await expect(page.getByRole("table", { name: "Monthly supporting data" })).toBeVisible();
     await expect(page.getByTestId("analytics-kpi").first()).toContainText("$280,617.20");
     await assertLayout(page, 1440, 900);
+    await expect(page.locator(".table-scroll-cue")).toHaveCount(0);
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expect(page.getByRole("button", { name: "Toggle Revenue" }).first()).toHaveCSS(
       "transition-duration",
@@ -126,6 +127,34 @@ test.describe("synthetic pilot golden analytics", () => {
     await assertLayout(page, 390, 844);
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: "test-results/pilot-sales-mobile.png", fullPage: true });
+    const mobileTable = page.getByRole("region", { name: "Monthly supporting data" });
+    const month = mobileTable.getByRole("rowheader", { name: "2026-03", exact: true });
+    await expect(month).toHaveCSS("white-space", "nowrap");
+    expect(
+      await month.evaluate((cell) => {
+        const range = document.createRange();
+        range.selectNodeContents(cell);
+        return range.getClientRects().length;
+      }),
+    ).toBe(1);
+    await expect(mobileTable).toHaveAccessibleDescription(
+      "More columns: scroll horizontally or use ← / → when focused.",
+    );
+    await expect(mobileTable).toHaveAttribute("tabindex", "0");
+    expect(await mobileTable.evaluate((region) => region.scrollWidth > region.clientWidth)).toBe(
+      true,
+    );
+    await mobileTable.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect.poll(() => mobileTable.evaluate((region) => region.scrollLeft)).toBeGreaterThan(0);
+    await mobileTable.evaluate((region) => {
+      region.scrollLeft = 0;
+    });
+    await page.locator(".supporting-table").first().scrollIntoViewIfNeeded();
+    await page.screenshot({ path: "test-results/pilot-sales-mobile-table.png" });
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
     await inspectRevenue(page);
     await page
       .getByTestId("analytics-chart")
