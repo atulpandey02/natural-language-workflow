@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import { safeNextPath } from "@/lib/next-path";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -10,6 +11,14 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // An allowlisted return path (only the invitation-accept page). Read once, kept
+  // in memory, and scrubbed from the address bar so the token does not linger.
+  const next = useRef<string | null>(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    next.current = safeNextPath(params.get("next"));
+    if (params.has("next")) window.history.replaceState(null, "", "/login");
+  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -21,7 +30,7 @@ export default function LoginPage() {
       setError(error.message);
       return;
     }
-    router.push("/");
+    router.push(next.current ?? "/");
     router.refresh();
   }
 

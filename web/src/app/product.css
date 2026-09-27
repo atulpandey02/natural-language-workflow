@@ -1,0 +1,75 @@
+/* Launch-closure product layer: shared, app-wide primitives (members, login,
+   onboarding, friendly errors). Colors come from the tokens in globals.css so
+   contrast stays within the audited palette. */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+button.danger {
+  background: transparent;
+  border: 1px solid var(--danger);
+  color: #ffb3b3;
+}
+button.danger:hover:not(:disabled) {
+  background: rgba(255, 107, 107, 0.12);
+}
+
+.field-error {
+  color: #ffb3b3;
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+input[aria-invalid="true"],
+select[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.field-hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+.role-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+/* Friendly error panel (lib/friendly-errors.ts): title + explanation + next step. */
+.error-panel {
+  border: 1px solid var(--danger);
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 12px 0;
+  background: rgba(255, 107, 107, 0.06);
+}
+.error-panel.warn {
+  border-color: var(--warn);
+  background: rgba(224, 179, 65, 0.07);
+}
+.error-panel.info {
+  border-color: var(--accent);
+  background: rgba(146, 186, 255, 0.07);
+}
+.error-panel strong {
+  display: block;
+  margin-bottom: 4px;
+}
+.error-panel p {
+  margin: 4px 0;
+}
+.error-panel .ref {
+  color: var(--muted);
+  font-size: 12px;
+}

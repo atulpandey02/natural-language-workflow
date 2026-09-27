@@ -4,6 +4,7 @@ import { WORKSPACE_COOKIE_NAME } from "@/lib/workspace";
 import { buildContentSecurityPolicy } from "@/lib/csp";
 import { getServerPublicConfig, getServerSupabaseUrl } from "@/lib/public-config";
 import { supabaseCookieOptions } from "@/lib/supabase/shared";
+import { loginSearchFor } from "@/lib/next-path";
 
 // Next.js 16 proxy (formerly middleware): refreshes the Supabase session on
 // every request, enforces the route-protection boundary, and sets a per-request
@@ -51,6 +52,9 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   if (!user && !isPublic) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
+    // Only the invitation-accept page carries its path+token forward (as an
+    // allowlisted `next`); every other query string is dropped, never leaked.
+    url.search = loginSearchFor(pathname, request.nextUrl.search);
     return NextResponse.redirect(url);
   }
 

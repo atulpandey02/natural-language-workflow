@@ -92,7 +92,7 @@ async def list_members(
     session: AsyncSession = Depends(get_session),
 ) -> list[MemberOut]:
     rows = await MembershipRepository(session).list_for_workspace(ctx.tenant_id)
-    return [MemberOut(user_id=m.user_id, role=m.role) for m in rows]
+    return [MemberOut(user_id=m.user_id, role=m.role, joined_at=_iso(m.created_at)) for m in rows]
 
 
 @router.patch("/members/{user_id}", response_model=MemberOut)

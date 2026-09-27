@@ -150,6 +150,9 @@ class ApprovalDecisionOut(BaseModel):
 class MemberOut(BaseModel):
     user_id: uuid.UUID
     role: str
+    # When the membership row was created: a non-sensitive way for the UI to tell
+    # co-members apart (their emails are not readable under users RLS).
+    joined_at: str | None = None
 
 
 class RoleUpdate(BaseModel):
