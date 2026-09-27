@@ -57,7 +57,14 @@ def test_pilot_job_runs_both_harness_journeys_and_rejects_skips() -> None:
     assert "PILOT_VISUAL_STATES" not in golden.get("env", {})
     assert visual["env"]["PILOT_VISUAL_STATES"] == "1"
     assert "-p web.e2e.visual_states_plugin" in visual["run"]
-    for step in (golden, visual):
+    launch = _step(
+        pilot, "Launch journeys (workspace, invitation, join, analysis, approval, denial)"
+    )
+    assert launch["env"]["PILOT_LAUNCH_JOURNEYS"] == "1"
+    assert "-p web.e2e.launch_journeys_plugin" in launch["run"]
+    assert "PILOT_LAUNCH_JOURNEYS" not in golden.get("env", {})
+    assert "PILOT_VISUAL_STATES" not in launch["env"]
+    for step in (golden, visual, launch):
         assert "tests/integration/test_pilot_browser.py" in step["run"]
         assert "--junitxml=" in step["run"] and step["env"]["E2E_JSON_REPORT"]
         assert "scripts/ci/check_pilot_browser_run.py" in step["run"]

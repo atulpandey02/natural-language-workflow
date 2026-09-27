@@ -125,6 +125,13 @@ export function ConnectorForm({ onCreated }: { onCreated?: () => void }) {
         ))}
       </select>
 
+      {type === "slack" ? (
+        <p className="field-hint" data-testid="slack-scope-note">
+          Product Slack: where approved analysis summaries are posted for your team. It is separate
+          from the operators&apos; infrastructure alerts (Alertmanager), which are configured
+          outside NLW.
+        </p>
+      ) : null}
       <label htmlFor="c-name">Name</label>
       <input
         id="c-name"
@@ -140,11 +147,6 @@ export function ConnectorForm({ onCreated }: { onCreated?: () => void }) {
 
       {type === "slack" ? (
         <>
-          <p className="field-hint" data-testid="slack-scope-note">
-            Product Slack: where approved analysis summaries are posted for your team. It is
-            separate from the operators&apos; infrastructure alerts (Alertmanager), which are
-            configured outside NLW.
-          </p>
           <label htmlFor="c-workspace_label">Slack workspace</label>
           <input
             id="c-workspace_label"

@@ -262,6 +262,19 @@ jobs:
             --junit "$RUNNER_TEMP/pilot-visual-junit.xml" --playwright "$E2E_JSON_REPORT" || status=1
           exit "$status"
 
+      - name: Launch journeys (workspace, invitation, join, analysis, approval, denial)
+        env:
+          PILOT_LAUNCH_JOURNEYS: "1"
+          E2E_JSON_REPORT: ${{ runner.temp }}/pilot-launch-playwright.json
+        run: |
+          status=0
+          uv run python -m pytest tests/integration/test_pilot_browser.py \
+            -p web.e2e.launch_journeys_plugin -q --tb=short -p no:cacheprovider \
+            --junitxml="$RUNNER_TEMP/pilot-launch-junit.xml" || status=$?
+          uv run python scripts/ci/check_pilot_browser_run.py \
+            --junit "$RUNNER_TEMP/pilot-launch-junit.xml" --playwright "$E2E_JSON_REPORT" || status=1
+          exit "$status"
+
       # Runs even after a failure. A Supabase that cannot be stopped fails the job.
       - name: Tear down local Supabase and credentials
         if: always()

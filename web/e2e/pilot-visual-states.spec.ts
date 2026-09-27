@@ -17,7 +17,7 @@ test("real failed/partial checkpoints and immutable Slack UNKNOWN outcome", asyn
   async function run(prompt: string, target: Page = page) {
     await target.goto("/workflows/new");
     await target.getByLabel(/what should this workflow do/i).fill(prompt);
-    await target.getByRole("button", { name: /^Plan$/ }).click();
+    await target.getByRole("button", { name: /^Prepare plan$/ }).click();
     await target.getByRole("button", { name: "Save workflow" }).click();
     await target.getByRole("button", { name: /run now/i }).click();
     await expect(target).toHaveURL(/\/runs\/[0-9a-f-]{36}$/);

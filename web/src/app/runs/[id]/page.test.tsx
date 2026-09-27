@@ -171,4 +171,18 @@ describe("RunDetailPage result summary", () => {
       expect(document.body.textContent).not.toMatch(/You can try again now/);
     }
   });
+
+  it("shows one explanation, not a cascade, when the run can't be loaded", async () => {
+    setup({ error: new ApiError({ status: 404, code: "not_found", message: "run not found" }) });
+    mockRun.mockReturnValue({
+      isLoading: false,
+      error: new ApiError({ status: 404, code: "not_found", message: "run not found" }),
+      data: undefined,
+    });
+    renderPage();
+    expect(await screen.findByText("We couldn't find that")).toBeInTheDocument();
+    expect(screen.getAllByTestId("friendly-error")).toHaveLength(1);
+    expect(screen.queryByText("Analytics panel")).toBeNull();
+    expect(screen.getByRole("link", { name: "Back to runs" })).toHaveAttribute("href", "/runs");
+  });
 });
