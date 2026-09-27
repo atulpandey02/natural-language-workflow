@@ -417,24 +417,87 @@ def _pool_policy(
     )
 
 
-def _saturate(
-    pool: BoundedResolverPool, policy: PostgresDestinationPolicy, n: int
-) -> list[threading.Thread]:
-    """Fire n concurrent callers to fill workers + queue; return the threads."""
+class _ResolverGate:
+    """A blocking resolver that reports, via a condition, each time a pool worker
+    actually ENTERS it — i.e. the worker is occupied, not merely alive."""
 
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self._cond = threading.Condition()
+        self.entered = 0
+
+    def resolver(self, _host: str) -> list[str]:
+        with self._cond:
+            self.entered += 1
+            self._cond.notify_all()
+        self.release.wait(30)  # blocks far beyond any test deadline
+        return ["93.184.216.34"]
+
+    def wait_entered(self, n: int, timeout_s: float) -> bool:
+        with self._cond:
+            return self._cond.wait_for(lambda: self.entered >= n, timeout_s)
+
+
+_SYNC_TIMEOUT_S = 5.0  # bound on each synchronization wait; never a sleep
+
+
+def _start_callers(
+    policy: PostgresDestinationPolicy, n: int, threads: list[threading.Thread]
+) -> None:
     def _call() -> None:
         with contextlib.suppress(Exception):  # saturation callers may time out
             policy.validate_and_pin("db.example.com", 5432, "verify-full")
 
-    threads = [threading.Thread(target=_call, daemon=True) for _ in range(n)]
-    for t in threads:
+    for _ in range(n):
+        t = threading.Thread(target=_call, daemon=True)
+        threads.append(t)  # recorded before start: cleanup sees partial progress
         t.start()
-    deadline = time.monotonic() + 4
-    while (
-        pool.live_worker_count() < pool.max_workers or pool.queued() < pool.max_queue
-    ) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    return threads
+
+
+def _saturate(
+    pool: BoundedResolverPool,
+    policy: PostgresDestinationPolicy,
+    gate: _ResolverGate,
+    threads: list[threading.Thread],
+) -> None:
+    """Deterministically saturate the pool: every worker occupied inside the
+    resolver, THEN the bounded queue full. Event/condition driven, no sleeps.
+
+    Fire-all-at-once callers race the workers: a caller can find the queue
+    momentarily full before a worker's first ``get()`` and be (correctly) rejected,
+    leaving the pool one short of saturation, so a later probe is ADMITTED and waits
+    out the DNS timeout instead of failing fast. Staging removes that race: with
+    exactly ``max_workers`` callers no ``put_nowait`` can overflow, and once those
+    workers are blocked nothing dequeues, so ``max_queue`` more callers fill the
+    queue exactly. Abandoned (timed-out) callers leave their task queued, so the
+    saturated state does not decay while it is observed."""
+    q = pool._queue  # the pool's bounded queue; its own conditions signal changes
+    _start_callers(policy, pool.max_workers, threads)
+    assert gate.wait_entered(pool.max_workers, _SYNC_TIMEOUT_S), "workers never occupied"
+    _start_callers(policy, pool.max_queue, threads)
+    with q.not_empty:  # notified on every put; q.mutex is held (use len, not qsize)
+        filled = q.not_empty.wait_for(lambda: len(q.queue) >= pool.max_queue, _SYNC_TIMEOUT_S)
+    assert filled, "bounded queue never filled"
+    # Proven saturation, not merely "within bounds".
+    assert gate.entered == pool.max_workers
+    assert pool.live_worker_count() == pool.max_workers
+    assert pool.queued() == pool.max_queue
+
+
+def _drain(pool: BoundedResolverPool, gate: _ResolverGate, threads: list[threading.Thread]) -> None:
+    """Guaranteed cleanup: unblock the resolver, join every caller and wait until
+    no task is queued or in flight, so nothing leaks into another test. The pool's
+    worker threads (no shutdown API; production unchanged) stay parked, idle, on
+    THIS pool's private, empty queue."""
+    gate.release.set()
+    for t in threads:
+        t.join(_SYNC_TIMEOUT_S)
+    assert not [t for t in threads if t.is_alive()], "saturation caller did not exit"
+    q = pool._queue
+    with q.all_tasks_done:
+        drained = q.all_tasks_done.wait_for(lambda: q.unfinished_tasks == 0, _SYNC_TIMEOUT_S)
+    assert drained, "resolver tasks still in flight after release"
+    assert pool.queued() == 0
 
 
 def test_repeated_timeouts_do_not_grow_threads_and_never_exceed_max_workers() -> None:
@@ -471,31 +534,32 @@ def test_blocked_lookup_caller_returns_within_dns_timeout_plus_margin() -> None:
 
 def test_capacity_exhaustion_fails_fast() -> None:
     pool = BoundedResolverPool(max_workers=2, max_queue=2)
-    release = threading.Event()
+    gate = _ResolverGate()
     # Long caller timeout so the fast-fail is due to saturation, not the deadline.
-    policy = _pool_policy(pool, _blocking_resolver(release), dns_timeout_s=5)
-    threads = _saturate(pool, policy, n=4)
+    policy = _pool_policy(pool, gate.resolver, dns_timeout_s=5)
+    threads: list[threading.Thread] = []
     try:
-        assert pool.live_worker_count() <= pool.max_workers
-        assert pool.queued() <= pool.max_queue
+        _saturate(pool, policy, gate, threads)
         t0 = time.monotonic()
         with pytest.raises(PostgresDnsUnavailableError):
             policy.validate_and_pin("other.example.com", 5432, "verify-full")
         assert time.monotonic() - t0 < 0.5  # admission rejected promptly, no waiting
+        # The probe was rejected at admission: it never reached a worker or the queue.
+        assert gate.entered == pool.max_workers
+        assert pool.queued() == pool.max_queue
     finally:
-        release.set()
-        for t in threads:
-            t.join(2)
+        _drain(pool, gate, threads)
 
 
 def test_capacity_recovers_after_blocked_lookups_release() -> None:
     pool = BoundedResolverPool(max_workers=2, max_queue=2)
-    release = threading.Event()
-    blocked = _pool_policy(pool, _blocking_resolver(release), dns_timeout_s=5)
-    threads = _saturate(pool, blocked, n=4)
-    release.set()
-    for t in threads:
-        t.join(3)
+    gate = _ResolverGate()
+    blocked = _pool_policy(pool, gate.resolver, dns_timeout_s=5)
+    threads: list[threading.Thread] = []
+    try:
+        _saturate(pool, blocked, gate, threads)
+    finally:
+        _drain(pool, gate, threads)
     # The same pool now resolves a fresh safe host successfully.
     ok = _pool_policy(pool, _resolver({"good.example.com": ["93.184.216.34"]}), dns_timeout_s=2)
     dest = ok.validate_and_pin("good.example.com", 5432, "verify-full")
