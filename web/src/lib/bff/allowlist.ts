@@ -30,6 +30,10 @@ const RULES: Rule[] = [
   // Consumed by useWorkflowProvenance (workflow detail "Original request" card).
   { method: "GET", pattern: new RegExp(`^/workflow-versions/${UUID}/provenance$`) },
   { method: "POST", pattern: new RegExp(`^/workflows/${UUID}/runs$`) },
+  // Analytics: exact authorized result and explicit handoff paths only.
+  { method: "GET", pattern: /^\/analytics\/datasets$/ },
+  { method: "GET", pattern: new RegExp(`^/runs/${UUID}/analytics$`) },
+  { method: "POST", pattern: new RegExp(`^/runs/${UUID}/slack-proposal$`) },
   // Runs
   { method: "GET", pattern: /^\/runs$/ },
   { method: "GET", pattern: new RegExp(`^/runs/${UUID}$`) },

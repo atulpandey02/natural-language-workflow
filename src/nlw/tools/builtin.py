@@ -19,6 +19,7 @@ import nlw.connectors.slack  # noqa: F401  (registers the 'slack' connector type
 import nlw.connectors.static  # noqa: F401  (registers the 'static' connector type)
 import nlw.connectors.webhook  # noqa: F401  (registers the 'webhook' connector type)
 import nlw.tools.action_tools  # noqa: F401  (registers 'webhook.send' + 'slack.send_message')
+import nlw.tools.analytics_tools  # noqa: F401 (registered synthetic analytical tools)
 import nlw.tools.postgres_tools  # noqa: F401  (registers 'postgres.query')
 from nlw.connectors.base import ConnectorContext
 from nlw.registry.registry import (

@@ -3,6 +3,29 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## M12C — pilot analytics experience (local branch)
+
+`feat/pilot-analytics-experience` adds two deterministic synthetic datasets,
+registered analytical tools, the bounded `analytics-1` result contract, authorized
+results and an immutable two-proposal Slack journey. The responsive Next.js
+interface renders KPIs, fixed Recharts charts, supporting tables and source-step
+evidence. Migration `0021` adds handoff provenance only; migrations 0001–0020 and
+protected execution/approval/authorization/recovery/release semantics remain
+unchanged. The final frontend visual refinement adds a compact KPI strip,
+consistent metric colors, asymmetric charts and collapsible execution evidence.
+Real seeded browser captures cover desktop, laptop, tablet, mobile and failure
+states. Independent review returned `READY WITH NON-BLOCKING NOTES`. The three
+final corrections restore forbidden catalog-text test coverage, keep mobile
+table identifiers on one line with an accessible scroll cue, and gate Slack
+sharing on validated READY analytics. The corrections are local and awaiting
+review. This package does not complete the separate pilot-launch gates below.
+
+- [Architecture, dataset grains, metric definitions and contract](development/pilot-analytics.md)
+- [Golden workflows and demo script](runbooks/pilot-analytics-demo.md)
+- [ADR-027: grounded analytics and immutable summary handoff](adr/ADR-027-grounded-pilot-analytics.md)
+- [Inspection and implementation note](development/m12c-implementation-note.md)
+- [Validation and browser evidence](evidence/m12c/validation.md)
+
 ## Status
 
 | Field | Value |

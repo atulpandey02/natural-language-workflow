@@ -33,6 +33,7 @@ from sqlglot import exp
 from sqlglot.errors import SqlglotError
 
 import nlw.tools.builtin  # noqa: F401  (populates the registry)
+from nlw.eval.catalog import benchmark_tools
 from nlw.eval.harness import EvalConnector
 from nlw.feasibility.engine import FeasibilityStatus, check_plan
 from nlw.feasibility.limits import DEFAULT_LIMITS
@@ -133,11 +134,11 @@ def v2_digest() -> str:
 
 def _view(case: V2Case) -> Any:
     connectors = [c.to_safe() for c in case.connectors]
-    return build_capability_view(REGISTRY.all(), connectors, include_demo=True)
+    return build_capability_view(benchmark_tools(), connectors, include_demo=True)
 
 
 def _all_tool_names() -> set[str]:
-    return {t.name for t in REGISTRY.all()}
+    return {t.name for t in benchmark_tools()}
 
 
 def replay_fixture_status(case: V2Case) -> FeasibilityStatus:

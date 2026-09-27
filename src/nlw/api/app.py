@@ -35,6 +35,7 @@ from nlw.api.middleware import (
 )
 from nlw.api.recovery_gate import RecoveryGate
 from nlw.api.routers import (
+    analytics,
     approvals,
     connectors,
     identity,
@@ -164,6 +165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(approvals.router)
     app.include_router(schedules.router)
     app.include_router(workflows.router)
+    app.include_router(analytics.router)
     app.include_router(runs.router)
 
     @app.get("/health")

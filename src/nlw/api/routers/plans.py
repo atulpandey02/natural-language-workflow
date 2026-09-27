@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import nlw.tools.builtin  # noqa: F401  (populates the tool + connector-type registries)
+from nlw.analytics.service import validate_handoff
 from nlw.api.capability import build_tenant_view
 from nlw.api.deps import (
     get_app_settings,
@@ -225,7 +226,15 @@ async def list_plans(
     session: AsyncSession = Depends(get_session),
 ) -> list[PlanProposalOut]:
     proposals = await PlanProposalRepository(session).list_for_tenant(ctx.tenant_id)
-    return [PlanProposalOut.model_validate(p) for p in proposals]
+    # Handoff messages contain analytical data: detail-only, never list payloads.
+    return [
+        PlanProposalOut.model_validate(p).model_copy(
+            update={"proposed_plan": None, "normalized_plan": None, "feasibility": {}}
+        )
+        if p.analytics_source is not None or p.planner_contract_version == "analytics-handoff-1"
+        else PlanProposalOut.model_validate(p)
+        for p in proposals
+    ]
 
 
 @router.get("/plans/{proposal_id}", response_model=PlanProposalDetailOut)
@@ -267,6 +276,12 @@ async def materialize_plan(
     proposal = await repo.get_for_update(proposal_id, ctx.tenant_id)
     if proposal is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "proposal not found")
+
+    if (
+        proposal.analytics_source is not None
+        or proposal.planner_contract_version == "analytics-handoff-1"
+    ):
+        await validate_handoff(proposal, ctx, session)
 
     # Idempotent: already materialized -> return the existing version, no re-create.
     if proposal.workflow_version_id is not None:

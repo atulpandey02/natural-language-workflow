@@ -4,6 +4,17 @@ import { isAllowed } from "./allowlist";
 const UUID = "11111111-2222-3333-4444-555555555555";
 
 describe("BFF allowlist", () => {
+  it("limits analytics to catalog/result reads and an explicit Slack proposal", () => {
+    expect(isAllowed("GET", "/analytics/datasets")).toBe(true);
+    expect(isAllowed("GET", `/runs/${UUID}/analytics`)).toBe(true);
+    expect(isAllowed("POST", `/runs/${UUID}/slack-proposal`)).toBe(true);
+    expect(isAllowed("POST", "/analytics/datasets")).toBe(false);
+    expect(isAllowed("POST", `/runs/${UUID}/analytics`)).toBe(false);
+    expect(isAllowed("GET", `/runs/${UUID}/slack-proposal`)).toBe(false);
+    expect(isAllowed("GET", `/runs/${UUID}/analytics/raw`)).toBe(false);
+    expect(isAllowed("POST", `/runs/${UUID}/slack-proposal/send`)).toBe(false);
+    expect(isAllowed("GET", "/runs/not-a-uuid/analytics")).toBe(false);
+  });
   it("allows the exact endpoints M10 uses", () => {
     expect(isAllowed("GET", "/workflows")).toBe(true);
     expect(isAllowed("GET", `/workflows/${UUID}`)).toBe(true);

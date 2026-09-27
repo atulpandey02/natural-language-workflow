@@ -1,4 +1,5 @@
 "use client";
+import { ResponsiveDetails } from "@/components/ResponsiveDetails";
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -8,45 +9,58 @@ import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { SignOutButton } from "./SignOutButton";
 
 const NAV = [
-  { href: "/", label: "Dashboard" },
-  { href: "/workflows", label: "Workflows" },
-  { href: "/connectors", label: "Connectors" },
-  { href: "/members", label: "Members" },
-  { href: "/approvals", label: "Approvals" },
-  { href: "/schedules", label: "Schedules" },
+  { href: "/", label: "Home", icon: "⌂" },
+  { href: "/workflows/new", label: "New analysis", icon: "＋" },
+  { href: "/workflows", label: "Workflows", icon: "◇" },
+  { href: "/runs", label: "Runs", icon: "▷" },
+  { href: "/approvals", label: "Approvals", icon: "✓" },
+  { href: "/connectors", label: "Connectors", icon: "⊞" },
+  { href: "/settings", label: "Settings", icon: "⚙" },
 ];
-
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const me = useMe();
-
   return (
-    <>
-      <header className="shell">
-        <div className="inner">
-          <strong>NLW</strong>
+    <div className="app-frame">
+      <a className="skip-link" href="#main-content">
+        Skip to content
+      </a>
+      <ResponsiveDetails className="sidebar" breakpoint={1200}>
+        <summary>Navigation</summary>
+        <div className="sidebar-content">
+          <Link href="/" className="brand">
+            <span aria-hidden="true">N</span> NLW <small>PILOT</small>
+          </Link>
+          <p className="nav-caption">WORKSPACE</p>
+          <WorkspaceSwitcher />
           <nav aria-label="Primary">
             {NAV.map((item) => (
               <Link
-                key={item.href}
                 href={item.href}
+                key={item.href}
                 aria-current={
-                  pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href))
+                  pathname === item.href ||
+                  (item.href === "/workflows" &&
+                    pathname.startsWith("/workflows/") &&
+                    pathname !== "/workflows/new")
                     ? "page"
                     : undefined
                 }
               >
+                <span aria-hidden="true">{item.icon}</span>
                 {item.label}
               </Link>
             ))}
           </nav>
-          <span className="spacer" />
-          <WorkspaceSwitcher />
-          {me.data ? <span className="muted">{me.data.email}</span> : null}
-          <SignOutButton />
+          <div className="sidebar-footer">
+            <p className="muted small">{me.data?.email}</p>
+            <SignOutButton />
+          </div>
         </div>
-      </header>
-      <main className="container">{children}</main>
-    </>
+      </ResponsiveDetails>
+      <main className="container" id="main-content">
+        {children}
+      </main>
+    </div>
   );
 }

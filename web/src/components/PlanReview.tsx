@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { PlanProposalOut } from "@/lib/api/types";
 import { useMaterialize } from "@/lib/api/hooks";
@@ -24,17 +25,45 @@ export function PlanReview({ proposal }: { proposal: PlanProposalOut }) {
   const clarifications = proposal.clarification_questions ?? [];
 
   async function onMaterialize() {
-    const result = await materialize.mutateAsync(proposal.id);
-    router.push(`/workflows/${result.workflow_id}`);
+    try {
+      const result = await materialize.mutateAsync(proposal.id);
+      router.push(`/workflows/${result.workflow_id}`);
+    } catch {
+      /* mutation exposes the error */
+    }
   }
 
   return (
-    <div className="card">
+    <div className={`card${proposal.analytics_source ? " handoff-review" : ""}`}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <h2 style={{ margin: 0, fontSize: 18 }}>{proposal.workflow_name}</h2>
         <StatusBadge status={proposal.status} />
       </div>
 
+      {proposal.analytics_source ? (
+        <section className="handoff-evidence" aria-label="Slack proposal evidence">
+          <p className="eyebrow">IMMUTABLE SLACK PROPOSAL</p>
+          <h3>Exact message for approval</h3>
+          <p className="message-destination">
+            Destination: <strong>{proposal.analytics_source.channel}</strong>
+          </p>
+          <pre aria-label="Immutable Slack message">
+            {String(
+              (
+                proposal.proposed_plan?.steps as Array<{ args?: { text?: string } }> | undefined
+              )?.[0]?.args?.text ?? "Message unavailable",
+            )}
+          </pre>
+          <Link href={`/runs/${proposal.analytics_source.source_run_id}`}>
+            Open source analysis run
+          </Link>
+          <p className="muted small">
+            {proposal.analytics_source.contract_version} · message digest{" "}
+            <code>{proposal.analytics_source.message_digest}</code>
+          </p>
+          <p>A separate run will request approval from a different admin or owner.</p>
+        </section>
+      ) : null}
       {proposal.proposed_plan ? (
         <>
           <h3 style={{ fontSize: 14 }}>Proposed steps</h3>
@@ -91,29 +120,31 @@ function PlanSteps({ plan }: { plan: Record<string, unknown> }) {
     : [];
   if (steps.length === 0) return <p className="muted">No steps.</p>;
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>Step</th>
-          <th>Tool</th>
-          <th>Connector</th>
-          <th>Depends on</th>
-        </tr>
-      </thead>
-      <tbody>
-        {steps.map((s, i) => (
-          <tr key={i}>
-            <td>{String(s.id ?? i)}</td>
-            <td>{String(s.tool ?? "")}</td>
-            <td className="muted">{s.connector ? String(s.connector) : "—"}</td>
-            <td className="muted">
-              {Array.isArray(s.depends_on) && s.depends_on.length
-                ? (s.depends_on as string[]).join(", ")
-                : "—"}
-            </td>
+    <div className="table-scroll" tabIndex={0} role="region" aria-label="Proposed steps">
+      <table>
+        <thead>
+          <tr>
+            <th>Step</th>
+            <th>Tool</th>
+            <th>Connector</th>
+            <th>Depends on</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {steps.map((s, i) => (
+            <tr key={i}>
+              <td>{String(s.id ?? i)}</td>
+              <td>{String(s.tool ?? "")}</td>
+              <td className="muted">{s.connector ? String(s.connector) : "—"}</td>
+              <td className="muted">
+                {Array.isArray(s.depends_on) && s.depends_on.length
+                  ? (s.depends_on as string[]).join(", ")
+                  : "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

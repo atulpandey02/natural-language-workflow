@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from nlw.core.config import Settings
+from nlw.eval.catalog import benchmark_tools
 from nlw.eval.corpus_v2 import (
     V2Case,
     grade_live,
@@ -41,12 +42,11 @@ from nlw.planner.capabilities import build_capability_view
 from nlw.planner.planner import plan_and_check
 from nlw.planner.provider import build_llm_provider
 from nlw.planner.schema import PLANNER_CONTRACT_VERSION
-from nlw.registry.registry import REGISTRY
 
 
 def _view(case: V2Case) -> Any:
     return build_capability_view(
-        REGISTRY.all(), [c.to_safe() for c in case.connectors], include_demo=True
+        benchmark_tools(), [c.to_safe() for c in case.connectors], include_demo=True
     )
 
 
@@ -62,7 +62,7 @@ async def _run(settings: Settings, repeats: int) -> dict[str, Any]:
 
     for case in cases:
         view = _view(case)
-        all_names = {t.name for t in REGISTRY.all()}
+        all_names = {t.name for t in benchmark_tools()}
         for r in range(repeats):
             start = time.perf_counter()
             result = await plan_and_check(

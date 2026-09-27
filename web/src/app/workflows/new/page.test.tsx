@@ -32,6 +32,8 @@ vi.mock("@/lib/api/hooks", () => ({
   useMaterialize: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
 
+vi.mock("@/components/DatasetPicker", () => ({ DatasetPicker: () => <div>Dataset picker</div> }));
+
 import NewWorkflowPage from "./page";
 
 function renderPage() {

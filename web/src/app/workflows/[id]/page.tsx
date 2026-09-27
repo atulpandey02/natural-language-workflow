@@ -66,6 +66,18 @@ export default function WorkflowDetailPage({ params }: { params: Promise<{ id: s
           {provenance.data?.request_text ? (
             <div className="card" data-testid="workflow-provenance">
               <strong>Original request</strong>
+              {provenance.data.analytics_source ? (
+                <p>
+                  <Link href={`/runs/${provenance.data.analytics_source.source_run_id}`}>
+                    Source analysis run
+                  </Link>{" "}
+                  · {provenance.data.analytics_source.contract_version}
+                  <br />
+                  <span className="small muted">
+                    Message digest: {provenance.data.analytics_source.message_digest}
+                  </span>
+                </p>
+              ) : null}
               <p style={{ whiteSpace: "pre-wrap" }}>{provenance.data.request_text}</p>
               <p className="muted">
                 planned by {provenance.data.provider}/{provenance.data.model} ·{" "}

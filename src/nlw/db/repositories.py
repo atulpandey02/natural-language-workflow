@@ -332,6 +332,7 @@ class PlanProposalRepository:
         request_text: str | None = None,
         request_sha256: str | None = None,
         planner_contract_version: str | None = None,
+        analytics_source: dict[str, Any] | None = None,
     ) -> PlanProposal:
         proposal = PlanProposal(
             id=uuid.uuid4(),
@@ -349,6 +350,7 @@ class PlanProposalRepository:
             request_text=request_text,
             request_sha256=request_sha256,
             planner_contract_version=planner_contract_version,
+            analytics_source=analytics_source,
         )
         self.session.add(proposal)
         await self.session.flush()

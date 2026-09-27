@@ -26,7 +26,14 @@ export default function DashboardPage() {
 
   return (
     <AppShell>
-      <h1>Dashboard</h1>
+      <p className="eyebrow">WORKSPACE OVERVIEW</p>
+      <h1>A question. An analysis. A clear next step.</h1>
+      <p className="lead muted">
+        Explore the pilot datasets and follow each result back to its workflow.
+      </p>
+      <Link className="primary-link" href="/workflows/new">
+        Start a new analysis →
+      </Link>
       <ErrorBanner error={anyError} />
       <div className="row" style={{ alignItems: "stretch" }}>
         <StatCard label="Workflows" value={workflows.data?.length ?? "…"} href="/workflows" />

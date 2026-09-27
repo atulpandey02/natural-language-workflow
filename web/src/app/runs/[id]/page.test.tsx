@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { ApiError } from "@/lib/errors";
 
 // Isolate the page: stub the shell, mock every hook it reads.
@@ -11,6 +11,11 @@ vi.mock("@/lib/api/hooks", () => ({
   useRunSteps: vi.fn(),
   useRunActions: vi.fn(),
   useRunSummary: vi.fn(),
+  useWorkflowProvenance: vi.fn(() => ({ data: undefined })),
+}));
+
+vi.mock("@/components/AnalyticsPanel", () => ({
+  AnalyticsPanel: () => <div>Analytics panel</div>,
 }));
 
 import RunDetailPage from "./page";
@@ -78,6 +83,24 @@ function renderPage() {
 afterEach(() => vi.clearAllMocks());
 
 describe("RunDetailPage result summary", () => {
+  it("does not expose raw step output even when evidence is expanded", async () => {
+    setup({ data: SUMMARY });
+    mockSteps.mockReturnValue({
+      data: [
+        {
+          step_id: "a",
+          tool: "fake.echo",
+          status: "COMPLETED",
+          output_preview: { confidential: "PRIVATE_TOOL_OUTPUT" },
+        },
+      ],
+    });
+    renderPage();
+    await screen.findByTestId("run-summary");
+    fireEvent.click(screen.getByText("Workflow & evidence details", { selector: "summary" }));
+    expect(screen.getByRole("heading", { name: "Workflow & evidence" })).toBeVisible();
+    expect(screen.queryByText(/PRIVATE_TOOL_OUTPUT/)).toBeNull();
+  });
   it("renders the summary card when the summary read succeeds", async () => {
     setup({ data: SUMMARY });
     renderPage();

@@ -380,6 +380,7 @@ class PlanProposal(TimestampMixin, Base):
     normalized_plan: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     feasibility: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     clarification_questions: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    analytics_source: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
 

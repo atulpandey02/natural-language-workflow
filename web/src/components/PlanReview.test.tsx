@@ -31,6 +31,39 @@ function renderReview(status: FeasibilityStatus) {
 }
 
 describe("PlanReview materialization gating", () => {
+  it("shows the immutable Slack text and destination verbatim with no editable message", () => {
+    const message = "Sales summary\nRevenue: $280,617.20\nLiteral <script>text</script> & symbols";
+    const client = new QueryClient();
+    const data: PlanProposalOut = {
+      ...proposal("NEEDS_APPROVAL"),
+      proposed_plan: {
+        steps: [{ id: "send", tool: "slack.post_message", args: { text: message } }],
+      },
+      analytics_source: {
+        source_run_id: "source-run",
+        contract_version: "analytics-1",
+        message_digest: "a".repeat(64),
+        connector_id: "connector",
+        channel: "CPILOT",
+        result_digest: "b".repeat(64),
+        connector_type: "slack",
+        config_fingerprint: "c".repeat(64),
+      },
+    };
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <PlanReview proposal={data} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByLabelText("Immutable Slack message").textContent).toBe(message);
+    expect(screen.getByText("CPILOT")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Open source analysis run" })).toHaveAttribute(
+      "href",
+      "/runs/source-run",
+    );
+    expect(screen.getByText("a".repeat(64))).toBeVisible();
+    expect(container.querySelector("script, textarea, [contenteditable='true']")).toBeNull();
+  });
   it("offers Materialize for PASS", () => {
     renderReview("PASS");
     expect(screen.getByRole("button", { name: /materialize/i })).toBeInTheDocument();

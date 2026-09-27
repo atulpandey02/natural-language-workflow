@@ -14,7 +14,14 @@ from nlw.core.config import Environment, Settings
 from nlw.planner.capabilities import SafeConnector, build_capability_view
 from nlw.registry.registry import REGISTRY
 
-DEMO = {"fake.echo", "fake.fail", "static.echo", "static.secret_check"}
+DEMO = {
+    "fake.echo",
+    "fake.fail",
+    "static.echo",
+    "static.secret_check",
+    "pilot.sales_analysis",
+    "pilot.support_analysis",
+}
 STATIC = SafeConnector(name="s", type="static", status="active")
 PG = SafeConnector(name="pg", type="postgres", status="active")
 
@@ -25,7 +32,7 @@ def test_exactly_the_demo_tools_are_tagged() -> None:
     # the shared process-wide registry (they are never demo-tagged either).
     real = {s.name for s in REGISTRY.all() if not s.demo}
     assert {"webhook.send", "slack.send_message", "postgres.query"} <= real
-    assert not any(n.startswith(("fake.", "static.")) for n in real)
+    assert not any(n.startswith(("fake.", "static.", "pilot.")) for n in real)
 
 
 def test_view_hides_demo_tools_by_default_even_with_a_static_connector() -> None:
