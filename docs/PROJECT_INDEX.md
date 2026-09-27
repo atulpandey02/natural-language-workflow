@@ -3,6 +3,23 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## M12C — pilot analytics experience (local branch)
+
+`feat/pilot-analytics-experience` adds two deterministic synthetic datasets,
+registered analytical tools, the bounded `analytics-1` result contract, authorized
+results and an immutable two-proposal Slack journey. The responsive Next.js
+interface renders KPIs, fixed Recharts charts, supporting tables and source-step
+evidence. Migration `0021` adds handoff provenance only; migrations 0001–0020 and
+protected execution/approval/authorization/recovery/release semantics remain
+unchanged. This package is local and awaiting visual UX review. It does not
+complete the separate pilot-launch gates described below.
+
+- [Architecture, dataset grains, metric definitions and contract](development/pilot-analytics.md)
+- [Golden workflows and demo script](runbooks/pilot-analytics-demo.md)
+- [ADR-027: grounded analytics and immutable summary handoff](adr/ADR-027-grounded-pilot-analytics.md)
+- [Inspection and implementation note](development/m12c-implementation-note.md)
+- [Validation and browser evidence](evidence/m12c/validation.md)
+
 ## Status
 
 | Field | Value |
