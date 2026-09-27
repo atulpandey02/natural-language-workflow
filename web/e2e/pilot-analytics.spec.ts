@@ -43,6 +43,15 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.getByRole("link", { name: "analyze", exact: true }).first().click();
     await expect(page.locator("#evidence-analyze")).toBeVisible();
     await expect(page.locator("#evidence-analyze")).toContainText("SUCCESS");
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await expect(page.locator(".sidebar")).not.toHaveAttribute("open", "");
+    await expect(page.locator(".workflow-details")).not.toHaveAttribute("open", "");
+    await page.locator(".sidebar > summary").click();
+    await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".sidebar")).not.toHaveAttribute("open", "");
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({ path: "test-results/pilot-sales-tablet.png", fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: "test-results/pilot-sales-mobile.png", fullPage: true });

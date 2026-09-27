@@ -694,7 +694,7 @@ summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
-@media (max-width: 760px) {
+@media (max-width: 1200px) {
   .app-frame {
     display: block;
   }
@@ -733,6 +733,8 @@ summary {
     height: calc(100% - 40px);
     padding-top: 20px;
   }
+}
+@media (max-width: 760px) {
   .dataset-grid,
   .chart-grid {
     grid-template-columns: 1fr;

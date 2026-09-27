@@ -25,7 +25,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <a className="skip-link" href="#main-content">
         Skip to content
       </a>
-      <ResponsiveDetails className="sidebar" breakpoint={760}>
+      <ResponsiveDetails className="sidebar" breakpoint={1200}>
         <summary>Navigation</summary>
         <div className="sidebar-content">
           <Link href="/" className="brand">
