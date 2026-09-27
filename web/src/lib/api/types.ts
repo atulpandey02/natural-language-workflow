@@ -64,6 +64,9 @@ export type MemberRole = "owner" | "admin" | "member";
 export interface MemberOut {
   user_id: string;
   role: MemberRole;
+  // When the membership began. Co-members' emails are not readable (users RLS),
+  // so this — never the user id — is how the UI tells members apart.
+  joined_at: string | null;
 }
 
 export interface InvitationOut {

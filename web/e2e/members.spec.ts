@@ -41,18 +41,21 @@ test.describe("members + invitations (multi-user)", () => {
 
     // Baseline count of roster rows already carrying the admin role, so the
     // assertion holds even under shared seeded state.
-    const adminCells = page.getByRole("cell", { name: "admin", exact: true });
-    const adminBefore = await adminCells.count();
+    const adminBefore = await countAdminCells(page);
 
-    const inviteForm = page.getByRole("form", { name: "invite member" });
-    await inviteForm.getByLabel("Email").fill(env.invitedEmail);
+    const inviteForm = page.getByRole("form", { name: "Invite someone" });
+    await inviteForm.getByLabel("Email address").fill(env.invitedEmail);
     await inviteForm.getByLabel("Role").selectOption("admin");
     await inviteForm.getByRole("button", { name: /create invitation/i }).click();
 
-    // The raw token is surfaced exactly once in the UI for manual copying.
-    const tokenBox = page.getByTestId("invitation-token");
-    await expect(tokenBox).toBeVisible();
-    const token = (await tokenBox.locator("pre").innerText()).trim();
+    // The one-time link is surfaced once, hidden until revealed.
+    const created = page.getByTestId("invitation-created");
+    await expect(created).toBeVisible();
+    await expect(page.getByTestId("invitation-link")).toHaveCount(0);
+    await created.getByRole("button", { name: "Show link" }).click();
+    const link = new URL(await page.getByTestId("invitation-link").inputValue());
+    const token = link.searchParams.get("token") ?? "";
+    expect(link.pathname).toBe("/invitations/accept");
     expect(token.length).toBeGreaterThan(0);
 
     // --- Context B: the invited user accepts (isolated cookies) ------------
@@ -65,7 +68,7 @@ test.describe("members + invitations (multi-user)", () => {
       // workspace) and then go straight to the accept URL. The proxy exempts
       // /invitations/accept from the workspace requirement.
       await pageB.goto("/login");
-      await pageB.getByLabel("Email").fill(env.invitedEmail);
+      await pageB.getByLabel("Work email").fill(env.invitedEmail);
       await pageB.getByLabel("Password").fill(env.invitedPassword);
       await pageB.getByRole("button", { name: /sign in/i }).click();
       await pageB.waitForURL(/\/(select-workspace)?$/, { timeout: 15000 });
@@ -75,13 +78,13 @@ test.describe("members + invitations (multi-user)", () => {
       const accepted = pageB.getByTestId("invitation-accepted");
       await expect(accepted).toBeVisible({ timeout: 15000 });
       // The granted role is shown to the invitee.
-      await expect(accepted).toContainText("admin");
+      await expect(accepted).toContainText("as Admin");
 
       // The raw token must NOT linger in the address bar / history after use.
       await expect(pageB).toHaveURL(/\/invitations\/accept$/);
 
       // Route into the app (selects the joined workspace + hard-navigates).
-      await pageB.getByRole("button", { name: /continue to workspace/i }).click();
+      await pageB.getByRole("button", { name: /open workspace/i }).click();
       await pageB.waitForURL(/\/$/, { timeout: 15000 });
 
       // Item 11: navigating BACK to the accept page must not resurface the raw
@@ -105,7 +108,7 @@ test.describe("members + invitations (multi-user)", () => {
     // requester) must NOT be able to decide it, and the newly-invited admin must.
     await page.goto("/approvals");
     await expect(page.getByRole("heading", { name: "Pending approvals" })).toBeVisible();
-    const requesterCard = page.locator(".card", { hasText: "webhook.send" });
+    const requesterCard = page.locator(".card", { hasText: "Send to a webhook" });
     await expect(requesterCard).toBeVisible();
     // Item 8: the requester sees the SoD note and NO approve/reject controls.
     await expect(requesterCard.getByRole("note")).toContainText(/you requested this action/i);
@@ -118,7 +121,7 @@ test.describe("members + invitations (multi-user)", () => {
       const pageC = await contextC.newPage();
       await signIn(pageC, env.invitedEmail, env.invitedPassword);
       await pageC.goto("/approvals");
-      const approverCard = pageC.locator(".card", { hasText: "webhook.send" });
+      const approverCard = pageC.locator(".card", { hasText: "Send to a webhook" });
       await expect(approverCard).toBeVisible();
       const approve = approverCard.getByRole("button", { name: /^approve$/i });
       await expect(approve).toBeEnabled();
@@ -139,5 +142,5 @@ test.describe("members + invitations (multi-user)", () => {
 });
 
 async function countAdminCells(page: Page): Promise<number> {
-  return page.getByRole("cell", { name: "admin", exact: true }).count();
+  return page.locator('[data-testid="member-row"] .role-pill', { hasText: /^Admin$/ }).count();
 }

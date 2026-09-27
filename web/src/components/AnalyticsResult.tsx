@@ -12,20 +12,26 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import Link from "next/link";
 import {
   analyticsSchema,
+  type AnalyticsResult,
   type AnalyticsTable,
+  type Unit,
   type Visualization,
   formatValue,
 } from "@/lib/analytics";
 import {
   formatAxis,
   formatPeriod,
+  kpiDisplay,
   metricKind,
   seriesStyle,
   unitLabel,
 } from "@/lib/analytics-presentation";
 import { Empty, StatusBadge } from "./ui";
+
+type Finding = AnalyticsResult["findings"][number];
 
 function SeriesMark({ label }: { label: string }) {
   const style = seriesStyle(label);
@@ -79,10 +85,10 @@ function Chart({ chart, index }: { chart: Visualization; index: number }) {
   };
   const categoryAxis = { type: "category" as const, dataKey: "label" };
   const axis = {
-    stroke: "#9caebe",
+    stroke: "#8a94a7",
     tickLine: false,
     axisLine: false,
-    tick: { fontSize: 12 },
+    tick: { fontSize: 12, fill: "#667085" },
     tickMargin: 10,
   };
   return (
@@ -109,7 +115,7 @@ function Chart({ chart, index }: { chart: Visualization; index: number }) {
             margin={{ top: 12, right: 22, left: 0, bottom: 8 }}
           >
             <CartesianGrid
-              stroke="#283643"
+              stroke="#e3e8f0"
               strokeDasharray="2 5"
               horizontal={!horizontal}
               vertical={horizontal}
@@ -128,7 +134,7 @@ function Chart({ chart, index }: { chart: Visualization; index: number }) {
             />
             <Tooltip
               cursor={
-                horizontal ? { fill: "#ffffff06" } : { stroke: "#9caebe", strokeDasharray: "3 3" }
+                horizontal ? { fill: "#5165d60d" } : { stroke: "#8a94a7", strokeDasharray: "3 3" }
               }
               allowEscapeViewBox={{ x: false, y: false }}
               content={({ active, label }) => {
@@ -163,7 +169,7 @@ function Chart({ chart, index }: { chart: Visualization; index: number }) {
                   stroke={seriesStyle(s.label).color}
                   strokeDasharray={seriesStyle(s.label).dash}
                   strokeWidth={2.5}
-                  dot={{ r: 3.5, strokeWidth: 2, fill: "#101b25" }}
+                  dot={{ r: 3.5, strokeWidth: 2, fill: "#ffffff" }}
                   activeDot={{ r: 5 }}
                   connectNulls={false}
                   isAnimationActive={false}
@@ -289,7 +295,130 @@ function SupportingTable({ table }: { table: AnalyticsTable }) {
     </details>
   );
 }
-export function AnalyticsResultView({ value }: { value: unknown }) {
+// Presentation grouping only: the grounded finding text is shown unchanged and
+// keeps its source links; nothing here adds a claim about the data.
+const ATTENTION =
+  /\b(declin|decreas|drop|fell|fall|below|backlog|breach|miss|worse|risk|overdue|reopen|slipp)/i;
+
+function Insights({ findings, ready }: { findings: Finding[]; ready: boolean }) {
+  const attention = findings.filter((f) => ATTENTION.test(f.text));
+  const changed = findings.filter((f) => !ATTENTION.test(f.text));
+  const list = (items: Finding[], offset: number) => (
+    <ol>
+      {items.map((f, i) => (
+        <li key={i}>
+          <span className="finding-index" aria-hidden="true">
+            {String(offset + i + 1).padStart(2, "0")}
+          </span>
+          <div>
+            {f.text}
+            <Sources ids={f.source_step_ids} />
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+  return (
+    <div className="insight-grid findings">
+      <section className="insight" aria-labelledby="changed-title">
+        <h3 id="changed-title">What changed</h3>
+        {changed.length ? (
+          list(changed, 0)
+        ) : (
+          <p className="muted small">No other findings in this sample.</p>
+        )}
+      </section>
+      <section className="insight attention" aria-labelledby="attention-title">
+        <h3 id="attention-title">Needs attention</h3>
+        {attention.length ? (
+          list(attention, changed.length)
+        ) : (
+          <p className="muted small">Nothing in these findings was flagged for attention.</p>
+        )}
+      </section>
+      <section className="insight actions" aria-labelledby="actions-title">
+        <h3 id="actions-title">Recommended actions</h3>
+        <ul>
+          <li>Open a finding&apos;s source step to check the evidence behind it.</li>
+          {ready ? (
+            <li>Share the summary with your team below; a second admin approves it first.</li>
+          ) : null}
+          <li>
+            <Link href="/workflows/new">Ask a follow-up question</Link>
+          </li>
+        </ul>
+        <p className="insight-note">Suggested next steps in NLW, not conclusions from the data.</p>
+      </section>
+    </div>
+  );
+}
+
+/** A KPI value that never clips: exact when it fits, compact (and marked) when not. */
+/**
+ * Break opportunities for the exact figure: after each thousands separator and
+ * after every third fractional digit. Digits never break anywhere else.
+ */
+function exactSegments(exact: string): string[] {
+  const point = exact.indexOf(".");
+  const head = point < 0 ? exact : exact.slice(0, point + 1);
+  const segments = head.split(",").map((part, i, all) => (i < all.length - 1 ? `${part},` : part));
+  if (point >= 0) {
+    const tail = exact.slice(point + 1);
+    const digits = /^\d+/.exec(tail)?.[0] ?? "";
+    const suffix = tail.slice(digits.length);
+    const chunks = digits.match(/\d{1,3}/g) ?? [];
+    chunks.forEach((chunk, i) => segments.push(i === chunks.length - 1 ? chunk + suffix : chunk));
+  }
+  return segments;
+}
+
+/** A KPI value that never clips and never hides precision without saying so. */
+function KpiValue({ value, unit, label }: { value: number | null; unit: Unit; label: string }) {
+  const shown = kpiDisplay(value, unit);
+  if (!shown.rounded) {
+    return (
+      <>
+        <strong>{shown.text}</strong>
+        <span className="metric-kind">{metricKind(label)}</span>
+      </>
+    );
+  }
+  // The exact parsed value is announced once, in place of the rounded display.
+  // The disclosure repeats it visually for keyboard and pointer users.
+  return (
+    <>
+      <strong
+        title={shown.exact}
+        data-rounded="true"
+        data-compacted={shown.compacted ? "true" : undefined}
+      >
+        <span aria-hidden="true">{shown.text}</span>
+        <span className="sr-only">{shown.exact}</span>
+      </strong>
+      <span className="metric-kind">{metricKind(label)} · rounded</span>
+      <details className="kpi-exact">
+        <summary>Exact value</summary>
+        <span className="kpi-exact-value" aria-hidden="true">
+          {exactSegments(shown.exact).map((segment, i) => (
+            <span key={i}>
+              {segment}
+              <wbr />
+            </span>
+          ))}
+        </span>
+      </details>
+    </>
+  );
+}
+
+export function AnalyticsResultView({
+  value,
+  outcomeOverride,
+}: {
+  value: unknown;
+  /** A more cautious run outcome from the run page; replaces the result's own badge. */
+  outcomeOverride?: string;
+}) {
   const parsed = analyticsSchema.safeParse(value);
   if (!parsed.success || parsed.data.status === "INVALID")
     return (
@@ -321,10 +450,10 @@ export function AnalyticsResultView({ value }: { value: unknown }) {
     >
       <div className="row result-heading">
         <div>
-          <p className="eyebrow">PERFORMANCE / OVERVIEW</p>
+          <p className="eyebrow">Analysis report</p>
           <h2>{title}</h2>
         </div>
-        <StatusBadge status={result.run_outcome} />
+        <StatusBadge status={outcomeOverride ?? result.run_outcome} />
       </div>
       {result.status === "PARTIAL" ? (
         <p className="notice" role="status">
@@ -354,31 +483,12 @@ export function AnalyticsResultView({ value }: { value: unknown }) {
               <SeriesMark label={m.label} />
               {m.label}
             </span>
-            <strong>{formatValue(m.value, m.unit)}</strong>
-            <span className="metric-kind">{metricKind(m.label)}</span>
+            <KpiValue value={m.value} unit={m.unit} label={m.label} />
             <Sources ids={m.source_step_ids} />
           </article>
         ))}
       </div>
-      <section className="findings" aria-labelledby="findings-title">
-        <div>
-          <p className="eyebrow">GROUNDED FINDINGS</p>
-          <h3 id="findings-title">What the data shows</h3>
-        </div>
-        <ol>
-          {result.findings.map((f, i) => (
-            <li key={i}>
-              <span className="finding-index" aria-hidden="true">
-                {String(i + 1).padStart(2, "0")}
-              </span>
-              <div>
-                {f.text}
-                <Sources ids={f.source_step_ids} />
-              </div>
-            </li>
-          ))}
-        </ol>
-      </section>
+      <Insights findings={result.findings} ready={result.status === "READY" && !outcomeOverride} />
       <div className="chart-section-heading">
         <h3>Performance trends & breakdowns</h3>
         <span>Hover or focus a chart and use arrow keys to inspect</span>

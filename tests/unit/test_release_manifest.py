@@ -84,27 +84,37 @@ def test_generator_derives_target_revision_from_this_checkout() -> None:
     assert doc["expected_current_revision"] == "0010_readiness_schema_grant"
 
 
-def test_committed_target_env_yields_a_code_only_release_at_accepted_0020() -> None:
-    """The recorded host is at 0020; keep the accepted code-only scenario at 0020:
-    CI must still produce an attested manifest for a CODE-ONLY release —
-    expected == target, `migrate` a verified no-op. The image gate needs no
-    migration files for an empty range and the live-revision gate stays."""
+def test_committed_target_env_yields_a_code_only_release_at_0021() -> None:
+    """The host is at 0021 (M12C rollout). This checkout's head is also 0021, so CI
+    produces a CODE-ONLY release from the committed target (the custom-domain
+    edge release): expected == target, `migrate` a verified no-op, the image gate
+    needs no migration file for the empty range and the live-revision gate stays.
+    The manifest records the reviewed PRIMARY hostname (the fallback never)."""
     text = COMMITTED_TARGET_ENV.read_text()
-    assert "NLW_STAGING_CURRENT_REVISION=0020_schedule_authorization" in text
-    doc = _gen(target_env=COMMITTED_TARGET_ENV, target_revision="0020_schedule_authorization")
-    assert (
-        doc["expected_current_revision"] == doc["target_revision"] == "0020_schedule_authorization"
-    )
+    assert "NLW_STAGING_CURRENT_REVISION=0021_analytics_handoff" in text
+    doc = _gen(target_env=COMMITTED_TARGET_ENV, target_revision=None)
+    assert doc["expected_current_revision"] == doc["target_revision"] == "0021_analytics_handoff"
+    assert doc["public_hostname"] == "app.nlwplatform.com"
+    assert "sslip" not in json.dumps(doc)
     m = rm.parse_manifest(doc, raw_bytes=json.dumps(doc).encode())
-    info = dict(GOOD_INFO, alembic_head="0020_schedule_authorization",
-                migrations=[f"{n:04d}_x.py" for n in range(1, 21)])  # fmt: skip
+    info = dict(GOOD_INFO, alembic_head="0021_analytics_handoff",
+                migrations=[f"{n:04d}_x.py" for n in range(1, 22)])  # fmt: skip
     gates.check_image_info(info, m)
     with pytest.raises(GateError, match="unknown migration state"):
-        gates.check_current_revision("0019_connector_bindings", m.expected_current_revision)
+        gates.check_current_revision("0020_schedule_authorization", m.expected_current_revision)
 
 
-def test_checkout_head_requires_new_migration_from_recorded_target() -> None:
-    doc = _gen(target_env=COMMITTED_TARGET_ENV, target_revision=None)
+def test_checkout_head_requires_new_migration_from_a_0020_target(tmp_path: Path) -> None:
+    # The migration-requiring path (0020 -> 0021) stays covered from an explicit
+    # 0020 copy of the committed target (the recorded host has moved past it).
+    target = tmp_path / "target.env"
+    target.write_text(
+        COMMITTED_TARGET_ENV.read_text().replace(
+            "NLW_STAGING_CURRENT_REVISION=0021_analytics_handoff",
+            "NLW_STAGING_CURRENT_REVISION=0020_schedule_authorization",
+        )
+    )
+    doc = _gen(target_env=target, target_revision=None)
     assert doc["expected_current_revision"] == "0020_schedule_authorization"
     assert doc["target_revision"] == "0021_analytics_handoff"
     m = rm.parse_manifest(doc, raw_bytes=json.dumps(doc).encode())

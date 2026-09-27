@@ -39,8 +39,8 @@ describe("RunSummaryCard", () => {
 
   it("shows UNKNOWN and SKIPPED outcomes, never as success", () => {
     render(<RunSummaryCard summary={summary()} />);
-    expect(screen.getByText("UNKNOWN")).toBeInTheDocument();
-    expect(screen.getByText("SKIPPED")).toBeInTheDocument();
-    expect(screen.queryByText("SUCCESS")).toBeNull();
+    expect(screen.getAllByText("Outcome unknown").length).toBeGreaterThan(0);
+    expect(screen.getByText("Skipped")).toBeInTheDocument();
+    expect(screen.queryByText("Succeeded")).toBeNull();
   });
 });

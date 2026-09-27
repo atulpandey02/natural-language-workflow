@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import product
@@ -101,6 +102,7 @@ PINS_STAGED = (
     "PUBLIC_HOSTNAME=32-197-83-193.sslip.io\nNLW_CTX_KEYS_DIR=/srv/nlw/ctx-keys\n"
     "NLW_CTX_API_KEY_ID=stg-api-1\nNLW_CTX_WORKER_KEY_ID=stg-worker-1\n"
     "NLW_CTX_SCHEDULER_KEY_ID=stg-sched-1\nDEMO_TOOLS_ENABLED=false\n"
+    "PUBLIC_HOSTNAME_FALLBACK=\n"
 )
 IMAGE_INFO = json.dumps(
     {
@@ -155,15 +157,19 @@ ACTIVE_MUTATION = re.compile(
 )
 
 
+# A scripted response: text, an exit code (scripted failure), or a function of the
+# fake's own recorded history (e.g. the maintenance flag) and the command.
+Response = str | int | Callable[["FakeRemote", str], str]
+Table = list[tuple[str, Response]]
+
+
 class FakeRemote:
     """Pattern -> response table; records every command. Unmatched commands fail
     loudly so a phase cannot silently do something the test did not script."""
 
     is_local = False
 
-    def __init__(
-        self, table: list[tuple[str, str | int]], state: dict[str, Any] | None = None
-    ) -> None:
+    def __init__(self, table: Table, state: dict[str, Any] | None = None) -> None:
         self.table = table
         self.commands: list[str] = []
         self.state_doc: dict[str, Any] = state or {"phases": {}, "evidence": {}}
@@ -191,6 +197,8 @@ class FakeRemote:
             if re.search(pattern, command):
                 if isinstance(response, int):
                     return CommandResult(response, "", "scripted failure")
+                if callable(response):
+                    return CommandResult(0, response(self, command), "")
                 return CommandResult(0, response, "")
         raise AssertionError(f"unscripted command: {command[:160]}")
 
@@ -217,10 +225,23 @@ TGT_CURRENT = replace(
     TGT_OP, remote_app="/opt/nlw/current", git_remote="https://github.com/o/r.git"
 )
 PREVIOUS = "/opt/nlw/releases/" + "9" * 40
+CADDYFILE_SRC = f"{STAGED}/docker/caddy/Caddyfile"
 RENDERED_AM = json.dumps(
     {
         "services": {
             "api": {"environment": {"DEMO_TOOLS_ENABLED": "false"}},
+            "caddy": {
+                "image": "caddy:2",
+                "environment": {
+                    "PUBLIC_HOSTNAME": "32-197-83-193.sslip.io",
+                    "PUBLIC_HOSTNAME_FALLBACK": "",
+                },
+                "volumes": [
+                    {"type": "bind", "source": CADDYFILE_SRC,
+                     "target": "/etc/caddy/Caddyfile", "read_only": True},
+                    {"type": "volume", "source": "caddy_data", "target": "/data"},
+                ],
+            },
             "alertmanager": {
                 "volumes": [
                     {"type": "bind", "source": AMCFG, "target": CFG_MOUNT, "read_only": True},
@@ -235,7 +256,7 @@ RENDERED_AM = json.dumps(
 
 def _operator_table(
     *, cfg: str = OPERATOR_CFG, loaded: str | None = None, record: str = "__ABSENT__"
-) -> list[tuple[str, str | int]]:
+) -> Table:
     """Host + running-container facts for a correctly wired operator Alertmanager."""
     status = json.dumps({"config": {"original": loaded if loaded is not None else cfg}})
     mounts = (
@@ -264,12 +285,62 @@ def _operator_table(
     ]  # fmt: skip
 
 
+MAINT = "/srv/maint/MAINTENANCE"
+
+
+def _maintenance_on(fake: FakeRemote) -> bool:
+    """The edge's maintenance flag as the fake host would have it: closed after a
+    recorded drain until a recorded reopen, then toggled by the phase's OWN
+    touch/rm commands (so a probe cannot simply agree with what a phase expects)."""
+    phases = fake.state_doc.get("phases", {})
+    closed_span = PHASES[PHASES.index("drain") : PHASES.index("reopen")]
+    on = any(p in phases for p in closed_span) and "reopen" not in phases
+    for command in fake.commands:
+        if f"touch {MAINT}" in command:
+            on = True
+        elif f"rm -f {MAINT}" in command:
+            on = False
+    return on
+
+
+def _edge_http(fake: FakeRemote, command: str) -> str:
+    if _maintenance_on(fake):
+        return "503"
+    return "404" if "/metrics'" in command else "200"
+
+
+def _adapted(*hosts: str) -> str:
+    route = {"match": [{"host": list(hosts)}], "handle": [{"handler": "subroute"}]}
+    return json.dumps({"apps": {"http": {"servers": {"srv0": {"routes": [route]}}}}})
+
+
+def _edge_table(
+    primary: str = "32-197-83-193.sslip.io", fallback: str = "", source: str = CADDYFILE_SRC
+) -> Table:
+    """A correctly wired edge: Caddyfile validates/adapts to exactly the reviewed
+    hosts, the running caddy carries exactly those values and mounts the release
+    Caddyfile, and every hostname answers per the maintenance flag."""
+    running = (
+        f"PUBLIC_HOSTNAME={primary}\nPUBLIC_HOSTNAME_FALLBACK={fallback}\nMOUNT={source}:false"
+    )
+    return [
+        (r"caddy validate --config", ""),
+        (r"caddy adapt --config", _adapted(primary, *([fallback] if fallback else []))),
+        (r"docker inspect --format .*PUBLIC_HOSTNAME=.*ps -q caddy", running),
+        (r"readlink -f '.*/docker/caddy/Caddyfile'", source),
+        (r"port caddy 443", "0.0.0.0:443"),
+        (r"curl -sk -o /dev/null .*--resolve", _edge_http),
+        (r"up -d --no-deps caddy$", ""),
+        (r"^sleep 5$", ""),
+    ]
+
+
 def _base_table(
     *,
     roles: str = ROLES_M11,
     staged_pins: str = PINS_STAGED,
     rev: str = "0010_readiness_schema_grant",
-) -> list[tuple[str, str | int]]:
+) -> Table:
     return [
         (r"169\.254\.169\.254", IMDS),
         (r"docker inspect --format .*DEMO_TOOLS_ENABLED=.*ps -q api", "match"),
@@ -294,6 +365,7 @@ def _base_table(
         # Pre-activation phases: current is ABSENT on the legacy host.
         (r"if \[ -L '/opt/nlw/current' \]; then readlink", "ABSENT"),
         (r"readlink '/opt/nlw/current'", STAGED),
+        *_edge_table(),
         *_operator_table(),
     ]
 
@@ -307,7 +379,12 @@ def _done(*phases: str) -> dict[str, Any]:
     # Later phase fixtures have already passed staging under this manifest.
     if any(PHASES.index(p) >= PHASES.index("stage-release") for p in phases):
         doc["phases"]["stage-release"] = {}
-        doc["evidence"]["stage-release"] = {"demo_tools_enabled": False, "release_sha": SHA}
+        doc["evidence"]["stage-release"] = {
+            "demo_tools_enabled": False,
+            "public_hostname": REL.public_hostname,
+            "public_hostname_fallback": "",
+            "release_sha": SHA,
+        }
     return doc
 
 
@@ -452,7 +529,7 @@ def test_verify_release_requires_every_command_and_records_evidence() -> None:
 
 
 # --- §C/§D: nothing mutates the database or the active deployment before the gate --
-def _pre_backup_table() -> list[tuple[str, str | int]]:
+def _pre_backup_table() -> Table:
     return _base_table() + [
         (r"docker pull -q", ""),
         (r'index \.Config\.Labels "org\.opencontainers\.image\.revision"', SHA),
@@ -850,7 +927,8 @@ def test_drain_stops_on_non_terminal_work_and_never_stops_api() -> None:
         _rollout(fake, authorization=AUTHORIZATION_PHRASE).drain()
     assert fake.ran(r"stop scheduler") and not fake.ran(r"stop worker api")
     assert fake.ran(
-        rf"cd '{STAGED}' && env -u DEMO_TOOLS_ENABLED docker compose -p app .* "
+        rf"cd '{STAGED}' && env -u DEMO_TOOLS_ENABLED -u PUBLIC_HOSTNAME "
+        r"-u PUBLIC_HOSTNAME_FALLBACK docker compose -p app .* "
         r"up -d --no-deps --force-recreate caddy"
     )
 
@@ -1007,7 +1085,7 @@ def test_state_recorded_for_another_manifest_invalidates_every_phase() -> None:
 
 
 # --- final audit: legacy-host first rollout -------------------------------------------
-def _stage_table() -> list[tuple[str, str | int]]:
+def _stage_table() -> Table:
     return _base_table() + [
         (
             r"ctxkeys fingerprint",
@@ -1163,7 +1241,7 @@ def _rollout_op(remote: FakeRemote, target: TargetConfig = TGT_OP, **op: object)
     )
 
 
-def _reopen_table(**kw: Any) -> list[tuple[str, str | int]]:
+def _reopen_table(**kw: Any) -> Table:
     return (
         _operator_table(**kw)
         + _base_table()
@@ -1329,7 +1407,7 @@ def test_committed_null_config_cannot_misrepresent_the_running_config() -> None:
 
 # J.5 / J.6 — the operator override is required BEFORE Alertmanager is recreated and
 # every recreation keeps the external config + secrets mounts.
-def _activation_table(**kw: Any) -> list[tuple[str, str | int]]:
+def _activation_table(**kw: Any) -> Table:
     return (
         _operator_table(**kw)
         + _base_table(roles=ROLES_ALL, rev="0016_signed_database_context")
@@ -1488,7 +1566,7 @@ def test_second_rollout_follows_current_and_expects_the_live_revision() -> None:
         (Path(__file__).resolve().parents[2] / "deploy/staging/target.env").read_text()
     )
     assert tgt["NLW_STAGING_REMOTE_APP"] == "/opt/nlw/current"
-    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0020_schedule_authorization"
+    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0021_analytics_handoff"
     assert (
         tgt["NLW_STAGING_COMPOSE_PROJECT"] == "app"
         and tgt["NLW_STAGING_INSTANCE_ID"] == "i-0d1e65cdc9401dbb9"
@@ -1607,7 +1685,7 @@ def test_code_only_release_migrates_as_a_verified_noop() -> None:
 def test_prepare_keys_reuses_existing_host_keys_on_a_follow_up_release() -> None:
     """N+1 keeps the installed keys: prepare-keys must verify + fingerprint the
     existing files instead of refusing (`ctxkeys prepare` never overwrites)."""
-    table: list[tuple[str, str | int]] = [
+    table: Table = [
         (r"ctxkeys prepare", 1),  # would refuse: the files exist
         (r"--entrypoint stat .* '/keys/\.'", ".|directory|700|0|0|4096"),
         (
@@ -1632,7 +1710,7 @@ def test_prepare_keys_reuses_existing_host_keys_on_a_follow_up_release() -> None
         "scheduler",
     }
     # A PARTIAL set is never silently completed.
-    partial: list[tuple[str, str | int]] = [
+    partial: Table = [
         (r"--entrypoint stat .* '/keys/scheduler\.key'", 1),
         *table,
     ]
@@ -1642,3 +1720,419 @@ def test_prepare_keys_reuses_existing_host_keys_on_a_follow_up_release() -> None
             target=TGT_CURRENT,
             authorization=AUTHORIZATION_PHRASE,
         ).prepare_keys(keys_dir=KEYS)
+
+
+# --- public edge: reviewed primary (manifest) + sslip fallback (target) -----------
+EDGE_PRIMARY = "app.nlwplatform.com"
+EDGE_FALLBACK = "32-197-83-193.sslip.io"
+EDGE_IP = "32.197.83.193"
+REL_EDGE_DOC = {**REL_DOC, "public_hostname": EDGE_PRIMARY}
+REL_EDGE_RAW = json.dumps(REL_EDGE_DOC, indent=2, sort_keys=True) + "\n"
+REL_EDGE = replace(
+    rm.parse_manifest(REL_EDGE_DOC, raw_bytes=REL_EDGE_RAW.encode()),
+    raw=REL_EDGE_RAW,
+    source_path="release-manifest.json",
+)
+TGT_EDGE = replace(TGT, public_hostname=EDGE_PRIMARY, public_hostname_fallback=EDGE_FALLBACK)
+PINS_STAGED_EDGE = PINS_STAGED.replace(
+    "PUBLIC_HOSTNAME=32-197-83-193.sslip.io\n", f"PUBLIC_HOSTNAME={EDGE_PRIMARY}\n"
+).replace("PUBLIC_HOSTNAME_FALLBACK=\n", f"PUBLIC_HOSTNAME_FALLBACK={EDGE_FALLBACK}\n")
+
+
+def _rendered_edge(**caddy_env: str) -> str:
+    doc = json.loads(RENDERED_AM)
+    doc["services"]["caddy"]["environment"] = {
+        "PUBLIC_HOSTNAME": EDGE_PRIMARY,
+        "PUBLIC_HOSTNAME_FALLBACK": EDGE_FALLBACK,
+        **caddy_env,
+    }
+    return json.dumps(doc)
+
+
+def _edge_first(*extra: tuple[str, Response], pins: str = PINS_STAGED_EDGE) -> Table:
+    """Scripted responses for a correctly wired custom-domain edge; ``extra``
+    entries are matched FIRST (a test's deviation from the good edge)."""
+    return [
+        *extra,
+        (r"config --format json", _rendered_edge()),
+        (r"grep -E '\^\(NLW_IMAGE.*releases", pins),
+        *_edge_table(EDGE_PRIMARY, EDGE_FALLBACK),
+    ]
+
+
+def _done_edge(*phases: str) -> dict[str, Any]:
+    doc = _done(*phases)
+    doc["manifest_sha256"] = REL_EDGE.sha256
+    if "stage-release" in doc["evidence"]:
+        doc["evidence"]["stage-release"].update(
+            public_hostname=EDGE_PRIMARY, public_hostname_fallback=EDGE_FALLBACK
+        )
+    return doc
+
+
+def _edge_rollout(
+    fake: FakeRemote,
+    *,
+    target: TargetConfig = TGT_EDGE,
+    resolve: Any = lambda _h: {EDGE_IP},
+    **op: object,
+) -> Rollout:
+    return Rollout(
+        release=REL_EDGE,
+        target=target,
+        remote=fake,
+        operator=Operator(**op),  # type: ignore[arg-type]
+        log=lambda _m: None,
+        now=lambda: NOW,
+        receipt=RECEIPT,
+        resolve=resolve,
+    )
+
+
+def _no_mutation(fake: FakeRemote) -> bool:
+    return not any(ACTIVE_MUTATION.search(c) or DB_MUTATION.search(c) for c in fake.commands)
+
+
+def test_edge_preflight_binds_primary_dns_and_accepts_the_active_fallback() -> None:
+    fake = FakeRemote(_edge_first() + _base_table())
+    report = _edge_rollout(fake).preflight()
+    assert report["edge"] == {
+        "primary": EDGE_PRIMARY,
+        "fallback": EDGE_FALLBACK,
+        "primary_a_records": [EDGE_IP],
+        "active_hostname": "32-197-83-193.sslip.io",  # the sslip-only release being replaced
+    }
+    assert _no_mutation(fake)
+
+
+@pytest.mark.parametrize(
+    "resolved,msg",
+    [(set(), "no IPv4 A record"), ({"104.16.0.1"}, "not this instance")],
+)
+def test_edge_preflight_refuses_missing_or_foreign_dns(resolved: set[str], msg: str) -> None:
+    fake = FakeRemote(_edge_first() + _base_table())
+    with pytest.raises(GateError, match=msg):
+        _edge_rollout(fake, resolve=lambda _h: resolved).preflight()
+    assert _no_mutation(fake)
+
+
+def test_edge_identity_refuses_a_fallback_that_no_longer_encodes_the_instance() -> None:
+    imds = "instance-id=i-0d1e65cdc9401dbb9\nplacement/region=us-east-1\npublic-ipv4=3.3.3.3\n"
+    fake = FakeRemote(_edge_first((r"169\.254\.169\.254", imds)) + _base_table())
+    with pytest.raises(GateError, match="does not encode the instance public IPv4"):
+        _edge_rollout(fake, resolve=lambda _h: {"3.3.3.3"}).preflight()
+
+
+def test_edge_identity_refuses_a_target_primary_that_differs_from_the_manifest() -> None:
+    fake = FakeRemote(_edge_first() + _base_table())
+    target = replace(TGT_EDGE, public_hostname="other.nlwplatform.com")
+    with pytest.raises(GateError, match="differs from the attested release"):
+        _edge_rollout(fake, target=target).preflight()
+
+
+def test_edge_preflight_refuses_an_unknown_active_hostname() -> None:
+    active = PINS_ACTIVE.replace("PUBLIC_HOSTNAME=32-197-83-193.sslip.io", "PUBLIC_HOSTNAME=x.io")
+    fake = FakeRemote(
+        _edge_first((r"grep -E '\^\(NLW_IMAGE.*'/opt/nlw/app/\.env\.prod'", active)) + _base_table()
+    )
+    with pytest.raises(GateError, match="unknown edge state"):
+        _edge_rollout(fake).preflight()
+
+
+def test_edge_stage_release_writes_canonical_values_and_validates_the_caddyfile() -> None:
+    fake = FakeRemote(
+        _edge_first() + _pre_backup_table(), state=_done_edge("verify-release", "verify-escrow")
+    )
+    _edge_rollout(fake, authorization=AUTHORIZATION_PHRASE).stage_release(keys_dir=KEYS)
+    tmp = rf">> '{STAGED}/\.env\.prod\.tmp'"
+    assert fake.ran(rf"'PUBLIC_HOSTNAME' '{re.escape(EDGE_PRIMARY)}' {tmp}")
+    assert fake.ran(rf"'PUBLIC_HOSTNAME_FALLBACK' '{re.escape(EDGE_FALLBACK)}' {tmp}")
+    evidence = fake.state_doc["evidence"]["stage-release"]
+    assert evidence["public_hostname"] == EDGE_PRIMARY
+    assert evidence["public_hostname_fallback"] == EDGE_FALLBACK
+    assert fake.ran(r"caddy validate --config") and fake.ran(r"caddy adapt --config")
+    assert fake.ran(r"--network none -e PUBLIC_HOSTNAME=app\.nlwplatform\.com")
+    assert _no_mutation(fake)
+
+
+@pytest.mark.parametrize(
+    "active_lines",
+    [
+        "",
+        "PUBLIC_HOSTNAME=32-197-83-193.sslip.io\n",
+        "PUBLIC_HOSTNAME=evil.example\nexport PUBLIC_HOSTNAME_FALLBACK=1-2-3-4.sslip.io\n",
+        " PUBLIC_HOSTNAME = evil.example\nPUBLIC_HOSTNAME_FALLBACK=\nPUBLIC_HOSTNAME_FALLBACK=x\n",
+    ],
+)
+def test_edge_staged_env_never_inherits_hostnames_from_the_active_release(
+    tmp_path: Path, active_lines: str
+) -> None:
+    active = tmp_path / "active"
+    active.mkdir()
+    target = replace(TGT_EDGE, remote_app=str(active), ops_root=str(tmp_path))
+    staged = Path(target.release_dir(SHA))
+    staged.mkdir(parents=True)
+    original = f"# active\nUNRELATED_SETTING=kept\n{active_lines}".encode()
+    (active / ".env.prod").write_bytes(original)
+    rollout = Rollout(
+        release=REL_EDGE, target=target, remote=LocalRemote(), operator=Operator(), log=print
+    )
+    rollout._write_staged_env(keys_dir=KEYS)
+    assert (active / ".env.prod").read_bytes() == original  # active stays byte-identical
+    text = (staged / ".env.prod").read_text()
+    edge = [ln for ln in text.splitlines() if "PUBLIC_HOSTNAME" in ln]
+    assert edge == [f"PUBLIC_HOSTNAME={EDGE_PRIMARY}", f"PUBLIC_HOSTNAME_FALLBACK={EDGE_FALLBACK}"]
+    assert "UNRELATED_SETTING=kept" in text
+    pins = rollout.read_pins(str(staged))  # the gate's own reader accepts the result
+    assert pins["PUBLIC_HOSTNAME"] == EDGE_PRIMARY
+
+
+@pytest.mark.parametrize("phase", [*PHASES[PHASES.index("stage-release") + 1 :], "go-check"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "target-fallback",
+        "target-no-fallback",
+        "staged-file",
+        "recorded-fallback",
+        "recorded-primary",
+    ],
+)
+def test_edge_every_later_phase_refuses_reviewed_state_or_file_drift(
+    phase: str, change: str
+) -> None:
+    doc = _done_edge(*PHASES[1:])
+    target, pins = TGT_EDGE, PINS_STAGED_EDGE
+    if change == "target-fallback":
+        target = replace(TGT_EDGE, public_hostname_fallback="1-2-3-4.sslip.io")
+    elif change == "target-no-fallback":
+        target = replace(TGT_EDGE, public_hostname_fallback=None)
+    elif change == "staged-file":
+        pins = pins.replace(EDGE_FALLBACK, "1-2-3-4.sslip.io")
+    elif change == "recorded-fallback":
+        doc["evidence"]["stage-release"]["public_hostname_fallback"] = "1-2-3-4.sslip.io"
+    else:
+        doc["evidence"]["stage-release"]["public_hostname"] = "old.nlwplatform.com"
+    fake = FakeRemote(_edge_first(pins=pins) + _activation_table(), state=doc)
+    r = _edge_rollout(fake, target=target, authorization=AUTHORIZATION_PHRASE)
+    call = r.go_check if phase == "go-check" else _all_phase_calls(r)[phase]
+    with pytest.raises(GateError, match="re-run stage-release"):
+        call()
+    assert _no_mutation(fake)
+
+
+def test_edge_restaging_records_the_new_reviewed_values_and_resets_activation() -> None:
+    doc = _done_edge(*PHASES[1:])
+    doc["evidence"]["stage-release"]["public_hostname_fallback"] = "1-2-3-4.sslip.io"
+    fake = FakeRemote(_edge_first() + _pre_backup_table(), state=doc)
+    _edge_rollout(fake, authorization=AUTHORIZATION_PHRASE).stage_release(keys_dir=KEYS)
+    assert fake.state_doc["evidence"]["stage-release"]["public_hostname_fallback"] == EDGE_FALLBACK
+    assert not ({"recreate-runtime", "validate", "reopen"} & fake.state_doc["phases"].keys())
+
+
+_DRAIN_EXTRA: Table = [
+    (r"up -d --no-deps --force-recreate caddy", ""),
+    (r"exec -T caddy touch", ""),
+    (r"\bstop scheduler\b", ""),
+    (r"\bstop worker api\b", ""),
+    (r"^sleep", ""),
+]
+_BACKED_UP = ("verify-release", "prepare-keys", "verify-escrow", "stage-release", "backup")
+
+
+@pytest.mark.parametrize(
+    "deviation,msg",
+    [
+        ((r"config --format json", _rendered_edge(PUBLIC_HOSTNAME="evil.example")), "scope"),
+        (
+            (
+                r"config --format json",
+                json.dumps(
+                    {
+                        **json.loads(_rendered_edge()),
+                        "services": {
+                            **json.loads(_rendered_edge())["services"],
+                            "web": {"environment": {"PUBLIC_HOSTNAME_FALLBACK": EDGE_FALLBACK}},
+                        },
+                    }
+                ),
+            ),
+            "scope",
+        ),
+        (
+            (r"config --format json", _rendered_edge().replace(CADDYFILE_SRC, "/tmp/Caddyfile")),
+            "does not mount this release",
+        ),
+        ((r"caddy validate --config", 1), "does not validate"),
+        ((r"caddy adapt --config", _adapted(EDGE_PRIMARY, EDGE_FALLBACK, "x.io")), "!= reviewed"),
+        ((r"caddy adapt --config", _adapted(EDGE_PRIMARY)), "!= reviewed"),
+    ],
+)
+def test_edge_drain_refuses_an_unreviewed_edge_before_touching_caddy(
+    deviation: tuple[str, Response], msg: str
+) -> None:
+    fake = FakeRemote(
+        _edge_first(deviation) + _base_table() + _DRAIN_EXTRA,
+        state=_done_edge(*_BACKED_UP, "verify-backup"),
+    )
+    with pytest.raises(GateError, match=msg):
+        _edge_rollout(fake, authorization=AUTHORIZATION_PHRASE).drain()
+    assert not fake.ran(r"up -d|touch /srv/maint|stop scheduler")
+
+
+def test_edge_drain_refuses_primary_dns_drift_before_touching_caddy() -> None:
+    fake = FakeRemote(
+        _edge_first() + _base_table() + _DRAIN_EXTRA,
+        state=_done_edge(*_BACKED_UP, "verify-backup"),
+    )
+    with pytest.raises(GateError, match="not this instance"):
+        _edge_rollout(
+            fake, resolve=lambda _h: {"104.16.0.1"}, authorization=AUTHORIZATION_PHRASE
+        ).drain()
+    assert not fake.ran(r"up -d|touch /srv/maint|stop scheduler")
+
+
+def test_edge_drain_verifies_both_hostnames_before_closing_traffic() -> None:
+    fake = FakeRemote(
+        _edge_first() + _base_table() + _DRAIN_EXTRA,
+        state=_done_edge(*_BACKED_UP, "verify-backup"),
+    )
+    _edge_rollout(fake, authorization=AUTHORIZATION_PHRASE).drain()
+    probes = [c for c in fake.commands if "curl -sk" in c]
+    for host in (EDGE_PRIMARY, EDGE_FALLBACK):
+        assert any(f"--resolve '{host}:443:127.0.0.1'" in c and "/login'" in c for c in probes)
+        assert any(f"'https://{host}:443/metrics'" in c for c in probes)
+    first_probe = next(i for i, c in enumerate(fake.commands) if "curl -sk" in c)
+    touch = next(i for i, c in enumerate(fake.commands) if "touch /srv/maint" in c)
+    assert first_probe < touch  # proven while the old runtime still serves
+
+
+def test_edge_drain_stops_before_closing_traffic_when_a_hostname_does_not_answer() -> None:
+    def fallback_down(fake: FakeRemote, command: str) -> str:
+        return "000" if EDGE_FALLBACK in command else _edge_http(fake, command)
+
+    fake = FakeRemote(
+        _edge_first((r"curl -sk -o /dev/null .*--resolve", fallback_down))
+        + _base_table()
+        + _DRAIN_EXTRA,
+        state=_done_edge(*_BACKED_UP, "verify-backup"),
+    )
+    with pytest.raises(GateError, match="edge route behavior mismatch"):
+        _edge_rollout(fake, authorization=AUTHORIZATION_PHRASE).drain()
+    assert fake.ran(r"up -d --no-deps --force-recreate caddy")
+    assert not fake.ran(r"touch /srv/maint|stop scheduler|stop worker")
+    assert "drain" not in fake.state_doc["phases"]
+
+
+_UNTIL = {
+    "recreate-runtime": "install-context-keys",
+    "validate": "recreate-runtime",
+    "reopen": "validate",
+    "go-check": "reopen",
+}
+
+
+@pytest.mark.parametrize("phase", list(_UNTIL))
+@pytest.mark.parametrize(
+    "running",
+    [
+        "NOT_RUNNING",
+        f"PUBLIC_HOSTNAME={EDGE_PRIMARY}\nMOUNT={CADDYFILE_SRC}:false",
+        f"PUBLIC_HOSTNAME={EDGE_PRIMARY}\nPUBLIC_HOSTNAME_FALLBACK=1-2-3-4.sslip.io\n"
+        f"MOUNT={CADDYFILE_SRC}:false",
+        f"PUBLIC_HOSTNAME={EDGE_PRIMARY}\nPUBLIC_HOSTNAME_FALLBACK={EDGE_FALLBACK}\n"
+        "MOUNT=/opt/nlw/releases/old/docker/caddy/Caddyfile:false",
+        f"PUBLIC_HOSTNAME={EDGE_PRIMARY}\nPUBLIC_HOSTNAME_FALLBACK={EDGE_FALLBACK}\n"
+        f"MOUNT={CADDYFILE_SRC}:true",
+    ],
+)
+def test_edge_running_mismatch_blocks_activation_validate_reopen_and_go_check(
+    phase: str, running: str
+) -> None:
+    upto = PHASES[: PHASES.index(_UNTIL[phase]) + 1][1:]
+    fake = FakeRemote(
+        _edge_first((r"docker inspect --format .*PUBLIC_HOSTNAME=.*ps -q caddy", running))
+        + _activation_table()
+        + _reopen_table()
+        + [(r"exec -T caddy touch", "")],
+        state=_done_edge(*upto),
+    )
+    r = _edge_rollout(fake, authorization=AUTHORIZATION_PHRASE)
+    call = r.go_check if phase == "go-check" else _all_phase_calls(r)[phase]
+    with pytest.raises(GateError, match="keep traffic closed"):
+        call()
+    assert not fake.ran(r"rm -f /srv/maint/MAINTENANCE")  # traffic never reopened
+    assert phase not in fake.state_doc["phases"] or phase == "go-check"
+    probe = next(c for c in fake.commands if "ps -q caddy" in c and "docker inspect" in c)
+    assert "{{json .Config.Env}}" not in probe and "{{println .}}{{end}}{{end}}" not in probe[:40]
+
+
+def test_edge_reopen_proves_both_hostnames_and_recloses_when_opening_fails() -> None:
+    fake = FakeRemote(
+        _edge_first() + _reopen_table() + [(r"exec -T caddy touch", "")],
+        state=_done_edge("validate"),
+    )
+    _edge_rollout(fake, authorization=AUTHORIZATION_PHRASE).reopen()
+    assert fake.state_doc["evidence"]["reopen"]["edge_hosts"] == sorted(
+        [EDGE_PRIMARY, EDGE_FALLBACK]
+    )
+
+    def broken_when_open(fake: FakeRemote, command: str) -> str:
+        return "503" if _maintenance_on(fake) else "502"
+
+    fake2 = FakeRemote(
+        _edge_first((r"curl -sk -o /dev/null .*--resolve", broken_when_open))
+        + _reopen_table()
+        + [(r"exec -T caddy touch", "")],
+        state=_done_edge("validate"),
+    )
+    with pytest.raises(GateError, match="edge route behavior mismatch"):
+        _edge_rollout(fake2, authorization=AUTHORIZATION_PHRASE).reopen()
+    removed = next(i for i, c in enumerate(fake2.commands) if "rm -f /srv/maint" in c)
+    assert any("touch /srv/maint" in c for c in fake2.commands[removed:])  # closed again
+    assert "reopen" not in fake2.state_doc["phases"]
+
+
+def test_edge_go_check_proves_both_hostnames_serve_the_open_routes() -> None:
+    good = json.dumps(
+        {
+            "receiver": "ops-slack",
+            "delivered_at": (NOW - timedelta(hours=2)).isoformat(),
+            "confirmed_by": "ops-lead",
+        }
+    )
+    fake = FakeRemote(
+        _edge_first() + _reopen_table(record="__OK__\n" + good), state=_done_edge(*PHASES[1:])
+    )
+    _edge_rollout(fake).go_check()
+    codes = {c.split("'https://")[1].split("'")[0] for c in fake.commands if "curl -sk" in c}
+    assert codes == {
+        f"{h}:443{p}" for h in (EDGE_PRIMARY, EDGE_FALLBACK) for p in ("/login", "/metrics")
+    }
+
+
+def test_edge_state_evidence_carries_hostnames_but_no_secret() -> None:
+    fake = FakeRemote(
+        _edge_first() + _pre_backup_table(), state=_done_edge("verify-release", "verify-escrow")
+    )
+    _edge_rollout(fake, authorization=AUTHORIZATION_PHRASE).stage_release(keys_dir=KEYS)
+    blob = json.dumps(fake.state_doc)
+    assert EDGE_PRIMARY in blob and EDGE_FALLBACK in blob
+    for needle in ("password", "secret", "token", "://"):
+        assert needle not in blob
+
+
+def test_edge_rendered_mount_compares_cleaned_paths_without_widening() -> None:
+    # Reproduced in the disposable rehearsal: TMPDIR ends in '/', so the staged path
+    # holds '//'; Compose renders the CLEANED path. Equal after normalization only.
+    target = replace(TGT_EDGE, ops_root="/opt/nlw/")
+    fake = FakeRemote(_edge_first() + _base_table())
+    r = _edge_rollout(fake, target=target)
+    assert "//releases/" in r.staged
+    r.check_rendered_edge()
+    moved = _rendered_edge().replace(
+        CADDYFILE_SRC, "/opt/nlw/releases/other/docker/caddy/Caddyfile"
+    )
+    fake2 = FakeRemote(_edge_first((r"config --format json", moved)) + _base_table())
+    with pytest.raises(GateError, match="does not mount this release"):
+        _edge_rollout(fake2, target=target).check_rendered_edge()

@@ -3,6 +3,20 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Pilot launch closure (local, awaiting review)
+
+On `feat/staging-custom-domain`, after the unchanged custom-domain commits: a
+discoverable Members page with invitations and safe acceptance, one friendly
+error language (UNKNOWN never invites a blind retry), a polished sign-in and
+first-use onboarding, plain-language plan/run states, a corrected typed Slack
+connector form (plus a 409 for duplicate connector names instead of a 500), and
+a readable approval review. Real-browser launch journeys run as a third step of
+the isolated pilot harness job, still asserting exactly one mock delivery.
+Co-member emails remain hidden pending a reviewed SECURITY DEFINER directory
+function. Not pushed or deployed.
+
+- [Discovery, journeys, screenshots, demo script and limitations](evidence/launch-closure/README.md)
+
 ## M12C — pilot analytics experience and rollout correction
 
 M12C merged to `main` as `549b19f` (#37), adding two deterministic synthetic datasets,

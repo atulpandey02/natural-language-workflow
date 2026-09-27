@@ -127,3 +127,24 @@ def test_connectors_are_tenant_isolated(client: TestClient) -> None:
     assert client.get("/connectors", headers=hb).json() == []
     tools_b = {t["name"] for t in client.get("/tools", headers=hb).json()}
     assert "static.echo" not in tools_b  # B owns no static connector
+
+
+def test_duplicate_connector_name_is_a_clean_conflict(client: TestClient) -> None:
+    h = {**_auth("conn-dup", "dup@example.com")}
+    ws = _new_workspace(client, h)
+    h = {**h, "X-Workspace-Id": ws}
+    body = {
+        "type": "slack",
+        "name": "product-slack",
+        "config": {"workspace_label": "NLW Product Demo", "default_channel": "C0123ABCD"},
+        "secret_ref": "SLACK_DEMO_BOT_TOKEN",
+    }
+    assert client.post("/connectors", json=body, headers=h).status_code == 201
+    dup = client.post("/connectors", json=body, headers=h)
+    assert dup.status_code == 409
+    assert dup.json()["error"] == {
+        "code": "conflict",
+        "message": "a connector with this name already exists",
+    }
+    # The workspace still works after the rejected insert.
+    assert [c["name"] for c in client.get("/connectors", headers=h).json()] == ["product-slack"]

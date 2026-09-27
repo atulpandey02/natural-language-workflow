@@ -27,8 +27,9 @@ function proposal(status: FeasibilityStatus, id: string): PlanProposalOut {
 }
 
 const mutateAsync = vi.fn();
+let planPending = false;
 vi.mock("@/lib/api/hooks", () => ({
-  useCreatePlan: () => ({ mutateAsync, isPending: false, error: null }),
+  useCreatePlan: () => ({ mutateAsync, isPending: planPending, error: null }),
   useMaterialize: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
 
@@ -54,7 +55,7 @@ describe("new-workflow clarification + edit/resubmit flow", () => {
 
     const textarea = screen.getByLabelText(/what should this workflow do/i);
     fireEvent.change(textarea, { target: { value: "Summarize failed payments." } });
-    fireEvent.click(screen.getByRole("button", { name: /^plan$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^prepare plan$/i }));
 
     // The actionable clarification question is displayed and Materialize is blocked.
     await waitFor(() =>
@@ -66,13 +67,34 @@ describe("new-workflow clarification + edit/resubmit flow", () => {
     fireEvent.change(textarea, {
       target: { value: "Query the payments table for yesterday's failures." },
     });
-    fireEvent.click(screen.getByRole("button", { name: /^plan$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^prepare plan$/i }));
 
     // The clarification is gone and an actionable proposal (Materialize) is offered.
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /materialize/i })).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: /save workflow/i })).toBeInTheDocument(),
     );
     expect(screen.queryByText(/which table should i query\?/i)).toBeNull();
     expect(mutateAsync).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("new-workflow submission guard", () => {
+  it("shows progress and ignores repeat submissions while a plan is being prepared", () => {
+    planPending = true;
+    mutateAsync.mockClear();
+    try {
+      renderPage();
+      const button = screen.getByRole("button", { name: "Preparing…" });
+      expect(button).toBeDisabled();
+      expect(screen.getByTestId("planning-progress")).toHaveAttribute("role", "status");
+      fireEvent.change(screen.getByLabelText(/what should this workflow do/i), {
+        target: { value: "Summarize sales." },
+      });
+      // Enter in the form while planning is ignored, not queued.
+      fireEvent.submit(button.closest("form")!);
+      expect(mutateAsync).not.toHaveBeenCalled();
+    } finally {
+      planPending = false;
+    }
   });
 });

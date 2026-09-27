@@ -36,9 +36,13 @@ describe("Playwright spec routing between the seeded-stack and pilot-harness job
     }
   });
 
-  it("keeps the existing golden and visual-state pilot specs in the pilot job", () => {
+  it("keeps the golden, visual-state and launch pilot specs in the pilot job", () => {
     expect(collectedBy({ E2E_PILOT: "1" })).toEqual(
-      expect.arrayContaining(["pilot-analytics.spec.ts", "pilot-visual-states.spec.ts"]),
+      expect.arrayContaining([
+        "pilot-analytics.spec.ts",
+        "pilot-visual-states.spec.ts",
+        "pilot-launch.spec.ts",
+      ]),
     );
   });
 });

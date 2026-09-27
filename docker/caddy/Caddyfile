@@ -8,8 +8,14 @@
 #
 # /metrics is refused at the edge as defense in depth — metrics are scraped
 # in-cluster on each process's internal port, never through the proxy.
+#
+# ONE site block serves the reviewed primary hostname ({$PUBLIC_HOSTNAME}) and the
+# optional reviewed fallback ({$PUBLIC_HOSTNAME_FALLBACK}, an sslip.io name; empty
+# = primary only), so maintenance, /metrics denial and the proxy are identical for
+# both. The rollout writes both values from the reviewed target/attested manifest
+# and verifies `caddy adapt` yields exactly these hosts — never add a site here.
 
-{$PUBLIC_HOSTNAME} {
+{$PUBLIC_HOSTNAME} {$PUBLIC_HOSTNAME_FALLBACK} {
 	encode gzip
 
 	# Maintenance mode (M12A rollout §G/§P): while /srv/maint/MAINTENANCE exists on

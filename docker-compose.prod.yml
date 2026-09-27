@@ -79,6 +79,8 @@ services:
       - caddy_maint:/srv/maint
     environment:
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+      # Reviewed fallback site address (caddy ONLY; empty = primary only).
+      PUBLIC_HOSTNAME_FALLBACK: ${PUBLIC_HOSTNAME_FALLBACK:-}
     depends_on:
       - web
     networks:

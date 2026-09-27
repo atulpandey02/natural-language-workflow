@@ -86,6 +86,13 @@ def test_owner_invites_and_correct_user_accepts(
         headers={**_auth("inv1", "invitee@x.com"), "X-Workspace-Id": str(tid)},
     )
     assert who.status_code == 200 and who.json()["role"] == "member"
+    # The roster shows both memberships with a join time; it never carries an email
+    # (co-members' emails are not readable under users RLS) — only id/role/joined_at.
+    roster = client.get("/members", headers={**owner_h, "X-Workspace-Id": str(tid)})
+    assert roster.status_code == 200, roster.text
+    rows = roster.json()
+    assert sorted(r["role"] for r in rows) == ["member", "owner"]
+    assert all(set(r) == {"user_id", "role", "joined_at"} and r["joined_at"] for r in rows)
 
 
 # --- 2: wrong email cannot accept ---

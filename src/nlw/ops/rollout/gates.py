@@ -8,6 +8,7 @@ phrases — never credentials or key material.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -53,6 +54,172 @@ def check_instance_identity(imds_instance_id: str, imds_region: str, release: Re
         )
 
 
+# ---- public edge hostnames (Caddy site addresses) ----------------------------
+# One reviewed primary (the attested manifest's ``public_hostname``) and at most
+# one reviewed fallback (``NLW_STAGING_PUBLIC_HOSTNAME_FALLBACK``, an sslip.io name
+# that encodes the instance's own IPv4). Bare, lowercase, fully qualified names
+# only: no scheme, port, path, wildcard, whitespace, quotes or trailing dot.
+_HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+_SSLIP_RE = re.compile(r"^(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})\.sslip\.io$")
+LOOPBACK_IPV4 = "127.0.0.1"
+
+
+def hostname_problem(value: str) -> str | None:
+    """Why ``value`` is not a canonical public hostname (None when it is)."""
+    if not value:
+        return "empty"
+    if len(value) > 253 or any(len(label) > 63 for label in value.split(".")):
+        return "too long"
+    if not _HOSTNAME_RE.fullmatch(value):
+        return "not a bare lowercase fully qualified hostname"
+    return None
+
+
+def sslip_ipv4(hostname: str) -> str | None:
+    """The canonical dotted IPv4 an ``a-b-c-d.sslip.io`` name encodes, else None."""
+    m = _SSLIP_RE.fullmatch(hostname)
+    if m is None:
+        return None
+    octets = m.groups()
+    if any(str(int(o)) != o or int(o) > 255 for o in octets):
+        return None  # leading zeros / out of range: not the canonical encoding
+    return ".".join(octets)
+
+
+def check_fallback_hostname(fallback: str, primary: str) -> None:
+    """A fallback must be a canonical sslip.io name, distinct from the primary."""
+    problem = hostname_problem(fallback)
+    if problem is not None:
+        raise GateError(f"fallback public hostname is invalid ({problem})")
+    if sslip_ipv4(fallback) is None:
+        raise GateError("fallback public hostname must be a canonical <a-b-c-d>.sslip.io name")
+    if fallback == primary:
+        raise GateError("fallback public hostname duplicates the primary")
+
+
+def check_edge_identity(
+    imds_public_ip: str,
+    release: ReleaseSpec,
+    *,
+    target_primary: str | None,
+    fallback: str | None,
+) -> None:
+    """Pure, every-phase binding of the edge hostnames to this instance: the
+    reviewed target names the SAME primary as the attested manifest, and the
+    fallback (when configured) encodes the instance's actual public IPv4."""
+    if target_primary is not None and target_primary != release.public_hostname:
+        raise GateError(
+            "target NLW_STAGING_PUBLIC_HOSTNAME differs from the attested release "
+            "public_hostname — use the manifest generated for this target; STOP"
+        )
+    if fallback is None:
+        return
+    check_fallback_hostname(fallback, release.public_hostname)
+    ip = imds_public_ip.strip()
+    if sslip_ipv4(fallback) != ip:
+        raise GateError(
+            f"fallback hostname {fallback} does not encode the instance public IPv4 "
+            f"{ip!r} — the address changed; stop"
+        )
+
+
+def check_primary_dns(primary: str, imds_public_ip: str, resolved: set[str]) -> None:
+    """The primary must resolve to THIS instance before Caddy serves it (ACME
+    HTTP-01 and every client depend on it). sslip.io names are checked by their
+    encoding; RFC 6761 ``*.localhost`` names resolve to loopback by definition
+    (disposable rehearsal only). ``resolved`` = the primary's IPv4 A records."""
+    ip = imds_public_ip.strip()
+    if not ip:
+        raise GateError("could not read the instance public IPv4 from IMDSv2")
+    if sslip_ipv4(primary) is not None:
+        if sslip_ipv4(primary) != ip:
+            raise GateError(f"public hostname {primary} does not encode {ip!r}; stop")
+        return
+    if primary.endswith(".localhost"):
+        if ip != LOOPBACK_IPV4:
+            raise GateError("a *.localhost public hostname is only valid on a loopback rehearsal")
+        return
+    if not resolved:
+        raise GateError(f"public hostname {primary} has no IPv4 A record — configure DNS; stop")
+    if ip not in resolved:
+        raise GateError(
+            f"public hostname {primary} resolves to {sorted(resolved)}, not this instance "
+            f"({ip}) — fix DNS before activating the edge; stop"
+        )
+
+
+def check_active_hostname(pins: dict[str, str], release: ReleaseSpec, fallback: str | None) -> None:
+    """Preflight: the ACTIVE edge must be a known neighbour of the reviewed one —
+    its primary is the release primary or the reviewed fallback (forward switch,
+    e.g. sslip-only -> custom domain + sslip fallback), or its fallback already
+    serves the release primary (reverse switch back to the sslip name). Any other
+    active hostname is an unknown edge state."""
+    active = pins.get("PUBLIC_HOSTNAME")
+    active_fallback = pins.get("PUBLIC_HOSTNAME_FALLBACK") or None
+    forward = active in {release.public_hostname} | ({fallback} if fallback else set())
+    reverse = active_fallback is not None and active_fallback == release.public_hostname
+    if not (forward or reverse):
+        raise GateError(
+            "PUBLIC_HOSTNAME in the active .env.prod is neither the release primary nor "
+            "the reviewed fallback, and the active edge does not already serve the "
+            "release primary — unknown edge state; stop"
+        )
+
+
+def expected_edge_hosts(primary: str, fallback: str) -> list[str]:
+    return sorted([primary, *([fallback] if fallback else [])])
+
+
+def check_adapted_caddy_hosts(adapted_json: str, primary: str, fallback: str) -> list[str]:
+    """``caddy adapt`` output: every host matcher across every HTTP route must be
+    EXACTLY the reviewed primary (+ fallback) — one site, nothing else served."""
+    try:
+        servers = json.loads(adapted_json)["apps"]["http"]["servers"]
+        sites = [
+            [h for match in route.get("match", []) for h in match.get("host", [])]
+            for server in servers.values()
+            for route in server.get("routes", [])
+        ]
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise GateError("cannot read the adapted Caddy configuration; STOP") from exc
+    sites = [hosts for hosts in sites if hosts]
+    if len(sites) != 1:
+        # Two site blocks could route differently (e.g. no maintenance matcher):
+        # both hostnames must share ONE site so every route applies identically.
+        raise GateError(f"adapted Caddy config has {len(sites)} host sites, want exactly one")
+    hosts = sites[0]
+    if sorted(hosts) != expected_edge_hosts(primary, fallback):
+        raise GateError(
+            f"adapted Caddy site hosts {sorted(hosts)} != reviewed "
+            f"{expected_edge_hosts(primary, fallback)}; re-run stage-release"
+        )
+    return sorted(hosts)
+
+
+def check_running_edge_facts(
+    lines: list[str], primary: str, fallback: str, caddyfile_sources: set[str]
+) -> None:
+    """Facts filtered from the RUNNING caddy container: only its two hostname
+    variables and its /etc/caddy/Caddyfile mount (never other environment)."""
+    if "NOT_RUNNING" in lines:
+        raise GateError("the caddy container is not running; keep traffic closed")
+    # ``lines`` are pre-filtered by the inspect template to the two hostname
+    # variables and the Caddyfile mount — non-secret, so a mismatch names them.
+    env = sorted(line for line in lines if line.startswith("PUBLIC_HOSTNAME"))
+    want = sorted([f"PUBLIC_HOSTNAME={primary}", f"PUBLIC_HOSTNAME_FALLBACK={fallback}"])
+    if env != want:
+        raise GateError(
+            f"running Caddy edge hostnames {env} != reviewed {want}; keep traffic closed"
+        )
+    mounts = [line.removeprefix("MOUNT=") for line in lines if line.startswith("MOUNT=")]
+    allowed = sorted(f"{s}:false" for s in caddyfile_sources)
+    if len(mounts) != 1 or mounts[0] not in allowed:
+        raise GateError(
+            "running Caddy does not mount the reviewed release Caddyfile read-only "
+            f"(observed {mounts}, allowed {allowed}); keep traffic closed"
+        )
+
+
 def check_public_ip_matches_hostname(imds_public_ip: str, release: ReleaseSpec) -> None:
     """sslip.io hostnames encode the IP; a changed IP invalidates TLS + Supabase config."""
     host = release.public_hostname
@@ -76,6 +243,7 @@ def parse_env_pins(env_text: str) -> dict[str, str]:
         "NLW_CTX_WORKER_KEY_ID",
         "NLW_CTX_SCHEDULER_KEY_ID",
         "DEMO_TOOLS_ENABLED",
+        "PUBLIC_HOSTNAME_FALLBACK",
     }
     out: dict[str, str] = {}
     for line in env_text.splitlines():
@@ -85,6 +253,13 @@ def parse_env_pins(env_text: str) -> dict[str, str]:
                 k != "DEMO_TOOLS_ENABLED" or v not in ("true", "false") or k in out
             ):
                 raise GateError("noncanonical demo-tool pin; re-run stage-release")
+            edge = re.fullmatch(r"\s*(?:export\s+)?(PUBLIC_HOSTNAME(?:_FALLBACK)?)\s*", k)
+            if edge and (
+                k != edge.group(1)
+                or k in out
+                or (hostname_problem(v) is not None and not (k.endswith("_FALLBACK") and v == ""))
+            ):
+                raise GateError("noncanonical edge-hostname pin; re-run stage-release")
             if k.strip() in wanted:
                 out[k.strip()] = v.strip()
     return out
@@ -96,9 +271,11 @@ def check_release_pins(
     *,
     post_pin: bool,
     demo_tools_enabled: bool | None = None,
+    public_hostname_fallback: str | None = None,
 ) -> None:
     """Before ``migrate`` the host must ALREADY be pinned to the release images
-    (pin_release does that); the hostname must always match."""
+    (pin_release does that); the hostname must always match. A STAGED file also
+    carries the canonical ``PUBLIC_HOSTNAME_FALLBACK`` line (empty = no fallback)."""
     if pins.get("PUBLIC_HOSTNAME") != release.public_hostname:
         raise GateError("PUBLIC_HOSTNAME in .env.prod does not match the release")
     if post_pin:
@@ -114,6 +291,8 @@ def check_release_pins(
         expected = "true" if demo_tools_enabled else "false"
         if type(demo_tools_enabled) is not bool or pins.get("DEMO_TOOLS_ENABLED") != expected:
             raise GateError("staged demo-tool policy mismatch; re-run stage-release")
+        if pins.get("PUBLIC_HOSTNAME_FALLBACK") != (public_hostname_fallback or ""):
+            raise GateError("staged fallback hostname mismatch; re-run stage-release")
 
 
 def check_current_revision(current: str, expected: str) -> None:

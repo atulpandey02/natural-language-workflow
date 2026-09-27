@@ -103,7 +103,8 @@ describe("WorkflowDetailPage provenance", () => {
     renderPage();
     const card = await screen.findByTestId("workflow-provenance-error");
     expect(card).toHaveTextContent("Original request");
-    expect(card).toHaveTextContent("Unknown resource.");
+    expect(card).toHaveTextContent("We couldn't find that");
+    expect(card).not.toHaveTextContent("Unknown resource."); // raw API text never shown
     expect(screen.queryByTestId("workflow-provenance")).not.toBeInTheDocument();
   });
 
@@ -111,7 +112,7 @@ describe("WorkflowDetailPage provenance", () => {
     setup({ error: new ApiError({ status: 403, code: "forbidden", message: "nope" }) });
     renderPage();
     const card = await screen.findByTestId("workflow-provenance-error");
-    expect(card).toHaveTextContent("You do not have permission");
+    expect(card).toHaveTextContent("You don't have access to that");
     expect(card).not.toHaveTextContent("nope");
   });
 

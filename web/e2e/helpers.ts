@@ -84,7 +84,7 @@ export async function signIn(page: Page, email: string, password: string): Promi
       await page.getByLabel(/workspace name/i).fill("E2E Workspace");
       const [res] = await Promise.all([
         page.waitForResponse(isWorkspacePost),
-        page.getByRole("button", { name: /create \+ open/i }).click(),
+        page.getByRole("button", { name: /create and open/i }).click(),
       ]);
       expect(res.ok()).toBeTruthy();
     } else {

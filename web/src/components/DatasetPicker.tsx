@@ -1,9 +1,25 @@
 "use client";
+import { useEffect, useRef } from "react";
 import { useDatasets } from "@/lib/api/analytics-hooks";
 import { ErrorBanner, Loading } from "./ui";
 
-export function DatasetPicker({ onSelect }: { onSelect: (prompt: string) => void }) {
+export function DatasetPicker({
+  onSelect,
+  preselect = null,
+}: {
+  onSelect: (prompt: string) => void;
+  preselect?: string | null;
+}) {
   const datasets = useDatasets();
+  const applied = useRef(false);
+  useEffect(() => {
+    if (applied.current || !preselect || !datasets.data) return;
+    const match = datasets.data.find((d) => d.id === preselect);
+    if (match) {
+      applied.current = true;
+      onSelect(match.prompt);
+    }
+  }, [preselect, datasets.data, onSelect]);
   return (
     <section aria-label="Golden analytical use cases">
       <div className="section-heading">
@@ -20,7 +36,13 @@ export function DatasetPicker({ onSelect }: { onSelect: (prompt: string) => void
       ) : null}
       <div className="dataset-grid">
         {datasets.data?.map((d) => (
-          <button className="dataset-card" key={d.id} onClick={() => onSelect(d.prompt)}>
+          <button
+            type="button"
+            className="dataset-card"
+            key={d.id}
+            onClick={() => onSelect(d.prompt)}
+            aria-describedby={`example-${d.id}`}
+          >
             <span className="dataset-symbol" aria-hidden="true">
               {d.id === "sales-v1" ? "↗" : "◎"}
             </span>
@@ -33,7 +55,10 @@ export function DatasetPicker({ onSelect }: { onSelect: (prompt: string) => void
             <small>
               {d.rows.toLocaleString()} records · {d.grain}
             </small>
-            <small>Historical snapshot · {d.as_of}</small>
+            <small>Synthetic historical snapshot · {d.as_of}</small>
+            <small className="dataset-example" id={`example-${d.id}`}>
+              Example: “{d.prompt}”
+            </small>
           </button>
         ))}
       </div>

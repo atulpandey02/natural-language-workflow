@@ -49,9 +49,9 @@ describe("SchedulesPage status truthfulness", () => {
       },
     ]);
     render(<SchedulesPage />);
-    const badge = screen.getByText("blocked");
+    const badge = screen.getByText("Blocked");
     expect(badge).toHaveClass("fail");
-    expect(screen.queryByText("active")).not.toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
     const reason = screen.getByTestId("schedule-blocked-reason");
     expect(reason).toHaveTextContent(/no longer a member of this workspace/);
     // Raw reason code / internals are not shown to the user.
@@ -64,9 +64,9 @@ describe("SchedulesPage status truthfulness", () => {
       { ...BASE, id: "b", enabled: false, blocked_reason: null, blocked_at: null },
     ]);
     render(<SchedulesPage />);
-    expect(screen.getByText("active")).toBeInTheDocument();
-    expect(screen.getByText("disabled")).toBeInTheDocument();
-    expect(screen.queryByText("blocked")).not.toBeInTheDocument();
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.getByText("Disabled")).toBeInTheDocument();
+    expect(screen.queryByText("Blocked")).not.toBeInTheDocument();
     expect(screen.queryByTestId("schedule-blocked-reason")).not.toBeInTheDocument();
   });
 

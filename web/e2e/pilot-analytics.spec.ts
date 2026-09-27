@@ -9,16 +9,127 @@ async function assertLayout(page: Page, width: number, height: number) {
   const charts = page.getByTestId("analytics-chart");
   const first = await charts.nth(0).boundingBox();
   const second = await charts.nth(1).boundingBox();
+  const third = await charts.nth(2).boundingBox();
   expect(first).not.toBeNull();
   expect(second).not.toBeNull();
+  expect(third).not.toBeNull();
+  // One dominant visualization across the report, then supporting breakdowns.
+  expect(second!.y).toBeGreaterThan(first!.y + first!.height);
   if (width > 600) {
-    expect(Math.abs(first!.y - second!.y)).toBeLessThan(2);
-    if (width > 1200) expect(first!.width).toBeGreaterThan(second!.width);
+    expect(first!.width).toBeGreaterThan(second!.width * 1.8);
+    expect(Math.abs(second!.y - third!.y)).toBeLessThan(2);
   } else {
-    expect(second!.y).toBeGreaterThan(first!.y + first!.height);
-    expect(first!.width).toBeGreaterThan(340);
+    expect(third!.y).toBeGreaterThan(second!.y + second!.height);
+    expect(first!.width).toBeGreaterThan(320);
+    expect(Math.abs(first!.width - second!.width)).toBeLessThan(2);
   }
   await expect(page.locator(".workflow-details")).not.toHaveAttribute("open", "");
+}
+
+const KPI_WIDTHS = [1440, 1280, 834, 800, 768, 744, 390];
+
+/** Every KPI value renders on exactly one line, inside its card, with no page overflow. */
+async function assertKpisOneLine(page: Page) {
+  for (const width of KPI_WIDTHS) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+      .toBe(true);
+    const kpis = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="analytics-kpi"] strong')].map((strong) => {
+        // A compacted value shows its aria-hidden visible form; measure that.
+        const el = strong.querySelector('[aria-hidden="true"]') ?? strong;
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const lines = new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+        const text = range.getBoundingClientRect();
+        const card = strong.closest(".kpi-card")!.getBoundingClientRect();
+        return {
+          value: el.textContent,
+          lines,
+          inside: text.left >= card.left - 0.5 && text.right <= card.right + 0.5,
+        };
+      }),
+    );
+    expect(kpis.length).toBe(4);
+    for (const k of kpis) {
+      expect(k, `${k.value} at ${width}px`).toEqual({ value: k.value, lines: 1, inside: true });
+    }
+  }
+}
+
+/**
+ * Contract-boundary KPI values (finite, within ±1e12) rendered in the real page:
+ * the analytics response for this run is intercepted and only its metric values
+ * are replaced. Nothing may clip, digits may not wrap, and the exact value must
+ * stay available accessibly.
+ */
+async function assertBoundaryKpis(page: Page) {
+  const runId = page.url().split("/runs/")[1];
+  const pattern = `**/api/nlw/runs/${runId}/analytics`;
+  // [value, unit, displayed, exact parsed value, compact notation?]
+  const values: Array<[number, string, string, string, boolean]> = [
+    [-999999999999.9999, "USD", "-$1.00T", "-$999,999,999,999.9999", true],
+    [12345678.123456, "hours", "12.35M h", "12,345,678.123456 h", true],
+    [-12345678.123456, "USD", "-$12.35M", "-$12,345,678.123456", true],
+    [0.123456789, "percent", "0.12%", "0.123456789%", false],
+  ];
+  await page.route(pattern, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.metrics = body.metrics.map((m: Record<string, unknown>, i: number) => ({
+      ...m,
+      value: values[i][0],
+      unit: values[i][1],
+    }));
+    await route.fulfill({ response, json: body });
+  });
+  await page.reload();
+  const kpis = page.getByTestId("analytics-kpi");
+  await expect(kpis.first()).toContainText("-$1.00T", { timeout: 30000 });
+  for (const [i, [, , shown, exact, compacted]] of values.entries()) {
+    const value = kpis.nth(i).locator("strong");
+    await expect(value).toHaveAttribute("data-rounded", "true");
+    if (compacted) await expect(value).toHaveAttribute("data-compacted", "true");
+    await expect(value).toHaveAttribute("title", exact);
+    await expect(value.locator('[aria-hidden="true"]')).toHaveText(shown);
+    // The accessible alternative is the full-precision parsed value.
+    await expect(value.locator(".sr-only")).toHaveText(exact);
+    await expect(kpis.nth(i)).toContainText("rounded");
+  }
+  await assertKpisOneLine(page);
+
+  // Open every exact-value disclosure (the first by keyboard) and check each is
+  // complete and inside its card at every width.
+  const first = kpis.first().getByText("Exact value");
+  await first.focus();
+  await page.keyboard.press("Enter");
+  for (let i = 1; i < values.length; i++) await kpis.nth(i).getByText("Exact value").click();
+  for (const width of KPI_WIDTHS) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+      .toBe(true);
+    for (const [i, [, , , exact]] of values.entries()) {
+      const disclosed = kpis.nth(i).locator(".kpi-exact-value");
+      await expect(disclosed).toHaveText(exact);
+      const box = await disclosed.boundingBox();
+      const card = await kpis.nth(i).boundingBox();
+      expect(box!.x, `${exact} at ${width}px`).toBeGreaterThanOrEqual(card!.x - 0.5);
+      expect(box!.x + box!.width, `${exact} at ${width}px`).toBeLessThanOrEqual(
+        card!.x + card!.width + 0.5,
+      );
+    }
+    if (width === 390) {
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: "test-results/pilot-kpi-boundary-mobile.png" });
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: "test-results/pilot-kpi-boundary-desktop.png" });
+  await assertLayout(page, 1440, 900); // dominant chart hierarchy unchanged
+  await page.unroute(pattern);
 }
 
 async function inspectRevenue(page: Page) {
@@ -46,7 +157,7 @@ async function inspectRevenue(page: Page) {
   const viewport = page.viewportSize()!;
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
-  await expect(tooltip.locator(".series-mark")).toHaveCSS("background-color", "rgb(64, 217, 237)");
+  await expect(tooltip.locator(".series-mark")).toHaveCSS("background-color", "rgb(24, 150, 167)");
 }
 
 test.describe("synthetic pilot golden analytics", () => {
@@ -64,11 +175,11 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.goto("/workflows/new");
     await page.getByRole("button", { name: /Sales operations/ }).click();
     await expect(page.getByLabel(/what should this workflow do/i)).toContainText("sales-v1");
-    await page.getByRole("button", { name: /^Plan$/ }).click();
-    await expect(page.getByText("pilot.sales_analysis", { exact: true })).toBeVisible();
-    await expect(page.getByText("PASS", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: /^Prepare plan$/ }).click();
+    await expect(page.getByText("Analyze synthetic sales data", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-status="PASS"]')).toBeVisible();
     await page.screenshot({ path: "test-results/pilot-proposal-desktop.png", fullPage: true });
-    await page.getByRole("button", { name: "Materialize workflow" }).click();
+    await page.getByRole("button", { name: "Save workflow" }).click();
     await expect(page).toHaveURL(/\/workflows\/[0-9a-f-]{36}$/);
     const initial = page.waitForResponse(
       (r) => /\/workflows\/[0-9a-f-]+\/runs$/.test(r.url()) && r.request().method() === "POST",
@@ -81,7 +192,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await expect(page.getByTestId("analytics-result")).toBeVisible({ timeout: 30000 });
     await expect(page.getByTestId("analytics-kpi")).toHaveCount(4);
     await expect(page.getByTestId("analytics-chart")).toHaveCount(4);
-    await expect(page.getByRole("heading", { name: "What the data shows" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "What changed" })).toBeVisible();
     await expect(page.getByText(/Accessories revenue declined/)).toBeVisible();
     await expect(page.locator('svg.recharts-surface[role="application"]')).toHaveCount(4);
     const monthly = page
@@ -91,6 +202,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.keyboard.press("Enter");
     await expect(page.getByRole("table", { name: "Monthly supporting data" })).toBeVisible();
     await expect(page.getByTestId("analytics-kpi").first()).toContainText("$280,617.20");
+    await assertKpisOneLine(page);
     await assertLayout(page, 1440, 900);
     await expect(page.locator(".table-scroll-cue")).toHaveCount(0);
     await page.emulateMedia({ reducedMotion: "reduce" });
@@ -113,7 +225,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.screenshot({ path: "test-results/pilot-sales-laptop.png", fullPage: true });
     await page.getByRole("link", { name: "analyze", exact: true }).first().click();
     await expect(page.locator("#evidence-analyze")).toBeVisible();
-    await expect(page.locator("#evidence-analyze")).toContainText("SUCCESS");
+    await expect(page.locator('#evidence-analyze [data-status="SUCCESS"]')).toBeVisible();
     await page.setViewportSize({ width: 768, height: 1024 });
     await expect(page.locator(".sidebar")).not.toHaveAttribute("open", "");
     await assertLayout(page, 768, 1024);
@@ -193,7 +305,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.getByRole("button", { name: "Send summary to Slack" }).click();
     const immutable = await (await proposed).json();
     await expect(page.getByRole("heading", { name: "Exact message for approval" })).toBeVisible();
-    await expect(page.getByText("NEEDS_APPROVAL", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-status="NEEDS_APPROVAL"]')).toBeVisible();
     expect(await page.getByLabel("Immutable Slack message").textContent()).toBe(
       immutable.proposed_plan.steps[0].args.text,
     );
@@ -207,9 +319,11 @@ test.describe("synthetic pilot golden analytics", () => {
     await page
       .locator(".handoff-review")
       .screenshot({ path: "test-results/pilot-slack-proposal.png" });
-    await page.getByRole("button", { name: "Materialize workflow" }).click();
+    await page.getByRole("button", { name: "Save workflow" }).click();
     await page.getByRole("button", { name: /run now/i }).click();
-    await expect(page.getByText("WAITING_APPROVAL").first()).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('[data-status="WAITING_APPROVAL"]').first()).toBeVisible({
+      timeout: 30000,
+    });
     const slackRun = page.url().split("/runs/")[1];
     await page.goto("/approvals");
     await expect(page.getByText(/you requested this/i)).toBeVisible();
@@ -218,11 +332,12 @@ test.describe("synthetic pilot golden analytics", () => {
     await signIn(approver, process.env.E2E_APPROVER_EMAIL!, process.env.E2E_APPROVER_PASSWORD!);
     await approver.goto("/approvals");
     await expect(approver.getByText("CPILOT", { exact: false }).first()).toBeVisible();
-    const approvalPreview = JSON.parse((await approver.locator("pre").textContent())!);
-    expect(approvalPreview.args.text).toBe(immutable.proposed_plan.steps[0].args.text);
+    expect(await approver.getByLabel("Exact message to be sent").textContent()).toBe(
+      immutable.proposed_plan.steps[0].args.text,
+    );
     await approver.getByRole("button", { name: /^approve$/i }).click();
     await page.goto(`/runs/${slackRun}`);
-    await expect(page.getByText("COMPLETED").first()).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('[data-status="COMPLETED"]').first()).toBeVisible({ timeout: 30000 });
     await page.locator(".workflow-details > summary").click();
     await expect(page.getByRole("link", { name: "Open source analysis run" })).toHaveAttribute(
       "href",
@@ -239,17 +354,19 @@ test.describe("synthetic pilot golden analytics", () => {
     await signIn(page, env.adminEmail, env.adminPassword);
     await page.goto("/workflows/new");
     await page.getByRole("button", { name: /Support operations/ }).click();
-    await page.getByRole("button", { name: /^Plan$/ }).click();
-    await page.getByRole("button", { name: "Materialize workflow" }).click();
+    await page.getByRole("button", { name: /^Prepare plan$/ }).click();
+    await page.getByRole("button", { name: "Save workflow" }).click();
     await page.getByRole("button", { name: /run now/i }).click();
     await expect(page.getByTestId("analytics-result")).toBeVisible({ timeout: 30000 });
     await expect(page.getByTestId("analytics-kpi")).toHaveCount(4);
     await expect(page.getByTestId("analytics-chart")).toHaveCount(5);
     await expect(page.getByRole("heading", { name: "SLA compliance trend" })).toBeVisible();
+    await assertKpisOneLine(page);
     await assertLayout(page, 1440, 900);
     for (const value of ["49.79%", "25", "23.03 h", "4.23 / 5"]) {
       await expect(page.getByTestId("analytics-kpi").filter({ hasText: value })).toHaveCount(1);
     }
     await page.screenshot({ path: "test-results/pilot-support-desktop.png", fullPage: true });
+    await assertBoundaryKpis(page);
   });
 });

@@ -1,8 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useAcceptInvitation } from "@/lib/api/hooks";
+import { useAcceptInvitation, useMe, useWorkspaces } from "@/lib/api/hooks";
+import { roleLabel } from "@/lib/membership";
 import { hardNavigate, postWorkspaceSelection } from "@/lib/workspace-client";
 import { ApiError } from "@/lib/errors";
 import { Loading } from "@/components/ui";
@@ -18,6 +20,8 @@ function AcceptInner() {
   const router = useRouter();
   const params = useSearchParams();
   const accept = useAcceptInvitation();
+  const me = useMe();
+  const workspaces = useWorkspaces();
 
   const [phase, setPhase] = useState<Phase>("accepting");
   const [result, setResult] = useState<InvitationAcceptedOut | null>(null);
@@ -80,31 +84,59 @@ function AcceptInner() {
     hardNavigate("/");
   }
 
-  return (
-    <main className="container" style={{ maxWidth: 480, paddingTop: 48 }}>
-      <h1>Accept invitation</h1>
+  const joined = result ? workspaces.data?.find((w) => w.id === result.workspace_id) : undefined;
 
-      {phase === "accepting" ? <Loading label="Redeeming invitation…" /> : null}
+  return (
+    <main className="container" style={{ maxWidth: 520, paddingTop: 48 }}>
+      <p className="eyebrow">NLW PILOT · INVITATION</p>
+      <h1>Join a workspace</h1>
+      {me.data?.email ? (
+        <p className="muted small" data-testid="accept-identity">
+          Signed in as {me.data.email}
+        </p>
+      ) : null}
+      {phase === "accepting" ? <Loading label="Checking your invitation…" /> : null}
 
       {phase === "failed" ? (
-        <div className="banner" role="alert" aria-live="assertive">
-          {FAILURE}
+        <div
+          className="error-panel"
+          role="alert"
+          aria-live="assertive"
+          data-testid="invitation-failed"
+        >
+          <strong>{FAILURE}</strong>
+          <p>
+            Invitations work once, only for the email address they were sent to, and expire after a
+            few days.
+          </p>
+          <p>
+            Check that you are signed in with the invited email, or ask the workspace owner or an
+            admin for a new invitation.
+          </p>
+          <p>
+            <Link href="/">Go to your workspaces</Link>
+          </p>
         </div>
       ) : null}
 
       {result && (phase === "accepted" || phase === "entering") ? (
         <div className="card" data-testid="invitation-accepted">
-          <strong>You&rsquo;ve joined the workspace.</strong>
+          <strong>
+            You&rsquo;ve joined {joined ? joined.name : "the workspace"} as {roleLabel(result.role)}
+            .
+          </strong>
           <p className="muted">
-            Workspace <code>{result.workspace_id}</code> · role <strong>{result.role}</strong>
+            You can now see its analyses and workflows
+            {result.role === "member" ? "." : ", and review approvals requested by others."}
           </p>
           {enterError ? (
-            <div className="banner" role="alert">
-              Could not open the workspace. Please try again.
+            <div className="error-panel" role="alert">
+              <strong>We couldn&rsquo;t open the workspace.</strong>
+              <p>Please try again. If it keeps happening, sign out and back in.</p>
             </div>
           ) : null}
           <button onClick={enter} disabled={phase === "entering"}>
-            {phase === "entering" ? "Opening…" : "Continue to workspace"}
+            {phase === "entering" ? "Opening…" : "Open workspace"}
           </button>
         </div>
       ) : null}

@@ -5,13 +5,13 @@ import { useRouter } from "next/navigation";
 import type { PlanProposalOut } from "@/lib/api/types";
 import { useMaterialize } from "@/lib/api/hooks";
 import { ErrorBanner, StatusBadge } from "@/components/ui";
+import { findingText, planStatusCopy, toolLabel } from "@/lib/plan-language";
 
 const MATERIALIZABLE = new Set(["PASS", "NEEDS_APPROVAL"]);
 
 interface Finding {
   code?: string;
   severity?: string;
-  message?: string;
 }
 
 export function PlanReview({ proposal }: { proposal: PlanProposalOut }) {
@@ -25,6 +25,7 @@ export function PlanReview({ proposal }: { proposal: PlanProposalOut }) {
   const clarifications = proposal.clarification_questions ?? [];
 
   async function onMaterialize() {
+    if (materialize.isPending) return;
     try {
       const result = await materialize.mutateAsync(proposal.id);
       router.push(`/workflows/${result.workflow_id}`);
@@ -33,12 +34,26 @@ export function PlanReview({ proposal }: { proposal: PlanProposalOut }) {
     }
   }
 
+  const steps = planSteps(proposal.proposed_plan);
+  const bindings = [...new Set(steps.map(bindingFor).filter((b): b is string => Boolean(b)))];
+  const checksTone =
+    proposal.status === "PASS" ? "" : proposal.status === "REJECT" ? " blocked" : " attention";
+
   return (
-    <div className={`card${proposal.analytics_source ? " handoff-review" : ""}`}>
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <h2 style={{ margin: 0, fontSize: 18 }}>{proposal.workflow_name}</h2>
+    <article
+      className={`card plan-review${proposal.analytics_source ? " handoff-review" : ""}`}
+      aria-labelledby={`plan-${proposal.id}`}
+    >
+      <section className="plan-head">
+        <div>
+          <p className="eyebrow">Proposed workflow</p>
+          <h2 id={`plan-${proposal.id}`}>{proposal.workflow_name}</h2>
+          {proposal.analytics_source ? null : (
+            <span className="ai-tag">Drafted by the AI planner · checked by NLW</span>
+          )}
+        </div>
         <StatusBadge status={proposal.status} />
-      </div>
+      </section>
 
       {proposal.analytics_source ? (
         <section className="handoff-evidence" aria-label="Slack proposal evidence">
@@ -64,82 +79,122 @@ export function PlanReview({ proposal }: { proposal: PlanProposalOut }) {
           <p>A separate run will request approval from a different admin or owner.</p>
         </section>
       ) : null}
-      {proposal.proposed_plan ? (
-        <>
-          <h3 style={{ fontSize: 14 }}>Proposed steps</h3>
-          <PlanSteps plan={proposal.proposed_plan} />
-        </>
-      ) : (
-        <p className="muted">No executable plan was produced.</p>
-      )}
 
-      {findings.length > 0 ? (
-        <>
-          <h3 style={{ fontSize: 14 }}>Findings</h3>
-          <ul>
-            {findings.map((f, i) => (
-              <li key={i}>
-                <span className="muted">{f.severity ?? "info"}:</span> {f.code}
-                {f.message ? ` — ${f.message}` : ""}
-              </li>
+      <section aria-label="Workflow steps">
+        <h3 className="plan-section-title">What will happen</h3>
+        {proposal.proposed_plan ? (
+          <PlanSteps steps={steps} />
+        ) : (
+          <p className="muted">The planner didn&apos;t propose any steps for this request.</p>
+        )}
+      </section>
+
+      <section aria-label="Data and connectors">
+        <h3 className="plan-section-title">Data and connectors</h3>
+        {bindings.length ? (
+          <ul className="bindings">
+            {bindings.map((b) => (
+              <li key={b}>{b}</li>
             ))}
           </ul>
-        </>
-      ) : null}
+        ) : (
+          <p className="muted small">Built-in steps only; no data source or connector.</p>
+        )}
+      </section>
 
-      {clarifications.length > 0 ? (
-        <>
-          <h3 style={{ fontSize: 14 }}>Clarifications needed</h3>
-          <ul>
-            {clarifications.map((q, i) => (
-              <li key={i}>{q}</li>
-            ))}
-          </ul>
-        </>
-      ) : null}
-
-      <ErrorBanner error={materialize.error} />
-
-      {canMaterialize ? (
-        <button onClick={onMaterialize} disabled={materialize.isPending}>
-          {materialize.isPending ? "Materializing…" : "Materialize workflow"}
-        </button>
-      ) : (
-        <p className="muted" data-testid="materialize-blocked">
-          This plan is <strong>{proposal.status}</strong> and cannot be materialized. Revise the
-          request or answer the clarifications, then plan again.
+      <section className={`checks${checksTone}`} aria-label="Safety checks">
+        <h3 className="plan-section-title">Safety checks</h3>
+        <p data-testid="plan-status-copy" style={{ margin: 0 }}>
+          {planStatusCopy(proposal.status)}
         </p>
-      )}
-    </div>
+        {findings.length > 0 ? (
+          <ul data-testid="plan-findings">
+            {[...new Set(findings.map((f) => findingText(f.code)))].map((text) => (
+              <li key={text}>{text}</li>
+            ))}
+          </ul>
+        ) : null}
+        {clarifications.length > 0 ? (
+          <>
+            <h3 className="plan-section-title" style={{ marginTop: 14 }}>
+              Questions from the planner <span className="ai-tag">AI-generated</span>
+            </h3>
+            <ul>
+              {clarifications.map((q, i) => (
+                <li key={i}>{q}</li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+      </section>
+
+      <section className="plan-actions" aria-label="Next action">
+        <ErrorBanner error={materialize.error} />
+        {canMaterialize ? (
+          <div className="row">
+            <button
+              onClick={onMaterialize}
+              disabled={materialize.isPending}
+              aria-describedby="save-workflow-help"
+            >
+              {materialize.isPending ? "Saving…" : "Save workflow"}
+            </button>
+            <span className="muted small" id="save-workflow-help">
+              Saves a fixed, versioned copy of these steps. Nothing runs until you choose Run now.
+            </span>
+          </div>
+        ) : (
+          <p className="muted" data-testid="materialize-blocked" style={{ margin: 0 }}>
+            This plan can&apos;t be saved yet. Revise your request, then prepare the plan again.
+          </p>
+        )}
+      </section>
+    </article>
   );
 }
 
-function PlanSteps({ plan }: { plan: Record<string, unknown> }) {
-  const steps = Array.isArray((plan as { steps?: unknown[] }).steps)
-    ? ((plan as { steps?: Array<Record<string, unknown>> }).steps as Array<Record<string, unknown>>)
-    : [];
+type Step = Record<string, unknown>;
+
+function planSteps(plan: Record<string, unknown> | null | undefined): Step[] {
+  const raw = (plan as { steps?: unknown } | null | undefined)?.steps;
+  return Array.isArray(raw) ? (raw as Step[]) : [];
+}
+
+const DATASET_FOR_TOOL: Record<string, string> = {
+  "pilot.sales_analysis": "Synthetic sales-v1",
+  "pilot.support_analysis": "Synthetic support-v1",
+};
+
+function bindingFor(step: Step): string | null {
+  if (step.connector) return `Connector: ${String(step.connector)}`;
+  return DATASET_FOR_TOOL[String(step.tool)] ?? null;
+}
+
+function PlanSteps({ steps }: { steps: Step[] }) {
   if (steps.length === 0) return <p className="muted">No steps.</p>;
   return (
     <div className="table-scroll" tabIndex={0} role="region" aria-label="Proposed steps">
       <table>
         <thead>
           <tr>
+            <th>#</th>
             <th>Step</th>
-            <th>Tool</th>
-            <th>Connector</th>
-            <th>Depends on</th>
+            <th>Uses</th>
+            <th>Runs after</th>
           </tr>
         </thead>
         <tbody>
           {steps.map((s, i) => (
             <tr key={i}>
-              <td>{String(s.id ?? i)}</td>
-              <td>{String(s.tool ?? "")}</td>
-              <td className="muted">{s.connector ? String(s.connector) : "—"}</td>
+              <td>{i + 1}</td>
+              <td>{toolLabel(s.tool)}</td>
+              <td className="muted">{s.connector ? String(s.connector) : "Built in"}</td>
               <td className="muted">
                 {Array.isArray(s.depends_on) && s.depends_on.length
-                  ? (s.depends_on as string[]).join(", ")
-                  : "—"}
+                  ? (s.depends_on as string[])
+                      .map((d) => `step ${steps.findIndex((x) => x.id === d) + 1 || "?"}`)
+                      .join(", ")
+                  : "Start"}
               </td>
             </tr>
           ))}

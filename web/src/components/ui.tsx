@@ -1,22 +1,57 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { ApiError, userMessageForStatus } from "@/lib/errors";
+import { statusLabel } from "@/lib/plan-language";
+import {
+  RETRY_TEXT,
+  describeError,
+  describeOutcome,
+  type FriendlyError,
+} from "@/lib/friendly-errors";
 
+/**
+ * The ONE way pages show a failure: a short title, a plain explanation, a safe
+ * next step and retry guidance (lib/friendly-errors). Raw provider/API/Pydantic
+ * text, internal identifiers and stack traces are never rendered; only a
+ * sanitized request reference is.
+ */
 export function ErrorBanner({ error }: { error: unknown }) {
-  if (!error) return null;
-  let message = "Something went wrong.";
-  let requestId: string | undefined;
-  if (error instanceof ApiError) {
-    message = userMessageForStatus(error.status, error.message);
-    requestId = error.requestId;
-  } else if (error instanceof Error) {
-    message = error.message;
-  }
+  const friendly = describeError(error);
+  if (!friendly) return null;
+  return <FriendlyPanel friendly={friendly} />;
+}
+
+/** Friendly explanation of a non-successful workflow outcome (FAILED, PARTIAL, UNKNOWN). */
+export function OutcomeNotice({ outcome }: { outcome: string | undefined }) {
+  const friendly = describeOutcome(outcome);
+  if (!friendly) return null;
+  return <FriendlyPanel friendly={friendly} live="polite" />;
+}
+
+function FriendlyPanel({
+  friendly,
+  live = "assertive",
+}: {
+  friendly: FriendlyError;
+  live?: "polite" | "assertive";
+}) {
+  const tone = friendly.tone === "error" ? "" : ` ${friendly.tone}`;
   return (
-    <div className="banner" role="alert" aria-live="assertive">
-      {message}
-      {requestId ? <span className="muted"> (ref: {requestId})</span> : null}
+    <div
+      className={`error-panel${tone}`}
+      role={live === "assertive" ? "alert" : "status"}
+      aria-live={live}
+      data-testid="friendly-error"
+      data-kind={friendly.kind}
+    >
+      <strong>{friendly.title}</strong>
+      <p>{friendly.explanation}</p>
+      {friendly.changed ? <p className="changed">{friendly.changed}</p> : null}
+      <p>
+        {friendly.action}{" "}
+        <span className="muted">{friendly.retryText ?? RETRY_TEXT[friendly.retry]}</span>
+      </p>
+      {friendly.reference ? <p className="ref">Reference: {friendly.reference}</p> : null}
     </div>
   );
 }
@@ -56,6 +91,10 @@ const STATUS_CLASS: Record<string, string> = {
   UNKNOWN: "warn",
   SKIPPED: "skip",
   FAILED_WITH_UNKNOWN: "warn",
+  ACTION_OUTCOME_UNKNOWN: "warn",
+  OUTCOME_UNAVAILABLE: "warn",
+  OUTCOME_PENDING: "skip",
+  PARTIAL: "warn",
   NEEDS_APPROVAL: "warn",
   NEEDS_CLARIFICATION: "warn",
   PASS: "ok",
@@ -63,7 +102,11 @@ const STATUS_CLASS: Record<string, string> = {
 };
 
 export function StatusBadge({ status }: { status: string }) {
-  return <span className={`badge ${STATUS_CLASS[status] ?? ""}`}>{status}</span>;
+  return (
+    <span className={`badge ${STATUS_CLASS[status] ?? ""}`} data-status={status}>
+      {statusLabel(status)}
+    </span>
+  );
 }
 
 /** Convenience UI gate. Backend RLS remains authoritative (M10 change §16). */

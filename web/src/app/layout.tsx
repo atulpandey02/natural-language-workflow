@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 import "./globals.css";
+import "./product.css";
 import { Providers } from "./providers";
 import { getServerPublicConfig } from "@/lib/public-config";
 import { PUBLIC_CONFIG_ELEMENT_ID, serializePublicConfig } from "@/lib/public-config-shared";

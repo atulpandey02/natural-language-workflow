@@ -1,13 +1,15 @@
 "use client";
 import { ResponsiveDetails } from "@/components/ResponsiveDetails";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { PlanReview } from "@/components/PlanReview";
 import { DatasetPicker } from "@/components/DatasetPicker";
 import { ErrorBanner } from "@/components/ui";
 import { useCreatePlan } from "@/lib/api/hooks";
 import type { PlanProposalOut } from "@/lib/api/types";
+import { takeDraftQuestion } from "@/lib/draft-question";
+import { EvidenceChain } from "@/components/EvidenceChain";
 
 export default function NewWorkflowPage() {
   const createPlan = useCreatePlan();
@@ -15,8 +17,26 @@ export default function NewWorkflowPage() {
   const [proposal, setProposal] = useState<PlanProposalOut | null>(null);
   const [submitted, setSubmitted] = useState("");
   const composer = useRef<HTMLTextAreaElement>(null);
+  // `?dataset=sales-v1` (from the home page's next actions) preselects a sample.
+  // Read once on the client; it only feeds the picker's effect, never markup.
+  const [preselect] = useState<string | null>(() =>
+    typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search).get("dataset"),
+  );
+  // A question typed on the home page arrives through session storage, once.
+  // Storage is only readable after hydration, so this syncs from it in an effect.
+  useEffect(() => {
+    const draft = takeDraftQuestion();
+    if (!draft) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time read of external storage
+    setPrompt(draft);
+    composer.current?.focus();
+  }, []);
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // One plan request at a time: a double click or Enter while planning is ignored.
+    if (createPlan.isPending || !prompt.trim()) return;
     setProposal(null);
     setSubmitted(prompt);
     try {
@@ -27,14 +47,16 @@ export default function NewWorkflowPage() {
   }
   return (
     <AppShell>
-      <p className="eyebrow">YOUR DATA, A CLEARER PICTURE</p>
+      <p className="eyebrow">New analysis</p>
       <h1>What would you like to understand?</h1>
       <p className="lead muted">
         Ask a business question. Review the steps, run the analysis, and explore the evidence.
       </p>
+      <EvidenceChain current={proposal ? "Plan" : "Request"} />
       <div className="analysis-layout">
         <div className="analysis-main">
           <DatasetPicker
+            preselect={preselect}
             onSelect={(text) => {
               setPrompt(text);
               setProposal(null);
@@ -64,10 +86,17 @@ export default function NewWorkflowPage() {
               required
             />
             <ErrorBanner error={createPlan.error} />
+            {createPlan.isPending ? (
+              <p className="muted small" role="status" data-testid="planning-progress">
+                Preparing a plan and running the safety checks. This usually takes a few seconds.
+              </p>
+            ) : null}
             <div className="row">
-              <span className="muted small">Review before running · No automatic delivery</span>
+              <span className="muted small">
+                You&apos;ll review the plan first · Nothing is sent without approval
+              </span>
               <button type="submit" disabled={createPlan.isPending || !prompt.trim()}>
-                {createPlan.isPending ? "Planning…" : "Plan"}
+                {createPlan.isPending ? "Preparing…" : "Prepare plan"}
               </button>
             </div>
           </form>
@@ -78,10 +107,10 @@ export default function NewWorkflowPage() {
             <p className="eyebrow">HOW IT WORKS</p>
             <h2>From question to evidence</h2>
             <ol className="timeline">
-              <li>Choose a dataset and describe your question.</li>
-              <li>Review the proposed tools and feasibility.</li>
-              <li>Materialize the workflow, then start the run.</li>
-              <li>Explore grounded results and source steps.</li>
+              <li>Choose a sample dataset and ask your question.</li>
+              <li>Prepare a plan and review its steps and safety checks.</li>
+              <li>Save it as a workflow, then choose Run now.</li>
+              <li>Explore the results and the step behind each finding.</li>
             </ol>
             <p className="muted">
               Slack sharing creates a separate proposal after analysis. A different admin or owner

@@ -75,8 +75,11 @@ def test_committed_example_is_rejected_and_target_env_is_consistent() -> None:
         load_release(ROOT / "deploy" / "staging" / "release.example.json")
     tgt = parse_target_env((ROOT / "deploy" / "staging" / "target.env").read_text())
     assert tgt["NLW_STAGING_INSTANCE_ID"] == REL.instance_id
-    # The first rollout completed: the host is at 0020 and served through current.
-    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0020_schedule_authorization"
+    # The M12C rollout completed: the host is at 0021 and served through current;
+    # the edge serves the reviewed primary plus the instance's sslip fallback.
+    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0021_analytics_handoff"
+    assert tgt["NLW_STAGING_PUBLIC_HOSTNAME"] == "app.nlwplatform.com"
+    assert tgt["NLW_STAGING_PUBLIC_HOSTNAME_FALLBACK"] == "32-197-83-193.sslip.io"
     assert tgt["NLW_STAGING_REMOTE_APP"] == "/opt/nlw/current"
     assert tgt["NLW_STAGING_OPS_ROOT"] == "/opt/nlw"
 
@@ -185,6 +188,7 @@ def test_wrong_release_digest_fails() -> None:
         "PUBLIC_HOSTNAME=32-197-83-193.sslip.io\nNLW_CTX_KEYS_DIR=/srv/nlw/ctx-keys\n"
         "NLW_CTX_API_KEY_ID=stg-api-1\nNLW_CTX_WORKER_KEY_ID=stg-worker-1\n"
         "NLW_CTX_SCHEDULER_KEY_ID=stg-sched-1\nDEMO_TOOLS_ENABLED=false\n"
+        "PUBLIC_HOSTNAME_FALLBACK=\n"
     )
     assert "POSTGRES_PASSWORD" not in pins  # secrets are never parsed out
     gates.check_release_pins(pins, REL, post_pin=False)  # hostname only, pre-pin

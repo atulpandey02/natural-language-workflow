@@ -26,6 +26,8 @@ log = structlog.get_logger(__name__)
 
 # Migration 0015: partial unique index on (tenant_id, email) WHERE status='pending'.
 PENDING_INVITATION_UNIQUE_INDEX = "uq_invitation_pending_email"
+# models.Connector: UniqueConstraint("tenant_id", "name").
+CONNECTOR_NAME_UNIQUE = "uq_connector_tenant_name"
 
 # SQLSTATE values / classes the API treats as "the database is unavailable right
 # now" (transient; the caller may retry). Class 08 = connection exception,

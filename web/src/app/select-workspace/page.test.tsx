@@ -73,3 +73,44 @@ describe("SelectWorkspace", () => {
     expect(mockNav).not.toHaveBeenCalled();
   });
 });
+
+describe("SelectWorkspace onboarding", () => {
+  it("explains workspaces and the journey before creation", () => {
+    mockWorkspaces.mockReturnValue({ isLoading: false, error: null, data: [] });
+    setCreate();
+    render(<SelectWorkspacePage />);
+    expect(screen.getByRole("heading", { level: 1, name: "Welcome to NLW" })).toBeInTheDocument();
+    expect(screen.getByText(/A workspace is your team/)).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "How NLW works" })).toHaveTextContent(
+      /Ask.*Review.*Execute.*Evidence/,
+    );
+    expect(screen.getByTestId("no-workspaces")).toBeInTheDocument();
+  });
+
+  it("shows friendly role labels", () => {
+    mockWorkspaces.mockReturnValue({
+      isLoading: false,
+      error: null,
+      data: [{ id: "w1", name: "Alpha", role: "admin" }],
+    });
+    setCreate();
+    render(<SelectWorkspacePage />);
+    expect(screen.getByText(/· Admin/)).toBeInTheDocument();
+  });
+
+  it("validates the name, then creates and opens the workspace", async () => {
+    mockWorkspaces.mockReturnValue({ isLoading: false, error: null, data: [] });
+    const mutateAsync = vi.fn().mockResolvedValue({ id: "w9", name: "Pilot" });
+    mockCreate.mockReturnValue({ mutateAsync, isPending: false, error: null });
+    mockPost.mockResolvedValue(undefined);
+    render(<SelectWorkspacePage />);
+    await userEvent.click(screen.getByRole("button", { name: "Create and open" }));
+    expect(screen.getByText("Give your workspace a name.")).toBeInTheDocument();
+    expect(mutateAsync).not.toHaveBeenCalled();
+    await userEvent.type(screen.getByLabelText("Workspace name"), "  Pilot  ");
+    await userEvent.click(screen.getByRole("button", { name: "Create and open" }));
+    await waitFor(() => expect(mockNav).toHaveBeenCalledWith("/"));
+    expect(mutateAsync).toHaveBeenCalledWith("Pilot");
+    expect(mockPost).toHaveBeenCalledWith("w9");
+  });
+});
