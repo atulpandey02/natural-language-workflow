@@ -1,5 +1,53 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { env, requireEnv, signIn } from "./helpers";
+
+async function assertLayout(page: Page, width: number, height: number) {
+  await page.setViewportSize({ width, height });
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    .toBe(true);
+  const charts = page.getByTestId("analytics-chart");
+  const first = await charts.nth(0).boundingBox();
+  const second = await charts.nth(1).boundingBox();
+  expect(first).not.toBeNull();
+  expect(second).not.toBeNull();
+  if (width > 600) {
+    expect(Math.abs(first!.y - second!.y)).toBeLessThan(2);
+    if (width > 1200) expect(first!.width).toBeGreaterThan(second!.width);
+  } else {
+    expect(second!.y).toBeGreaterThan(first!.y + first!.height);
+    expect(first!.width).toBeGreaterThan(340);
+  }
+  await expect(page.locator(".workflow-details")).not.toHaveAttribute("open", "");
+}
+
+async function inspectRevenue(page: Page) {
+  const chart = page.getByTestId("analytics-chart").first();
+  await chart.locator(".recharts-line-dot").nth(2).hover();
+  await expect(chart.getByRole("status")).toContainText("$47,090.65");
+  const svg = chart.locator('svg[role="application"]');
+  await svg.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(svg).toHaveCSS("outline-style", "solid");
+  const tooltip = chart.getByRole("status");
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toContainText("Revenue");
+  const label = await tooltip.locator(":scope > strong").textContent();
+  const values: Record<string, string> = {
+    "2026-03": "$40,647.45",
+    "2026-04": "$47,522.80",
+    "2026-05": "$47,090.65",
+    "2026-06": "$43,789.15",
+    "2026-07": "$53,931.15",
+    "2026-08": "$47,636.00",
+  };
+  await expect(tooltip.locator("b")).toHaveText(values[label!]);
+  const box = await tooltip.boundingBox();
+  const viewport = page.viewportSize()!;
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+  await expect(tooltip.locator(".series-mark")).toHaveCSS("background-color", "rgb(64, 217, 237)");
+}
 
 test.describe("synthetic pilot golden analytics", () => {
   test("sign in → plan → materialize → real worker → evidence → bound Slack proposal", async ({
@@ -11,7 +59,7 @@ test.describe("synthetic pilot golden analytics", () => {
       "requires the isolated pilot provider/worker harness",
     );
     test.setTimeout(120000);
-    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.setViewportSize({ width: 1440, height: 900 });
     await signIn(page, env.adminEmail, env.adminPassword);
     await page.goto("/workflows/new");
     await page.getByRole("button", { name: /Sales operations/ }).click();
@@ -36,15 +84,38 @@ test.describe("synthetic pilot golden analytics", () => {
     await expect(page.getByRole("heading", { name: "What the data shows" })).toBeVisible();
     await expect(page.getByText(/Accessories revenue declined/)).toBeVisible();
     await expect(page.locator('svg.recharts-surface[role="application"]')).toHaveCount(4);
-    await page.getByText("Monthly supporting data", { exact: true }).first().click();
+    const monthly = page
+      .locator(".supporting-table > summary")
+      .filter({ hasText: "Monthly supporting data" });
+    await monthly.focus();
+    await page.keyboard.press("Enter");
     await expect(page.getByRole("table", { name: "Monthly supporting data" })).toBeVisible();
+    await expect(page.getByTestId("analytics-kpi").first()).toContainText("$280,617.20");
+    await assertLayout(page, 1440, 900);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(page.getByRole("button", { name: "Toggle Revenue" }).first()).toHaveCSS(
+      "transition-duration",
+      "0s",
+    );
+    await page.emulateMedia({ reducedMotion: "no-preference" });
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: "test-results/pilot-sales-desktop.png", fullPage: true });
+    await page.screenshot({ path: "test-results/pilot-sales-desktop-viewport.png" });
+    await inspectRevenue(page);
+    await page
+      .getByTestId("analytics-chart")
+      .first()
+      .screenshot({ path: "test-results/pilot-tooltip.png" });
+    await page.getByRole("heading", { name: "Sales performance" }).click();
+    await assertLayout(page, 1280, 800);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({ path: "test-results/pilot-sales-laptop.png", fullPage: true });
     await page.getByRole("link", { name: "analyze", exact: true }).first().click();
     await expect(page.locator("#evidence-analyze")).toBeVisible();
     await expect(page.locator("#evidence-analyze")).toContainText("SUCCESS");
-    await page.setViewportSize({ width: 1024, height: 768 });
+    await page.setViewportSize({ width: 768, height: 1024 });
     await expect(page.locator(".sidebar")).not.toHaveAttribute("open", "");
+    await assertLayout(page, 768, 1024);
     await expect(page.locator(".workflow-details")).not.toHaveAttribute("open", "");
     await page.locator(".sidebar > summary").click();
     await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
@@ -52,9 +123,15 @@ test.describe("synthetic pilot golden analytics", () => {
     await expect(page.locator(".sidebar")).not.toHaveAttribute("open", "");
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: "test-results/pilot-sales-tablet.png", fullPage: true });
-    await page.setViewportSize({ width: 390, height: 844 });
+    await assertLayout(page, 390, 844);
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: "test-results/pilot-sales-mobile.png", fullPage: true });
+    await inspectRevenue(page);
+    await page
+      .getByTestId("analytics-chart")
+      .first()
+      .screenshot({ path: "test-results/pilot-tooltip-mobile.png" });
+    await page.getByRole("heading", { name: "Sales performance" }).click();
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
@@ -66,7 +143,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.getByRole("link", { name: "analyze", exact: true }).first().click();
     await page.keyboard.press("Escape");
     await expect(page.locator(".workflow-details")).not.toHaveAttribute("open", "");
-    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     // Separate tenant signs in through the same real auth + BFF path.
     const outsider = await browser.newContext();
@@ -81,15 +158,26 @@ test.describe("synthetic pilot golden analytics", () => {
     await outsider.close();
 
     await page.getByLabel("Slack destination").selectOption({ label: "pilot-slack · CPILOT" });
+    const proposed = page.waitForResponse(
+      (r) => r.url().endsWith(`/runs/${runId}/slack-proposal`) && r.request().method() === "POST",
+    );
     await page.getByRole("button", { name: "Send summary to Slack" }).click();
+    const immutable = await (await proposed).json();
     await expect(page.getByRole("heading", { name: "Exact message for approval" })).toBeVisible();
     await expect(page.getByText("NEEDS_APPROVAL", { exact: true })).toBeVisible();
+    expect(await page.getByLabel("Immutable Slack message").textContent()).toBe(
+      immutable.proposed_plan.steps[0].args.text,
+    );
+    await expect(page.locator(".message-destination strong")).toHaveText(
+      immutable.analytics_source.channel,
+    );
     await expect(page.getByRole("link", { name: "Open source analysis run" })).toHaveAttribute(
       "href",
       `/runs/${runId}`,
     );
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await page.screenshot({ path: "test-results/pilot-slack-proposal.png", fullPage: true });
+    await page
+      .locator(".handoff-review")
+      .screenshot({ path: "test-results/pilot-slack-proposal.png" });
     await page.getByRole("button", { name: "Materialize workflow" }).click();
     await page.getByRole("button", { name: /run now/i }).click();
     await expect(page.getByText("WAITING_APPROVAL").first()).toBeVisible({ timeout: 30000 });
@@ -101,9 +189,12 @@ test.describe("synthetic pilot golden analytics", () => {
     await signIn(approver, process.env.E2E_APPROVER_EMAIL!, process.env.E2E_APPROVER_PASSWORD!);
     await approver.goto("/approvals");
     await expect(approver.getByText("CPILOT", { exact: false }).first()).toBeVisible();
+    const approvalPreview = JSON.parse((await approver.locator("pre").textContent())!);
+    expect(approvalPreview.args.text).toBe(immutable.proposed_plan.steps[0].args.text);
     await approver.getByRole("button", { name: /^approve$/i }).click();
     await page.goto(`/runs/${slackRun}`);
     await expect(page.getByText("COMPLETED").first()).toBeVisible({ timeout: 30000 });
+    await page.locator(".workflow-details > summary").click();
     await expect(page.getByRole("link", { name: "Open source analysis run" })).toHaveAttribute(
       "href",
       `/runs/${runId}`,
@@ -115,7 +206,7 @@ test.describe("synthetic pilot golden analytics", () => {
       process.env.E2E_PILOT === "1",
       "requires the isolated pilot provider/worker harness",
     );
-    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.setViewportSize({ width: 1440, height: 900 });
     await signIn(page, env.adminEmail, env.adminPassword);
     await page.goto("/workflows/new");
     await page.getByRole("button", { name: /Support operations/ }).click();
@@ -126,6 +217,10 @@ test.describe("synthetic pilot golden analytics", () => {
     await expect(page.getByTestId("analytics-kpi")).toHaveCount(4);
     await expect(page.getByTestId("analytics-chart")).toHaveCount(5);
     await expect(page.getByRole("heading", { name: "SLA compliance trend" })).toBeVisible();
+    await assertLayout(page, 1440, 900);
+    for (const value of ["49.79%", "25", "23.03 h", "4.23 / 5"]) {
+      await expect(page.getByTestId("analytics-kpi").filter({ hasText: value })).toHaveCount(1);
+    }
     await page.screenshot({ path: "test-results/pilot-support-desktop.png", fullPage: true });
   });
 });

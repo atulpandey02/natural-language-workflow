@@ -11,7 +11,10 @@ results and an immutable two-proposal Slack journey. The responsive Next.js
 interface renders KPIs, fixed Recharts charts, supporting tables and source-step
 evidence. Migration `0021` adds handoff provenance only; migrations 0001–0020 and
 protected execution/approval/authorization/recovery/release semantics remain
-unchanged. This package is local and awaiting visual UX review. It does not
+unchanged. The final frontend visual refinement adds a compact KPI strip,
+consistent metric colors, asymmetric charts and collapsible execution evidence.
+Real seeded browser captures cover desktop, laptop, tablet, mobile and failure
+states. This package is local and awaiting independent review. It does not
 complete the separate pilot-launch gates described below.
 
 - [Architecture, dataset grains, metric definitions and contract](development/pilot-analytics.md)

@@ -5,7 +5,162 @@ Baseline: `6507d0b1250ccc6134d27ff01354881fdec561f4` (clean at start).
 All execution was local. No VPS, live model provider or real Slack transport was
 used. No push, PR, merge or deployment was performed.
 
-## Checks
+## Final visual refinement — 2026-09-26
+
+This pass starts at accepted functional commit `6b8605b`. The earlier functional
+validation below is retained as historical evidence. Only frontend presentation,
+additive frontend tests, browser evidence and documentation changed in this pass.
+
+### Before and after
+
+The initial inspection found equal blue cards, small KPI values, repeated page
+headings, identical chart colors, tiny legend controls and an always-open execution
+column competing with the analysis. The [original Sales capture](pilot-sales-desktop.png)
+is retained for comparison.
+
+The refinement gives the business result the full content width. A compact KPI
+strip uses stable metric colors and identifies measured totals versus derived
+averages/rates. Numbered grounded findings sit above asymmetric trend panels;
+horizontal category bars make category names easier to read. Supporting tables,
+Slack sharing, deterministic execution summary and collapsible evidence each
+have a distinct visual treatment. The existing line/bar contract, exact values,
+findings and source links remain intact. Lines join recorded observations with
+straight segments; no smoothing or additional data points were introduced.
+
+### Checks for this pass
+
+| Check | Result |
+|---|---|
+| Frontend Prettier / ESLint / TypeScript | Passed |
+| Vitest | **132 passed across 30 files**; all existing assertions retained |
+| Next.js production build | Passed |
+| Original real Playwright journeys | **2/2 passed**: Sales → separate Slack proposal → independent approval; Support |
+| Supplemental real browser scenario | **1/1 passed**: partial FAILED/SKIPPED, empty FAILED, separate Slack run with UNKNOWN |
+| Frontend test adapter Ruff format / lint | Passed |
+| Harness warnings | One existing Starlette/AnyIO deprecation warning per run |
+| Protected-file diff against `6b8605b` | Empty for backend, tests/integration, migrations, API/BFF/hooks/contracts, datasets and dependencies |
+| Full backend suites | Intentionally not rerun; no shared contract or backend implementation changed |
+
+The ordinary browser harness remains byte-for-byte unchanged. The new opt-in
+`web/e2e/visual_states_plugin.py` reuses it with a separate browser spec and
+deterministic planner inputs containing the existing `fake.fail` tool. The
+existing mock Slack HTTP transport returns its ambiguous outcome. Real auth,
+feasibility, materialization, queue, worker, approval and PostgreSQL checkpoints
+produce the displayed results. No browser API responses or persisted outcomes
+are fabricated. Both harness runs retain the assertion of exactly one synthetic
+transmission to `CPILOT`; neither can deliver a real Slack message.
+
+Reproduction after `cd web && npm run build`, from the repository root with a
+running disposable local Supabase project:
+
+```sh
+PILOT_AUTH_CONFIG=/tmp/nlw-m12c-auth-status.json UV_CACHE_DIR=/tmp/nlw-m12c-uv \
+  uv run pytest tests/integration/test_pilot_browser.py -q --tb=short
+PILOT_VISUAL_STATES=1 PILOT_AUTH_CONFIG=/tmp/nlw-m12c-auth-status.json \
+  UV_CACHE_DIR=/tmp/nlw-m12c-uv uv run python -m pytest \
+  tests/integration/test_pilot_browser.py -p web.e2e.visual_states_plugin -q --tb=short
+```
+
+The local auth configuration contains credentials and is deliberately outside the
+repository. `python -m pytest` is required for the frontend test plugin's module
+path. Initial development checks caught TypeScript fixture typing and jsdom's
+missing native keyboard activation for `summary`; the latter is covered in the
+real browser. The first golden browser run required opening the new disclosure
+before checking its source link. No original assertion was removed or relaxed.
+Supplemental selectors distinguish loading indicators and duplicated audit
+destinations. UNKNOWN uses a fixed 1440×1440 capture: tracing showed that
+Playwright's full-page capture briefly sets a 1px viewport, which correctly
+collapses responsive drawers. An additional unit check verifies that an open
+evidence disclosure survives an ordinary result rerender.
+
+### Responsive and accessibility evidence
+
+- **1440×900 and 1280×800:** two chart columns, wider primary trend, four KPIs,
+  desktop navigation, collapsed evidence, no page overflow.
+- **768×1024:** two chart columns with readable 12px axes; navigation and evidence
+  drawers close with Escape; no page overflow.
+- **390×844:** single chart/KPI column, 44px chart controls, bounded exact-value
+  tooltip, no page overflow. Wide supporting tables scroll inside their own
+  focusable region.
+- Real browser assertions cover native disclosure Enter activation, chart arrow
+  keys, pointer hover, visible focus, Escape, exact tooltip text, tooltip bounds
+  and reduced-motion transitions. Unit tests check keyboard legend controls,
+  complete chart text alternatives and every Sales KPI/table cell.
+- Series have text labels plus marker shapes and line patterns. Palette and axis
+  text contrast against the five principal dark surfaces ranges from **6.26:1**
+  upward; this exceeds AA text contrast. The primary Slack button uses dark text
+  on mint. Status text remains explicit for FAILED, SKIPPED and UNKNOWN.
+- The immutable Slack message is compared verbatim with the server proposal and
+  the separate approver's preview. The destination is also checked. Tests retain
+  hostile-text rejection and add verification that opening evidence never reveals
+  confidential raw step output.
+
+### Final unedited browser screenshots
+
+All images come from the real seeded local browser flows. Full-page images retain
+their viewport width and extend vertically; tooltip and proposal images capture
+the relevant rendered component. The prior screenshots remain unchanged.
+
+| Screenshot | Evidence |
+|---|---|
+| [Sales desktop](visual-refinement/pilot-sales-desktop.png) | Full result, 1440px wide, table expanded |
+| [Desktop viewport](visual-refinement/pilot-sales-desktop-viewport.png) | Initial 1440×900 composition |
+| [Sales laptop](visual-refinement/pilot-sales-laptop.png) | 1280×800 viewport, asymmetric layout |
+| [Sales tablet](visual-refinement/pilot-sales-tablet.png) | 768×1024 viewport, two chart columns |
+| [Sales mobile](visual-refinement/pilot-sales-mobile.png) | 390×844 viewport, single column |
+| [Support desktop](visual-refinement/pilot-support-desktop.png) | SLA, backlog, resolution, satisfaction and issue/team breakdowns |
+| [Chart interaction](visual-refinement/pilot-tooltip.png) | Exact-value keyboard tooltip with series marker |
+| [Mobile interaction](visual-refinement/pilot-tooltip-mobile.png) | Tooltip contained in the mobile chart |
+| [Immutable Slack review](visual-refinement/pilot-slack-proposal.png) | Exact message, destination, source run and digest |
+| [Mobile source evidence](visual-refinement/pilot-evidence-mobile.png) | Source opens the secondary evidence drawer |
+| [Partial / failed](visual-refinement/pilot-partial-failed.png) | Completed evidence retained; FAILED and SKIPPED visible; no sharing |
+| [Failed / empty](visual-refinement/pilot-failed-empty.png) | No completed analytics; no charts invented |
+| [UNKNOWN](visual-refinement/pilot-unknown.png) | Separate Slack action remains UNKNOWN and is not reported as success |
+| [Proposal](visual-refinement/pilot-proposal-desktop.png) | Original planning experience still works |
+
+### Exact file manifest
+
+Paths are relative to the repository root. No dependency files changed.
+
+```text
+web/src/app/analytics.css
+web/src/app/globals.css
+web/src/app/runs/[id]/page.tsx
+web/src/app/runs/[id]/page.test.tsx
+web/src/components/AnalyticsPanel.tsx
+web/src/components/AnalyticsResult.tsx
+web/src/components/AnalyticsResult.test.tsx
+web/src/components/PlanReview.tsx
+web/src/components/PlanReview.test.tsx
+web/src/components/ResponsiveDetails.tsx
+web/src/components/ResponsiveDetails.test.tsx
+web/src/components/RunSummaryCard.tsx
+web/src/lib/analytics-presentation.ts
+web/src/lib/analytics-presentation.test.ts
+web/e2e/pilot-analytics.spec.ts
+web/e2e/pilot-visual-states.spec.ts
+web/e2e/visual_states_plugin.py
+docs/PROJECT_INDEX.md
+docs/evidence/m12c/validation.md
+```
+
+The 14 PNG files listed individually in the screenshot table are the remaining
+new files, all under `docs/evidence/m12c/visual-refinement/`.
+
+### Review boundary and limitations
+
+Backend execution/security/approval behavior, Slack proposal bindings/digests,
+analytics calculations/contracts, seeds, expected values and deployment files
+are unchanged from `6b8605b`. No live model/provider or Slack delivery occurred.
+No push, PR, merge or deployment was performed. Independent review is next.
+
+Visual validation uses Chromium and the synthetic pilot datasets. Safari,
+Firefox, assistive-technology user testing and a full accessibility audit were
+not performed. Charts retain the fixed line/bar templates; tables intentionally
+scroll within their region on narrow screens. Long full-page captures should be
+viewed at native width. This pass does not restyle the rest of the application.
+
+## Accepted functional implementation — historical checks
 
 | Check | Result |
 |---|---|
@@ -153,7 +308,7 @@ No forced dependency upgrade was applied. These existing development-tool
 advisories remain a limitation; resolving them would be a separate toolchain
 change. No newly added runtime package was flagged.
 
-## Review boundary
+## Original functional review boundary
 
 This package stops at focused local commits and a clean working tree. Visual
 UX review is next. Frozen synthetic data, a single dataset per analysis, fixed
