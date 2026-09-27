@@ -1,109 +1,240 @@
 "use client";
 
 import { useState } from "react";
-import { useForm, useWatch } from "react-hook-form";
+import { useForm, useWatch, type FieldPath } from "react-hook-form";
 import { useCreateConnector } from "@/lib/api/hooks";
 import { ErrorBanner } from "@/components/ui";
+import { ApiError } from "@/lib/errors";
+import {
+  SLACK_CHANNEL_ID_RE,
+  buildConnectorPayload,
+  secretRefProblem,
+  type ConnectorFormValues,
+  type ConnectorType,
+} from "@/lib/connector-form";
 
-type ConnectorType = "postgres" | "webhook" | "slack" | "static";
+const TYPE_LABEL: Record<ConnectorType, string> = {
+  slack: "Slack — share approved results",
+  postgres: "PostgreSQL — read-only queries",
+  webhook: "Webhook — send approved results",
+  static: "Static — test connector",
+};
 
-interface FormValues {
-  type: ConnectorType;
-  name: string;
-  secret_ref: string;
-  // type-specific
-  host?: string;
-  port?: string;
-  database?: string;
-  allowed_schemas?: string;
-  url?: string;
-  default_channel?: string;
-  label?: string;
-}
+// Where a 422 detail's field path lands in this form.
+const FIELD_FOR: Record<string, FieldPath<ConnectorFormValues>> = {
+  name: "name",
+  secret_ref: "secret_ref",
+  "config.workspace_label": "workspace_label",
+  "config.default_channel": "default_channel",
+  "config.host": "host",
+  "config.database": "database",
+  "config.url": "url",
+};
 
-function buildConfig(v: FormValues): Record<string, unknown> {
-  switch (v.type) {
-    case "postgres":
-      return {
-        host: v.host,
-        port: v.port ? Number(v.port) : 5432,
-        database: v.database,
-        allowed_schemas: (v.allowed_schemas || "public")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-      };
-    case "webhook":
-      return { url: v.url };
-    case "slack":
-      return v.default_channel ? { default_channel: v.default_channel } : {};
-    case "static":
-      return v.label ? { label: v.label } : {};
-    default:
-      return {};
-  }
+const EMPTY: Omit<ConnectorFormValues, "type"> = {
+  name: "",
+  secret_ref: "",
+  workspace_label: "",
+  default_channel: "",
+  host: "",
+  port: "5432",
+  database: "",
+  allowed_schemas: "",
+  url: "",
+  label: "",
+};
+
+function FieldError({ id, message }: { id: string; message?: string }) {
+  return message ? (
+    <p className="field-error" id={id}>
+      {message}
+    </p>
+  ) : null;
 }
 
 export function ConnectorForm({ onCreated }: { onCreated?: () => void }) {
   const create = useCreateConnector();
-  const { register, handleSubmit, control, reset, formState } = useForm<FormValues>({
-    defaultValues: { type: "postgres", name: "", secret_ref: "" },
-  });
-  const type = useWatch({ control, name: "type" });
-  const [ok, setOk] = useState(false);
-
-  async function onSubmit(values: FormValues) {
-    setOk(false);
-    await create.mutateAsync({
-      type: values.type,
-      name: values.name,
-      config: buildConfig(values),
-      secret_ref: values.secret_ref ? values.secret_ref.toUpperCase() : null,
+  const { register, handleSubmit, control, reset, setError, setValue, formState } =
+    useForm<ConnectorFormValues>({
+      defaultValues: { type: "slack", ...EMPTY },
+      mode: "onTouched",
     });
-    setOk(true);
-    reset({ type: values.type, name: "", secret_ref: "" });
+  const { errors } = formState;
+  const type = useWatch({ control, name: "type" });
+  const [created, setCreated] = useState<string | null>(null);
+  const [rejectedCredential, setRejectedCredential] = useState(false);
+  const [submitError, setSubmitError] = useState<unknown>(null);
+
+  async function onSubmit(values: ConnectorFormValues) {
+    if (create.isPending) return;
+    setCreated(null);
+    setSubmitError(null);
+    try {
+      await create.mutateAsync(buildConnectorPayload(values));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        setError("name", { message: "A connector with this name already exists." });
+        return;
+      }
+      if (e instanceof ApiError && e.status === 422 && Array.isArray(e.details)) {
+        for (const d of e.details as Array<{ loc?: unknown[] }>) {
+          const path = (d.loc ?? []).filter((x) => x !== "body").join(".");
+          const field = FIELD_FOR[path];
+          if (field) setError(field, { message: "Check this value." });
+        }
+      }
+      setSubmitError(e);
+      return;
+    }
+    setCreated(values.name.trim());
+    reset({ type: values.type, ...EMPTY });
     onCreated?.();
   }
 
+  const invalid = (f: FieldPath<ConnectorFormValues>) => (errors[f] ? true : undefined);
+  const describedBy = (f: string, hint?: boolean) =>
+    [
+      hint ? `c-${f}-hint` : null,
+      errors[f as FieldPath<ConnectorFormValues>] ? `c-${f}-error` : null,
+    ]
+      .filter(Boolean)
+      .join(" ") || undefined;
   return (
-    <form className="card" onSubmit={handleSubmit(onSubmit)} noValidate>
-      <h2 style={{ marginTop: 0, fontSize: 16 }}>Add a connector</h2>
-      <ErrorBanner error={create.error} />
-      {ok ? <p className="muted">Connector created.</p> : null}
+    <form
+      className="card"
+      onSubmit={handleSubmit(onSubmit)}
+      noValidate
+      aria-labelledby="connector-form-title"
+    >
+      <h2 id="connector-form-title" style={{ marginTop: 0, fontSize: 16 }}>
+        Add a connector
+      </h2>
+      <ErrorBanner error={submitError} />
+      {created ? (
+        <p className="muted" role="status">
+          Connector “{created}” added. An operator must provision its secret before it can be used.
+        </p>
+      ) : null}
 
       <label htmlFor="c-type">Type</label>
       <select id="c-type" {...register("type")}>
-        <option value="postgres">postgres</option>
-        <option value="webhook">webhook</option>
-        <option value="slack">slack</option>
-        <option value="static">static</option>
+        {(Object.keys(TYPE_LABEL) as ConnectorType[]).map((t) => (
+          <option key={t} value={t}>
+            {TYPE_LABEL[t]}
+          </option>
+        ))}
       </select>
 
       <label htmlFor="c-name">Name</label>
-      <input id="c-name" {...register("name", { required: true })} />
+      <input
+        id="c-name"
+        placeholder={type === "slack" ? "product-slack" : undefined}
+        aria-invalid={invalid("name")}
+        aria-describedby={describedBy("name")}
+        {...register("name", {
+          validate: (v) => (v.trim() ? true : "Give this connector a name."),
+          maxLength: { value: 120, message: "Use 120 characters or fewer." },
+        })}
+      />
+      <FieldError id="c-name-error" message={errors.name?.message} />
+
+      {type === "slack" ? (
+        <>
+          <p className="field-hint" data-testid="slack-scope-note">
+            Product Slack: where approved analysis summaries are posted for your team. It is
+            separate from the operators&apos; infrastructure alerts (Alertmanager), which are
+            configured outside NLW.
+          </p>
+          <label htmlFor="c-workspace_label">Slack workspace</label>
+          <input
+            id="c-workspace_label"
+            placeholder="NLW Product Demo"
+            aria-invalid={invalid("workspace_label")}
+            aria-describedby={describedBy("workspace_label", true)}
+            {...register("workspace_label", {
+              validate: (v, all) =>
+                all.type !== "slack" || v.trim() ? true : "Enter the Slack workspace's name.",
+            })}
+          />
+          <p className="field-hint" id="c-workspace_label-hint">
+            A label so people know which Slack workspace this posts to.
+          </p>
+          <FieldError id="c-workspace_label-error" message={errors.workspace_label?.message} />
+
+          <label htmlFor="c-default_channel">Default channel ID</label>
+          <input
+            id="c-default_channel"
+            placeholder="C0123ABCD"
+            autoCapitalize="characters"
+            spellCheck={false}
+            aria-invalid={invalid("default_channel")}
+            aria-describedby={describedBy("default_channel", true)}
+            {...register("default_channel", {
+              validate: (raw, all) => {
+                if (all.type !== "slack") return true;
+                const v = raw.trim();
+                if (!v) return "Enter the channel ID for the default channel.";
+                if (v.startsWith("#"))
+                  return "Use the channel ID, not its name. In Slack, open the channel's details — the ID is at the bottom and starts with C.";
+                if (!SLACK_CHANNEL_ID_RE.test(v))
+                  return "Channel IDs start with C, G or D followed by capital letters and digits, for example C0123ABCD.";
+                return true;
+              },
+            })}
+          />
+          <p className="field-hint" id="c-default_channel-hint">
+            For example, the ID of #nlw-product-demo. Messages go only to this channel.
+          </p>
+          <FieldError id="c-default_channel-error" message={errors.default_channel?.message} />
+        </>
+      ) : null}
 
       {type === "postgres" ? (
         <>
           <label htmlFor="c-host">Host</label>
-          <input id="c-host" {...register("host")} />
+          <input
+            id="c-host"
+            aria-invalid={invalid("host")}
+            aria-describedby={describedBy("host")}
+            {...register("host", {
+              validate: (v, all) =>
+                all.type !== "postgres" || v.trim() ? true : "Enter the host.",
+            })}
+          />
+          <FieldError id="c-host-error" message={errors.host?.message} />
           <label htmlFor="c-port">Port</label>
-          <input id="c-port" type="number" {...register("port")} defaultValue={5432} />
-          <label htmlFor="c-db">Database</label>
-          <input id="c-db" {...register("database")} />
+          <input id="c-port" type="number" inputMode="numeric" {...register("port")} />
+          <label htmlFor="c-database">Database</label>
+          <input
+            id="c-database"
+            aria-invalid={invalid("database")}
+            aria-describedby={describedBy("database")}
+            {...register("database", {
+              validate: (v, all) =>
+                all.type !== "postgres" || v.trim() ? true : "Enter the database name.",
+            })}
+          />
+          <FieldError id="c-database-error" message={errors.database?.message} />
           <label htmlFor="c-schemas">Allowed schemas (comma-separated)</label>
           <input id="c-schemas" {...register("allowed_schemas")} placeholder="public" />
         </>
       ) : null}
       {type === "webhook" ? (
         <>
-          <label htmlFor="c-url">Webhook URL</label>
-          <input id="c-url" {...register("url")} />
-        </>
-      ) : null}
-      {type === "slack" ? (
-        <>
-          <label htmlFor="c-chan">Default channel (optional)</label>
-          <input id="c-chan" {...register("default_channel")} />
+          <label htmlFor="c-url">Destination URL</label>
+          <input
+            id="c-url"
+            type="url"
+            aria-invalid={invalid("url")}
+            aria-describedby={describedBy("url")}
+            {...register("url", {
+              validate: (v, all) =>
+                all.type !== "webhook" || /^https:\/\/\S+$/.test(v.trim())
+                  ? true
+                  : "Enter an https:// address.",
+            })}
+          />
+          <FieldError id="c-url-error" message={errors.url?.message} />
         </>
       ) : null}
       {type === "static" ? (
@@ -113,16 +244,44 @@ export function ConnectorForm({ onCreated }: { onCreated?: () => void }) {
         </>
       ) : null}
 
-      <label htmlFor="c-secret">Secret reference</label>
-      <input id="c-secret" {...register("secret_ref")} placeholder="PG_MAIN" />
-      <p className="muted" style={{ marginTop: 4 }}>
-        Enter only the secret <em>reference</em> name. The actual credential is pre-provisioned by
-        an operator in the worker environment — this console never sees or stores secret values.
+      <label htmlFor="c-secret_ref">Secret reference</label>
+      <input
+        id="c-secret_ref"
+        placeholder={type === "slack" ? "SLACK_DEMO_BOT_TOKEN" : "PG_MAIN"}
+        autoComplete="off"
+        spellCheck={false}
+        aria-invalid={invalid("secret_ref")}
+        aria-describedby={describedBy("secret_ref", true)}
+        {...register("secret_ref", {
+          // Credential material is cleared the moment it is entered, so it never
+          // stays in form state, on screen, or in a request.
+          onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
+            const credential = secretRefProblem(e.target.value, "static") === "credential";
+            if (credential) setValue("secret_ref", "");
+            if (credential || e.target.value) setRejectedCredential(credential);
+          },
+          validate: (v, all) => {
+            if (!v.trim() && rejectedCredential)
+              return "That looks like a credential. Enter only the name of the secret your operator provisioned — never the token or URL itself.";
+            const problem = secretRefProblem(v, all.type);
+            if (problem === "required") return "Enter the secret reference name.";
+            if (problem === "format" || problem === "credential")
+              return "Use capital letters, digits and underscores, starting with a letter (for example SLACK_DEMO_BOT_TOKEN).";
+            return true;
+          },
+        })}
+      />
+      <p className="field-hint" id="c-secret_ref-hint">
+        {type === "slack"
+          ? "The name of the Slack bot token your operator stored on the NLW server. "
+          : "The name of the credential your operator stored on the NLW server. "}
+        NLW never asks for, shows or stores the secret itself.
       </p>
+      <FieldError id="c-secret_ref-error" message={errors.secret_ref?.message} />
 
       <div style={{ marginTop: 12 }}>
         <button type="submit" disabled={formState.isSubmitting || create.isPending}>
-          {create.isPending ? "Creating…" : "Create connector"}
+          {create.isPending ? "Adding…" : "Create connector"}
         </button>
       </div>
     </form>

@@ -11,9 +11,11 @@ The API never resolves secrets and has no ``NLW_SECRET_*`` environment.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import nlw.tools.builtin  # noqa: F401  (populates registries)
+from nlw.api import db_errors
 from nlw.api.capability import demo_tools_included
 from nlw.api.deps import (
     get_app_settings,
@@ -97,9 +99,17 @@ async def create_connector(
     except QuotaExceededError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
-    connector = await ConnectorRepository(session).create(
-        ctx.tenant_id, body.type, body.name, config, body.secret_ref
-    )
+    try:
+        connector = await ConnectorRepository(session).create(
+            ctx.tenant_id, body.type, body.name, config, body.secret_ref
+        )
+    except SQLAlchemyError as exc:
+        # The request transaction is aborted either way; get_session rolls it back.
+        if db_errors.is_unique_violation_of(exc, db_errors.CONNECTOR_NAME_UNIQUE):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "a connector with this name already exists"
+            ) from exc
+        raise
     return _to_out(connector)
 
 

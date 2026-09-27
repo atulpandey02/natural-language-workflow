@@ -19,7 +19,7 @@ test.describe("MVP happy path", () => {
     await page.getByLabel("Name").fill("static-e2e");
     await page.getByLabel(/secret reference/i).fill("STATIC_DEMO");
     await page.getByRole("button", { name: /create connector/i }).click();
-    await expect(page.getByText("static-e2e")).toBeVisible();
+    await expect(page.getByRole("cell", { name: "static-e2e", exact: true })).toBeVisible();
 
     // Natural-language plan → feasibility. The stub planner cannot infer intent,
     // so the proposal is NEEDS_CLARIFICATION and materialization is BLOCKED.
