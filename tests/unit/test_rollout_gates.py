@@ -185,6 +185,7 @@ def test_wrong_release_digest_fails() -> None:
         "PUBLIC_HOSTNAME=32-197-83-193.sslip.io\nNLW_CTX_KEYS_DIR=/srv/nlw/ctx-keys\n"
         "NLW_CTX_API_KEY_ID=stg-api-1\nNLW_CTX_WORKER_KEY_ID=stg-worker-1\n"
         "NLW_CTX_SCHEDULER_KEY_ID=stg-sched-1\nDEMO_TOOLS_ENABLED=false\n"
+        "PUBLIC_HOSTNAME_FALLBACK=\n"
     )
     assert "POSTGRES_PASSWORD" not in pins  # secrets are never parsed out
     gates.check_release_pins(pins, REL, post_pin=False)  # hostname only, pre-pin

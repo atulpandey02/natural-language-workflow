@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -81,6 +82,14 @@ MAINTENANCE_FLAG = "/srv/maint/MAINTENANCE"
 RUNTIME_SERVICES = ("api", "worker", "scheduler")
 DRAIN_WAIT_S = 120
 REVISION_LABEL = "org.opencontainers.image.revision"
+# The public edge: the release's own Caddyfile, mounted read-only by the caddy
+# service, whose site block serves exactly {$PUBLIC_HOSTNAME} {$PUBLIC_HOSTNAME_FALLBACK}.
+CADDYFILE = "docker/caddy/Caddyfile"
+CADDYFILE_MOUNT = "/etc/caddy/Caddyfile"
+EDGE_KEYS = ("PUBLIC_HOSTNAME", "PUBLIC_HOSTNAME_FALLBACK")
+# Bounded wait for a freshly (re)created edge to answer on every hostname (a new
+# primary's certificate is obtained by Caddy at start; ACME HTTP-01 on port 80).
+EDGE_WAIT_S = 120
 # Commands the release image must be able to execute (M12A-Prep §B).
 REQUIRED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("-m", "nlw.ops.rollout", "--help"),
@@ -91,6 +100,17 @@ REQUIRED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("-m", "nlw.backup", "evidence", "--help"),
 )
 Log = Callable[[str], None]
+Resolver = Callable[[str], set[str]]
+
+
+def resolve_ipv4(hostname: str) -> set[str]:
+    """The IPv4 addresses ``hostname`` resolves to from the operator machine (the
+    public resolver path ACME and clients use). Empty when it does not resolve."""
+    try:
+        infos = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError):
+        return set()
+    return {str(info[4][0]) for info in infos}
 
 
 @dataclass(frozen=True)
@@ -140,8 +160,10 @@ class Rollout:
         log: Log,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         receipt: ProvenanceReceipt | None = None,
+        resolve: Resolver = resolve_ipv4,
     ) -> None:
         self.release = release
+        self.resolve = resolve  # injectable: tests never touch real DNS
         self.target = target
         self.remote = remote
         self.op = operator
@@ -182,8 +204,19 @@ class Rollout:
                 or evidence["demo_tools_enabled"] != self.target.demo_tools_enabled
             ):
                 raise GateError("reviewed/staged demo-tool policy mismatch; re-run stage-release")
+            primary, fallback = self.edge_hostnames()
+            if (
+                evidence.get("public_hostname") != primary
+                or evidence.get("public_hostname_fallback") != fallback
+            ):
+                raise GateError("reviewed/staged edge hostnames mismatch; re-run stage-release")
             self.check_staged_pins()
         return doc
+
+    def edge_hostnames(self) -> tuple[str, str]:
+        """(primary, fallback): the attested manifest names the primary; the
+        reviewed target names the fallback ("" = none)."""
+        return self.release.public_hostname, self.target.public_hostname_fallback or ""
 
     def check_staged_pins(self) -> None:
         gates.check_release_pins(
@@ -191,6 +224,7 @@ class Rollout:
             self.release,
             post_pin=True,
             demo_tools_enabled=self.target.demo_tools_enabled,
+            public_hostname_fallback=self.target.public_hostname_fallback,
         )
 
     def _save(self, doc: dict[str, Any]) -> None:
@@ -239,13 +273,28 @@ class Rollout:
         if self.target.compose_project != self.release.compose_project:
             raise GateError("target config compose project != release compose project")
         gates.check_public_ip_matches_hostname(imds.get("public-ipv4", ""), self.release)
+        gates.check_edge_identity(
+            imds.get("public-ipv4", ""),
+            self.release,
+            target_primary=self.target.public_hostname,
+            fallback=self.target.public_hostname_fallback,
+        )
         return imds
+
+    def check_primary_dns(self, imds: dict[str, str]) -> list[str]:
+        """The primary resolves to THIS instance (sslip/.localhost need no lookup)."""
+        primary = self.release.public_hostname
+        lookup = gates.sslip_ipv4(primary) is None and not primary.endswith(".localhost")
+        resolved = self.resolve(primary) if lookup else set()
+        gates.check_primary_dns(primary, imds.get("public-ipv4", ""), resolved)
+        return sorted(resolved)
 
     def read_pins(self, directory: str) -> dict[str, str]:
         text = self._run(
-            f"grep -E '^(NLW_IMAGE|NLW_WEB_IMAGE|PUBLIC_HOSTNAME|NLW_CTX_KEYS_DIR|"
+            f"grep -E '^(NLW_IMAGE|NLW_WEB_IMAGE|NLW_CTX_KEYS_DIR|"
             f"NLW_CTX_(API|WORKER|SCHEDULER)_KEY_ID)=|"
-            f"^[[:space:]]*(export[[:space:]]+)?DEMO_TOOLS_ENABLED[[:space:]]*=' "
+            f"^[[:space:]]*(export[[:space:]]+)?DEMO_TOOLS_ENABLED[[:space:]]*=|"
+            f"^[[:space:]]*(export[[:space:]]+)?PUBLIC_HOSTNAME(_FALLBACK)?[[:space:]]*=' "
             f"'{directory}/.env.prod'"
         )
         return gates.parse_env_pins(text)
@@ -466,6 +515,101 @@ class Rollout:
         if holders != {"api": expected}:
             raise GateError("rendered demo-tool policy/scope mismatch; re-run stage-release")
 
+    # ---- public edge (Caddy): reviewed hostnames only --------------------------
+    def check_rendered_edge(self) -> None:
+        """BEFORE Caddy is (re)created: the rendered Compose config gives the two
+        edge values to caddy ONLY, caddy mounts THIS release's Caddyfile read-only,
+        and that Caddyfile validates and adapts to exactly the reviewed hosts."""
+        raw = self._run(f"{self.dc_staged} --profile '*' config --format json")
+        primary, fallback = self.edge_hostnames()
+        try:
+            services = json.loads(raw)["services"]
+            holders = {
+                name: {k: v for k, v in svc.get("environment", {}).items() if k in EDGE_KEYS}
+                for name, svc in services.items()
+            }
+            holders = {name: env for name, env in holders.items() if env}
+            caddy = services["caddy"]
+            image = str(caddy["image"])
+            mounts = [
+                (v.get("source"), bool(v.get("read_only")))
+                for v in caddy.get("volumes", [])
+                if v.get("target") == CADDYFILE_MOUNT
+            ]
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise GateError(
+                "cannot verify the rendered edge configuration; re-run stage-release"
+            ) from exc
+        if holders != {"caddy": {"PUBLIC_HOSTNAME": primary, "PUBLIC_HOSTNAME_FALLBACK": fallback}}:
+            raise GateError("rendered edge hostnames/scope mismatch; re-run stage-release")
+        if mounts != [(f"{self.staged}/{CADDYFILE}", True)]:
+            raise GateError("rendered Caddy config does not mount this release's Caddyfile")
+        self._check_caddyfile(image)
+
+    def _check_caddyfile(self, image: str) -> list[str]:
+        primary, fallback = self.edge_hostnames()
+        run = (
+            f"docker run --rm --network none -e PUBLIC_HOSTNAME={shlex.quote(primary)} "
+            f"-e PUBLIC_HOSTNAME_FALLBACK={shlex.quote(fallback)} "
+            f"-v '{self.staged}/{CADDYFILE}:{CADDYFILE_MOUNT}:ro' {shlex.quote(image)} caddy"
+        )
+        opts = f"--config {CADDYFILE_MOUNT} --adapter caddyfile"
+        if not self.remote.run(f"{run} validate {opts} >/dev/null 2>&1").ok:
+            raise GateError("the release Caddyfile does not validate for the reviewed hostnames")
+        hosts = gates.check_adapted_caddy_hosts(
+            self._run(f"{run} adapt {opts} 2>/dev/null"), primary, fallback
+        )
+        self.log(f"Caddy site hosts (validated + adapted): {hosts}")
+        return hosts
+
+    def verify_running_edge(self, *, maintenance: bool) -> None:
+        """AFTER Caddy is (re)created: the running container carries exactly the
+        reviewed values and the release Caddyfile, and EVERY hostname answers with
+        the same route behavior (maintenance 503, else /login 200 + /metrics 404).
+        Only the two hostname variables are read from the container environment."""
+        primary, fallback = self.edge_hostnames()
+        template = (
+            "{{if .State.Running}}{{range .Config.Env}}"
+            '{{if and (ge (len .) 16) (eq (slice . 0 16) "PUBLIC_HOSTNAME=")}}{{println .}}'
+            '{{else if and (ge (len .) 25) (eq (slice . 0 25) "PUBLIC_HOSTNAME_FALLBACK=")}}'
+            "{{println .}}{{end}}{{end}}{{range .Mounts}}"
+            f'{{{{if eq .Destination "{CADDYFILE_MOUNT}"}}}}MOUNT={{{{.Source}}}}:{{{{.RW}}}}'
+            "{{println}}{{end}}{{end}}{{else}}NOT_RUNNING{{end}}"
+        )
+        out = self._run(
+            f"docker inspect --format {shlex.quote(template)} $({self.dc_staged} ps -q caddy)"
+        )
+        source = f"{self.staged}/{CADDYFILE}"
+        real = self._run(f"readlink -f '{source}'").strip()
+        gates.check_running_edge_facts(out.splitlines(), primary, fallback, {source, real})
+        published = self._run(f"{self.dc_staged} port caddy 443").splitlines()[0].strip()
+        bind, _, port = published.rpartition(":")
+        ip = "127.0.0.1" if bind.strip("[]") in ("0.0.0.0", "::", "") else bind.strip("[]")
+        want = (
+            {"/login": "503", "/metrics": "503"}
+            if maintenance
+            else {
+                "/login": "200",
+                "/metrics": "404",
+            }
+        )
+        hosts = gates.expected_edge_hosts(primary, fallback)
+        got: dict[str, str] = {}
+        for _ in range(EDGE_WAIT_S // 5):  # bounded: a new certificate may still be issuing
+            got = {
+                f"{h}{path}": self.remote.run(
+                    f"curl -sk -o /dev/null -m 10 -w '%{{http_code}}' "
+                    f"--resolve '{h}:{port}:{ip}' 'https://{h}:{port}{path}'"
+                ).text
+                for h in hosts
+                for path in want
+            }
+            if all(got[f"{h}{p}"] == code for h in hosts for p, code in want.items()):
+                self.log(f"edge routes ok on {hosts} (maintenance={maintenance})")
+                return
+            self._run("sleep 5")
+        raise GateError(f"edge route behavior mismatch on the reviewed hostnames: {got}")
+
     def verify_running_demo_policy(self) -> None:
         # Filter inside Docker's formatter: never return other environment
         # entries or even an invalid flag value. Duplicate matches also fail.
@@ -661,8 +805,10 @@ class Rollout:
         self.log(f"target: {self.remote.describe()}")
         imds = self.check_identity()
         self.log(f"instance ok: {imds.get('instance-id')} {imds.get('placement/region')}")
+        dns = self.check_primary_dns(imds)
         pins = self.read_pins(self.target.remote_app)
-        gates.check_release_pins(pins, self.release, post_pin=False)
+        gates.check_active_hostname(pins, self.release, self.target.public_hostname_fallback)
+        primary, fallback = self.edge_hostnames()
         rev = self.read_revision()
         roles = self.read_roles()
         gates.check_roles(roles, require_provisioned=False)
@@ -675,6 +821,12 @@ class Rollout:
             gates.check_current_revision(rev, self.release.expected_current_revision)
         report = {
             "alertmanager": am.evidence(),
+            "edge": {
+                "primary": primary,
+                "fallback": fallback,
+                "primary_a_records": dns,
+                "active_hostname": pins.get("PUBLIC_HOSTNAME"),
+            },
             "backup_env_mode": backup_env_mode,
             "current_link": current_shape,
             "manifest_sha256": self.release.sha256,
@@ -892,6 +1044,7 @@ class Rollout:
         if active_env_hash_before != active_env_hash_after:
             raise RolloutStop("active .env.prod changed during staging — aborting")
         self.check_staged_pins()
+        self.check_rendered_edge()  # read-only: throwaway `caddy validate/adapt`
         state.mark_phase(
             doc,
             "stage-release",
@@ -899,6 +1052,8 @@ class Rollout:
             active_checkout=self.read_active_sha(),
             worker_env_file=worker_secrets,
             demo_tools_enabled=self.target.demo_tools_enabled,
+            public_hostname=self.edge_hostnames()[0],
+            public_hostname_fallback=self.edge_hostnames()[1],
             release_sha=self.release.release_sha,
         )
         # A new staged policy needs fresh activation/readiness evidence. Database,
@@ -929,18 +1084,26 @@ class Rollout:
         return verdict
 
     def _write_staged_env(self, *, keys_dir: str) -> None:
-        """Rewrite release pins and the reviewed demo-tool policy in the staged
-        copy only; portable temp-file rewrite, never `sed -i`."""
+        """Rewrite release pins, the reviewed demo-tool policy and the reviewed edge
+        hostnames in the staged copy only; portable temp-file rewrite, never
+        `sed -i`. Neither hostname is ever inherited from the active release:
+        every form of an existing line is dropped and the canonical line appended."""
+        primary, fallback = self.edge_hostnames()
         lines = {
             "NLW_IMAGE": self.release.backend_image,
             "NLW_WEB_IMAGE": self.release.web_image,
             "NLW_CTX_KEYS_DIR": keys_dir,
             "DEMO_TOOLS_ENABLED": "true" if self.target.demo_tools_enabled else "false",
+            "PUBLIC_HOSTNAME": primary,
+            "PUBLIC_HOSTNAME_FALLBACK": fallback,
             **{f"NLW_CTX_{c.upper()}_KEY_ID": self.release.key_ids[c] for c in KEY_CLASSES},
         }
         src, dst = f"{self.target.remote_app}/.env.prod", f"{self.staged}/.env.prod"
         pattern = "|".join(lines)
-        pattern = f"^({pattern})=|^[[:space:]]*(export[[:space:]]+)?DEMO_TOOLS_ENABLED[[:space:]]*="
+        pattern = (
+            f"^({pattern})=|^[[:space:]]*(export[[:space:]]+)?"
+            "(DEMO_TOOLS_ENABLED|PUBLIC_HOSTNAME|PUBLIC_HOSTNAME_FALLBACK)[[:space:]]*="
+        )
         script = f"set -e; umask 077; grep -Ev '{pattern}' '{src}' > '{dst}.tmp' || true; "
         for k, v in lines.items():
             script += f"printf '%s=%s\\n' '{k}' '{v}' >> '{dst}.tmp'; "
@@ -1031,13 +1194,20 @@ class Rollout:
         self._require_mutation_authority()
         doc = self._state(require_staged=True)
         state.require_phases(doc, "verify-backup")
-        self.check_identity()
+        imds = self.check_identity()
         self.verify_checkout(self.staged)
         self.check_staged_pins()
         gates.check_current_revision(self.read_revision(), self.release.expected_current_revision)
+        # The primary must resolve to this instance and the release edge must render,
+        # validate and adapt to exactly the reviewed hostnames BEFORE caddy changes.
+        self.check_primary_dns(imds)
+        self.check_rendered_edge()
         # The edge must run the RELEASE config (maintenance matcher + caddy_maint
         # volume) before the flag means anything: recreate caddy alone, no deps.
         self._run(f"{self.dc_staged} up -d --no-deps --force-recreate caddy", timeout=300)
+        # Every hostname must answer through the new edge while the OLD runtime still
+        # serves: a failure here stops before traffic is closed or anything is stopped.
+        self.verify_running_edge(maintenance=False)
         self._run(f"{self.dc_staged} exec -T caddy touch {MAINTENANCE_FLAG}")
         self._run(f"{self.dc_staged} stop scheduler")
         deadline = self.now() + timedelta(seconds=DRAIN_WAIT_S)
@@ -1169,6 +1339,7 @@ class Rollout:
         am = self.check_alertmanager_authority()
         self.check_rendered_alertmanager_mounts(am)
         self.check_rendered_demo_policy()
+        self.check_rendered_edge()
         # <ops_root>/current must be absent (first activation from the legacy
         # layout) or an existing SYMLINK (`ln -sfn` replaces it). A real directory
         # would silently receive a link INSIDE it and activation would be a lie.
@@ -1196,7 +1367,11 @@ class Rollout:
                 f"{self.dc_staged} up -d --force-recreate --no-deps {' '.join(monitoring)}",
                 timeout=300,
             )
+        # drain already runs the staged edge; converge caddy only if a re-stage
+        # changed its reviewed configuration (no forced recreate otherwise).
+        self._run(f"{self.dc_staged} up -d --no-deps caddy", timeout=300)
         self.verify_running_demo_policy()
+        self.verify_running_edge(maintenance=True)
         images = self.read_running_images()
         gates.check_running_images(images, self.release)
         self.verify_mount_isolation(keys_dir)
@@ -1271,6 +1446,7 @@ class Rollout:
         doc = self._state(require_staged=True)
         state.require_phases(doc, "recreate-runtime")
         self.verify_running_demo_policy()
+        self.verify_running_edge(maintenance=True)
         body = ""
         for _ in range(45):
             res = self.remote.run("curl -sS -m 5 http://127.0.0.1:8000/health/ready")
@@ -1371,8 +1547,21 @@ class Rollout:
         alerting.check_rules_and_connectivity(status)
         alerting.check_delivery_record_usable(status)
         open_gates = alerting.launch_gates_for(status, environment=self.release.environment)
+        self.verify_running_edge(maintenance=True)  # still closed: prove the edge first
         self._run(f"{self.dc_staged} exec -T caddy rm -f {MAINTENANCE_FLAG}")
-        state.mark_phase(doc, "reopen", launch_gates_open=open_gates, alerting=status.evidence())
+        try:
+            self.verify_running_edge(maintenance=False)
+        except GateError:
+            # Fail closed: the edge did not serve the reviewed routes once opened.
+            self._run(f"{self.dc_staged} exec -T caddy touch {MAINTENANCE_FLAG}")
+            raise
+        state.mark_phase(
+            doc,
+            "reopen",
+            launch_gates_open=open_gates,
+            alerting=status.evidence(),
+            edge_hosts=gates.expected_edge_hosts(*self.edge_hostnames()),
+        )
         self._save(doc)
         for g in open_gates:
             self.log(f"LAUNCH GATE OPEN: {g} — technical deployment only, NOT an M12 GO")
@@ -1383,5 +1572,6 @@ class Rollout:
         doc = self._state(require_staged=True)
         state.require_phases(doc, "reopen")
         self.verify_running_demo_policy()
+        self.verify_running_edge(maintenance=False)
         status = self.alerting_status()
         alerting.check_go(status, environment=self.release.environment)

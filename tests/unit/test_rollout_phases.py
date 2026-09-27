@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import product
@@ -101,6 +102,7 @@ PINS_STAGED = (
     "PUBLIC_HOSTNAME=32-197-83-193.sslip.io\nNLW_CTX_KEYS_DIR=/srv/nlw/ctx-keys\n"
     "NLW_CTX_API_KEY_ID=stg-api-1\nNLW_CTX_WORKER_KEY_ID=stg-worker-1\n"
     "NLW_CTX_SCHEDULER_KEY_ID=stg-sched-1\nDEMO_TOOLS_ENABLED=false\n"
+    "PUBLIC_HOSTNAME_FALLBACK=\n"
 )
 IMAGE_INFO = json.dumps(
     {
@@ -155,15 +157,19 @@ ACTIVE_MUTATION = re.compile(
 )
 
 
+# A scripted response: text, an exit code (scripted failure), or a function of the
+# fake's own recorded history (e.g. the maintenance flag) and the command.
+Response = str | int | Callable[["FakeRemote", str], str]
+Table = list[tuple[str, Response]]
+
+
 class FakeRemote:
     """Pattern -> response table; records every command. Unmatched commands fail
     loudly so a phase cannot silently do something the test did not script."""
 
     is_local = False
 
-    def __init__(
-        self, table: list[tuple[str, str | int]], state: dict[str, Any] | None = None
-    ) -> None:
+    def __init__(self, table: Table, state: dict[str, Any] | None = None) -> None:
         self.table = table
         self.commands: list[str] = []
         self.state_doc: dict[str, Any] = state or {"phases": {}, "evidence": {}}
@@ -191,6 +197,8 @@ class FakeRemote:
             if re.search(pattern, command):
                 if isinstance(response, int):
                     return CommandResult(response, "", "scripted failure")
+                if callable(response):
+                    return CommandResult(0, response(self, command), "")
                 return CommandResult(0, response, "")
         raise AssertionError(f"unscripted command: {command[:160]}")
 
@@ -217,10 +225,23 @@ TGT_CURRENT = replace(
     TGT_OP, remote_app="/opt/nlw/current", git_remote="https://github.com/o/r.git"
 )
 PREVIOUS = "/opt/nlw/releases/" + "9" * 40
+CADDYFILE_SRC = f"{STAGED}/docker/caddy/Caddyfile"
 RENDERED_AM = json.dumps(
     {
         "services": {
             "api": {"environment": {"DEMO_TOOLS_ENABLED": "false"}},
+            "caddy": {
+                "image": "caddy:2",
+                "environment": {
+                    "PUBLIC_HOSTNAME": "32-197-83-193.sslip.io",
+                    "PUBLIC_HOSTNAME_FALLBACK": "",
+                },
+                "volumes": [
+                    {"type": "bind", "source": CADDYFILE_SRC,
+                     "target": "/etc/caddy/Caddyfile", "read_only": True},
+                    {"type": "volume", "source": "caddy_data", "target": "/data"},
+                ],
+            },
             "alertmanager": {
                 "volumes": [
                     {"type": "bind", "source": AMCFG, "target": CFG_MOUNT, "read_only": True},
@@ -235,7 +256,7 @@ RENDERED_AM = json.dumps(
 
 def _operator_table(
     *, cfg: str = OPERATOR_CFG, loaded: str | None = None, record: str = "__ABSENT__"
-) -> list[tuple[str, str | int]]:
+) -> Table:
     """Host + running-container facts for a correctly wired operator Alertmanager."""
     status = json.dumps({"config": {"original": loaded if loaded is not None else cfg}})
     mounts = (
@@ -264,12 +285,62 @@ def _operator_table(
     ]  # fmt: skip
 
 
+MAINT = "/srv/maint/MAINTENANCE"
+
+
+def _maintenance_on(fake: FakeRemote) -> bool:
+    """The edge's maintenance flag as the fake host would have it: closed after a
+    recorded drain until a recorded reopen, then toggled by the phase's OWN
+    touch/rm commands (so a probe cannot simply agree with what a phase expects)."""
+    phases = fake.state_doc.get("phases", {})
+    closed_span = PHASES[PHASES.index("drain") : PHASES.index("reopen")]
+    on = any(p in phases for p in closed_span) and "reopen" not in phases
+    for command in fake.commands:
+        if f"touch {MAINT}" in command:
+            on = True
+        elif f"rm -f {MAINT}" in command:
+            on = False
+    return on
+
+
+def _edge_http(fake: FakeRemote, command: str) -> str:
+    if _maintenance_on(fake):
+        return "503"
+    return "404" if "/metrics'" in command else "200"
+
+
+def _adapted(*hosts: str) -> str:
+    route = {"match": [{"host": list(hosts)}], "handle": [{"handler": "subroute"}]}
+    return json.dumps({"apps": {"http": {"servers": {"srv0": {"routes": [route]}}}}})
+
+
+def _edge_table(
+    primary: str = "32-197-83-193.sslip.io", fallback: str = "", source: str = CADDYFILE_SRC
+) -> Table:
+    """A correctly wired edge: Caddyfile validates/adapts to exactly the reviewed
+    hosts, the running caddy carries exactly those values and mounts the release
+    Caddyfile, and every hostname answers per the maintenance flag."""
+    running = (
+        f"PUBLIC_HOSTNAME={primary}\nPUBLIC_HOSTNAME_FALLBACK={fallback}\nMOUNT={source}:false"
+    )
+    return [
+        (r"caddy validate --config", ""),
+        (r"caddy adapt --config", _adapted(primary, *([fallback] if fallback else []))),
+        (r"docker inspect --format .*PUBLIC_HOSTNAME=.*ps -q caddy", running),
+        (r"readlink -f '.*/docker/caddy/Caddyfile'", source),
+        (r"port caddy 443", "0.0.0.0:443"),
+        (r"curl -sk -o /dev/null .*--resolve", _edge_http),
+        (r"up -d --no-deps caddy$", ""),
+        (r"^sleep 5$", ""),
+    ]
+
+
 def _base_table(
     *,
     roles: str = ROLES_M11,
     staged_pins: str = PINS_STAGED,
     rev: str = "0010_readiness_schema_grant",
-) -> list[tuple[str, str | int]]:
+) -> Table:
     return [
         (r"169\.254\.169\.254", IMDS),
         (r"docker inspect --format .*DEMO_TOOLS_ENABLED=.*ps -q api", "match"),
@@ -294,6 +365,7 @@ def _base_table(
         # Pre-activation phases: current is ABSENT on the legacy host.
         (r"if \[ -L '/opt/nlw/current' \]; then readlink", "ABSENT"),
         (r"readlink '/opt/nlw/current'", STAGED),
+        *_edge_table(),
         *_operator_table(),
     ]
 
@@ -307,7 +379,12 @@ def _done(*phases: str) -> dict[str, Any]:
     # Later phase fixtures have already passed staging under this manifest.
     if any(PHASES.index(p) >= PHASES.index("stage-release") for p in phases):
         doc["phases"]["stage-release"] = {}
-        doc["evidence"]["stage-release"] = {"demo_tools_enabled": False, "release_sha": SHA}
+        doc["evidence"]["stage-release"] = {
+            "demo_tools_enabled": False,
+            "public_hostname": REL.public_hostname,
+            "public_hostname_fallback": "",
+            "release_sha": SHA,
+        }
     return doc
 
 
@@ -452,7 +529,7 @@ def test_verify_release_requires_every_command_and_records_evidence() -> None:
 
 
 # --- §C/§D: nothing mutates the database or the active deployment before the gate --
-def _pre_backup_table() -> list[tuple[str, str | int]]:
+def _pre_backup_table() -> Table:
     return _base_table() + [
         (r"docker pull -q", ""),
         (r'index \.Config\.Labels "org\.opencontainers\.image\.revision"', SHA),
@@ -850,7 +927,8 @@ def test_drain_stops_on_non_terminal_work_and_never_stops_api() -> None:
         _rollout(fake, authorization=AUTHORIZATION_PHRASE).drain()
     assert fake.ran(r"stop scheduler") and not fake.ran(r"stop worker api")
     assert fake.ran(
-        rf"cd '{STAGED}' && env -u DEMO_TOOLS_ENABLED docker compose -p app .* "
+        rf"cd '{STAGED}' && env -u DEMO_TOOLS_ENABLED -u PUBLIC_HOSTNAME "
+        r"-u PUBLIC_HOSTNAME_FALLBACK docker compose -p app .* "
         r"up -d --no-deps --force-recreate caddy"
     )
 
@@ -1007,7 +1085,7 @@ def test_state_recorded_for_another_manifest_invalidates_every_phase() -> None:
 
 
 # --- final audit: legacy-host first rollout -------------------------------------------
-def _stage_table() -> list[tuple[str, str | int]]:
+def _stage_table() -> Table:
     return _base_table() + [
         (
             r"ctxkeys fingerprint",
@@ -1163,7 +1241,7 @@ def _rollout_op(remote: FakeRemote, target: TargetConfig = TGT_OP, **op: object)
     )
 
 
-def _reopen_table(**kw: Any) -> list[tuple[str, str | int]]:
+def _reopen_table(**kw: Any) -> Table:
     return (
         _operator_table(**kw)
         + _base_table()
@@ -1329,7 +1407,7 @@ def test_committed_null_config_cannot_misrepresent_the_running_config() -> None:
 
 # J.5 / J.6 — the operator override is required BEFORE Alertmanager is recreated and
 # every recreation keeps the external config + secrets mounts.
-def _activation_table(**kw: Any) -> list[tuple[str, str | int]]:
+def _activation_table(**kw: Any) -> Table:
     return (
         _operator_table(**kw)
         + _base_table(roles=ROLES_ALL, rev="0016_signed_database_context")
@@ -1607,7 +1685,7 @@ def test_code_only_release_migrates_as_a_verified_noop() -> None:
 def test_prepare_keys_reuses_existing_host_keys_on_a_follow_up_release() -> None:
     """N+1 keeps the installed keys: prepare-keys must verify + fingerprint the
     existing files instead of refusing (`ctxkeys prepare` never overwrites)."""
-    table: list[tuple[str, str | int]] = [
+    table: Table = [
         (r"ctxkeys prepare", 1),  # would refuse: the files exist
         (r"--entrypoint stat .* '/keys/\.'", ".|directory|700|0|0|4096"),
         (
@@ -1632,7 +1710,7 @@ def test_prepare_keys_reuses_existing_host_keys_on_a_follow_up_release() -> None
         "scheduler",
     }
     # A PARTIAL set is never silently completed.
-    partial: list[tuple[str, str | int]] = [
+    partial: Table = [
         (r"--entrypoint stat .* '/keys/scheduler\.key'", 1),
         *table,
     ]

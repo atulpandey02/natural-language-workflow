@@ -50,9 +50,12 @@ def _render_authority(
         "staged": target.dc_in(str(tmp_path)),
         "backup": target.dc_backup_in(str(tmp_path)),
     }[invocation]
-    assert "env -u DEMO_TOOLS_ENABLED docker compose" in command
+    assert (
+        "env -u DEMO_TOOLS_ENABLED -u PUBLIC_HOSTNAME -u PUBLIC_HOSTNAME_FALLBACK docker compose"
+        in command
+    )
     if not protected:
-        command = command.replace("env -u DEMO_TOOLS_ENABLED ", "")
+        command = re.sub(r"env( -u [A-Z_]+)+ ", "", command)  # the parent (unprotected) form
     env = {
         k: f"fixture-{k}"
         for k in re.findall(r"\$\{([A-Z_]+):\?", (ROOT / "docker-compose.prod.yml").read_text())

@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from nlw.ops.rollout.gates import hostname_problem, sslip_ipv4
+
 _TARGET_KEYS = (
     "NLW_STAGING_INSTANCE_ID",
     "NLW_STAGING_SSH_HOST",
@@ -39,7 +41,21 @@ _TARGET_KEYS = (
     "NLW_STAGING_REMOTE_APP",
     "NLW_STAGING_COMPOSE_PROJECT",
     "NLW_STAGING_DEMO_TOOLS_ENABLED",
+    "NLW_STAGING_PUBLIC_HOSTNAME",
 )
+# Reviewed values that must occur at most once in target.env (a duplicate is
+# ambiguous configuration, never "last one wins").
+_SINGLE_KEYS = (
+    "NLW_STAGING_DEMO_TOOLS_ENABLED",
+    "NLW_STAGING_PUBLIC_HOSTNAME",
+    "NLW_STAGING_PUBLIC_HOSTNAME_FALLBACK",
+)
+# Interpolation values a reviewed rollout must never take from the operator's
+# shell: Compose ranks the shell environment ABOVE `--env-file`, so each one is
+# removed from every rollout Compose invocation and only the staged .env.prod
+# (written by stage-release from the reviewed target/manifest) supplies it.
+AMBIENT_UNSET = ("DEMO_TOOLS_ENABLED", "PUBLIC_HOSTNAME", "PUBLIC_HOSTNAME_FALLBACK")
+_ENV_UNSET = "env " + " ".join(f"-u {name}" for name in AMBIENT_UNSET)
 _OPERATOR_ALERTING_KEYS = (
     "NLW_STAGING_ALERTMANAGER_CONFIG",
     "NLW_STAGING_ALERTMANAGER_SECRETS_DIR",
@@ -76,6 +92,12 @@ class TargetConfig:
     remote_app: str  # the ACTIVE checkout (M11 today)
     compose_project: str
     demo_tools_enabled: bool  # required reviewed target policy; never inherited from active env
+    # Reviewed edge hostnames. The primary must equal the attested manifest's
+    # ``public_hostname`` (None = not cross-checked: fixtures built in code). The
+    # fallback (a canonical sslip.io name) is authoritative from the target only;
+    # None = no fallback (sslip-only primary, or the loopback rehearsal).
+    public_hostname: str | None = None
+    public_hostname_fallback: str | None = None
     ops_root: str = "/opt/nlw"
     compose_files: tuple[str, ...] = ("docker-compose.prod.yml", "docker-compose.staging.yml")
     # The backup job's env file (restic repository + credentials) — the SAME file
@@ -121,7 +143,7 @@ class TargetConfig:
             names.append(self.operator_alerting.override_path)
         files = " ".join(f"-f {f}" for f in names)
         return (
-            f"cd '{directory}' && env -u DEMO_TOOLS_ENABLED "
+            f"cd '{directory}' && {_ENV_UNSET} "
             f"docker compose -p {self.compose_project} "
             f"--env-file .env.prod {files}"
         )
@@ -136,7 +158,7 @@ class TargetConfig:
     def dc_backup_in(self, directory: str) -> str:
         """Backup profile from ``directory``, mirroring docker/systemd/nlw-backup.service."""
         return (
-            f"cd '{directory}' && env -u DEMO_TOOLS_ENABLED "
+            f"cd '{directory}' && {_ENV_UNSET} "
             f"docker compose -p {self.compose_project} "
             f"--env-file .env.prod --env-file '{self.backup_env_file}' "
             f"-f docker-compose.prod.yml --profile backup"
@@ -150,16 +172,33 @@ def parse_target_env(text: str) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        if k.strip() == "NLW_STAGING_DEMO_TOOLS_ENABLED" and (
-            k.strip() in values or v.strip() not in ("true", "false")
-        ):
+        key = k.strip()
+        if key in _SINGLE_KEYS and key in values:
+            raise TargetConfigError(f"{key} must occur exactly once")
+        if key == "NLW_STAGING_DEMO_TOOLS_ENABLED" and v.strip() not in ("true", "false"):
             raise TargetConfigError(
                 "NLW_STAGING_DEMO_TOOLS_ENABLED must occur once and be exactly true or false"
             )
-        values[k.strip()] = v.strip().strip('"')
+        if key in ("NLW_STAGING_PUBLIC_HOSTNAME", "NLW_STAGING_PUBLIC_HOSTNAME_FALLBACK"):
+            # Checked on the RAW value: quoting or padding is non-canonical here.
+            problem = hostname_problem(v.strip())
+            if problem is not None or v != v.strip() or raw != line:
+                raise TargetConfigError(
+                    f"{key} must be a bare lowercase hostname "
+                    f"(no scheme, port, path, wildcard or quotes): {problem or 'padded'}"
+                )
+        values[key] = v.strip().strip('"')
     missing = [k for k in _TARGET_KEYS if not values.get(k)]
     if missing:
         raise TargetConfigError(f"target config missing: {missing}")
+    fallback = values.get("NLW_STAGING_PUBLIC_HOSTNAME_FALLBACK")
+    if fallback is not None:
+        if sslip_ipv4(fallback) is None:
+            raise TargetConfigError(
+                "NLW_STAGING_PUBLIC_HOSTNAME_FALLBACK must be a canonical <a-b-c-d>.sslip.io name"
+            )
+        if fallback == values["NLW_STAGING_PUBLIC_HOSTNAME"]:
+            raise TargetConfigError("NLW_STAGING_PUBLIC_HOSTNAME_FALLBACK duplicates the primary")
     if not re.match(r"^i-[0-9a-f]{8,17}$", values["NLW_STAGING_INSTANCE_ID"]):
         raise TargetConfigError("NLW_STAGING_INSTANCE_ID is not an EC2 instance id")
     if not re.match(r"^[A-Za-z0-9.\-]+$", values["NLW_STAGING_SSH_HOST"]):
@@ -204,6 +243,8 @@ def load_target(path: Path, *, ssh_key: Path | None = None) -> TargetConfig:
         remote_app=remote_app,
         compose_project=values["NLW_STAGING_COMPOSE_PROJECT"],
         demo_tools_enabled=values["NLW_STAGING_DEMO_TOOLS_ENABLED"] == "true",
+        public_hostname=values["NLW_STAGING_PUBLIC_HOSTNAME"],
+        public_hostname_fallback=values.get("NLW_STAGING_PUBLIC_HOSTNAME_FALLBACK"),
         ops_root=ops_root,
         compose_files=compose_files,
         backup_env_file=values.get("NLW_STAGING_BACKUP_ENV_FILE") or f"{ops_root}/.env.backup",
