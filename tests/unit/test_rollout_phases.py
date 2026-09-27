@@ -2120,3 +2120,19 @@ def test_edge_state_evidence_carries_hostnames_but_no_secret() -> None:
     assert EDGE_PRIMARY in blob and EDGE_FALLBACK in blob
     for needle in ("password", "secret", "token", "://"):
         assert needle not in blob
+
+
+def test_edge_rendered_mount_compares_cleaned_paths_without_widening() -> None:
+    # Reproduced in the disposable rehearsal: TMPDIR ends in '/', so the staged path
+    # holds '//'; Compose renders the CLEANED path. Equal after normalization only.
+    target = replace(TGT_EDGE, ops_root="/opt/nlw/")
+    fake = FakeRemote(_edge_first() + _base_table())
+    r = _edge_rollout(fake, target=target)
+    assert "//releases/" in r.staged
+    r.check_rendered_edge()
+    moved = _rendered_edge().replace(
+        CADDYFILE_SRC, "/opt/nlw/releases/other/docker/caddy/Caddyfile"
+    )
+    fake2 = FakeRemote(_edge_first((r"config --format json", moved)) + _base_table())
+    with pytest.raises(GateError, match="does not mount this release"):
+        _edge_rollout(fake2, target=target).check_rendered_edge()

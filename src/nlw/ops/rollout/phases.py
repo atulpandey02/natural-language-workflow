@@ -47,6 +47,7 @@ rewrite that carries only image digests, key ids and paths.
 from __future__ import annotations
 
 import json
+import posixpath
 import shlex
 import socket
 from collections.abc import Callable
@@ -531,8 +532,10 @@ class Rollout:
             holders = {name: env for name, env in holders.items() if env}
             caddy = services["caddy"]
             image = str(caddy["image"])
+            # Compose renders CLEANED absolute paths (e.g. a `//` in the ops root
+            # collapses), so both sides are compared normalized — never widened.
             mounts = [
-                (v.get("source"), bool(v.get("read_only")))
+                (posixpath.normpath(str(v.get("source"))), bool(v.get("read_only")))
                 for v in caddy.get("volumes", [])
                 if v.get("target") == CADDYFILE_MOUNT
             ]
@@ -542,7 +545,7 @@ class Rollout:
             ) from exc
         if holders != {"caddy": {"PUBLIC_HOSTNAME": primary, "PUBLIC_HOSTNAME_FALLBACK": fallback}}:
             raise GateError("rendered edge hostnames/scope mismatch; re-run stage-release")
-        if mounts != [(f"{self.staged}/{CADDYFILE}", True)]:
+        if mounts != [(posixpath.normpath(f"{self.staged}/{CADDYFILE}"), True)]:
             raise GateError("rendered Caddy config does not mount this release's Caddyfile")
         self._check_caddyfile(image)
 
@@ -581,7 +584,8 @@ class Rollout:
         )
         source = f"{self.staged}/{CADDYFILE}"
         real = self._run(f"readlink -f '{source}'").strip()
-        gates.check_running_edge_facts(out.splitlines(), primary, fallback, {source, real})
+        sources = {posixpath.normpath(source), posixpath.normpath(real)}
+        gates.check_running_edge_facts(out.splitlines(), primary, fallback, sources)
         published = self._run(f"{self.dc_staged} port caddy 443").splitlines()[0].strip()
         bind, _, port = published.rpartition(":")
         ip = "127.0.0.1" if bind.strip("[]") in ("0.0.0.0", "::", "") else bind.strip("[]")
