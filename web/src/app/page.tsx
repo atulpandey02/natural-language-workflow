@@ -3,7 +3,16 @@
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { ErrorBanner, Empty, Loading, StatusBadge } from "@/components/ui";
-import { useApprovals, useConnectors, useRuns, useSchedules, useWorkflows } from "@/lib/api/hooks";
+import {
+  useApprovals,
+  useConnectors,
+  useCurrentWorkspace,
+  useRuns,
+  useSchedules,
+  useWorkflows,
+} from "@/lib/api/hooks";
+import { isManager } from "@/lib/membership";
+import { GetStarted } from "@/components/GetStarted";
 
 function StatCard({ label, value, href }: { label: string; value: number | string; href: string }) {
   return (
@@ -15,6 +24,7 @@ function StatCard({ label, value, href }: { label: string; value: number | strin
 }
 
 export default function DashboardPage() {
+  const current = useCurrentWorkspace();
   const workflows = useWorkflows();
   const runs = useRuns();
   const connectors = useConnectors();
@@ -35,6 +45,9 @@ export default function DashboardPage() {
         Start a new analysis →
       </Link>
       <ErrorBanner error={anyError} />
+      {workflows.data && workflows.data.length === 0 ? (
+        <GetStarted canManage={isManager(current.data?.role)} />
+      ) : null}
       <div className="row" style={{ alignItems: "stretch" }}>
         <StatCard label="Workflows" value={workflows.data?.length ?? "…"} href="/workflows" />
         <StatCard label="Connectors" value={connectors.data?.length ?? "…"} href="/connectors" />

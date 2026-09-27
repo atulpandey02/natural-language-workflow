@@ -87,7 +87,7 @@ function AcceptInner() {
   const joined = result ? workspaces.data?.find((w) => w.id === result.workspace_id) : undefined;
 
   return (
-    <main className="container auth-page" style={{ maxWidth: 520, paddingTop: 48 }}>
+    <main className="container" style={{ maxWidth: 520, paddingTop: 48 }}>
       <p className="eyebrow">NLW PILOT · INVITATION</p>
       <h1>Join a workspace</h1>
       {me.data?.email ? (
