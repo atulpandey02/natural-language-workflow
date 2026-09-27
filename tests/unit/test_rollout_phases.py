@@ -12,6 +12,7 @@ import json
 import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -99,7 +100,7 @@ PINS_STAGED = (
     f"NLW_IMAGE={REL.backend_image}\nNLW_WEB_IMAGE={REL.web_image}\n"
     "PUBLIC_HOSTNAME=32-197-83-193.sslip.io\nNLW_CTX_KEYS_DIR=/srv/nlw/ctx-keys\n"
     "NLW_CTX_API_KEY_ID=stg-api-1\nNLW_CTX_WORKER_KEY_ID=stg-worker-1\n"
-    "NLW_CTX_SCHEDULER_KEY_ID=stg-sched-1\n"
+    "NLW_CTX_SCHEDULER_KEY_ID=stg-sched-1\nDEMO_TOOLS_ENABLED=false\n"
 )
 IMAGE_INFO = json.dumps(
     {
@@ -219,6 +220,7 @@ PREVIOUS = "/opt/nlw/releases/" + "9" * 40
 RENDERED_AM = json.dumps(
     {
         "services": {
+            "api": {"environment": {"DEMO_TOOLS_ENABLED": "false"}},
             "alertmanager": {
                 "volumes": [
                     {"type": "bind", "source": AMCFG, "target": CFG_MOUNT, "read_only": True},
@@ -270,6 +272,7 @@ def _base_table(
 ) -> list[tuple[str, str | int]]:
     return [
         (r"169\.254\.169\.254", IMDS),
+        (r"docker inspect --format .*DEMO_TOOLS_ENABLED=.*ps -q api", "match"),
         (r"grep -E '\^\(NLW_IMAGE.*'/opt/nlw/app/\.env\.prod'", PINS_ACTIVE),
         (r"grep -E '\^\(NLW_IMAGE.*releases", staged_pins),
         (r"alembic_version", rev),
@@ -296,7 +299,16 @@ def _base_table(
 
 
 def _done(*phases: str) -> dict[str, Any]:
-    return {"phases": {p: {} for p in phases}, "evidence": {}}
+    doc: dict[str, Any] = {
+        "manifest_sha256": REL.sha256,
+        "phases": {p: {} for p in phases},
+        "evidence": {},
+    }
+    # Later phase fixtures have already passed staging under this manifest.
+    if any(PHASES.index(p) >= PHASES.index("stage-release") for p in phases):
+        doc["phases"]["stage-release"] = {}
+        doc["evidence"]["stage-release"] = {"demo_tools_enabled": False, "release_sha": SHA}
+    return doc
 
 
 RECEIPT = ProvenanceReceipt(
@@ -534,7 +546,16 @@ def test_mutating_phases_require_verified_backup_recorded_on_host() -> None:
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_stage_release_records_reviewed_demo_policy(enabled: bool) -> None:
-    fake = FakeRemote(_pre_backup_table(), state=_done("verify-release", "verify-escrow"))
+    table = [
+        (
+            p,
+            v.replace("DEMO_TOOLS_ENABLED=false", "DEMO_TOOLS_ENABLED=true")
+            if enabled and isinstance(v, str)
+            else v,
+        )
+        for p, v in _pre_backup_table()
+    ]
+    fake = FakeRemote(table, state=_done("verify-release", "verify-escrow"))
     rollout = _rollout(fake, authorization=AUTHORIZATION_PHRASE)
     rollout.target = replace(TGT, demo_tools_enabled=enabled)
     rollout.stage_release(keys_dir=KEYS)
@@ -573,6 +594,163 @@ def test_staged_demo_policy_overrides_active_value_without_changing_active_bytes
     assert result.startswith("# active environment\nUNRELATED_SETTING=preserved\n")
     assert (staged / ".env.prod").stat().st_mode & 0o777 == 0o600
     assert not (staged / ".env.prod.tmp").exists()
+
+
+@pytest.mark.parametrize("target_value,recorded,pinned", list(product((False, True), repeat=3)))
+def test_demo_authority_requires_target_state_and_staged_pin_agreement(
+    target_value: bool, recorded: bool, pinned: bool
+) -> None:
+    doc = _done("stage-release")
+    doc["evidence"]["stage-release"]["demo_tools_enabled"] = recorded
+    pins = PINS_STAGED.replace(
+        "DEMO_TOOLS_ENABLED=false", f"DEMO_TOOLS_ENABLED={str(pinned).lower()}"
+    )
+    fake = FakeRemote(_base_table(staged_pins=pins), state=doc)
+    r = _rollout_op(fake, target=replace(TGT, demo_tools_enabled=target_value))
+    if target_value == recorded == pinned:
+        assert r._state(require_staged=True)["manifest_sha256"] == REL.sha256
+    else:
+        with pytest.raises(GateError, match="re-run stage-release"):
+            r._state(require_staged=True)
+    assert not any(ACTIVE_MUTATION.search(c) or DB_MUTATION.search(c) for c in fake.commands)
+
+
+@pytest.mark.parametrize("phase", [*PHASES[PHASES.index("stage-release") + 1 :], "go-check"])
+@pytest.mark.parametrize("change", ["target", "staged-file", "recorded"])
+def test_every_later_phase_refuses_policy_drift_before_mutation(phase: str, change: str) -> None:
+    doc = _done(*PHASES[1:])
+    pins = PINS_STAGED
+    target = TGT
+    if change == "target":
+        target = replace(TGT, demo_tools_enabled=True)
+    elif change == "staged-file":
+        pins = pins.replace("DEMO_TOOLS_ENABLED=false", "DEMO_TOOLS_ENABLED=true")
+    else:
+        doc["evidence"]["stage-release"]["demo_tools_enabled"] = True
+    fake = FakeRemote(_base_table(staged_pins=pins), state=doc)
+    r = _rollout_op(fake, target=target, authorization=AUTHORIZATION_PHRASE)
+    call = r.go_check if phase == "go-check" else _all_phase_calls(r)[phase]
+    with pytest.raises(GateError, match="re-run stage-release"):
+        call()
+    assert not any(ACTIVE_MUTATION.search(c) or DB_MUTATION.search(c) for c in fake.commands)
+
+
+@pytest.mark.parametrize("binding", ["missing-manifest", "foreign-manifest", "foreign-release"])
+def test_staged_demo_policy_cannot_use_unbound_or_foreign_state(binding: str) -> None:
+    doc = _done("stage-release")
+    if binding == "missing-manifest":
+        doc.pop("manifest_sha256")
+    elif binding == "foreign-manifest":
+        doc["manifest_sha256"] = "f" * 64
+    else:
+        doc["evidence"]["stage-release"]["release_sha"] = "f" * 40
+    fake = FakeRemote([], state=doc)
+    with pytest.raises((StateError, GateError)):
+        _rollout(fake)._state(require_staged=True)
+    assert len(fake.commands) == 1  # only the state read, no host mutation
+
+
+@pytest.mark.parametrize(
+    "value", [None, "TRUE", "", "1", "false # comment", '"false"', "false\nDEMO_TOOLS_ENABLED=true"]
+)
+def test_noncanonical_or_missing_staged_pin_fails(value: str | None) -> None:
+    line = "" if value is None else f"DEMO_TOOLS_ENABLED={value}\n"
+    pins = PINS_STAGED.replace("DEMO_TOOLS_ENABLED=false\n", line)
+    fake = FakeRemote(_base_table(staged_pins=pins), state=_done("stage-release"))
+    with pytest.raises(GateError, match="re-run stage-release"):
+        _rollout(fake)._state(require_staged=True)
+
+
+def test_restaging_reviewed_change_updates_bound_state_and_requires_fresh_activation() -> None:
+    class StagingRemote(FakeRemote):
+        def run(
+            self, command: str, *, stdin: str | None = None, timeout: int = 300
+        ) -> CommandResult:
+            if "'DEMO_TOOLS_ENABLED' 'true' >>" in command:
+                self.table = [
+                    (
+                        p,
+                        v.replace("DEMO_TOOLS_ENABLED=false", "DEMO_TOOLS_ENABLED=true")
+                        if isinstance(v, str)
+                        else v,
+                    )
+                    for p, v in self.table
+                ]
+            return super().run(command, stdin=stdin, timeout=timeout)
+
+    fake = StagingRemote(_pre_backup_table(), state=_done(*PHASES[1:]))
+    r = _rollout_op(
+        fake, target=replace(TGT, demo_tools_enabled=True), authorization=AUTHORIZATION_PHRASE
+    )
+    with pytest.raises(GateError, match="re-run stage-release"):
+        r.backup()
+    r.stage_release(keys_dir=KEYS)
+    doc = r._state(require_staged=True)
+    assert doc["manifest_sha256"] == REL.sha256
+    assert doc["evidence"]["stage-release"]["release_sha"] == SHA
+    assert doc["evidence"]["stage-release"]["demo_tools_enabled"] is True
+    assert not ({"recreate-runtime", "validate", "reopen"} & doc["phases"].keys())
+    r.backup()  # progression permitted only after the explicit re-stage
+    assert not any(ACTIVE_MUTATION.search(c) or DB_MUTATION.search(c) for c in fake.commands)
+
+
+def test_restaging_an_active_release_cannot_rewrite_its_environment() -> None:
+    fake = FakeRemote(
+        [(r"if \[ -L '/opt/nlw/current'", STAGED)] + _pre_backup_table(),
+        state=_done("verify-release", "verify-escrow", "stage-release"),
+    )
+    with pytest.raises(GateError, match="cannot re-stage the active release"):
+        _rollout(fake, authorization=AUTHORIZATION_PHRASE).stage_release(keys_dir=KEYS)
+    assert not fake.ran(r"\.env\.prod\.tmp|git clone")
+
+
+@pytest.mark.parametrize(
+    "service",
+    [
+        "api",
+        "worker",
+        "scheduler",
+        "web",
+        "postgres",
+        "redis",
+        "caddy",
+        "backup",
+        "restore",
+        "migrate",
+        "prometheus",
+        "alertmanager",
+    ],
+)
+def test_rendered_demo_scope_mismatch_stops_before_recreation(service: str) -> None:
+    rendered = json.loads(RENDERED_AM)
+    rendered["services"].setdefault(service, {})["environment"] = {"DEMO_TOOLS_ENABLED": "true"}
+    fake = FakeRemote(
+        [(r"--profile '\*' config --format json", json.dumps(rendered))] + _activation_table(),
+        state=_done("install-context-keys"),
+    )
+    with pytest.raises(GateError, match="rendered demo-tool policy/scope mismatch"):
+        _rollout(fake, authorization=AUTHORIZATION_PHRASE).recreate_runtime(keys_dir=KEYS)
+    assert not fake.ran(r"up -d|ln -sfn")
+
+
+@pytest.mark.parametrize("observed", ["mismatch", "", "match\nmatch"])
+@pytest.mark.parametrize("phase", ["recreate-runtime", "validate", "reopen", "go-check"])
+def test_running_demo_mismatch_never_reopens_traffic(phase: str, observed: str) -> None:
+    fake = FakeRemote(
+        [(r"docker inspect --format .*DEMO_TOOLS_ENABLED=.*ps -q api", observed)]
+        + _activation_table(),
+        state=_done(*PHASES[1:]),
+    )
+    r = _rollout(fake, authorization=AUTHORIZATION_PHRASE)
+    call = r.go_check if phase == "go-check" else _all_phase_calls(r)[phase]
+    with pytest.raises(GateError, match="running API demo-tool policy mismatch"):
+        call()
+    # Even previously successful validation cannot authorize reopening after drift.
+    with pytest.raises(GateError, match="running API demo-tool policy mismatch"):
+        r.reopen()
+    assert not fake.ran(r"rm -f /srv/maint/MAINTENANCE")
+    probe = next(c for c in fake.commands if "range .Config.Env" in c)
+    assert "{{json .Config.Env}}" not in probe and "{{println .}}" not in probe
 
 
 def test_prepare_roles_is_the_first_db_mutation_and_needs_drain() -> None:
@@ -672,7 +850,8 @@ def test_drain_stops_on_non_terminal_work_and_never_stops_api() -> None:
         _rollout(fake, authorization=AUTHORIZATION_PHRASE).drain()
     assert fake.ran(r"stop scheduler") and not fake.ran(r"stop worker api")
     assert fake.ran(
-        rf"cd '{STAGED}' && docker compose -p app .* up -d --no-deps --force-recreate caddy"
+        rf"cd '{STAGED}' && env -u DEMO_TOOLS_ENABLED docker compose -p app .* "
+        r"up -d --no-deps --force-recreate caddy"
     )
 
 

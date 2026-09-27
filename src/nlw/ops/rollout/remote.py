@@ -121,7 +121,8 @@ class TargetConfig:
             names.append(self.operator_alerting.override_path)
         files = " ".join(f"-f {f}" for f in names)
         return (
-            f"cd '{directory}' && docker compose -p {self.compose_project} "
+            f"cd '{directory}' && env -u DEMO_TOOLS_ENABLED "
+            f"docker compose -p {self.compose_project} "
             f"--env-file .env.prod {files}"
         )
 
@@ -135,7 +136,8 @@ class TargetConfig:
     def dc_backup_in(self, directory: str) -> str:
         """Backup profile from ``directory``, mirroring docker/systemd/nlw-backup.service."""
         return (
-            f"cd '{directory}' && docker compose -p {self.compose_project} "
+            f"cd '{directory}' && env -u DEMO_TOOLS_ENABLED "
+            f"docker compose -p {self.compose_project} "
             f"--env-file .env.prod --env-file '{self.backup_env_file}' "
             f"-f docker-compose.prod.yml --profile backup"
         )

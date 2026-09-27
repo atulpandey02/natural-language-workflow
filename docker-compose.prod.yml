@@ -21,9 +21,6 @@
 #   POSTGRES_PASSWORD  WORKSPACE_COOKIE_SECRET  NLW_*_DB_PASSWORD
 
 x-app-env: &app-env
-  # Only api/worker/scheduler consume this anchor and initialize the tool registry.
-  # stage-release writes the reviewed target policy; ordinary renders default off.
-  DEMO_TOOLS_ENABLED: ${DEMO_TOOLS_ENABLED:-false}
   APP_ENV: production
   LOG_LEVEL: info
   DATABASE_URL: ${DATABASE_URL}
@@ -120,6 +117,9 @@ services:
     <<: *app-hardening
     environment:
       <<: *app-env
+      # API alone consumes this visibility policy. Worker registry execution is
+      # independent of it. Reviewed rollout removes ambient shell overrides.
+      DEMO_TOOLS_ENABLED: ${DEMO_TOOLS_ENABLED:-false}
       # Planner runs API-side ONLY. The LLM provider/model/key live here (never in
       # x-app-env), so worker/scheduler/web never receive the platform LLM key.
       NLW_LLM_PROVIDER: ${NLW_LLM_PROVIDER:-stub}

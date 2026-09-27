@@ -184,17 +184,17 @@ def test_wrong_release_digest_fails() -> None:
         f"NLW_IMAGE=ghcr.io/o/r@sha256:{'c' * 64}\nNLW_WEB_IMAGE=ghcr.io/o/r/web@{W}\n"
         "PUBLIC_HOSTNAME=32-197-83-193.sslip.io\nNLW_CTX_KEYS_DIR=/srv/nlw/ctx-keys\n"
         "NLW_CTX_API_KEY_ID=stg-api-1\nNLW_CTX_WORKER_KEY_ID=stg-worker-1\n"
-        "NLW_CTX_SCHEDULER_KEY_ID=stg-sched-1\n"
+        "NLW_CTX_SCHEDULER_KEY_ID=stg-sched-1\nDEMO_TOOLS_ENABLED=false\n"
     )
     assert "POSTGRES_PASSWORD" not in pins  # secrets are never parsed out
     gates.check_release_pins(pins, REL, post_pin=False)  # hostname only, pre-pin
     with pytest.raises(GateError, match="backend digest"):
-        gates.check_release_pins(pins, REL, post_pin=True)
+        gates.check_release_pins(pins, REL, post_pin=True, demo_tools_enabled=False)
     pins["NLW_IMAGE"] = REL.backend_image
-    gates.check_release_pins(pins, REL, post_pin=True)
+    gates.check_release_pins(pins, REL, post_pin=True, demo_tools_enabled=False)
     pins["NLW_CTX_WORKER_KEY_ID"] = "other"
     with pytest.raises(GateError, match="WORKER_KEY_ID"):
-        gates.check_release_pins(pins, REL, post_pin=True)
+        gates.check_release_pins(pins, REL, post_pin=True, demo_tools_enabled=False)
 
 
 # --- migration state (O.4) -------------------------------------------------------

@@ -111,10 +111,32 @@ that environment. The setting enables all existing demo-tagged tools, including
 During `stage-release`, the active `.env.prod` is read and hash-checked but never
 edited. The staged copy receives `DEMO_TOOLS_ENABLED` from the validated target,
 replacing any inherited value. The phase evidence records `demo_tools_enabled`
-as a boolean without environment contents or credentials. Compose forwards it
-only to API, worker and scheduler; a missing or empty Compose value defaults to
-`false`. Do not edit active/staged release files or broaden the Alertmanager-only
-operator override to set this flag.
+as a boolean and binds it to the release SHA and existing manifest digest, without
+environment contents or credentials. Compose forwards it only to API, the sole
+visibility-policy consumer. Worker execution and scheduler enqueueing do not
+depend on receiving it. A missing or empty ordinary Compose value defaults to
+`false`.
+
+Every reviewed rollout Compose command uses `env -u DEMO_TOOLS_ENABLED` so an
+exported shell value cannot override the staged environment file. Other required
+environment variables remain available. From `backup` onward, every phase
+requires agreement between the current target, manifest-bound staging evidence
+and canonical staged pin; disagreement stops with `re-run stage-release`.
+Re-stage the inactive release explicitly after reviewing a target change. This
+updates the policy and clears prior recreation/validation/reopening evidence;
+the existing backup, database and escrow gates still apply. An active release
+cannot be re-staged: use a new reviewed release instead.
+
+Before activation, the full Compose render must put the exact boolean only on
+API, including checks of inactive service profiles. Existing image/key pins and
+operator Alertmanager checks remain mandatory. After recreation, during
+validation, and again before reopening or a GO check, Docker's inspection
+formatter compares only the running API's flag and returns a sanitized
+match/mismatch. No complete container environment is returned or logged. A
+mismatch blocks reopening even if an earlier validation succeeded.
+
+Do not edit active/staged release files or broaden the Alertmanager-only operator
+override to set this flag.
 
 Release `549b19f` lacks this wiring. Deployment must use a new Delivery-attested
 release containing the correction, with its own escrow attestation. The recorded

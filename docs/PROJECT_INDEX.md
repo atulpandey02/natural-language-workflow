@@ -20,8 +20,11 @@ table identifiers on one line with an accessible scroll cue, and gate Slack
 sharing on validated READY analytics. A local follow-up on
 `fix/staging-demo-tool-enablement` addresses a deployment blocker: the reviewed
 target now explicitly selects demo-tool visibility, stage-release writes it only
-to the staged environment, and Compose forwards it to API/worker/scheduler with
-a default of false. This fix awaits review and a new Delivery-attested release;
+to the staged environment, and Compose forwards it only to API with a default
+of false. A follow-up authority correction removes ambient shell overrides,
+checks target/state/staged pins on every later phase, and verifies rendered and
+running API values before reopening. Worker execution remains independent of
+the visibility flag. This fix awaits review and a new Delivery-attested release;
 `549b19f` must not be used for deployment. The `0020` → `0021` migration path and
 the separate pilot-launch gates below are unchanged. No VPS was contacted.
 

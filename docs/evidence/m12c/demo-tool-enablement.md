@@ -1,121 +1,150 @@
-# M12C rollout correction: explicit demo-tool enablement
+# M12C demo-tool visibility: rollout authority correction
 
-Baseline: local `main` at `549b19f`. Fix branch:
-`fix/staging-demo-tool-enablement`. All verification was local; no VPS connection
-or release operation was performed.
+Branch: `fix/staging-demo-tool-enablement`. This correction follows `1b14405`
+without amending it. The parent correction's service-scope and authority claims
+are superseded by the evidence below. No VPS connection was made.
 
-## Reproduction and correction
+## Root cause and final scope
 
-A local render of the original `549b19f:docker-compose.prod.yml`, with
-`DEMO_TOOLS_ENABLED=true` supplied, omitted the variable from API, worker and
-scheduler. Their application settings therefore kept new demo planning and the
-pilot catalog disabled. The existing rollout rewrote only release pins and key
-settings, while the operator override correctly allowed only Alertmanager mounts.
+The parent wrote a reviewed value into staged `.env.prod`, but Compose gives an
+exported shell variable precedence over `--env-file`. Later phases did not bind
+that choice to staged pins or verify rendered/running values. A fresh-process
+Settings test also mistook parsing a field for consuming its policy.
 
-The target now requires `NLW_STAGING_DEMO_TOOLS_ENABLED` exactly once, with an
-unquoted lowercase `true` or `false`. Missing, empty, duplicate or noncanonical
-values fail before remote construction or phase execution. Staging explicitly
-selects `true`; the disposable rehearsal explicitly selects `false`.
+Only API consumes visibility: `api/capability.py::demo_tools_included` reads
+`Settings.demo_tools_visible` for planning/materialization/tool listing, and
+`api/routers/analytics.py::datasets` uses it for the pilot catalog. No worker or
+scheduler code reads this policy. `tools/builtin.py` registers tools regardless
+of visibility; `worker/actors.py` invokes `engine/execution.py`, which resolves
+registered tools independently of this flag. Scheduler imports the actor for
+enqueueing only. Their execution/compatibility behavior is unchanged.
 
-`stage-release` writes `DEMO_TOOLS_ENABLED` from that validated boolean into only
-the staged `.env.prod`, replacing any value inherited from the active file. The
-existing atomic rewrite, 0600 permissions and active-file hash check remain.
-The phase evidence records only the boolean `demo_tools_enabled`. Production
-targets must explicitly select `false` unless separately reviewed to enable it.
-The application and ordinary Compose render remain default-off.
+Production Compose now forwards `DEMO_TOOLS_ENABLED` only to API, with
+`${DEMO_TOOLS_ENABLED:-false}`. Worker, scheduler, web, Postgres, Redis, Caddy,
+migrate, backup, restore, Prometheus and Alertmanager do not receive it.
 
-## Exact runtime service set
+## Authority chain
 
-| Service | Inspected code path and reason |
-|---|---|
-| API | `api.app.create_app` loads Settings; `api.capability.demo_tools_included` gates new planning; `api.routers.analytics.datasets` gates the pilot catalog. API routers import `tools.builtin` to populate the registry. |
-| Worker | `worker.actors` loads Settings and imports `engine.execution`, which imports `tools.builtin` and resolves tools through `REGISTRY`. It must receive the same environment policy as API. |
-| Scheduler | `scheduler.__main__.main` loads Settings and imports `worker.actors.advance_run` for enqueueing, initializing the same registry/actor settings. It remains enqueue-only. |
+1. **Reviewed target:** `NLW_STAGING_DEMO_TOOLS_ENABLED` is required exactly once
+   and accepts only unquoted lowercase `true` or `false`. Invalid/missing values
+   fail locally before remote construction. Staging explicitly enables it;
+   production stays disabled unless its reviewed target explicitly enables it.
+2. **Manifest-bound state:** stage-release records the boolean and release SHA
+   in the existing state document bound to the manifest digest. Later phases
+   refuse missing bindings, foreign manifest/release evidence, missing/nonboolean
+   evidence and disagreement with the currently loaded target.
+3. **Staged environment:** the canonical non-secret flag is part of release-pin
+   readback and verification, alongside existing image/key/hostname checks.
+   Every phase from backup through GO rechecks agreement. Mismatch stops with
+   `re-run stage-release`; no later phase rewrites a value. The staged rewrite
+   removes prior flag assignments and leaves active bytes unchanged.
+4. **Rendered Compose:** all reviewed rollout Compose commands use
+   `env -u DEMO_TOOLS_ENABLED docker compose ...`. Only that variable is removed;
+   unrelated required variables still reach Compose. Before activation, the
+   full render (including inactive profiles) must contain exactly the reviewed
+   boolean on API and no flag on any other service. The existing operator
+   Alertmanager mount/config gates remain mandatory.
+5. **Running API:** after recreation, during validation, before reopening and
+   during GO, a Docker inspection template filters/computes the flag match
+   internally. Only `match`/`mismatch` is returned; no complete environment or
+   invalid flag content is returned/logged. Missing/duplicate values or a stopped
+   container fail. A mismatch blocks reopening despite old successful evidence.
 
-Only these three services consume the production `x-app-env` anchor. The flag is
-forwarded there as `${DEMO_TOOLS_ENABLED:-false}`. No service gains a secret or a
-new mount. Disabling visibility still permits existing materialized workflows to
-execute their registered tools, as required by the existing compatibility policy.
+Re-staging an inactive release with a newly reviewed value updates the pin and
+manifest-bound policy evidence, then clears prior recreation/validation/reopen
+records. Backup/database/escrow facts retain their existing gates. Re-staging an
+already active release is refused to prevent rewriting its environment through
+`current`; use a new reviewed release.
 
 ## Rendered-Compose matrix
 
-Each render used dummy credentials, an empty project directory and `/dev/null`
-as its environment file, including all service profiles. No containers started.
+| Invocation and input | API | All other services |
+|---|---|---|
+| Unprotected parent-style invocation: file false, shell true | true (defect reproduced) | — |
+| Reviewed file false, shell true/false/empty | false | absent |
+| Reviewed file true, shell true/false/empty | true | absent |
+| Ordinary production/staging render, missing/empty input | false | absent |
+| Invalid/missing reviewed target | rejected before host contact | — |
 
-| Compose / reviewed setting | API | Worker | Scheduler | All other services |
-|---|---|---|---|---|
-| Original `549b19f`, explicit true | absent | absent | absent | absent |
-| Production, missing or empty value | false | false | false | absent |
-| Production, explicit false | false | false | false | absent |
-| Production, explicit true | true | true | true | absent |
-| Production + staging overlay, missing/empty/false | false | false | false | absent |
-| Reviewed staging target, true | true | true | true | absent |
-| Invalid or missing target setting | rejected before host contact | — | — | — |
-
-The excluded services are Postgres, Redis, Caddy, web, migrate, backup, restore,
-Prometheus and Alertmanager. Production enablement requires an explicit reviewed
-target choice; the staging overlay itself does not enable demo tools.
+The protected matrix runs through the actual active, staged and backup Compose
+command builders. `NLW_LLM_MODEL` and all required shell-supplied settings survive
+flag removal. Fresh-process API tests prove the pilot catalog and planner view
+are populated only when enabled. Worker/scheduler actor processes receive no
+flag and can still execute both registered pilot tool functions locally.
 
 ## Validation
 
-- **310 focused tests passed:** target parsing, rollout phases, new rendered
-  Compose tests, existing deployment/secret/key/backup isolation checks, demo
-  visibility, planner capabilities, release manifest and provenance tests.
-- **1,070 CI-equivalent unit tests passed:** `uv run pytest -m 'not integration'`.
-  The 34 skipped tests are opt-in live-model evaluations; 433 integration tests
-  were deselected. Four existing dependency/test warnings remained. The first
-  sandboxed attempt could not bind local fixture sockets; the rerun with local
-  socket permission passed.
-- **Ruff format/check passed** across the repository; **mypy passed** across 303
-  source files. Shell syntax validation of the rehearsal script passed.
-- **16 tracked YAML files parsed successfully.** CI's nine missing-required-value
-  Compose cases still failed for the expected variable. An ordinary render
-  succeeded without the migration credential; the credential appeared only in
-  the profiled `migrate` service.
-- Fresh processes initialized API and worker-actor Settings from each rendered
-  runtime environment. Enabled API catalog/planning exposed both pilot tools;
-  disabled catalog/planning exposed neither. Worker/scheduler actor imports saw
-  the same boolean, and both registered pilot tool functions executed locally
-  under either policy, preserving existing-workflow compatibility.
-- Temporary-file tests executed the actual staged-env rewrite for missing,
-  true, false and foreign manual active values, with both reviewed target values.
-  Active bytes stayed identical; staged output contained one reviewed assignment,
-  kept unrelated settings and retained 0600 permissions.
-- Existing manifest/image-gate tests verified the recorded `0020` source and
-  `0021` target, including rejection of an image missing the required migration.
-  `git diff --check` passed.
+| Check | Result |
+|---|---|
+| Focused rollout/Compose/visibility/capability/manifest/provenance/secret-isolation tests | **403 passed** |
+| CI-equivalent `pytest -m 'not integration'` | **1,163 passed**, 34 opt-in live-model skips, 433 integration tests deselected |
+| Ruff format/check | Passed repository-wide |
+| mypy | Passed: 303 source files |
+| YAML and rehearsal shell syntax | Passed: 16 tracked YAML files; `bash -n` |
+| `git diff --check` | Passed |
+| Committed disposable rehearsal | **Passed, exit 0**, including cleanup |
 
-No database migration, full integration suite, frontend build, container image
-build or live smoke was run for this configuration-only correction. No release
-manifest, downloaded artifact or existing `549b19f` release was changed.
+Unit coverage includes all eight boolean target/state/file combinations;
+policy drift at every post-staging phase; missing/foreign manifest bindings and
+foreign release state; noncanonical/missing/duplicate pins; explicit re-staging;
+active-file byte identity; every forbidden rendered service; running mismatch
+blocking recreation/validation/reopen/GO; and unchanged image/key/Alertmanager
+checks. Existing visibility tests preserve already-materialized execution.
+Four existing dependency/test warnings remained in the complete unit run.
 
-## Changed files
+The full committed rehearsal exercised both shell-override directions, target
+mutation after staging, staged-file mutation, successful explicit re-staging,
+and active-file byte identity. It then deliberately recreated API through an
+unprotected invocation: validation and reopening both rejected the running
+value. The reviewed invocation restored it. Worker execution and one scheduler
+occurrence passed without receiving the flag.
+
+The first local rollout reached `0021_analytics_handoff`; a second code-only
+release activated through `current` with unchanged keys and preserved operator
+Alertmanager authority. Local preflight-to-reopen timings were 139 seconds and
+77 seconds respectively, excluding builds. The final disposable downgrade and
+re-upgrade included `0020_schedule_authorization` → `0021_analytics_handoff`.
+Cleanup removed the rehearsal containers, volumes, keys, manifests, registry and
+temporary checkouts. This is local fixture evidence, not a VPS, backup-provider,
+attestation or external-delivery claim.
+
+Reproduction commands (repository root, local fixture sockets required):
+
+```sh
+UV_CACHE_DIR=/tmp/nlw-m12c-uv uv run pytest -m 'not integration' -q
+UV_CACHE_DIR=/tmp/nlw-m12c-uv uv run ruff format --check .
+UV_CACHE_DIR=/tmp/nlw-m12c-uv uv run ruff check .
+UV_CACHE_DIR=/tmp/nlw-m12c-uv uv run mypy
+bash -n scripts/ops/rehearse-0010-to-0016.sh
+UV_CACHE_DIR=/tmp/nlw-m12c-uv bash scripts/ops/rehearse-0010-to-0016.sh
+```
+
+## Changed files in this correction
 
 ```text
-.env.prod.example
-deploy/staging/target.env
 docker-compose.prod.yml
-scripts/ops/rehearse-0010-to-0016.sh
 src/nlw/ops/rollout/remote.py
+src/nlw/ops/rollout/gates.py
 src/nlw/ops/rollout/phases.py
+scripts/ops/rehearse-0010-to-0016.sh
+tests/unit/test_demo_tools_compose.py
 tests/unit/test_rollout_gates.py
 tests/unit/test_rollout_phases.py
-tests/unit/test_demo_tools_compose.py
 docs/PROJECT_INDEX.md
 docs/runbooks/staging-signed-context-rollout.md
 docs/evidence/m12c/demo-tool-enablement.md
 ```
 
-## Review boundary
+## Protected boundary
 
-Analytics, frontend, Slack, planner/execution semantics, authorization, RLS,
-approvals, audit, recovery and signed context are unchanged. Migration 0021,
-Alertmanager operator-authority restrictions, backup/escrow behavior and release
-manifest/provenance authority are unchanged. No new migration was added.
+Migration 0021, analytics, datasets, contracts, frontend, planner/execution,
+Slack, authorization, RLS, approval, audit, recovery and signed-context behavior
+are unchanged. Backup/escrow/Alertmanager authority and release provenance policy
+are unchanged. No migration or deployable manifest was created or edited. The
+recorded staging source remains `0020_schedule_authorization`; a new attested
+release still legitimately targets `0021_analytics_handoff`.
 
-Nothing was pushed, merged, staged on the VPS, deployed, drained, migrated or
-restarted. No VPS was contacted or changed. Stop for review. After approval,
-the new merged SHA needs its own Delivery artifact and escrow attestation before
-the complete rollout; `549b19f` is unsuitable for deployment. Backup timer
-installation/verification and real Sales/Support browser smoke remain subsequent
-deployment work.
+Nothing was pushed to Git or an external registry, deployed externally, or
+changed on the VPS. The local rehearsal uses only disposable fixture resources
+and a loopback registry. Independent delta verification is next; review/merge,
+a new Delivery artifact and a matching escrow attestation precede any VPS rollout.

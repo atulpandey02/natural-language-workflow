@@ -90,7 +90,7 @@ must_fail() {
   if LAST_OUT="$("$@" 2>&1)"; then printf '%s\n' "$LAST_OUT"; die "$label — expected a STOP, but it succeeded"; fi
 }
 OVERLAY="$TMP/docker-compose.rehearsal.yml"
-DC_OLD="docker compose -p $PROJ --env-file $APP/.env.prod -f $APP/docker-compose.prod.yml -f $APP/docker-compose.staging.yml -f $OVERLAY"
+DC_OLD="env -u DEMO_TOOLS_ENABLED docker compose -p $PROJ --env-file $APP/.env.prod -f $APP/docker-compose.prod.yml -f $APP/docker-compose.staging.yml -f $OVERLAY"
 DC="$DC_OLD"  # switched to the activated release after recreate-runtime
 psql_owner() { $DC exec -T postgres psql -U nlw -d nlw -tAc "$1" | tr -d '[:space:]'; }
 running_api_image() { docker inspect --format '{{index .Config.Image}}' "$(docker ps -q --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=api")" 2>/dev/null || true; }
@@ -464,6 +464,7 @@ EOF
 "${ROLLOUT[@]}" verify-escrow --authorize "$AUTH" --escrow-confirm "$ESC" --attestation "$TMP/attestation.json"
 assert_untouched "after verify-escrow"
 
+export DEMO_TOOLS_ENABLED=true  # adversarial ambient shell; reviewed target is false
 log "7/10 stage-release (INACTIVE) -> forced backup failures -> real backup -> verify-backup; roles come AFTER"
 "${ROLLOUT[@]}" stage-release --authorize "$AUTH"
 STAGED="$OPS/releases/$NEW_SHA"
@@ -475,6 +476,40 @@ cmp -s "$APP/docker/worker.secrets.env" "$STAGED/docker/worker.secrets.env" || d
 [ -z "$(git -C "$STAGED" status --porcelain)" ] || die "staging the worker secrets file dirtied the release checkout"
 ok "worker connector secrets file staged (0600, git-ignored, checkout still clean)"
 assert_untouched "after stage-release (release staged inactive)"
+# Full authority chain: these edits are deliberate disposable negative fixtures.
+assert_demo_render() {
+  uv run python - "$TMP/target.env" "$STAGED" "$1" <<'PYDEMO'
+import json, sys
+from pathlib import Path
+from nlw.ops.rollout.remote import load_target, LocalRemote
+r = LocalRemote().run(load_target(Path(sys.argv[1])).dc_in(sys.argv[2]) + " --profile '*' config --format json")
+assert r.ok, "reviewed Compose render failed"
+services = json.loads(r.text)["services"]
+assert {n for n,s in services.items() if "DEMO_TOOLS_ENABLED" in s.get("environment", {})} == {"api"}
+assert services["api"]["environment"]["DEMO_TOOLS_ENABLED"] == sys.argv[3]
+print("reviewed Compose demo-tool policy and API-only scope: match")
+PYDEMO
+}
+assert_demo_render false
+sed -i.bak 's/^NLW_STAGING_DEMO_TOOLS_ENABLED=false$/NLW_STAGING_DEMO_TOOLS_ENABLED=true/' "$TMP/target.env"
+must_fail "changed target progressed without re-staging" "${ROLLOUT[@]}" backup --authorize "$AUTH"
+grep -q "re-run stage-release" <<<"$LAST_OUT" || die "target policy drift failed for the wrong reason"
+assert_untouched "target demo-policy mutation refused"
+export DEMO_TOOLS_ENABLED=false
+"${ROLLOUT[@]}" stage-release --authorize "$AUTH"
+assert_demo_render true
+sed -i.bak 's/^NLW_STAGING_DEMO_TOOLS_ENABLED=true$/NLW_STAGING_DEMO_TOOLS_ENABLED=false/' "$TMP/target.env"
+"${ROLLOUT[@]}" stage-release --authorize "$AUTH"
+# A changed staged file also blocks the first later phase; re-staging restores it.
+sed -i.bak 's/^DEMO_TOOLS_ENABLED=false$/DEMO_TOOLS_ENABLED=true/' "$STAGED/.env.prod"
+rm -f "$STAGED/.env.prod.bak"
+must_fail "changed staged demo policy progressed" "${ROLLOUT[@]}" backup --authorize "$AUTH"
+grep -q "re-run stage-release" <<<"$LAST_OUT" || die "staged policy drift failed for the wrong reason"
+"${ROLLOUT[@]}" stage-release --authorize "$AUTH"
+export DEMO_TOOLS_ENABLED=true
+assert_demo_render false
+assert_untouched "demo policy re-staged; active environment still byte-identical"
+ok "demo authority: both ambient overrides defeated; target/file drift blocked; explicit re-staging restored agreement"
 # Forced failure 1: verify-backup with NO backup evidence yet.
 must_fail "verify-backup passed without any backup" "${ROLLOUT[@]}" verify-backup --authorize "$AUTH" --allow-fixture-repository
 grep -q "backup gate failed\|evidence" <<<"$LAST_OUT" || die "verify-backup refused for the wrong reason: $LAST_OUT"
@@ -532,7 +567,7 @@ assert_datastores_untouched "after activation"
 WORKER_CID="$(docker ps -q --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=worker")"
 docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$WORKER_CID" | grep -q '^NLW_SECRET_REHEARSAL=' || die "recreated worker lost its connector secrets env file"
 ok "recreated worker carries the connector secrets env file (variable name checked, value never printed)"
-DC_BARE="docker compose -p $PROJ --env-file $STAGED/.env.prod -f $STAGED/docker-compose.prod.yml -f $STAGED/docker-compose.staging.yml -f $OVERLAY"
+DC_BARE="env -u DEMO_TOOLS_ENABLED docker compose -p $PROJ --env-file $STAGED/.env.prod -f $STAGED/docker-compose.prod.yml -f $STAGED/docker-compose.staging.yml -f $OVERLAY"
 DC="$DC_BARE -f $OVR"   # the reviewed invocation: the operator override on every call from a release dir
 am_mounts() { docker inspect --format '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' "$(docker ps -q --filter "label=com.docker.compose.project=$PROJ" --filter "label=com.docker.compose.service=alertmanager")"; }
 # am_has_mount <host path> <container path>: the daemon reports the RESOLVED source
@@ -555,6 +590,17 @@ am_has_mount "$AMDIR/alertmanager.yml" /etc/alertmanager/alertmanager.yml && am_
 python3 -c 'import json,sys; a=json.load(open(sys.argv[1]))["evidence"]["recreate-runtime"]["alertmanager"]; assert a["receiver"]=="ops-webhook" and a["config_source"]=="running-alertmanager", a; assert "secret" not in json.dumps(a)' "$OPS/rollout/$NEW_SHA.json"
 ok "recreate-runtime: the RUNNING Alertmanager mounts the operator config + secrets (not the committed file) and LOADED the operator receiver"
 "${ROLLOUT[@]}" validate --authorize "$AUTH"
+# Reproduce a bare operator recreation with the ambient override. The effective
+# API value must now stop both validation and reopening, even with old evidence.
+UNPROTECTED_DC="${DC#env -u DEMO_TOOLS_ENABLED }"
+$UNPROTECTED_DC up -d --force-recreate --no-deps api >/dev/null 2>&1
+for ph in validate reopen; do
+  must_fail "$ph accepted a running API demo-policy mismatch" "${ROLLOUT[@]}" "$ph" --authorize "$AUTH"
+  grep -q "running API demo-tool policy mismatch" <<<"$LAST_OUT" || die "$ph failed for the wrong reason"
+done
+$DC up -d --force-recreate --no-deps api >/dev/null 2>&1
+"${ROLLOUT[@]}" validate --authorize "$AUTH"
+ok "effective running API demo policy: mismatch blocks validate/reopen; reviewed recreation restores match"
 REOPEN_OUT="$("${ROLLOUT[@]}" reopen --authorize "$AUTH" 2>&1)"; printf '%s\n' "$REOPEN_OUT"
 grep -q "LAUNCH GATE OPEN: alert delivery unverified" <<<"$REOPEN_OUT" || die "reopen did not record the open alert-delivery gate"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["evidence"]["reopen"]; assert d["launch_gates_open"]==["alert delivery unverified"], d; a=d["alerting"]; assert a["rules_loaded"] and a["alertmanager_reachable"] and not a["receiver_is_null"] and a["receiver"]=="ops-webhook" and a["credential_files_present"] and not a["delivery_verified"] and a["config_source"]=="running-alertmanager" and a["delivery_status"]=="absent", a' "$OPS/rollout/$NEW_SHA.json"
@@ -698,7 +744,7 @@ ok "N+1 migrate: verified no-op — schema stays ${TARGET_HEAD}, ${EXPECTED_POLI
 [ "$(readlink "$OPS/current")" = "$STAGED2" ] || die "N+1: current does not point at the new release"
 [ "$(running_api_image)" = "$NEW2_BACKEND" ] || die "N+1: api is not running the N+1 digest"
 [ "$(git -C "$STAGED" rev-parse HEAD)" = "$NEW_SHA" ] && [ "$(git -C "$APP" rev-parse HEAD)" = "$OLD_SHA" ] || die "N+1: a previous checkout was modified"
-DC="docker compose -p $PROJ --env-file $STAGED2/.env.prod -f $STAGED2/docker-compose.prod.yml -f $STAGED2/docker-compose.staging.yml -f $OVERLAY -f $OVR"
+DC="env -u DEMO_TOOLS_ENABLED docker compose -p $PROJ --env-file $STAGED2/.env.prod -f $STAGED2/docker-compose.prod.yml -f $STAGED2/docker-compose.staging.yml -f $OVERLAY -f $OVR"
 am_has_mount "$AMDIR/alertmanager.yml" /etc/alertmanager/alertmanager.yml && am_has_mount "$AMSEC" /etc/alertmanager/secrets || die "N+1: operator Alertmanager mounts lost on recreation"
 [ "$(am_loaded_receiver)" = "ops-webhook" ] || die "N+1: Alertmanager loaded receiver changed"
 "${ROLLOUT2[@]}" validate --authorize "$AUTH"
