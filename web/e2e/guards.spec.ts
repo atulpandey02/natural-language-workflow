@@ -15,7 +15,7 @@ test.describe("access + safety guards", () => {
     await signIn(page, env.adminEmail, env.adminPassword);
     await page.goto("/workflows/new");
     await page.getByLabel(/what should this workflow do/i).fill("do something impossible xyzzy");
-    await page.getByRole("button", { name: /^plan$/i }).click();
+    await page.getByRole("button", { name: /^prepare plan$/i }).click();
     // The stub CI planner returns NEEDS_CLARIFICATION → the blocked notice shows
     // and no materialize button is offered (same gating as REJECT).
     await expect(page.getByTestId("materialize-blocked")).toBeVisible();

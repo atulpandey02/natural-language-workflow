@@ -3,7 +3,7 @@ import { ResponsiveDetails } from "@/components/ResponsiveDetails";
 import Link from "next/link";
 import { use } from "react";
 import { AppShell } from "@/components/AppShell";
-import { ErrorBanner, Empty, Loading, StatusBadge } from "@/components/ui";
+import { ErrorBanner, Empty, Loading, OutcomeNotice, StatusBadge } from "@/components/ui";
 import { RunSummaryCard } from "@/components/RunSummaryCard";
 import { AnalyticsPanel } from "@/components/AnalyticsPanel";
 import {
@@ -39,11 +39,8 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
             <Link href={`/workflows/${run.data.workflow_id}`}>Open workflow</Link>
           </div>
         ) : null}
-        {run.data?.error ? (
-          <div className="banner" role="alert">
-            {run.data.error}
-          </div>
-        ) : null}
+        {/* The engine's raw error text is diagnostic, not user copy: explain the outcome instead. */}
+        {run.data ? <OutcomeNotice outcome={summary.data?.outcome ?? run.data.status} /> : null}
         <div className="analysis-layout">
           <div className="analysis-main">
             <AnalyticsPanel runId={id} />

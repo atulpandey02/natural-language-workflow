@@ -64,26 +64,74 @@ describe("PlanReview materialization gating", () => {
     expect(screen.getByText("a".repeat(64))).toBeVisible();
     expect(container.querySelector("script, textarea, [contenteditable='true']")).toBeNull();
   });
-  it("offers Materialize for PASS", () => {
+  it("offers Save workflow for PASS", () => {
     renderReview("PASS");
-    expect(screen.getByRole("button", { name: /materialize/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save workflow/i })).toBeInTheDocument();
     expect(screen.queryByTestId("materialize-blocked")).toBeNull();
   });
 
-  it("offers Materialize for NEEDS_APPROVAL", () => {
+  it("offers Save workflow for NEEDS_APPROVAL", () => {
     renderReview("NEEDS_APPROVAL");
-    expect(screen.getByRole("button", { name: /materialize/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save workflow/i })).toBeInTheDocument();
   });
 
-  it("blocks Materialize for REJECT", () => {
+  it("blocks saving for REJECT", () => {
     renderReview("REJECT");
-    expect(screen.queryByRole("button", { name: /materialize/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /save workflow/i })).toBeNull();
     expect(screen.getByTestId("materialize-blocked")).toBeInTheDocument();
   });
 
-  it("blocks Materialize for NEEDS_CLARIFICATION", () => {
+  it("blocks saving for NEEDS_CLARIFICATION", () => {
     renderReview("NEEDS_CLARIFICATION");
-    expect(screen.queryByRole("button", { name: /materialize/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /save workflow/i })).toBeNull();
     expect(screen.getByText(/Which table\?/)).toBeInTheDocument();
+  });
+
+  it("reads as plain language: step labels, friendly checks, no raw codes or messages", () => {
+    const client = new QueryClient();
+    const data: PlanProposalOut = {
+      ...proposal("REJECT"),
+      proposed_plan: {
+        steps: [
+          { id: "sales", tool: "pilot.sales_analysis" },
+          {
+            id: "send",
+            tool: "slack.send_message",
+            connector: "pilot-slack",
+            depends_on: ["sales"],
+          },
+        ],
+      },
+      feasibility: {
+        findings: [
+          { code: "SQL_REJECTED", severity: "error", message: "psycopg: relation users denied" },
+          { code: "MYSTERY_CODE", severity: "error", message: "internal detail 42" },
+        ],
+      },
+    };
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <PlanReview proposal={data} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText("Blocked")).toBeInTheDocument();
+    expect(screen.getByTestId("plan-status-copy")).toHaveTextContent(/can't be used/);
+    expect(screen.getByText("Analyze synthetic sales data")).toBeInTheDocument();
+    expect(screen.getByText("Share to Slack (after approval)")).toBeInTheDocument();
+    expect(screen.getByText("step 1")).toBeInTheDocument();
+    const findings = screen.getByTestId("plan-findings");
+    expect(findings).toHaveTextContent(/only safe, read-only queries/);
+    expect(findings).toHaveTextContent("A safety check flagged this plan.");
+    const text = container.textContent ?? "";
+    for (const raw of [
+      "SQL_REJECTED",
+      "MYSTERY_CODE",
+      "psycopg",
+      "internal detail",
+      "REJECT",
+      "pilot.sales_analysis",
+    ]) {
+      expect(text).not.toContain(raw);
+    }
   });
 });

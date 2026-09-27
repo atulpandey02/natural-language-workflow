@@ -24,11 +24,11 @@ export function GetStarted({ canManage }: { canManage: boolean }) {
         </li>
       </ol>
       <div className="next-actions">
-        <Link href="/workflows/new">
+        <Link href="/workflows/new?dataset=sales-v1">
           <strong>Analyze synthetic Sales data →</strong>
           <span>e.g. “What drove revenue changes over the last six months?”</span>
         </Link>
-        <Link href="/workflows/new">
+        <Link href="/workflows/new?dataset=support-v1">
           <strong>Analyze synthetic Support data →</strong>
           <span>e.g. “Where are response times slipping, and which queues are at risk?”</span>
         </Link>

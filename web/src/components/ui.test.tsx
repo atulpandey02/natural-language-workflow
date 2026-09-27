@@ -30,19 +30,19 @@ describe("canApprove", () => {
 });
 
 describe("StatusBadge", () => {
-  it("renders the status text", () => {
+  it("renders a plain-language label and keeps the exact status as data", () => {
     render(<StatusBadge status="COMPLETED" />);
-    expect(screen.getByText("COMPLETED")).toBeInTheDocument();
+    expect(screen.getByText("Completed")).toHaveAttribute("data-status", "COMPLETED");
   });
 
   it("renders a blocked schedule as a failure state (it will not run)", () => {
     render(<StatusBadge status="blocked" />);
-    expect(screen.getByText("blocked")).toHaveClass("fail");
+    expect(screen.getByText("Blocked")).toHaveClass("fail");
   });
 
   it("renders the ambiguous unknown outcome as a warning, distinct from failure", () => {
     render(<StatusBadge status="unknown" />);
-    const badge = screen.getByText("unknown");
+    const badge = screen.getByText("Outcome unknown");
     expect(badge).toBeInTheDocument();
     // Amber warning, NOT the red failure class — an unknown outcome is not a
     // definite failure.

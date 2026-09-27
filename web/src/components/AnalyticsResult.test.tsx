@@ -140,9 +140,12 @@ describe("validated analytics presentation", () => {
     (run_outcome) => {
       render(<AnalyticsResultView value={{ ...fixture, status: "PARTIAL", run_outcome }} />);
       expect(screen.getByRole("status")).toHaveTextContent("Partial results from completed steps");
-      expect(screen.getByText(run_outcome)).toBeVisible();
+      const badge = document.querySelector(`[data-status="${run_outcome}"]`);
+      expect(badge).toBeVisible();
+      expect(badge).toHaveTextContent(run_outcome === "FAILED" ? "Failed" : "Outcome unknown");
       expect(screen.getAllByTestId("analytics-kpi")[0]).toHaveTextContent("$280,617.20");
-      expect(screen.queryByText("COMPLETED")).toBeNull();
+      expect(document.querySelector('[data-status="COMPLETED"]')).toBeNull();
+      expect(screen.queryByText("Completed")).toBeNull();
     },
   );
   it("never exposes unexpected raw output", () => {
@@ -220,17 +223,18 @@ describe("validated analytics presentation", () => {
         value={{ ...fixture, status: "PARTIAL", run_outcome: "FAILED_WITH_UNKNOWN" }}
       />,
     );
-    expect(screen.getByText("FAILED_WITH_UNKNOWN")).toHaveClass("warn");
+    expect(screen.getByText("Outcome unknown")).toHaveClass("warn");
     expect(screen.getByText(/Partial results/)).toBeVisible();
   });
   it.each([
-    ["FAILED", "fail"],
-    ["SKIPPED", "skip"],
-    ["UNKNOWN", "warn"],
-    ["WAITING_APPROVAL", "warn"],
-    ["NEEDS_APPROVAL", "warn"],
-  ])("styles %s explicitly", (status, style) => {
+    ["FAILED", "Failed", "fail"],
+    ["SKIPPED", "Skipped", "skip"],
+    ["UNKNOWN", "Outcome unknown", "warn"],
+    ["WAITING_APPROVAL", "Awaiting approval", "warn"],
+    ["NEEDS_APPROVAL", "Needs approval", "warn"],
+  ])("styles %s explicitly", (status, label, style) => {
     render(<StatusBadge status={status} />);
-    expect(screen.getByText(status)).toHaveClass(style);
+    expect(screen.getByText(label)).toHaveClass(style);
+    expect(screen.getByText(label)).toHaveAttribute("data-status", status);
   });
 });

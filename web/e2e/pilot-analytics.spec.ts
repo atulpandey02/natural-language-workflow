@@ -66,9 +66,9 @@ test.describe("synthetic pilot golden analytics", () => {
     await expect(page.getByLabel(/what should this workflow do/i)).toContainText("sales-v1");
     await page.getByRole("button", { name: /^Plan$/ }).click();
     await expect(page.getByText("pilot.sales_analysis", { exact: true })).toBeVisible();
-    await expect(page.getByText("PASS", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-status="PASS"]')).toBeVisible();
     await page.screenshot({ path: "test-results/pilot-proposal-desktop.png", fullPage: true });
-    await page.getByRole("button", { name: "Materialize workflow" }).click();
+    await page.getByRole("button", { name: "Save workflow" }).click();
     await expect(page).toHaveURL(/\/workflows\/[0-9a-f-]{36}$/);
     const initial = page.waitForResponse(
       (r) => /\/workflows\/[0-9a-f-]+\/runs$/.test(r.url()) && r.request().method() === "POST",
@@ -113,7 +113,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.screenshot({ path: "test-results/pilot-sales-laptop.png", fullPage: true });
     await page.getByRole("link", { name: "analyze", exact: true }).first().click();
     await expect(page.locator("#evidence-analyze")).toBeVisible();
-    await expect(page.locator("#evidence-analyze")).toContainText("SUCCESS");
+    await expect(page.locator('#evidence-analyze [data-status="SUCCESS"]')).toBeVisible();
     await page.setViewportSize({ width: 768, height: 1024 });
     await expect(page.locator(".sidebar")).not.toHaveAttribute("open", "");
     await assertLayout(page, 768, 1024);
@@ -193,7 +193,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.getByRole("button", { name: "Send summary to Slack" }).click();
     const immutable = await (await proposed).json();
     await expect(page.getByRole("heading", { name: "Exact message for approval" })).toBeVisible();
-    await expect(page.getByText("NEEDS_APPROVAL", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-status="NEEDS_APPROVAL"]')).toBeVisible();
     expect(await page.getByLabel("Immutable Slack message").textContent()).toBe(
       immutable.proposed_plan.steps[0].args.text,
     );
@@ -207,9 +207,11 @@ test.describe("synthetic pilot golden analytics", () => {
     await page
       .locator(".handoff-review")
       .screenshot({ path: "test-results/pilot-slack-proposal.png" });
-    await page.getByRole("button", { name: "Materialize workflow" }).click();
+    await page.getByRole("button", { name: "Save workflow" }).click();
     await page.getByRole("button", { name: /run now/i }).click();
-    await expect(page.getByText("WAITING_APPROVAL").first()).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('[data-status="WAITING_APPROVAL"]').first()).toBeVisible({
+      timeout: 30000,
+    });
     const slackRun = page.url().split("/runs/")[1];
     await page.goto("/approvals");
     await expect(page.getByText(/you requested this/i)).toBeVisible();
@@ -222,7 +224,7 @@ test.describe("synthetic pilot golden analytics", () => {
     expect(approvalPreview.args.text).toBe(immutable.proposed_plan.steps[0].args.text);
     await approver.getByRole("button", { name: /^approve$/i }).click();
     await page.goto(`/runs/${slackRun}`);
-    await expect(page.getByText("COMPLETED").first()).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('[data-status="COMPLETED"]').first()).toBeVisible({ timeout: 30000 });
     await page.locator(".workflow-details > summary").click();
     await expect(page.getByRole("link", { name: "Open source analysis run" })).toHaveAttribute(
       "href",
@@ -240,7 +242,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await page.goto("/workflows/new");
     await page.getByRole("button", { name: /Support operations/ }).click();
     await page.getByRole("button", { name: /^Plan$/ }).click();
-    await page.getByRole("button", { name: "Materialize workflow" }).click();
+    await page.getByRole("button", { name: "Save workflow" }).click();
     await page.getByRole("button", { name: /run now/i }).click();
     await expect(page.getByTestId("analytics-result")).toBeVisible({ timeout: 30000 });
     await expect(page.getByTestId("analytics-kpi")).toHaveCount(4);

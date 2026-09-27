@@ -7,7 +7,10 @@ describe("GetStarted onboarding", () => {
     render(<GetStarted canManage={false} />);
     const steps = screen.getByRole("list", { name: "How NLW works" });
     expect(steps).toHaveTextContent(/Ask.*Review.*Execute.*Evidence/);
-    expect(screen.getByRole("link", { name: /Sales/ })).toHaveAttribute("href", "/workflows/new");
+    expect(screen.getByRole("link", { name: /Sales/ })).toHaveAttribute(
+      "href",
+      "/workflows/new?dataset=sales-v1",
+    );
     expect(screen.getByRole("link", { name: /Support/ })).toBeInTheDocument();
     expect(screen.getByTestId("pilot-limits")).toHaveTextContent(/synthetic/);
   });

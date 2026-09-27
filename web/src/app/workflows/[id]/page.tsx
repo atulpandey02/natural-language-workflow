@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { ScheduleForm } from "@/components/ScheduleForm";
 import { ErrorBanner, Empty, Loading, RoleGate, StatusBadge } from "@/components/ui";
+import { toolLabel } from "@/lib/plan-language";
 import { blockedReasonText, scheduleStatus } from "@/lib/schedules";
 import {
   useCurrentWorkspace,
@@ -60,7 +61,14 @@ export default function WorkflowDetailPage({ params }: { params: Promise<{ id: s
               {run.isPending ? "Starting…" : "Run now"}
             </button>
           </div>
-          {!version ? <p className="muted">No materialized version to run.</p> : null}
+          {!version ? (
+            <p className="muted">This workflow has no saved version to run yet.</p>
+          ) : (
+            <p className="muted small">
+              Run now starts this saved version. Steps that send anything outside NLW wait for a
+              second person&apos;s approval.
+            </p>
+          )}
           <ErrorBanner error={runError} />
 
           {provenance.data?.request_text ? (
@@ -99,30 +107,32 @@ export default function WorkflowDetailPage({ params }: { params: Promise<{ id: s
           {steps.length === 0 ? (
             <Empty>No steps.</Empty>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Step</th>
-                  <th>Tool</th>
-                  <th>Connector</th>
-                  <th>Depends on</th>
-                </tr>
-              </thead>
-              <tbody>
-                {steps.map((s, i) => (
-                  <tr key={i}>
-                    <td>{String(s.id ?? i)}</td>
-                    <td>{String(s.tool ?? "")}</td>
-                    <td className="muted">{s.connector ? String(s.connector) : "—"}</td>
-                    <td className="muted">
-                      {Array.isArray(s.depends_on) && s.depends_on.length
-                        ? (s.depends_on as string[]).join(", ")
-                        : "—"}
-                    </td>
+            <div className="table-scroll" tabIndex={0} role="region" aria-label="Workflow steps">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Step</th>
+                    <th>What it does</th>
+                    <th>Uses</th>
+                    <th>Runs after</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {steps.map((s, i) => (
+                    <tr key={i}>
+                      <td>{String(s.id ?? i + 1)}</td>
+                      <td>{toolLabel(s.tool)}</td>
+                      <td className="muted">{s.connector ? String(s.connector) : "Built in"}</td>
+                      <td className="muted">
+                        {Array.isArray(s.depends_on) && s.depends_on.length
+                          ? (s.depends_on as string[]).join(", ")
+                          : "Start"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
 
           <h2>Runs</h2>

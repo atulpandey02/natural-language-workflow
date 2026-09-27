@@ -196,3 +196,11 @@ describe("describeAuthError", () => {
     expect(describeAuthError(null)).toBeNull();
   });
 });
+
+describe("analysis journey copy", () => {
+  it("explains a version without a recorded request instead of echoing the API", () => {
+    const f = describeError(api(404, "not_found", "no provenance for this version"));
+    expect(f?.title).toBe("No original request on record");
+    expect(JSON.stringify(f)).not.toContain("no provenance");
+  });
+});

@@ -86,8 +86,8 @@ describe("WorkflowDetailPage schedule cards", () => {
     });
 
     render(<WorkflowDetailPage params={settled({ id: WF_ID })} />);
-    expect(screen.getByText("blocked")).toHaveClass("fail");
-    expect(screen.queryByText("active")).not.toBeInTheDocument();
+    expect(screen.getByText("Blocked")).toHaveClass("fail");
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
     const reason = screen.getByTestId("schedule-blocked-reason");
     expect(reason).toHaveTextContent(/admin or owner role/);
     expect(reason).not.toHaveTextContent("CREATOR_ROLE_INSUFFICIENT");

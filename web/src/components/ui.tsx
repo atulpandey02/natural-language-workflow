@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { statusLabel } from "@/lib/plan-language";
 import {
   RETRY_TEXT,
   describeError,
@@ -88,6 +89,8 @@ const STATUS_CLASS: Record<string, string> = {
   UNKNOWN: "warn",
   SKIPPED: "skip",
   FAILED_WITH_UNKNOWN: "warn",
+  ACTION_OUTCOME_UNKNOWN: "warn",
+  PARTIAL: "warn",
   NEEDS_APPROVAL: "warn",
   NEEDS_CLARIFICATION: "warn",
   PASS: "ok",
@@ -95,7 +98,11 @@ const STATUS_CLASS: Record<string, string> = {
 };
 
 export function StatusBadge({ status }: { status: string }) {
-  return <span className={`badge ${STATUS_CLASS[status] ?? ""}`}>{status}</span>;
+  return (
+    <span className={`badge ${STATUS_CLASS[status] ?? ""}`} data-status={status}>
+      {statusLabel(status)}
+    </span>
+  );
 }
 
 /** Convenience UI gate. Backend RLS remains authoritative (M10 change §16). */

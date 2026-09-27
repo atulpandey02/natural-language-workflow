@@ -147,4 +147,28 @@ describe("RunDetailPage result summary", () => {
     expect(screen.queryByTestId("run-summary")).not.toBeInTheDocument();
     expect(screen.queryByTestId("run-summary-error")).not.toBeInTheDocument();
   });
+
+  it.each([
+    ["FAILED", "This run didn't finish"],
+    ["FAILED_WITH_UNKNOWN", "We can't confirm whether the action happened"],
+  ])("explains a %s run instead of showing the engine's raw error", async (outcome, title) => {
+    setup({ data: { ...SUMMARY, run_status: "FAILED", outcome } });
+    mockRun.mockReturnValue({
+      isLoading: false,
+      error: null,
+      data: {
+        ...RUN,
+        status: "FAILED",
+        error: "slack.send_message: ReadTimeout after 10.0s (httpx) tenant=9b1deb4d",
+      },
+    });
+    renderPage();
+    const notice = await screen.findByText(title);
+    expect(notice.closest("[data-testid=friendly-error]")).toHaveAttribute("role", "status");
+    expect(document.body.textContent).not.toMatch(/ReadTimeout|httpx|tenant=/);
+    if (outcome === "FAILED_WITH_UNKNOWN") {
+      expect(document.body.textContent).toMatch(/Don't simply run it again/);
+      expect(document.body.textContent).not.toMatch(/You can try again now/);
+    }
+  });
 });

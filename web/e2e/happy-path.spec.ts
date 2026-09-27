@@ -27,7 +27,7 @@ test.describe("MVP happy path", () => {
     await page
       .getByLabel(/what should this workflow do/i)
       .fill("Summarize yesterday's failed payments.");
-    await page.getByRole("button", { name: /^plan$/i }).click();
+    await page.getByRole("button", { name: /^prepare plan$/i }).click();
     await expect(page.getByTestId("materialize-blocked")).toBeVisible();
     await expect(page.getByRole("button", { name: /materialize/i })).toHaveCount(0);
 
@@ -41,12 +41,13 @@ test.describe("MVP happy path", () => {
     // The BFF's own rejection ("Unknown resource.") must never appear.
     const provenance = page.getByTestId("workflow-provenance-error");
     await expect(provenance).toBeVisible();
-    await expect(provenance).toContainText("no provenance for this version");
+    await expect(provenance).toContainText("No original request on record");
+    await expect(provenance).not.toContainText("no provenance for this version");
     await expect(provenance).not.toContainText("Unknown resource.");
 
     await page.getByRole("button", { name: /run now/i }).click();
     await expect(page).toHaveURL(/\/runs\/[0-9a-f-]{36}$/);
-    await expect(page.getByText("COMPLETED").first()).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('[data-status="COMPLETED"]').first()).toBeVisible({ timeout: 30000 });
     await expect(page.getByText("fake.echo").first()).toBeVisible();
 
     // The deterministic result summary is fetched through the real BFF path

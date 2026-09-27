@@ -139,7 +139,7 @@ const KNOWN: Record<string, Copy> = {
   INVALID_PLAN: {
     title: "This plan can't run",
     explanation: "The plan didn't pass NLW's safety and feasibility checks.",
-    action: "Rephrase your question and plan again.",
+    action: "Rephrase your question and prepare the plan again.",
     retry: "no",
     tone: "warn",
   },
@@ -210,14 +210,22 @@ const KNOWN: Record<string, Copy> = {
   "workflow has no materialized version to run": {
     title: "This workflow isn't ready to run",
     explanation: "It has no confirmed version yet.",
-    action: "Review the plan and choose Create workflow first.",
+    action: "Prepare a plan, review it and choose Save workflow first.",
     retry: "no",
     tone: "warn",
+  },
+  "no provenance for this version": {
+    title: "No original request on record",
+    explanation:
+      "This workflow version was created without a recorded question, so there is nothing to show here.",
+    action: "You can still run it; results link to the steps that produced them.",
+    retry: "no",
+    tone: "info",
   },
   "proposal has no materializable plan": {
     title: "This plan can't become a workflow",
     explanation: "It needs clarification or was rejected by the safety checks.",
-    action: "Rephrase your question and plan again.",
+    action: "Rephrase your question and prepare the plan again.",
     retry: "no",
     tone: "warn",
   },
