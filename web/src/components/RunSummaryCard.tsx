@@ -11,13 +11,17 @@ import type { RunSummaryOut } from "@/lib/api/types";
  */
 export function RunSummaryCard({ summary }: { summary: RunSummaryOut }) {
   return (
-    <div className="card" data-testid="run-summary">
+    <section
+      className="card execution-summary"
+      data-testid="run-summary"
+      aria-label="Deterministic run summary"
+    >
       <div className="row" style={{ justifyContent: "space-between" }}>
-        <strong>Result summary</strong>
+        <h2>Result summary</h2>
         <StatusBadge status={summary.outcome} />
       </div>
       <p data-testid="summary-headline">{summary.headline}</p>
-      <p className="muted">
+      <p className="muted execution-counts">
         {summary.succeeded} succeeded · {summary.failed} failed · {summary.unknown} unknown ·{" "}
         {summary.skipped} skipped
       </p>
@@ -30,10 +34,10 @@ export function RunSummaryCard({ summary }: { summary: RunSummaryOut }) {
           ))}
         </ul>
       ) : null}
-      <p className="muted">
+      <p className="muted small">
         Deterministic summary of persisted state. Failed, skipped, and unknown steps are never
         reported as success.
       </p>
-    </div>
+    </section>
   );
 }

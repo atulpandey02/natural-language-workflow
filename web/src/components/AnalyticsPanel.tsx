@@ -46,38 +46,43 @@ export function AnalyticsPanel({ runId }: { runId: string }) {
       {result.data ? <AnalyticsResultView value={result.data} /> : null}
       {result.data?.status === "READY" ? (
         <section className="card handoff">
-          <h3>Share the approved summary</h3>
-          <p className="muted">
-            Create a separate Slack proposal from this completed analysis. A different admin or
-            owner must approve the exact message before delivery.
-          </p>
-          <ErrorBanner error={connectors.error} />
-          {choices.length ? (
-            <>
-              <label htmlFor="slack-destination">Slack destination</label>
-              <select
-                id="slack-destination"
-                value={selection}
-                onChange={(e) => {
-                  setSelection(e.target.value);
-                  setProposal(null);
-                }}
-              >
-                <option value="">Select connector and channel</option>
-                {choices.map((c) => (
-                  <option key={c.key} value={c.key}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
-              <button onClick={propose} disabled={!selection || create.isPending}>
-                {create.isPending ? "Preparing proposal…" : "Send summary to Slack"}
-              </button>
-            </>
-          ) : (
-            <p>No active Slack destination. Ask an admin to configure a connector.</p>
-          )}
-          <ErrorBanner error={create.error} />
+          <div className="handoff-intro">
+            <p className="eyebrow">NEXT / SHARE INSIGHTS</p>
+            <h2>Take the findings to your team</h2>
+            <p className="muted">
+              Create a separate Slack proposal from this completed analysis. A different admin or
+              owner must approve the exact message before delivery.
+            </p>
+          </div>
+          <div className="handoff-controls">
+            <ErrorBanner error={connectors.error} />
+            {choices.length ? (
+              <>
+                <label htmlFor="slack-destination">Slack destination</label>
+                <select
+                  id="slack-destination"
+                  value={selection}
+                  onChange={(e) => {
+                    setSelection(e.target.value);
+                    setProposal(null);
+                  }}
+                >
+                  <option value="">Select connector and channel</option>
+                  {choices.map((c) => (
+                    <option key={c.key} value={c.key}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+                <button onClick={propose} disabled={!selection || create.isPending}>
+                  {create.isPending ? "Preparing proposal…" : "Send summary to Slack"}
+                </button>
+              </>
+            ) : (
+              <p>No active Slack destination. Ask an admin to configure a connector.</p>
+            )}
+            <ErrorBanner error={create.error} />
+          </div>
         </section>
       ) : null}
       {proposal ? <PlanReview proposal={proposal} /> : null}
