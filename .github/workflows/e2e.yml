@@ -3,6 +3,15 @@
 # REQUIRED mode (E2E_REQUIRED=1), so a missing/broken stack FAILS the job
 # instead of silently skipping.
 #
+# Spec routing (web/e2e/routing.ts) is explicit:
+# - job `e2e` runs every seeded-stack spec and never collects pilot-*.spec.ts;
+# - job `pilot` runs ONLY pilot-*.spec.ts, through the isolated pytest harness
+#   (tests/integration/test_pilot_browser.py). That harness provides the
+#   controlled planner provider, dedicated worker and mock Slack transport.
+#
+# Both jobs fail rather than skip: `pilot` rejects a run in which nothing was
+# collected or any test was skipped (scripts/ci/check_pilot_browser_run.py).
+#
 # NOTE: third-party actions should be pinned to immutable commit SHAs before
 # go-live (ADR-018 policy); left on tags here for readability.
 
@@ -149,6 +158,19 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
+      - name: Assert seeded-stack collection excludes harness-only specs
+        working-directory: web
+        env:
+          E2E_REQUIRED: "1"
+          E2E_BASE_URL: http://localhost:8080
+        run: |
+          npx playwright test --list > "$RUNNER_TEMP/seeded-e2e-list.txt"
+          cat "$RUNNER_TEMP/seeded-e2e-list.txt"
+          if grep -q "pilot-" "$RUNNER_TEMP/seeded-e2e-list.txt"; then
+            echo "::error::seeded-stack E2E collected harness-only pilot specs (job 'pilot' runs them)"
+            exit 1
+          fi
+          grep -Eq "^Total: [1-9][0-9]* tests? in" "$RUNNER_TEMP/seeded-e2e-list.txt"
       - name: Run required E2E
         working-directory: web
         # The seeded E2E_* credentials are inherited from $GITHUB_ENV (written by
@@ -168,3 +190,90 @@ jobs:
         run: |
           docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v || true
           supabase stop || true
+
+  pilot:
+    name: Required pilot browser harness (isolated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Private paths under the runner's temp dir (not the workspace). The
+      # `runner` context is unavailable in job-level env, so export them here.
+      - name: Define private harness paths
+        run: |
+          echo "PILOT_AUTH_WORKDIR=$RUNNER_TEMP/pilot-auth" >> "$GITHUB_ENV"
+          echo "PILOT_AUTH_CONFIG=$RUNNER_TEMP/pilot-auth.json" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12"
+      - uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1 # v1.7.1
+        with:
+          version: 2.117.0
+
+      - name: Install dependencies + build the production web app
+        run: |
+          uv sync --frozen
+          cd web
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run build
+
+      # Disposable LOCAL auth only; the harness refuses non-loopback auth. The CLI
+      # prints local keys on start, so output goes to a private file, never the log.
+      - name: Start isolated local Supabase auth
+        run: |
+          umask 077
+          supabase init --workdir "$PILOT_AUTH_WORKDIR" > /dev/null
+          if ! supabase start --workdir "$PILOT_AUTH_WORKDIR" \
+              --exclude studio,realtime,storage-api,imgproxy,postgres-meta,logflare,vector,edge-runtime,mailpit \
+              > "$RUNNER_TEMP/pilot-auth-start.log" 2>&1; then
+            grep -viE "key|secret|jwt|token|password" "$RUNNER_TEMP/pilot-auth-start.log" | tail -n 40
+            echo "::error::local Supabase auth failed to start"
+            exit 1
+          fi
+          supabase status --workdir "$PILOT_AUTH_WORKDIR" -o json > "$PILOT_AUTH_CONFIG"
+
+      - name: Golden pilot journeys (Sales -> Slack proposal -> approval; Support)
+        env:
+          E2E_JSON_REPORT: ${{ runner.temp }}/pilot-golden-playwright.json
+        run: |
+          status=0
+          uv run pytest tests/integration/test_pilot_browser.py -q --tb=short -p no:cacheprovider \
+            --junitxml="$RUNNER_TEMP/pilot-golden-junit.xml" || status=$?
+          uv run python scripts/ci/check_pilot_browser_run.py \
+            --junit "$RUNNER_TEMP/pilot-golden-junit.xml" --playwright "$E2E_JSON_REPORT" || status=1
+          exit "$status"
+
+      - name: Failure / partial / UNKNOWN pilot journey
+        env:
+          PILOT_VISUAL_STATES: "1"
+          E2E_JSON_REPORT: ${{ runner.temp }}/pilot-visual-playwright.json
+        run: |
+          status=0
+          uv run python -m pytest tests/integration/test_pilot_browser.py \
+            -p web.e2e.visual_states_plugin -q --tb=short -p no:cacheprovider \
+            --junitxml="$RUNNER_TEMP/pilot-visual-junit.xml" || status=$?
+          uv run python scripts/ci/check_pilot_browser_run.py \
+            --junit "$RUNNER_TEMP/pilot-visual-junit.xml" --playwright "$E2E_JSON_REPORT" || status=1
+          exit "$status"
+
+      # Runs even after a failure. A Supabase that cannot be stopped fails the job.
+      - name: Tear down local Supabase and credentials
+        if: always()
+        run: |
+          rm -f "$PILOT_AUTH_CONFIG" "$RUNNER_TEMP/pilot-auth-start.log"
+          if [ -d "$PILOT_AUTH_WORKDIR/supabase" ]; then
+            supabase stop --workdir "$PILOT_AUTH_WORKDIR" --no-backup
+          fi
+          rm -rf "$PILOT_AUTH_WORKDIR"
+          left="$(docker ps -aq --filter name=supabase_)"
+          if [ -n "$left" ]; then
+            echo "::error::local Supabase containers survived teardown"
+            docker ps -a --filter name=supabase_ --format '{{.Names}} {{.Status}}'
+            exit 1
+          fi
