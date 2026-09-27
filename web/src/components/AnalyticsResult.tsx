@@ -354,9 +354,28 @@ function Insights({ findings, ready }: { findings: Finding[]; ready: boolean }) 
 }
 
 /** A KPI value that never clips: exact when it fits, compact (and marked) when not. */
+/**
+ * Break opportunities for the exact figure: after each thousands separator and
+ * after every third fractional digit. Digits never break anywhere else.
+ */
+function exactSegments(exact: string): string[] {
+  const point = exact.indexOf(".");
+  const head = point < 0 ? exact : exact.slice(0, point + 1);
+  const segments = head.split(",").map((part, i, all) => (i < all.length - 1 ? `${part},` : part));
+  if (point >= 0) {
+    const tail = exact.slice(point + 1);
+    const digits = /^\d+/.exec(tail)?.[0] ?? "";
+    const suffix = tail.slice(digits.length);
+    const chunks = digits.match(/\d{1,3}/g) ?? [];
+    chunks.forEach((chunk, i) => segments.push(i === chunks.length - 1 ? chunk + suffix : chunk));
+  }
+  return segments;
+}
+
+/** A KPI value that never clips and never hides precision without saying so. */
 function KpiValue({ value, unit, label }: { value: number | null; unit: Unit; label: string }) {
   const shown = kpiDisplay(value, unit);
-  if (!shown.compacted) {
+  if (!shown.rounded) {
     return (
       <>
         <strong>{shown.text}</strong>
@@ -364,27 +383,26 @@ function KpiValue({ value, unit, label }: { value: number | null; unit: Unit; la
       </>
     );
   }
-  // Exact figure: read by screen readers in place, visible on demand (keyboard or
-  // pointer), and able to break only at thousands separators.
-  const parts = shown.exact.split(",");
+  // The exact parsed value is announced once, in place of the rounded display.
+  // The disclosure repeats it visually for keyboard and pointer users.
   return (
     <>
-      <strong title={shown.exact} data-compacted="true">
+      <strong
+        title={shown.exact}
+        data-rounded="true"
+        data-compacted={shown.compacted ? "true" : undefined}
+      >
         <span aria-hidden="true">{shown.text}</span>
         <span className="sr-only">{shown.exact}</span>
       </strong>
       <span className="metric-kind">{metricKind(label)} · rounded</span>
       <details className="kpi-exact">
         <summary>Exact value</summary>
-        <span className="kpi-exact-value">
-          {parts.map((part, i) => (
+        <span className="kpi-exact-value" aria-hidden="true">
+          {exactSegments(shown.exact).map((segment, i) => (
             <span key={i}>
-              {part}
-              {i < parts.length - 1 ? (
-                <>
-                  ,<wbr />
-                </>
-              ) : null}
+              {segment}
+              <wbr />
             </span>
           ))}
         </span>

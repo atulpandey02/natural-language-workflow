@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   KPI_MAX_CHARS,
+  exactValue,
   formatAxis,
   formatPeriod,
   kpiDisplay,
@@ -64,6 +65,7 @@ describe("KPI display policy (B3)", () => {
       text: "Unavailable",
       exact: "Unavailable",
       compacted: false,
+      rounded: false,
     });
   });
 
@@ -75,5 +77,71 @@ describe("KPI display policy (B3)", () => {
         expect(kpiDisplay(value, unit).text.length, `${value} ${unit}`).toBeLessThanOrEqual(
           KPI_MAX_CHARS,
         );
+  });
+});
+
+describe("exact value keeps the parsed number's full precision", () => {
+  // [value, USD, hours, percent]
+  const CASES: Array<[number | null, string, string, string]> = [
+    [12345678.123456, "$12,345,678.123456", "12,345,678.123456 h", "12,345,678.123456%"],
+    [-12345678.123456, "-$12,345,678.123456", "-12,345,678.123456 h", "-12,345,678.123456%"],
+    [0.123456789, "$0.123456789", "0.123456789 h", "0.123456789%"],
+    [-0.123456789, "-$0.123456789", "-0.123456789 h", "-0.123456789%"],
+    [999999999999.9999, "$999,999,999,999.9999", "999,999,999,999.9999 h", "999,999,999,999.9999%"],
+    [
+      -999999999999.9999,
+      "-$999,999,999,999.9999",
+      "-999,999,999,999.9999 h",
+      "-999,999,999,999.9999%",
+    ],
+    [0, "$0.00", "0 h", "0%"],
+    [-0, "$0.00", "0 h", "0%"],
+    [1257, "$1,257.00", "1,257 h", "1,257%"],
+    [-1e12, "-$1,000,000,000,000.00", "-1,000,000,000,000 h", "-1,000,000,000,000%"],
+    [null, "Unavailable", "Unavailable", "Unavailable"],
+  ];
+
+  it.each(CASES)("%s", (value, usd, hours, percent) => {
+    expect(exactValue(value, "USD")).toBe(usd);
+    expect(exactValue(value, "hours")).toBe(hours);
+    expect(exactValue(value, "percent")).toBe(percent);
+  });
+
+  it("round-trips: the exact digits parse back to the same number", () => {
+    for (const [value] of CASES) {
+      if (value === null) continue;
+      const digits = exactValue(value, "count").replace(/,/g, "");
+      expect(Number(digits)).toBe(value === 0 ? 0 : value);
+    }
+  });
+
+  it("expands exponent forms deterministically, without noise", () => {
+    expect(exactValue(1e-7, "count")).toBe("0.0000001");
+    expect(exactValue(-1.5e-7, "hours")).toBe("-0.00000015 h");
+    expect(Number(exactValue(5e-324, "count"))).toBe(5e-324);
+  });
+
+  it("marks the display rounded exactly when it hides precision", () => {
+    const hours = kpiDisplay(12345678.123456, "hours");
+    expect(hours).toMatchObject({
+      text: "12.35M h",
+      exact: "12,345,678.123456 h",
+      compacted: true,
+      rounded: true,
+    });
+    // Short but more precise than two decimals: shown rounded, and said so.
+    expect(kpiDisplay(0.123456789, "hours")).toMatchObject({
+      text: "0.12 h",
+      exact: "0.123456789 h",
+      compacted: false,
+      rounded: true,
+    });
+    // Ordinary values are unchanged and not marked.
+    expect(kpiDisplay(280617.2, "USD")).toMatchObject({
+      text: "$280,617.20",
+      exact: "$280,617.20",
+      rounded: false,
+    });
+    expect(kpiDisplay(-0, "USD")).toMatchObject({ text: "$0.00", rounded: false });
   });
 });

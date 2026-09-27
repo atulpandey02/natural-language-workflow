@@ -316,4 +316,33 @@ describe("large KPI values (B3)", () => {
     expect(revenue.querySelector("strong")).toHaveTextContent(/^\$280,617\.20$/);
     expect(revenue.querySelector("details")).toBeNull();
   });
+
+  it("exposes the full-precision exact value once to assistive tech and in the disclosure", async () => {
+    render(
+      <AnalyticsResultView
+        value={withValues([
+          [12345678.123456, "hours"],
+          [-0.123456789, "USD"],
+          [280617.2, "USD"],
+          [-0, "percent"],
+        ])}
+      />,
+    );
+    const [hours, fraction, ordinary, zero] = screen.getAllByTestId("analytics-kpi");
+    const value = hours.querySelector("strong")!;
+    expect(value).toHaveAttribute("data-rounded", "true");
+    expect(within(value).getByText("12.35M h")).toHaveAttribute("aria-hidden", "true");
+    expect(within(value).getByText("12,345,678.123456 h")).toHaveClass("sr-only");
+    expect(value).toHaveAttribute("title", "12,345,678.123456 h");
+    await userEvent.click(within(hours).getByText("Exact value"));
+    const disclosed = hours.querySelector(".kpi-exact-value")!;
+    expect(disclosed).toHaveTextContent("12,345,678.123456 h");
+    expect(disclosed).toHaveAttribute("aria-hidden", "true"); // announced once, in the value
+    // A short value with hidden precision is marked rounded too.
+    expect(fraction.querySelector("strong")).toHaveAttribute("title", "-$0.123456789");
+    expect(fraction).toHaveTextContent("rounded");
+    expect(ordinary.querySelector("strong")).toHaveTextContent(/^\$280,617\.20$/);
+    expect(ordinary.querySelector("[data-rounded]")).toBeNull();
+    expect(zero.querySelector("strong")).toHaveTextContent(/^0%$/);
+  });
 });

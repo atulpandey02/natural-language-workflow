@@ -67,11 +67,12 @@ async function assertKpisOneLine(page: Page) {
 async function assertBoundaryKpis(page: Page) {
   const runId = page.url().split("/runs/")[1];
   const pattern = `**/api/nlw/runs/${runId}/analytics`;
-  const values: Array<[number, string, string, string]> = [
-    [-1e12, "USD", "-$1.00T", "-$1,000,000,000,000.00"],
-    [12345678901.23, "USD", "$12.35B", "$12,345,678,901.23"],
-    [1e12, "count", "1.00T", "1,000,000,000,000"],
-    [999999999999.99, "percent", "1.00T%", "999,999,999,999.99%"],
+  // [value, unit, displayed, exact parsed value, compact notation?]
+  const values: Array<[number, string, string, string, boolean]> = [
+    [-999999999999.9999, "USD", "-$1.00T", "-$999,999,999,999.9999", true],
+    [12345678.123456, "hours", "12.35M h", "12,345,678.123456 h", true],
+    [-12345678.123456, "USD", "-$12.35M", "-$12,345,678.123456", true],
+    [0.123456789, "percent", "0.12%", "0.123456789%", false],
   ];
   await page.route(pattern, async (route) => {
     const response = await route.fetch();
@@ -86,25 +87,44 @@ async function assertBoundaryKpis(page: Page) {
   await page.reload();
   const kpis = page.getByTestId("analytics-kpi");
   await expect(kpis.first()).toContainText("-$1.00T", { timeout: 30000 });
-  for (const [i, [, , shown, exact]] of values.entries()) {
+  for (const [i, [, , shown, exact, compacted]] of values.entries()) {
     const value = kpis.nth(i).locator("strong");
-    await expect(value).toHaveAttribute("data-compacted", "true");
+    await expect(value).toHaveAttribute("data-rounded", "true");
+    if (compacted) await expect(value).toHaveAttribute("data-compacted", "true");
     await expect(value).toHaveAttribute("title", exact);
     await expect(value.locator('[aria-hidden="true"]')).toHaveText(shown);
+    // The accessible alternative is the full-precision parsed value.
     await expect(value.locator(".sr-only")).toHaveText(exact);
     await expect(kpis.nth(i)).toContainText("rounded");
   }
   await assertKpisOneLine(page);
-  // The exact figure is reachable by keyboard and stays inside its card.
-  await page.setViewportSize({ width: 390, height: 900 });
-  const summary = kpis.first().getByText("Exact value");
-  await summary.focus();
+
+  // Open every exact-value disclosure (the first by keyboard) and check each is
+  // complete and inside its card at every width.
+  const first = kpis.first().getByText("Exact value");
+  await first.focus();
   await page.keyboard.press("Enter");
-  const exactBox = await kpis.first().locator(".kpi-exact-value").boundingBox();
-  const cardBox = await kpis.first().boundingBox();
-  expect(exactBox!.x + exactBox!.width).toBeLessThanOrEqual(cardBox!.x + cardBox!.width + 0.5);
-  await expect(kpis.first().locator(".kpi-exact-value")).toHaveText("-$1,000,000,000,000.00");
-  await page.screenshot({ path: "test-results/pilot-kpi-boundary-mobile.png" });
+  for (let i = 1; i < values.length; i++) await kpis.nth(i).getByText("Exact value").click();
+  for (const width of KPI_WIDTHS) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+      .toBe(true);
+    for (const [i, [, , , exact]] of values.entries()) {
+      const disclosed = kpis.nth(i).locator(".kpi-exact-value");
+      await expect(disclosed).toHaveText(exact);
+      const box = await disclosed.boundingBox();
+      const card = await kpis.nth(i).boundingBox();
+      expect(box!.x, `${exact} at ${width}px`).toBeGreaterThanOrEqual(card!.x - 0.5);
+      expect(box!.x + box!.width, `${exact} at ${width}px`).toBeLessThanOrEqual(
+        card!.x + card!.width + 0.5,
+      );
+    }
+    if (width === 390) {
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: "test-results/pilot-kpi-boundary-mobile.png" });
+    }
+  }
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.screenshot({ path: "test-results/pilot-kpi-boundary-desktop.png" });

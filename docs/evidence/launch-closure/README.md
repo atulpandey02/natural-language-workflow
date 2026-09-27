@@ -339,3 +339,69 @@ No existing screenshot changed materially: ordinary values render exactly as bef
   itself.
 - The summary stays authoritative when only the action-evidence read fails.
 - Browser checks run in Chromium only.
+
+## 10. Exact-value precision correction
+
+Starting tip `b52b9b9`. Frontend and test changes only.
+
+**Reproduction.** Input `12345678.123456` in hours showed the compact form `12.35M h` (correct,
+labelled rounded). The "Exact value" disclosure, screen-reader text and title all showed
+`12,345,678.12 h`, silently dropping accepted precision.
+
+**Root cause.** The exact representation reused the two-decimal display formatter
+(`formatValue`, `maximumFractionDigits: 2`).
+
+**Compact display vs. exact parsed value.**
+- The **display** stays as before: the two-decimal form when it fits 11 characters, otherwise
+  compact notation (`$12.35B`, `-$1.00T`).
+- A value is marked **rounded** whenever the display differs from the exact value. Besides
+  compact values, this now includes short values with hidden precision, such as `0.12 h` for
+  `0.123456789`.
+- The **exact value** comes from a separate formatter, `exactValue`:
+  1. It takes the number's shortest round-trippable decimal form (`String(value)`), which adds no
+     floating-point noise and forces no fixed precision.
+  2. It expands exponent forms (`1e-7`, `5e-324`) by exact digit shifting.
+  3. It splits sign, integer and fraction, and groups only the integer part.
+  4. It keeps every fractional digit.
+  5. Currency is padded to at least two decimals, which never changes the value.
+  6. `-0` reads as `0`.
+- This preserves the parsed JavaScript number, not the original JSON spelling (`1.2300` and `1.23`
+  are the same number after parsing).
+
+**Accessibility.**
+- The exact value is announced once, as screen-reader text in place of the rounded display, and is
+  also the `title`.
+- The keyboard-reachable **Exact value** disclosure repeats it visually; its copy is `aria-hidden`,
+  so it isn't announced twice.
+- Digits break only after thousands separators and after every third fractional digit, so even a
+  subnormal's long fraction stays inside the card.
+
+**Regression values**, each checked in USD, hours and percent:
+- `12345678.123456` and `-12345678.123456`;
+- `0.123456789` and `-0.123456789`;
+- `999999999999.9999` and `-999999999999.9999`;
+- `0` and `-0`;
+- the integers `1257` and `-1e12`;
+- `null`.
+
+A round-trip test confirms each exact form parses back to the same number, and the exponent cases
+cover `1e-7`, `-1.5e-7` and `5e-324`.
+
+**Tests (local, final tree).**
+- Prettier, ESLint (0 warnings), `tsc` and `next build`: clean.
+- Vitest: 43 files, 363 tests; the focused presentation and result tests are 62 of these.
+- Golden Sales/Support pilot journey: 2 passed, 0 skipped. It now renders `-$999,999,999,999.9999`,
+  `12,345,678.123456 h`, `-$12,345,678.123456` and `0.123456789%` in the real page. At 1440, 1280,
+  834, 800, 768, 744 and 390 px it checks:
+  - the displayed value is one line inside its card;
+  - the screen-reader text and title equal the full-precision exact value;
+  - every disclosure (the first opened by keyboard) shows it completely inside its card;
+  - there is no page overflow;
+  - the dominant chart layout is unchanged.
+- The seeded-stack suite was not rerun. This change touches only KPI rendering on analytics result
+  pages, and none of the 8 seeded tests renders an analytics result. Their earlier pass at
+  `b52b9b9` still holds.
+
+**Screenshots replaced:** `visual/20-kpi-boundary-desktop.png` and
+`visual/21-kpi-boundary-mobile.png`, which now show exact values with more than two fractional
+digits.
