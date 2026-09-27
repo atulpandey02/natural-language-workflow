@@ -186,10 +186,9 @@ describe("RunDetailPage result summary", () => {
     expect(screen.getByRole("link", { name: "Back to runs" })).toHaveAttribute("href", "/runs");
   });
 
-  describe("outcome without an authoritative summary (F1)", () => {
-    const FAILED_RUN = { ...RUN, status: "FAILED", error: "raw engine text" };
+  describe("conservative outcome precedence (F1/B1)", () => {
     const unknownAction = {
-      step_id: "send_summary",
+      step_id: "a",
       tool: "slack.send_message",
       destination_summary: "CPILOT",
       status: "unknown",
@@ -205,48 +204,133 @@ describe("RunDetailPage result summary", () => {
       message: "upstream",
       method: "GET",
     });
+    const refetch = vi.fn();
 
-    function arrange(summary: { error?: unknown; isLoading?: boolean }, actions: unknown) {
+    function arrange(
+      runStatus: string,
+      summary: { data?: unknown; error?: unknown; isLoading?: boolean },
+      actions: { data?: unknown; error?: unknown; isLoading?: boolean },
+    ) {
       setup(summary);
-      mockRun.mockReturnValue({ isLoading: false, error: null, data: FAILED_RUN });
-      mockActions.mockReturnValue(actions);
+      mockSummary.mockReturnValue({
+        isLoading: summary.isLoading ?? false,
+        error: summary.error ?? null,
+        data: summary.data,
+        refetch,
+      });
+      mockRun.mockReturnValue({
+        isLoading: false,
+        error: null,
+        data: { ...RUN, status: runStatus, error: "raw engine text" },
+      });
+      mockActions.mockReturnValue({
+        isLoading: actions.isLoading ?? false,
+        error: actions.error ?? null,
+        data: actions.data,
+        refetch,
+      });
     }
 
-    function expectNoRetryAdvice() {
+    const stripStatus = () =>
+      document.querySelector(".run-strip [data-status]")?.getAttribute("data-status");
+
+    function expectNoSuccessOrRerun() {
       const text = document.body.textContent ?? "";
       expect(text).not.toMatch(/You can try again now|You can run the workflow again/);
       expect(text).not.toContain("This run didn't finish");
-      expect(document.querySelector(".badge.ok[data-status]")).toBeNull();
+      expect(text).not.toContain("Nothing was changed");
+      expect(document.querySelector(".run-strip .badge.ok")).toBeNull();
+      expect(screen.queryByTestId("run-summary")).toBeNull();
     }
 
-    it("shows UNKNOWN from action evidence while the summary is loading", async () => {
-      arrange({ isLoading: true }, { isLoading: false, error: null, data: [unknownAction] });
+    it.each(["COMPLETED", "PARTIAL", "IN_PROGRESS", "FAILED", "WAITING_APPROVAL"])(
+      "UNKNOWN action evidence overrides a %s summary",
+      async (summaryOutcome) => {
+        arrange(
+          "COMPLETED",
+          { data: { ...SUMMARY, run_status: summaryOutcome, outcome: summaryOutcome } },
+          { data: [unknownAction] },
+        );
+        renderPage();
+        expect(
+          await screen.findByText("We can't confirm whether the action happened"),
+        ).toBeVisible();
+        expect(stripStatus()).toBe("ACTION_OUTCOME_UNKNOWN");
+        expect(screen.getByTestId("run-summary-conflict")).toBeVisible();
+        expect(screen.getAllByText(/Don't simply run it again/).length).toBeGreaterThan(0);
+        // The unknown step reads "recorded" with a warning badge, never success.
+        expect(document.querySelector("#evidence-a [data-status]")).toHaveAttribute(
+          "data-status",
+          "UNKNOWN",
+        );
+        expectNoSuccessOrRerun();
+      },
+    );
+
+    it.each([
+      ["summary loading", { isLoading: true }],
+      ["summary 503", { error: outage }],
+    ])("UNKNOWN action evidence with %s → UNKNOWN", async (_label, summary) => {
+      arrange("FAILED", summary, { data: [unknownAction] });
       renderPage();
       expect(await screen.findByText("We can't confirm whether the action happened")).toBeVisible();
-      expect(document.querySelector(".run-strip [data-status]")).toHaveAttribute(
-        "data-status",
-        "ACTION_OUTCOME_UNKNOWN",
+      expect(stripStatus()).toBe("ACTION_OUTCOME_UNKNOWN");
+      expectNoSuccessOrRerun();
+    });
+
+    it("delayed summary with raw FAILED shows a neutral check, not FAILED", async () => {
+      arrange("FAILED", { isLoading: true }, { data: [] });
+      renderPage();
+      expect(await screen.findByText("Checking this run's recorded outcome…")).toBeVisible();
+      expect(stripStatus()).toBe("OUTCOME_PENDING");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expectNoSuccessOrRerun();
+    });
+
+    it("delayed actions with raw COMPLETED shows a neutral check, not success", async () => {
+      arrange("COMPLETED", { data: SUMMARY }, { isLoading: true });
+      renderPage();
+      expect(await screen.findByText("Checking this run's recorded outcome…")).toBeVisible();
+      expect(stripStatus()).toBe("OUTCOME_PENDING");
+      expectNoSuccessOrRerun();
+    });
+
+    it.each(["FAILED", "COMPLETED"])(
+      "both evidence reads unavailable with raw %s → unconfirmed",
+      async (runStatus) => {
+        arrange(runStatus, { error: outage }, { error: outage });
+        renderPage();
+        expect(await screen.findByText("We can't confirm this run's full outcome")).toBeVisible();
+        expect(stripStatus()).toBe("OUTCOME_UNAVAILABLE");
+        const text = document.body.textContent ?? "";
+        expect(text).toContain("Some steps may have run, including actions outside NLW.");
+        expect(text).toMatch(/ask an administrator, before running it again/);
+        expectNoSuccessOrRerun();
+        // The only retry offered reloads evidence, and says so.
+        const reload = screen.getByRole("button", { name: "Reload run evidence" });
+        expect(screen.getByTestId("reload-evidence")).toHaveTextContent(
+          "It doesn't run the workflow again.",
+        );
+        reload.click();
+        expect(refetch).toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ["COMPLETED", "ok"],
+      ["FAILED", "fail"],
+      ["FAILED_WITH_UNKNOWN", "warn"],
+    ])("ordinary %s summary is shown as-is", async (summaryOutcome, style) => {
+      arrange(
+        summaryOutcome === "COMPLETED" ? "COMPLETED" : "FAILED",
+        { data: { ...SUMMARY, outcome: summaryOutcome } },
+        { data: [] },
       );
-      expectNoRetryAdvice();
-    });
-
-    it("shows UNKNOWN from action evidence when the summary read returns 503", async () => {
-      arrange({ error: outage }, { isLoading: false, error: null, data: [unknownAction] });
       renderPage();
-      expect(await screen.findByText("We can't confirm whether the action happened")).toBeVisible();
-      expect(screen.getAllByText(/Don't simply run it again/).length).toBeGreaterThan(0);
-      expectNoRetryAdvice();
-    });
-
-    it("uses a neutral unconfirmed state when the outcome can't be determined", async () => {
-      arrange({ error: outage }, { isLoading: false, error: outage, data: undefined });
-      renderPage();
-      expect(await screen.findByText("We can't confirm this run's full outcome")).toBeVisible();
-      const text = document.body.textContent ?? "";
-      expect(text).toContain("Some steps may have run, including actions outside NLW.");
-      expect(text).toMatch(/ask an administrator, before running it again/);
-      expect(text).not.toContain("Nothing was changed");
-      expectNoRetryAdvice();
+      await screen.findByTestId("run-summary");
+      expect(stripStatus()).toBe(summaryOutcome);
+      expect(document.querySelector(".run-strip .badge")).toHaveClass(style);
+      expect(screen.queryByTestId("reload-evidence")).toBeNull();
     });
   });
 });

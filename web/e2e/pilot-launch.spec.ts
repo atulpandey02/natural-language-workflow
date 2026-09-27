@@ -296,6 +296,36 @@ test.describe("launch closure journeys (synthetic pilot)", () => {
     });
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.screenshot({ path: `${SHOT}-connector-lost-response.png`, fullPage: true });
+
+    // B2: the connector commits, but the browser receives a 500 instead of the reply.
+    await page.route("**/api/nlw/connectors", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      await route.fetch(); // commits on the API
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: { code: "internal_error", message: "internal server error" },
+        }),
+      });
+    });
+    await page.getByLabel("Name").fill("committed-500-slack");
+    await page.getByRole("button", { name: "Create connector" }).click();
+    const ambiguous = page.getByTestId("friendly-error");
+    await expect(ambiguous).toContainText("We couldn't confirm whether your change was saved.");
+    await expect(ambiguous).toContainText("Don't repeat it until you've checked.");
+    for (const unsafe of [
+      /safe to try again/i,
+      /request didn.t complete/i,
+      /nothing was changed/i,
+      /try again now/i,
+    ]) {
+      await expect(ambiguous).not.toContainText(unsafe);
+    }
+    await page.unroute("**/api/nlw/connectors");
+    await expect(page.getByRole("cell", { name: "committed-500-slack", exact: true })).toBeVisible({
+      timeout: 15000,
+    });
   });
 
   test("mobile and keyboard: sign in and navigate without a pointer", async ({ page }) => {

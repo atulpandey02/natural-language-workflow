@@ -226,3 +226,116 @@ eyebrows, badges and the Approve button on every screen. `07-sales-report-tablet
 - The KPI no-wrap check runs in Chromium only.
 - When the summary itself is unavailable, its own panel still offers the ordinary retry for
   re-reading it. That retry is a read, not the run.
+
+## 9. Final correction pass (B1–B3)
+
+Starting tip `8d8eb18`. Frontend and test changes only; no backend, migration or API-contract file
+changed.
+
+### B1 — conservative run-outcome precedence
+
+Reproduced (by code and unit test before the fix):
+- Action evidence `unknown` escalated only a `FAILED` summary. With a `COMPLETED`, `PARTIAL` or
+  `IN_PROGRESS` summary it showed that less-cautious state, including a green COMPLETED badge.
+- Raw `FAILED` was shown while the summary was still loading.
+- With both summary and action reads failed, the page showed the raw run status.
+
+The precedence rule (`lib/run-outcome.ts`), most conservative first:
+1. Any persisted action with status `unknown` gives UNKNOWN, whatever the summary says.
+2. A summary outcome that is itself UNKNOWN.
+3. Summary or action evidence still loading gives `OUTCOME_PENDING`: "Checking this run's recorded
+   outcome…", a neutral badge, and no claim of failure, success, mutation or retry.
+4. The deterministic summary, once it and the action evidence are read. If only the action read
+   failed, the summary stays authoritative, because the backend derives it from the same action rows.
+5. Otherwise `OUTCOME_UNAVAILABLE`: "We can't confirm this run's full outcome", "Some steps may have
+   run…", and check the evidence or ask an administrator.
+
+Raw run status is never presented as the outcome.
+
+When the outcome is cautious (UNKNOWN, pending or unconfirmed):
+- a less-cautious summary card is set aside, with a visible note;
+- the analytics badge shows the cautious outcome;
+- sharing is withheld;
+- a step with an unknown action shows an UNKNOWN badge and "Checkpoint recorded".
+
+A failed evidence read offers **Reload run evidence**, labelled "This only reloads what NLW has
+recorded. It doesn't run the workflow again." Backend execution, persistence and resend semantics are
+unchanged.
+
+### B2 — no unsafe HTTP 500 copy
+
+Reproduced: a write-side 500 composed "The request didn't complete. It's safe to try again." with
+"We couldn't confirm whether your change was saved."
+
+Copy changes:
+- The generic `server` and `unexpected` explanations now make no completion, safety or no-change
+  claim.
+- Write-side 5xx banners are fully composed as: unconfirmed; check the relevant list or record
+  before trying again; "Don't repeat it until you've checked."
+- Failed reads say "Try loading it again", with read-specific retry text.
+- Endpoint contracts that settle the state are encoded as known messages:
+  - planner 503/502 → unchanged (plans.py raises before any proposal row);
+  - approval enqueue failure → changed ("Your decision was saved. Scheduling the run to continue
+    did not complete.");
+  - "run created but could not be scheduled" → changed ("The run was created… Don't start it
+    again.").
+
+### B3 — large KPI values stay legible
+
+Reproduced: the contract accepts any finite value in ±1e12, and exact forms such as
+`-$1,000,000,000,000.00` exceed a KPI card and clipped.
+
+Policy (`kpiDisplay` in `lib/analytics-presentation.ts`):
+- An exact form of at most 11 characters is shown unchanged (`$280,617.20`, `49.79%`, `$0.00`,
+  "Unavailable" for null).
+- Longer values show compact notation to 2 decimals (`$12.35B`, `-$1.00T`, `1.00T%`), marked
+  "· rounded".
+- The exact value stays available three ways:
+  1. screen-reader text inside the value;
+  2. a `title` for pointer users;
+  3. a keyboard-reachable **Exact value** disclosure whose digits break only at thousands
+     separators.
+- Every value the contract accepts fits the 11-character budget; a unit test enumerates the
+  boundaries.
+
+### Tests (local, final tree)
+
+- Prettier, ESLint (0 warnings), `tsc` and `next build`: clean.
+- Vitest: 43 files, 348 tests, including:
+  - UNKNOWN against 11 summary outcomes;
+  - delayed summary or actions with raw FAILED/COMPLETED;
+  - both reads unavailable with raw FAILED/COMPLETED;
+  - fully composed banners for POST/PATCH/PUT/DELETE 500, write 502/503/504, GET 500, the known
+    changed and unchanged cases, and validation;
+  - KPI values for normal, long positive and negative, ±1e12 boundaries, large percentage, zero
+    and null.
+- Seeded-stack Playwright: 8 tests in 3 files, no pilot specs; 8 passed, 0 skipped, flaky or
+  failed.
+- Pilot harness, 0 skipped in each:
+  - launch 4 passed, including a connector that commits and then gets a 500 (the refreshed list
+    shows it; the banner has no "safe to try again", "request didn't complete" or "nothing was
+    changed");
+  - golden 2 passed, now including contract-boundary KPI values at 1440, 1280, 834, 800, 768,
+    744 and 390 px (each shown value one line inside its card, exact value accessible, keyboard
+    disclosure inside the card, dominant chart unchanged, no page overflow);
+  - failed / partial / UNKNOWN 1 passed, now including UNKNOWN action evidence against rewritten
+    COMPLETED and PARTIAL summaries, and the summary 503 after UNKNOWN.
+- Backend (unchanged files): `test_quota_caps.py`, `test_approvals_api.py` and
+  `test_connectors_api.py`: 15 passed.
+
+### Screenshots
+
+New:
+- `visual/19-unknown-vs-conflicting-summary.png`
+- `visual/20-kpi-boundary-desktop.png`
+- `visual/21-kpi-boundary-mobile.png`
+
+No existing screenshot changed materially: ordinary values render exactly as before.
+
+### Remaining limitations
+
+- The conflicting-summary, boundary-value and 500 scenarios are produced by rewriting real
+  responses in the browser (Playwright routing); the backend never emits those combinations
+  itself.
+- The summary stays authoritative when only the action-evidence read fails.
+- Browser checks run in Chromium only.

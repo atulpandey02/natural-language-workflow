@@ -123,6 +123,25 @@
 .analytics-workspace .kpi-card:first-child strong {
   font-size: clamp(24px, 14cqi, 44px);
 }
+.analytics-workspace .kpi-exact {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.analytics-workspace .kpi-exact summary {
+  color: var(--cyan-ink);
+  font-weight: 600;
+}
+/* The exact figure may wrap only at the <wbr> after each thousands separator. */
+.analytics-workspace .kpi-exact-value {
+  display: block;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+.analytics-workspace .kpi-exact-value > span {
+  white-space: nowrap;
+}
 .analytics-workspace .metric-kind {
   font-size: 11.5px;
   color: var(--muted);

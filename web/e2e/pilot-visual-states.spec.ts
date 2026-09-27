@@ -85,6 +85,42 @@ test("real failed/partial checkpoints and immutable Slack UNKNOWN outcome", asyn
   // An UNKNOWN step's checkpoint is "recorded", never "completed".
   await expect(page.getByText(/Checkpoint recorded/).first()).toBeVisible();
 
+  // B1: a summary that reads less cautiously than the recorded action evidence
+  // (COMPLETED or PARTIAL, every step "SUCCESS") must not win over UNKNOWN.
+  for (const conflicting of ["COMPLETED", "PARTIAL"]) {
+    await page.route("**/api/nlw/runs/*/summary", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.outcome = conflicting;
+      body.run_status = conflicting;
+      body.unknown = 0;
+      body.steps = body.steps.map((step: Record<string, unknown>) => ({
+        ...step,
+        outcome: "SUCCESS",
+      }));
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto(slackRun);
+    await expect(page.getByText("We can't confirm whether the action happened")).toBeVisible({
+      timeout: 30000,
+    });
+    await expect(page.locator(".run-strip [data-status]")).toHaveAttribute(
+      "data-status",
+      "ACTION_OUTCOME_UNKNOWN",
+    );
+    await expect(page.locator(".badge.ok")).toHaveCount(0);
+    await expect(page.getByTestId("run-summary-conflict")).toBeVisible();
+    await expect(page.getByTestId("run-summary")).toHaveCount(0);
+    await expect(
+      page.getByText(/You can try again now|You can run the workflow again/),
+    ).toHaveCount(0);
+    await page.locator(".workflow-details > summary").click();
+    await expect(page.getByText(/Checkpoint recorded/).first()).toBeVisible();
+    await expect(page.getByText(/Checkpoint completed/)).toHaveCount(0);
+    await page.unroute("**/api/nlw/runs/*/summary");
+  }
+  await page.screenshot({ path: "test-results/pilot-unknown-conflicting-summary.png" });
+
   // F1: after UNKNOWN, the summary read fails (503). The persisted action
   // evidence must keep the page on UNKNOWN, never fall back to a retryable FAILED.
   const outage = {

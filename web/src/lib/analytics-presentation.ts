@@ -1,4 +1,4 @@
-import type { Unit } from "./analytics";
+import { formatValue, type Unit } from "./analytics";
 
 // Presentation only. The backend owns metric definitions and all values.
 // Light-canvas series colors: each keeps >= 3:1 contrast against white, and
@@ -58,4 +58,37 @@ export function formatPeriod(label: string): string {
   return new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "UTC" }).format(
     new Date(`${label}-01T00:00:00Z`),
   );
+}
+
+/**
+ * KPI display policy. The contract allows any finite value in ±1e12, so an
+ * exact figure can be too long for a KPI card. Values whose exact form fits in
+ * KPI_MAX_CHARS characters (e.g. "$280,617.20") are shown exactly; longer ones
+ * are shown in compact notation to 2 decimals (e.g. "$12.35B", "-$1.00T") and
+ * marked as rounded. The exact value always stays available.
+ */
+export const KPI_MAX_CHARS = 11;
+
+const UNIT_SUFFIX: Record<Unit, string> = {
+  USD: "",
+  count: "",
+  percent: "%",
+  hours: " h",
+  score: " / 5",
+};
+
+export function kpiDisplay(
+  value: number | null,
+  unit: Unit,
+): { text: string; exact: string; compacted: boolean } {
+  const exact = formatValue(value, unit);
+  if (value === null || exact.length <= KPI_MAX_CHARS)
+    return { text: exact, exact, compacted: false };
+  const compact = new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    ...(unit === "USD" ? { style: "currency" as const, currency: "USD" } : {}),
+  }).format(value);
+  return { text: compact + UNIT_SUFFIX[unit], exact, compacted: true };
 }

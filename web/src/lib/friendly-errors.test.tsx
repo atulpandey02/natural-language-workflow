@@ -288,3 +288,93 @@ describe("mutation state: never claim nothing changed unless it's proven", () =>
     expect(screen.getByRole("alert")).toHaveTextContent("Nothing was changed.");
   });
 });
+
+describe("fully composed banners never contradict the mutation state (B2)", () => {
+  const banner = (status: number, method: string, message = "internal server error") => {
+    const { unmount } = render(
+      <ErrorBanner
+        error={
+          new ApiError({ status, code: status >= 500 ? "internal_error" : "x", message, method })
+        }
+      />,
+    );
+    const text = screen.getByTestId("friendly-error").textContent ?? "";
+    unmount();
+    return text;
+  };
+  const UNSAFE = [
+    /safe to try again/i,
+    /request didn.t complete/i,
+    /nothing was changed/i,
+    /try again now/i,
+  ];
+
+  it.each([
+    [500, "POST"],
+    [500, "PATCH"],
+    [500, "PUT"],
+    [500, "DELETE"],
+    [502, "POST"],
+    [503, "POST"],
+    [504, "POST"],
+    [503, "DELETE"],
+  ])("write-side %i %s: unconfirmed, check first, no safe-retry claim", (status, method) => {
+    const text = banner(status, method);
+    for (const unsafe of UNSAFE) expect(text).not.toMatch(unsafe);
+    expect(text).toContain("We couldn't confirm whether your change was saved.");
+    expect(text).toContain("check the relevant list or record before trying again");
+    expect(text).toContain("Don't repeat it until you've checked.");
+  });
+
+  it("GET 500 offers to load again, clearly as a read", () => {
+    const text = banner(500, "GET");
+    expect(text).toContain("Try loading it again.");
+    expect(text).toMatch(/try loading it again/i);
+    for (const unsafe of UNSAFE) expect(text).not.toMatch(unsafe);
+    expect(text).not.toMatch(/couldn't confirm whether your change/);
+  });
+
+  it("approval enqueue failure: decision saved, continuation not scheduled", () => {
+    const text = banner(503, "POST", "decision saved but resume could not be scheduled");
+    expect(text).toContain(
+      "Your decision was saved. Scheduling the run to continue did not complete.",
+    );
+    for (const unsafe of UNSAFE) expect(text).not.toMatch(unsafe);
+    expect(text).not.toMatch(/couldn't confirm/);
+  });
+
+  it("run created but not scheduled is reported as saved, not retryable", () => {
+    const text = banner(
+      503,
+      "POST",
+      "run created but could not be scheduled; it will be recovered automatically",
+    );
+    expect(text).toContain("The run was created.");
+    expect(text).toContain("Don't start it again.");
+    for (const unsafe of UNSAFE) expect(text).not.toMatch(unsafe);
+  });
+
+  it("a known-unchanged planner outage keeps its own guidance", () => {
+    const text = banner(503, "POST", "planner provider unavailable");
+    expect(text).toContain("The planner is unavailable");
+    expect(text).toContain("Nothing was changed.");
+    expect(text).not.toMatch(/couldn't confirm/);
+  });
+
+  it("a validation rejection still says nothing was changed", () => {
+    const { unmount } = render(
+      <ErrorBanner
+        error={
+          new ApiError({
+            status: 422,
+            code: "validation_error",
+            message: "request validation failed",
+            method: "POST",
+          })
+        }
+      />,
+    );
+    expect(screen.getByTestId("friendly-error")).toHaveTextContent("Nothing was changed.");
+    unmount();
+  });
+});

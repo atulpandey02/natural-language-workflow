@@ -24,6 +24,7 @@ const STATUS_LABEL: Record<string, string> = {
   FAILED_WITH_UNKNOWN: "Outcome unknown",
   ACTION_OUTCOME_UNKNOWN: "Outcome unknown",
   OUTCOME_UNAVAILABLE: "Outcome unconfirmed",
+  OUTCOME_PENDING: "Checking outcome",
   active: "Active",
   approved: "Approved",
   rejected: "Rejected",

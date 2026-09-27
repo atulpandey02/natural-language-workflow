@@ -9,10 +9,18 @@ import { AnalyticsResultView } from "./AnalyticsResult";
 import { ErrorBanner, Loading } from "./ui";
 import { PlanReview } from "./PlanReview";
 
-export function AnalyticsPanel({ runId }: { runId: string }) {
+export function AnalyticsPanel({
+  runId,
+  cautiousOutcome,
+}: {
+  runId: string;
+  /** Set when the run page can't confirm the outcome: no success badge, no sharing. */
+  cautiousOutcome?: string;
+}) {
   const result = useRunAnalytics(runId);
   const parsed = analyticsSchema.safeParse(result.data);
-  const canShare = parsed.success && parsed.data.status === "READY" && !result.error;
+  const canShare =
+    !cautiousOutcome && parsed.success && parsed.data.status === "READY" && !result.error;
   const connectors = useConnectors();
   const create = useSlackProposal(runId);
   const [selection, setSelection] = useState("");
@@ -47,7 +55,9 @@ export function AnalyticsPanel({ runId }: { runId: string }) {
     <>
       {result.isLoading ? <Loading label="Loading analytical evidence…" /> : null}
       <ErrorBanner error={result.error} />
-      {result.data ? <AnalyticsResultView value={result.data} /> : null}
+      {result.data ? (
+        <AnalyticsResultView value={result.data} outcomeOverride={cautiousOutcome} />
+      ) : null}
       {canShare ? (
         <section className="card handoff">
           <div className="handoff-intro">

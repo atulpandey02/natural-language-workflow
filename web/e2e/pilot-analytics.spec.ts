@@ -36,12 +36,14 @@ async function assertKpisOneLine(page: Page) {
       .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
       .toBe(true);
     const kpis = await page.evaluate(() =>
-      [...document.querySelectorAll('[data-testid="analytics-kpi"] strong')].map((el) => {
+      [...document.querySelectorAll('[data-testid="analytics-kpi"] strong')].map((strong) => {
+        // A compacted value shows its aria-hidden visible form; measure that.
+        const el = strong.querySelector('[aria-hidden="true"]') ?? strong;
         const range = document.createRange();
         range.selectNodeContents(el);
         const lines = new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
         const text = range.getBoundingClientRect();
-        const card = el.closest(".kpi-card")!.getBoundingClientRect();
+        const card = strong.closest(".kpi-card")!.getBoundingClientRect();
         return {
           value: el.textContent,
           lines,
@@ -54,6 +56,60 @@ async function assertKpisOneLine(page: Page) {
       expect(k, `${k.value} at ${width}px`).toEqual({ value: k.value, lines: 1, inside: true });
     }
   }
+}
+
+/**
+ * Contract-boundary KPI values (finite, within ±1e12) rendered in the real page:
+ * the analytics response for this run is intercepted and only its metric values
+ * are replaced. Nothing may clip, digits may not wrap, and the exact value must
+ * stay available accessibly.
+ */
+async function assertBoundaryKpis(page: Page) {
+  const runId = page.url().split("/runs/")[1];
+  const pattern = `**/api/nlw/runs/${runId}/analytics`;
+  const values: Array<[number, string, string, string]> = [
+    [-1e12, "USD", "-$1.00T", "-$1,000,000,000,000.00"],
+    [12345678901.23, "USD", "$12.35B", "$12,345,678,901.23"],
+    [1e12, "count", "1.00T", "1,000,000,000,000"],
+    [999999999999.99, "percent", "1.00T%", "999,999,999,999.99%"],
+  ];
+  await page.route(pattern, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.metrics = body.metrics.map((m: Record<string, unknown>, i: number) => ({
+      ...m,
+      value: values[i][0],
+      unit: values[i][1],
+    }));
+    await route.fulfill({ response, json: body });
+  });
+  await page.reload();
+  const kpis = page.getByTestId("analytics-kpi");
+  await expect(kpis.first()).toContainText("-$1.00T", { timeout: 30000 });
+  for (const [i, [, , shown, exact]] of values.entries()) {
+    const value = kpis.nth(i).locator("strong");
+    await expect(value).toHaveAttribute("data-compacted", "true");
+    await expect(value).toHaveAttribute("title", exact);
+    await expect(value.locator('[aria-hidden="true"]')).toHaveText(shown);
+    await expect(value.locator(".sr-only")).toHaveText(exact);
+    await expect(kpis.nth(i)).toContainText("rounded");
+  }
+  await assertKpisOneLine(page);
+  // The exact figure is reachable by keyboard and stays inside its card.
+  await page.setViewportSize({ width: 390, height: 900 });
+  const summary = kpis.first().getByText("Exact value");
+  await summary.focus();
+  await page.keyboard.press("Enter");
+  const exactBox = await kpis.first().locator(".kpi-exact-value").boundingBox();
+  const cardBox = await kpis.first().boundingBox();
+  expect(exactBox!.x + exactBox!.width).toBeLessThanOrEqual(cardBox!.x + cardBox!.width + 0.5);
+  await expect(kpis.first().locator(".kpi-exact-value")).toHaveText("-$1,000,000,000,000.00");
+  await page.screenshot({ path: "test-results/pilot-kpi-boundary-mobile.png" });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: "test-results/pilot-kpi-boundary-desktop.png" });
+  await assertLayout(page, 1440, 900); // dominant chart hierarchy unchanged
+  await page.unroute(pattern);
 }
 
 async function inspectRevenue(page: Page) {
@@ -291,5 +347,6 @@ test.describe("synthetic pilot golden analytics", () => {
       await expect(page.getByTestId("analytics-kpi").filter({ hasText: value })).toHaveCount(1);
     }
     await page.screenshot({ path: "test-results/pilot-support-desktop.png", fullPage: true });
+    await assertBoundaryKpis(page);
   });
 });

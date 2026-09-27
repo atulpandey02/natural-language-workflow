@@ -25,6 +25,8 @@ export interface FriendlyError {
   mutation?: Mutation;
   /** The sentence shown for `mutation`/outcome — never implied, always stated. */
   changed?: string;
+  /** Retry guidance composed for this context (overrides the generic RETRY_TEXT). */
+  retryText?: string;
   reference?: string;
   /** Friendly per-field messages from a 422 validation response (field -> text). */
   fields?: Record<string, string>;
@@ -116,16 +118,16 @@ const GENERIC: Record<string, Copy> = {
   },
   server: {
     title: "Something went wrong on our side",
-    explanation: "The request didn't complete. It's safe to try again.",
-    action: "Try again. If it keeps happening, share the reference with your administrator.",
-    retry: "now",
+    explanation: "NLW ran into an unexpected problem with this request.",
+    action: "If it keeps happening, share the reference with your administrator.",
+    retry: "later",
     tone: "error",
   },
   unexpected: {
     title: "Something went wrong",
-    explanation: "An unexpected problem stopped this action.",
-    action: "Refresh the page and try again.",
-    retry: "now",
+    explanation: "An unexpected problem interrupted this.",
+    action: "Refresh the page and check whether your last action took effect.",
+    retry: "no",
     tone: "error",
   },
 };
@@ -180,6 +182,8 @@ const KNOWN: Record<string, Copy> = {
     title: "The planner is unavailable",
     explanation: "NLW couldn't reach its planning service. Your question wasn't lost.",
     action: "Try again in a minute.",
+    // plans.py: provider faults raise before any proposal row is written.
+    mutation: "unchanged",
     retry: "later",
     tone: "warn",
   },
@@ -189,6 +193,7 @@ const KNOWN: Record<string, Copy> = {
     action: "Contact your administrator.",
     retry: "no",
     tone: "error",
+    mutation: "unchanged",
   },
   "you cannot decide an approval you requested": {
     title: "Someone else must approve this",
@@ -233,6 +238,15 @@ const KNOWN: Record<string, Copy> = {
     action: "Check the run in a minute. Don't decide again.",
     mutation: "changed",
     changed: "Your decision was saved. Scheduling the run to continue did not complete.",
+    retry: "no",
+    tone: "info",
+  },
+  "run created but could not be scheduled; it will be recovered automatically": {
+    title: "Run created — starting it was delayed",
+    explanation: "The run was saved, but NLW couldn't schedule it to start right away.",
+    action: "Open Runs to follow it. Don't start it again.",
+    mutation: "changed",
+    changed: "The run was created. Scheduling it did not complete; NLW recovers it automatically.",
     retry: "no",
     tone: "info",
   },
@@ -347,8 +361,35 @@ function mutationFor(status: number, method: string | undefined, copy: Copy): Mu
   return status >= 500 || status === 408 ? "unknown" : "unchanged";
 }
 
-function withMutation(f: FriendlyError, mutation: Mutation | undefined): FriendlyError {
-  if (!mutation) return { ...f, mutation: undefined, changed: undefined };
+// Read failures: retrying the read is safe, and the copy says it is the read.
+const READ_ACTION: Record<string, string> = {
+  network: "Check your connection, then try loading it again.",
+  unavailable: "Try loading it again in a minute.",
+  server:
+    "Try loading it again. If it keeps happening, share the reference with your administrator.",
+};
+const READ_RETRY_TEXT: Record<Retry, string> = {
+  now: "You can try loading it again now.",
+  later: "Wait a little, then try loading it again.",
+  no: "Don't retry blindly.",
+};
+const UNKNOWN_RETRY_TEXT = "Don't repeat it until you've checked.";
+
+function withMutation(
+  f: FriendlyError,
+  mutation: Mutation | undefined,
+  read = false,
+): FriendlyError {
+  if (!mutation) {
+    const readAction = read ? READ_ACTION[f.kind] : undefined;
+    return {
+      ...f,
+      mutation: undefined,
+      changed: undefined,
+      action: readAction ?? f.action,
+      retryText: read ? READ_RETRY_TEXT[f.retry] : undefined,
+    };
+  }
   if (mutation === "unknown") {
     return {
       ...f,
@@ -356,6 +397,7 @@ function withMutation(f: FriendlyError, mutation: Mutation | undefined): Friendl
       changed: OUTCOME_UNCONFIRMED,
       action: CHECK_BEFORE_RETRY,
       retry: "no",
+      retryText: UNKNOWN_RETRY_TEXT,
     };
   }
   if (mutation === "changed") return { ...f, mutation, retry: "no" };
@@ -382,13 +424,15 @@ export function describeError(error: unknown): FriendlyError | null {
         fields: error.status === 422 ? fieldErrors(error.details) : undefined,
       },
       mutationFor(error.status, error.method, copy),
+      isRead(error.method),
     );
   }
   if (error instanceof UserFacingError) return { ...error.copy, kind: error.kind };
   if (isInterrupted(error)) {
     const method = error instanceof RequestInterruptedError ? error.method : undefined;
     // A read that never completed changed nothing; anything else may have committed.
-    if (isRead(method)) return { ...GENERIC.network, kind: "network" };
+    if (isRead(method))
+      return withMutation({ ...GENERIC.network, kind: "network" }, undefined, true);
     return withMutation({ ...INTERRUPTED, kind: "interrupted" }, "unknown");
   }
   return withMutation({ ...GENERIC.unexpected, kind: "unexpected" }, "unknown");

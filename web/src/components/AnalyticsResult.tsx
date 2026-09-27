@@ -17,12 +17,14 @@ import {
   analyticsSchema,
   type AnalyticsResult,
   type AnalyticsTable,
+  type Unit,
   type Visualization,
   formatValue,
 } from "@/lib/analytics";
 import {
   formatAxis,
   formatPeriod,
+  kpiDisplay,
   metricKind,
   seriesStyle,
   unitLabel,
@@ -351,7 +353,54 @@ function Insights({ findings, ready }: { findings: Finding[]; ready: boolean }) 
   );
 }
 
-export function AnalyticsResultView({ value }: { value: unknown }) {
+/** A KPI value that never clips: exact when it fits, compact (and marked) when not. */
+function KpiValue({ value, unit, label }: { value: number | null; unit: Unit; label: string }) {
+  const shown = kpiDisplay(value, unit);
+  if (!shown.compacted) {
+    return (
+      <>
+        <strong>{shown.text}</strong>
+        <span className="metric-kind">{metricKind(label)}</span>
+      </>
+    );
+  }
+  // Exact figure: read by screen readers in place, visible on demand (keyboard or
+  // pointer), and able to break only at thousands separators.
+  const parts = shown.exact.split(",");
+  return (
+    <>
+      <strong title={shown.exact} data-compacted="true">
+        <span aria-hidden="true">{shown.text}</span>
+        <span className="sr-only">{shown.exact}</span>
+      </strong>
+      <span className="metric-kind">{metricKind(label)} · rounded</span>
+      <details className="kpi-exact">
+        <summary>Exact value</summary>
+        <span className="kpi-exact-value">
+          {parts.map((part, i) => (
+            <span key={i}>
+              {part}
+              {i < parts.length - 1 ? (
+                <>
+                  ,<wbr />
+                </>
+              ) : null}
+            </span>
+          ))}
+        </span>
+      </details>
+    </>
+  );
+}
+
+export function AnalyticsResultView({
+  value,
+  outcomeOverride,
+}: {
+  value: unknown;
+  /** A more cautious run outcome from the run page; replaces the result's own badge. */
+  outcomeOverride?: string;
+}) {
   const parsed = analyticsSchema.safeParse(value);
   if (!parsed.success || parsed.data.status === "INVALID")
     return (
@@ -386,7 +435,7 @@ export function AnalyticsResultView({ value }: { value: unknown }) {
           <p className="eyebrow">Analysis report</p>
           <h2>{title}</h2>
         </div>
-        <StatusBadge status={result.run_outcome} />
+        <StatusBadge status={outcomeOverride ?? result.run_outcome} />
       </div>
       {result.status === "PARTIAL" ? (
         <p className="notice" role="status">
@@ -416,13 +465,12 @@ export function AnalyticsResultView({ value }: { value: unknown }) {
               <SeriesMark label={m.label} />
               {m.label}
             </span>
-            <strong>{formatValue(m.value, m.unit)}</strong>
-            <span className="metric-kind">{metricKind(m.label)}</span>
+            <KpiValue value={m.value} unit={m.unit} label={m.label} />
             <Sources ids={m.source_step_ids} />
           </article>
         ))}
       </div>
-      <Insights findings={result.findings} ready={result.status === "READY"} />
+      <Insights findings={result.findings} ready={result.status === "READY" && !outcomeOverride} />
       <div className="chart-section-heading">
         <h3>Performance trends & breakdowns</h3>
         <span>Hover or focus a chart and use arrow keys to inspect</span>

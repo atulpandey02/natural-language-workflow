@@ -48,7 +48,8 @@ function FriendlyPanel({
       <p>{friendly.explanation}</p>
       {friendly.changed ? <p className="changed">{friendly.changed}</p> : null}
       <p>
-        {friendly.action} <span className="muted">{RETRY_TEXT[friendly.retry]}</span>
+        {friendly.action}{" "}
+        <span className="muted">{friendly.retryText ?? RETRY_TEXT[friendly.retry]}</span>
       </p>
       {friendly.reference ? <p className="ref">Reference: {friendly.reference}</p> : null}
     </div>
@@ -92,6 +93,7 @@ const STATUS_CLASS: Record<string, string> = {
   FAILED_WITH_UNKNOWN: "warn",
   ACTION_OUTCOME_UNKNOWN: "warn",
   OUTCOME_UNAVAILABLE: "warn",
+  OUTCOME_PENDING: "skip",
   PARTIAL: "warn",
   NEEDS_APPROVAL: "warn",
   NEEDS_CLARIFICATION: "warn",

@@ -1,63 +1,84 @@
 import { describe, expect, it } from "vitest";
-import { OUTCOME_UNAVAILABLE, deriveRunOutcome } from "./run-outcome";
+import {
+  OUTCOME_PENDING,
+  OUTCOME_UNAVAILABLE,
+  deriveRunOutcome,
+  isCautiousOutcome,
+  isUnknownOutcome,
+} from "./run-outcome";
 
-const base = { runStatus: "FAILED", summaryLoading: false, actionStatuses: undefined };
+const read = <T>(data: T | undefined, loading = false) => ({ data, loading });
 
-describe("deriveRunOutcome", () => {
-  it.each(["COMPLETED", "FAILED", "FAILED_WITH_UNKNOWN", "WAITING_APPROVAL"])(
-    "uses the authoritative summary outcome %s",
-    (summaryOutcome) => {
-      expect(deriveRunOutcome({ ...base, summaryOutcome, actionStatuses: ["failed"] })).toBe(
-        summaryOutcome,
+// Every outcome a summary (or raw status) could report.
+const SUMMARY_OUTCOMES = [
+  "COMPLETED",
+  "SUCCESS",
+  "PARTIAL",
+  "IN_PROGRESS",
+  "RUNNING",
+  "PENDING",
+  "WAITING_APPROVAL",
+  "FAILED",
+  "FAILED_WITH_UNKNOWN",
+  "ACTION_OUTCOME_UNKNOWN",
+  "UNKNOWN",
+];
+
+describe("deriveRunOutcome: UNKNOWN action evidence dominates", () => {
+  it.each(SUMMARY_OUTCOMES)("UNKNOWN action + %s summary → UNKNOWN", (summary) => {
+    const outcome = deriveRunOutcome({
+      summary: read(summary),
+      actions: read(["success", "unknown"]),
+    });
+    expect(isUnknownOutcome(outcome)).toBe(true);
+    expect(isCautiousOutcome(outcome)).toBe(true);
+  });
+
+  it.each([
+    ["summary loading", read<string>(undefined, true)],
+    ["summary unavailable", read<string>(undefined)],
+  ])("UNKNOWN action with %s → UNKNOWN", (_label, summary) => {
+    expect(deriveRunOutcome({ summary, actions: read(["unknown"]) })).toBe(
+      "ACTION_OUTCOME_UNKNOWN",
+    );
+  });
+});
+
+describe("deriveRunOutcome: no claim until the evidence is read", () => {
+  it.each([
+    ["summary delayed", read<string>(undefined, true), read<string[]>([])],
+    ["actions delayed", read("COMPLETED"), read<string[]>(undefined, true)],
+    ["both delayed", read<string>(undefined, true), read<string[]>(undefined, true)],
+  ])("%s → pending", (_label, summary, actions) => {
+    expect(deriveRunOutcome({ summary, actions })).toBe(OUTCOME_PENDING);
+  });
+
+  it("both evidence reads unavailable → unconfirmed, never the raw status", () => {
+    expect(
+      deriveRunOutcome({ summary: read<string>(undefined), actions: read<string[]>(undefined) }),
+    ).toBe(OUTCOME_UNAVAILABLE);
+  });
+
+  it("summary unavailable, actions read without UNKNOWN → unconfirmed", () => {
+    expect(deriveRunOutcome({ summary: read<string>(undefined), actions: read(["failed"]) })).toBe(
+      OUTCOME_UNAVAILABLE,
+    );
+  });
+});
+
+describe("deriveRunOutcome: ordinary outcomes", () => {
+  it.each(["COMPLETED", "FAILED", "PARTIAL", "WAITING_APPROVAL", "FAILED_WITH_UNKNOWN"])(
+    "authoritative %s summary with consistent action evidence",
+    (summary) => {
+      expect(deriveRunOutcome({ summary: read(summary), actions: read(["success"]) })).toBe(
+        summary,
       );
     },
   );
 
-  it("lets action evidence escalate a FAILED summary to UNKNOWN, never soften it", () => {
+  it("the summary stays authoritative when only the action read failed", () => {
     expect(
-      deriveRunOutcome({ ...base, summaryOutcome: "FAILED", actionStatuses: ["unknown"] }),
-    ).toBe("FAILED_WITH_UNKNOWN");
-    expect(
-      deriveRunOutcome({ ...base, summaryOutcome: "COMPLETED", actionStatuses: ["success"] }),
+      deriveRunOutcome({ summary: read("COMPLETED"), actions: read<string[]>(undefined) }),
     ).toBe("COMPLETED");
-  });
-
-  it("reports UNKNOWN from action evidence while the summary is loading", () => {
-    expect(
-      deriveRunOutcome({
-        ...base,
-        summaryOutcome: undefined,
-        summaryLoading: true,
-        actionStatuses: ["unknown"],
-      }),
-    ).toBe("ACTION_OUTCOME_UNKNOWN");
-  });
-
-  it("reports UNKNOWN from action evidence when the summary read failed", () => {
-    expect(
-      deriveRunOutcome({
-        ...base,
-        summaryOutcome: undefined,
-        actionStatuses: ["success", "unknown"],
-      }),
-    ).toBe("ACTION_OUTCOME_UNKNOWN");
-  });
-
-  it("never turns a raw FAILED into a retryable failure without the summary", () => {
-    for (const actionStatuses of [undefined, [], ["failed"], ["pending"]]) {
-      expect(deriveRunOutcome({ ...base, summaryOutcome: undefined, actionStatuses })).toBe(
-        OUTCOME_UNAVAILABLE,
-      );
-    }
-    // While the first summary read is in flight, say nothing rather than guess.
-    expect(
-      deriveRunOutcome({ ...base, summaryOutcome: undefined, summaryLoading: true }),
-    ).toBeUndefined();
-  });
-
-  it("passes through non-failure run states", () => {
-    expect(deriveRunOutcome({ ...base, runStatus: "RUNNING", summaryOutcome: undefined })).toBe(
-      "RUNNING",
-    );
   });
 });

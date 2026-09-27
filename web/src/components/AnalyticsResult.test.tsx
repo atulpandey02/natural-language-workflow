@@ -268,3 +268,52 @@ describe("insight sections", () => {
     );
   });
 });
+
+describe("large KPI values (B3)", () => {
+  const withValues = (values: Array<[number | null, string]>) => ({
+    ...fixture,
+    metrics: fixture.metrics.map((m, i) => ({
+      ...m,
+      value: values[i][0],
+      unit: values[i][1],
+    })),
+  });
+
+  it("shows a marked compact value, with the exact value available accessibly", async () => {
+    render(
+      <AnalyticsResultView
+        value={withValues([
+          [12345678901.23, "USD"],
+          [-1e12, "USD"],
+          [0, "count"],
+          [null, "percent"],
+        ])}
+      />,
+    );
+    const [big, negative, zero, missing] = screen.getAllByTestId("analytics-kpi");
+    const bigValue = big.querySelector("strong")!;
+    expect(bigValue).toHaveAttribute("data-compacted", "true");
+    expect(bigValue).toHaveAttribute("title", "$12,345,678,901.23");
+    expect(within(bigValue).getByText("$12.35B")).toHaveAttribute("aria-hidden", "true");
+    expect(within(bigValue).getByText("$12,345,678,901.23")).toHaveClass("sr-only");
+    expect(big).toHaveTextContent("rounded");
+    // The exact value is reachable by keyboard, not only on hover.
+    const exact = within(big).getByText("Exact value");
+    expect(exact.tagName).toBe("SUMMARY");
+    await userEvent.click(exact);
+    expect(big.querySelector(".kpi-exact-value")).toHaveTextContent("$12,345,678,901.23");
+    expect(within(negative).getByText("-$1.00T")).toBeVisible();
+    expect(negative.querySelector("strong")).toHaveAttribute("title", "-$1,000,000,000,000.00");
+    // Short values are unchanged and not marked.
+    expect(zero.querySelector("strong")).toHaveTextContent(/^0$/);
+    expect(zero.querySelector("[data-compacted]")).toBeNull();
+    expect(missing.querySelector("strong")).toHaveTextContent("Unavailable");
+  });
+
+  it("keeps ordinary values exact", () => {
+    render(<AnalyticsResultView value={fixture} />);
+    const revenue = screen.getAllByTestId("analytics-kpi")[0];
+    expect(revenue.querySelector("strong")).toHaveTextContent(/^\$280,617\.20$/);
+    expect(revenue.querySelector("details")).toBeNull();
+  });
+});
