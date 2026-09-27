@@ -402,7 +402,7 @@ def test_committed_target_env_carries_the_operator_contract_without_secrets() ->
         "NLW_STAGING_ALERTMANAGER_SECRETS_DIR=/opt/nlw/",
         "NLW_STAGING_COMPOSE_OVERRIDE=/opt/nlw/",
         "NLW_STAGING_REMOTE_APP=/opt/nlw/current",
-        "NLW_STAGING_CURRENT_REVISION=0020_schedule_authorization",
+        "NLW_STAGING_CURRENT_REVISION=0021_analytics_handoff",
         "NLW_STAGING_GIT_REMOTE=https://github.com/",
     ):
         assert key in text, key
