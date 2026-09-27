@@ -56,6 +56,20 @@ browser harness (isolated)".
 The golden spec (`pilot-analytics.spec.ts`) still covers the full Sales → Slack proposal →
 approval path, plus Support.
 
+### Final validation (local, at `bad8333`)
+
+| Check | Result |
+| --- | --- |
+| Backend `uv run pytest` | 1,793 passed, 35 skipped, 0 failed (17 min 22 s). The skips are opt-in suites, including the browser harness (run separately below) and live-model eval. |
+| `ruff format --check`, `ruff check`, `mypy` | clean (mypy: 305 source files) |
+| Frontend Vitest | 39 files, 231 tests passed |
+| Prettier, ESLint (`--max-warnings=0`), `tsc --noEmit`, `next build` | clean |
+| Pilot harness: golden journeys | 2 passed, 0 skipped; exactly one mock delivery |
+| Pilot harness: failed / partial / UNKNOWN | 1 passed, 0 skipped |
+| Pilot harness: launch journeys | 4 passed, 0 skipped; exactly one mock delivery |
+| Seeded-stack Playwright (local Compose + local Supabase) | 8 passed |
+| `git diff --check`, credential-pattern scan | clean. The only match is the fake `xoxb-…` test fixture that proves such values are refused. |
+
 ## 4. Screenshots
 
 In this folder (all synthetic):
