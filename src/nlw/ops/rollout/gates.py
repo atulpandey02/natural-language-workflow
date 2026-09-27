@@ -203,15 +203,20 @@ def check_running_edge_facts(
     variables and its /etc/caddy/Caddyfile mount (never other environment)."""
     if "NOT_RUNNING" in lines:
         raise GateError("the caddy container is not running; keep traffic closed")
+    # ``lines`` are pre-filtered by the inspect template to the two hostname
+    # variables and the Caddyfile mount — non-secret, so a mismatch names them.
     env = sorted(line for line in lines if line.startswith("PUBLIC_HOSTNAME"))
     want = sorted([f"PUBLIC_HOSTNAME={primary}", f"PUBLIC_HOSTNAME_FALLBACK={fallback}"])
     if env != want:
-        raise GateError("running Caddy edge hostnames mismatch; keep traffic closed")
-    mounts = [line.removeprefix("MOUNT=") for line in lines if line.startswith("MOUNT=")]
-    if len(mounts) != 1 or mounts[0] not in {f"{s}:false" for s in caddyfile_sources}:
         raise GateError(
-            "running Caddy does not mount the reviewed release Caddyfile read-only; "
-            "keep traffic closed"
+            f"running Caddy edge hostnames {env} != reviewed {want}; keep traffic closed"
+        )
+    mounts = [line.removeprefix("MOUNT=") for line in lines if line.startswith("MOUNT=")]
+    allowed = sorted(f"{s}:false" for s in caddyfile_sources)
+    if len(mounts) != 1 or mounts[0] not in allowed:
+        raise GateError(
+            "running Caddy does not mount the reviewed release Caddyfile read-only "
+            f"(observed {mounts}, allowed {allowed}); keep traffic closed"
         )
 
 

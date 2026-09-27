@@ -406,3 +406,20 @@ def test_compose_mentions_the_fallback_on_exactly_one_caddy_line() -> None:
         if "PUBLIC_HOSTNAME_FALLBACK" in ln
     ]
     assert lines == ["PUBLIC_HOSTNAME_FALLBACK: ${PUBLIC_HOSTNAME_FALLBACK:-}"]
+
+
+def test_running_edge_mismatch_names_only_the_filtered_edge_facts() -> None:
+    src = "/opt/nlw/releases/x/docker/caddy/Caddyfile"
+    wrong_mount = [
+        f"PUBLIC_HOSTNAME={PRIMARY}",
+        f"PUBLIC_HOSTNAME_FALLBACK={FALLBACK}",
+        "MOUNT=/opt/nlw/releases/old/docker/caddy/Caddyfile:false",
+    ]
+    with pytest.raises(GateError) as mount_err:
+        gates.check_running_edge_facts(wrong_mount, PRIMARY, FALLBACK, {src})
+    assert "releases/old/docker/caddy/Caddyfile:false" in str(mount_err.value)
+    assert f"{src}:false" in str(mount_err.value)
+    wrong_env = [f"PUBLIC_HOSTNAME={PRIMARY}", "PUBLIC_HOSTNAME_FALLBACK=", f"MOUNT={src}:false"]
+    with pytest.raises(GateError) as env_err:
+        gates.check_running_edge_facts(wrong_env, PRIMARY, FALLBACK, {src})
+    assert "PUBLIC_HOSTNAME_FALLBACK=" in str(env_err.value) and FALLBACK in str(env_err.value)
