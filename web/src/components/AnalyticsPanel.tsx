@@ -51,7 +51,7 @@ export function AnalyticsPanel({ runId }: { runId: string }) {
       {canShare ? (
         <section className="card handoff">
           <div className="handoff-intro">
-            <p className="eyebrow">NEXT / SHARE INSIGHTS</p>
+            <p className="eyebrow">Share with your team · needs approval</p>
             <h2>Take the findings to your team</h2>
             <p className="muted">
               Create a separate Slack proposal from this completed analysis. A different admin or

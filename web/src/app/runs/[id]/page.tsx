@@ -5,6 +5,7 @@ import { use } from "react";
 import { AppShell } from "@/components/AppShell";
 import { ErrorBanner, Empty, Loading, OutcomeNotice, StatusBadge } from "@/components/ui";
 import { RunSummaryCard } from "@/components/RunSummaryCard";
+import { EvidenceChain, runChain } from "@/components/EvidenceChain";
 import { AnalyticsPanel } from "@/components/AnalyticsPanel";
 import {
   useRun,
@@ -30,6 +31,9 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
         </div>
         {run.isLoading ? <Loading /> : null}
         <ErrorBanner error={run.error} />
+        {run.data ? (
+          <EvidenceChain {...runChain(summary.data?.outcome ?? run.data.status)} />
+        ) : null}
         {run.data ? (
           <div className="run-strip">
             <StatusBadge status={summary.data?.outcome ?? run.data.status} />

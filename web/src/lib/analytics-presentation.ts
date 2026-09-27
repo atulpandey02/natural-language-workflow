@@ -1,13 +1,16 @@
 import type { Unit } from "./analytics";
 
 // Presentation only. The backend owns metric definitions and all values.
+// Light-canvas series colors: each keeps >= 3:1 contrast against white, and
+// markers/dashes distinguish series without relying on color. Violet is
+// reserved for AI-assisted content and is not used for data.
 const palette = {
-  cyan: { color: "#40d9ed", marker: "circle", dash: undefined },
-  blue: { color: "#83aaff", marker: "square", dash: "6 3" },
-  magenta: { color: "#ed9be9", marker: "diamond", dash: "3 3" },
-  coral: { color: "#ffa28f", marker: "square", dash: "8 3 2 3" },
-  mint: { color: "#69e2bc", marker: "circle", dash: undefined },
-  lime: { color: "#c1df7a", marker: "diamond", dash: "6 3" },
+  cyan: { color: "#1896a7", marker: "circle", dash: undefined },
+  blue: { color: "#5165d6", marker: "square", dash: "6 3" },
+  magenta: { color: "#c2418f", marker: "diamond", dash: "3 3" },
+  coral: { color: "#e0574a", marker: "square", dash: "8 3 2 3" },
+  mint: { color: "#1e8c6a", marker: "circle", dash: undefined },
+  lime: { color: "#7a8b1e", marker: "diamond", dash: "6 3" },
 };
 const metrics: Record<string, keyof typeof palette> = {
   Revenue: "cyan",

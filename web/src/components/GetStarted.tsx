@@ -1,51 +1,58 @@
 import Link from "next/link";
+import { EvidenceChain } from "./EvidenceChain";
 
 /** First-use guidance: shown until the workspace has its first workflow. */
 export function GetStarted({ canManage }: { canManage: boolean }) {
   return (
     <section className="card" aria-labelledby="get-started-title" data-testid="get-started">
-      <h2 id="get-started-title">Get started</h2>
-      <ol className="steps" aria-label="How NLW works">
-        <li>
-          <strong>Ask</strong>
-          <span>Pick a sample dataset and ask a business question.</span>
-        </li>
-        <li>
-          <strong>Review</strong>
-          <span>Check the proposed steps before anything runs.</span>
-        </li>
-        <li>
-          <strong>Execute</strong>
-          <span>Run it; sharing to Slack waits for a second approver.</span>
-        </li>
-        <li>
-          <strong>Evidence</strong>
-          <span>Follow every finding back to the step that produced it.</span>
-        </li>
-      </ol>
+      <div className="section-heading">
+        <h2 id="get-started-title">Set up your workspace</h2>
+        <EvidenceChain current="Request" />
+      </div>
+      <p className="muted small">
+        Every analysis follows the same governed path: your request becomes a plan you review,
+        anything that leaves NLW waits for approval, and every result links to its evidence.
+      </p>
       <div className="next-actions">
         <Link href="/workflows/new?dataset=sales-v1">
-          <strong>Analyze synthetic Sales data →</strong>
-          <span>e.g. “What drove revenue changes over the last six months?”</span>
+          <span className="choice-icon" aria-hidden="true">
+            ▷
+          </span>
+          <strong>Run a guided analysis →</strong>
+          <span>Walk through Sales end to end: plan, run and evidence.</span>
         </Link>
-        <Link href="/workflows/new?dataset=support-v1">
-          <strong>Analyze synthetic Support data →</strong>
-          <span>e.g. “Where are response times slipping, and which queues are at risk?”</span>
+        <Link href="/workflows/new">
+          <span className="choice-icon" aria-hidden="true">
+            ⊟
+          </span>
+          <strong>Explore sample data →</strong>
+          <span>See the synthetic Sales and Support datasets and example questions.</span>
         </Link>
         {canManage ? (
           <>
             <Link href="/members">
+              <span className="choice-icon people" aria-hidden="true">
+                ⚇
+              </span>
               <strong>Invite a teammate →</strong>
               <span>Add an approver so shared results get a second pair of eyes.</span>
             </Link>
             <Link href="/connectors">
-              <strong>Add a Slack destination →</strong>
-              <span>Register where approved results may be shared.</span>
+              <span className="choice-icon connect" aria-hidden="true">
+                ⊞
+              </span>
+              <strong>Connect data or add a Slack destination →</strong>
+              <span>Register where NLW may read from or share approved results.</span>
             </Link>
           </>
-        ) : null}
+        ) : (
+          <div className="disabled-choice">
+            <strong>Invite teammates and connect data</strong>
+            <span>Ask a workspace owner or admin — they manage members and connectors.</span>
+          </div>
+        )}
       </div>
-      <p className="pilot-note small" data-testid="pilot-limits">
+      <p className="pilot-note small" data-testid="pilot-limits" style={{ marginTop: 14 }}>
         Pilot limits: the Sales and Support datasets are fixed, synthetic historical snapshots with
         no real customer or personal information. Uploading your own data isn&apos;t available in
         this pilot.

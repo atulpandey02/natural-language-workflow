@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { PlanReview } from "./PlanReview";
 import type { PlanProposalOut, FeasibilityStatus } from "@/lib/api/types";
@@ -133,5 +133,32 @@ describe("PlanReview materialization gating", () => {
     ]) {
       expect(text).not.toContain(raw);
     }
+  });
+
+  it("separates the workflow, its data bindings, safety checks and the next action", () => {
+    const client = new QueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <PlanReview
+          proposal={{
+            ...proposal("PASS"),
+            proposed_plan: { steps: [{ id: "analyze", tool: "pilot.sales_analysis" }] },
+          }}
+        />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByRole("heading", { level: 2, name: "Test WF" })).toBeVisible();
+    expect(screen.getByText(/Drafted by the AI planner/)).toHaveClass("ai-tag");
+    expect(screen.getByRole("region", { name: "Data and connectors" })).toHaveTextContent(
+      "Synthetic sales-v1",
+    );
+    expect(screen.getByRole("region", { name: "Safety checks" })).toHaveTextContent(
+      "All checks passed",
+    );
+    expect(
+      within(screen.getByRole("region", { name: "Next action" })).getByRole("button", {
+        name: "Save workflow",
+      }),
+    ).toBeEnabled();
   });
 });

@@ -126,7 +126,7 @@ function MemberTable({
                 <tr key={m.user_id} data-testid="member-row">
                   <th scope="row">{who}</th>
                   <td>
-                    <span className="role-pill" title={ROLE_HELP[m.role]}>
+                    <span className={`role-pill ${m.role}`} title={ROLE_HELP[m.role]}>
                       {roleLabel(m.role)}
                     </span>
                   </td>

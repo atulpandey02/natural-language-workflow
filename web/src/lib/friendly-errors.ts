@@ -14,6 +14,8 @@ export interface FriendlyError {
   action: string;
   retry: Retry;
   tone: Tone;
+  /** Whether anything changed as a result — always stated, never implied. */
+  changed?: string;
   reference?: string;
   /** Friendly per-field messages from a 422 validation response (field -> text). */
   fields?: Record<string, string>;
@@ -42,7 +44,7 @@ export class UserFacingError extends Error {
 const GENERIC: Record<string, Copy> = {
   network: {
     title: "Can't reach NLW",
-    explanation: "Your browser couldn't connect. Nothing was changed.",
+    explanation: "Your browser couldn't connect to NLW.",
     action: "Check your connection, then try again.",
     retry: "now",
     tone: "error",
@@ -282,6 +284,15 @@ function fieldErrors(details: unknown): Record<string, string> | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
+const NOTHING_CHANGED = "Nothing was changed.";
+// A server error or an unclassified failure can't prove nothing was saved.
+const MAYBE_CHANGED =
+  "If you were saving something, check whether it was saved before trying again.";
+
+function changedFor(kind: string): string {
+  return kind === "server" || kind === "unexpected" ? MAYBE_CHANGED : NOTHING_CHANGED;
+}
+
 function isNetworkError(error: unknown): boolean {
   return error instanceof TypeError || (error instanceof Error && error.name === "AbortError");
 }
@@ -300,13 +311,16 @@ export function describeError(error: unknown): FriendlyError | null {
     return {
       ...copy,
       kind,
+      changed: copy.changed ?? changedFor(known ? "known" : kind),
       reference: safeReference(error.requestId),
       fields: error.status === 422 ? fieldErrors(error.details) : undefined,
     };
   }
-  if (error instanceof UserFacingError) return { ...error.copy, kind: error.kind };
-  if (isNetworkError(error)) return { ...GENERIC.network, kind: "network" };
-  return { ...GENERIC.unexpected, kind: "unexpected" };
+  if (error instanceof UserFacingError)
+    return { changed: NOTHING_CHANGED, ...error.copy, kind: error.kind };
+  if (isNetworkError(error))
+    return { ...GENERIC.network, kind: "network", changed: NOTHING_CHANGED };
+  return { ...GENERIC.unexpected, kind: "unexpected", changed: MAYBE_CHANGED };
 }
 
 // ---- workflow outcomes (not HTTP errors, but the same language) --------------
@@ -318,6 +332,7 @@ export function describeOutcome(outcome: string | undefined): FriendlyError | nu
         title: "This run didn't finish",
         explanation: "A step failed, so later steps were skipped. Completed results are kept.",
         action: "Review the failed step below. You can run the workflow again when ready.",
+        changed: "Completed steps and their results were kept; nothing after the failed step ran.",
         retry: "now",
         tone: "error",
       };
@@ -328,6 +343,7 @@ export function describeOutcome(outcome: string | undefined): FriendlyError | nu
         explanation:
           "Some steps completed and others did not. Only verified results are shown and they can't be shared.",
         action: "Review which steps failed before relying on these results.",
+        changed: "Only the completed steps ran. Nothing was shared outside NLW.",
         retry: "now",
         tone: "warn",
       };
@@ -341,6 +357,7 @@ export function describeOutcome(outcome: string | undefined): FriendlyError | nu
           "The external system didn't give a clear answer. The action may or may not have taken effect, so NLW did not retry it.",
         action:
           "Check the destination (for example, the Slack channel) first. Don't simply run it again — that could send a duplicate.",
+        changed: "The external action may have happened. This is not a success.",
         retry: "no",
         tone: "warn",
       };

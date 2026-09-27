@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { safeNextPath } from "@/lib/next-path";
 import { describeAuthError } from "@/lib/friendly-errors";
+import { EvidenceChain } from "@/components/EvidenceChain";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -67,31 +68,16 @@ export default function LoginPage() {
 
   return (
     <main className="auth-page" id="main-content">
-      <section className="auth-intro" aria-labelledby="auth-headline">
+      <section className="auth-form-side auth-card" aria-labelledby="signin-title">
         <p className="brand" aria-label="NLW pilot">
           <span aria-hidden="true">N</span> NLW <small>PILOT</small>
         </p>
-        <h1 id="auth-headline">Turn business questions into governed workflows</h1>
-        <p className="lead muted">
-          Ask in plain language, review the plan, run it durably and follow every result back to its
-          evidence.
+        <h1 id="signin-title">{joining ? "Sign in to accept your invitation" : "Sign in"}</h1>
+        <p className="subtitle">
+          {joining
+            ? "Use the email address your invitation was sent to."
+            : "Welcome back. Use your work email."}
         </p>
-        <ul className="capability-list">
-          {CAPABILITIES.map((c) => (
-            <li key={c.title}>
-              <strong>{c.title}</strong>
-              <span>{c.body}</span>
-            </li>
-          ))}
-        </ul>
-        <p className="pilot-note small" data-testid="pilot-note">
-          Invitation-only pilot. All sample data is synthetic — no real customer or personal
-          information.
-        </p>
-      </section>
-
-      <section className="card auth-card" aria-labelledby="signin-title">
-        <h2 id="signin-title">{joining ? "Sign in to accept your invitation" : "Sign in"}</h2>
         <form onSubmit={onSubmit} noValidate aria-describedby="signin-help">
           {error ? (
             <div className="error-panel" role="alert" data-testid="login-error">
@@ -146,10 +132,28 @@ export default function LoginPage() {
           <button type="submit" className="auth-submit" disabled={busy}>
             {busy ? "Signing in…" : "Sign in"}
           </button>
-          <p className="muted small" id="signin-help">
+          <p className="muted small auth-help" id="signin-help">
             No account? Access is by invitation — ask your workspace owner or administrator.
           </p>
         </form>
+      </section>
+
+      <section className="auth-intro" aria-labelledby="auth-headline">
+        <p className="eyebrow">Governed analytics workflows</p>
+        <h2 id="auth-headline">Turn business questions into governed workflows</h2>
+        <EvidenceChain current="Request" />
+        <ul className="capability-list">
+          {CAPABILITIES.map((c) => (
+            <li key={c.title}>
+              <strong>{c.title}</strong>
+              <span>{c.body}</span>
+            </li>
+          ))}
+        </ul>
+        <p className="pilot-note small" data-testid="pilot-note">
+          Invitation-only pilot. All sample data is synthetic — no real customer or personal
+          information.
+        </p>
       </section>
     </main>
   );

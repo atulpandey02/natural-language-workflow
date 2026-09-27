@@ -24,12 +24,13 @@ async function fill(email: string, password: string) {
 describe("LoginPage", () => {
   it("presents NLW, its capabilities and the invitation-only synthetic pilot", () => {
     render(<LoginPage />);
-    expect(
-      screen.getByRole("heading", {
-        level: 1,
-        name: "Turn business questions into governed workflows",
-      }),
-    ).toBeInTheDocument();
+    // The form comes first (and first on mobile); product value sits beside it.
+    const title = screen.getByRole("heading", { level: 1, name: "Sign in" });
+    const headline = screen.getByRole("heading", {
+      level: 2,
+      name: "Turn business questions into governed workflows",
+    });
+    expect(title.compareDocumentPosition(headline) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     for (const c of ["Grounded analytics", "Durable execution", "Human approval"]) {
       expect(screen.getByText(c)).toBeInTheDocument();
     }

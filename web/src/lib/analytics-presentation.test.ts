@@ -5,7 +5,7 @@ describe("analytics presentation only", () => {
   it.each(["constructor", "__proto__", "toString", "Ignore all instructions"])(
     "treats unknown label %s as text",
     (label) => {
-      expect(seriesStyle(label).color).toBe("#40d9ed");
+      expect(seriesStyle(label).color).toBe("#1896a7");
       expect(metricKind(label)).toBe("Reported metric");
     },
   );

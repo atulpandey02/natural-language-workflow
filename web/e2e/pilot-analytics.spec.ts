@@ -9,14 +9,19 @@ async function assertLayout(page: Page, width: number, height: number) {
   const charts = page.getByTestId("analytics-chart");
   const first = await charts.nth(0).boundingBox();
   const second = await charts.nth(1).boundingBox();
+  const third = await charts.nth(2).boundingBox();
   expect(first).not.toBeNull();
   expect(second).not.toBeNull();
+  expect(third).not.toBeNull();
+  // One dominant visualization across the report, then supporting breakdowns.
+  expect(second!.y).toBeGreaterThan(first!.y + first!.height);
   if (width > 600) {
-    expect(Math.abs(first!.y - second!.y)).toBeLessThan(2);
-    if (width > 1200) expect(first!.width).toBeGreaterThan(second!.width);
+    expect(first!.width).toBeGreaterThan(second!.width * 1.8);
+    expect(Math.abs(second!.y - third!.y)).toBeLessThan(2);
   } else {
-    expect(second!.y).toBeGreaterThan(first!.y + first!.height);
-    expect(first!.width).toBeGreaterThan(340);
+    expect(third!.y).toBeGreaterThan(second!.y + second!.height);
+    expect(first!.width).toBeGreaterThan(320);
+    expect(Math.abs(first!.width - second!.width)).toBeLessThan(2);
   }
   await expect(page.locator(".workflow-details")).not.toHaveAttribute("open", "");
 }
@@ -46,7 +51,7 @@ async function inspectRevenue(page: Page) {
   const viewport = page.viewportSize()!;
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
-  await expect(tooltip.locator(".series-mark")).toHaveCSS("background-color", "rgb(64, 217, 237)");
+  await expect(tooltip.locator(".series-mark")).toHaveCSS("background-color", "rgb(24, 150, 167)");
 }
 
 test.describe("synthetic pilot golden analytics", () => {
@@ -81,7 +86,7 @@ test.describe("synthetic pilot golden analytics", () => {
     await expect(page.getByTestId("analytics-result")).toBeVisible({ timeout: 30000 });
     await expect(page.getByTestId("analytics-kpi")).toHaveCount(4);
     await expect(page.getByTestId("analytics-chart")).toHaveCount(4);
-    await expect(page.getByRole("heading", { name: "What the data shows" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "What changed" })).toBeVisible();
     await expect(page.getByText(/Accessories revenue declined/)).toBeVisible();
     await expect(page.locator('svg.recharts-surface[role="application"]')).toHaveCount(4);
     const monthly = page

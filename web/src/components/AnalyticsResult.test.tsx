@@ -113,7 +113,7 @@ describe("validated analytics presentation", () => {
       ".kpi-card:first-child .series-mark, th:nth-child(2) .series-mark",
     );
     revenueMarks.forEach((mark) =>
-      expect((mark as HTMLElement).style.getPropertyValue("--series")).toBe("#40d9ed"),
+      expect((mark as HTMLElement).style.getPropertyValue("--series")).toBe("#1896a7"),
     );
     expect(seriesStyle("Orders").color).not.toBe(seriesStyle("Revenue").color);
     expect(
@@ -236,5 +236,35 @@ describe("validated analytics presentation", () => {
     render(<StatusBadge status={status} />);
     expect(screen.getByText(label)).toHaveClass(style);
     expect(screen.getByText(label)).toHaveAttribute("data-status", status);
+  });
+});
+
+describe("insight sections", () => {
+  it("groups the grounded findings verbatim, keeping their source links", () => {
+    render(<AnalyticsResultView value={fixture} />);
+    const changed = screen.getByRole("region", { name: "What changed" });
+    const attention = screen.getByRole("region", { name: "Needs attention" });
+    expect(changed).toHaveTextContent(fixture.findings[0].text);
+    expect(attention).toHaveTextContent(fixture.findings[1].text);
+    expect(within(attention).getAllByRole("link", { name: "analyze" }).length).toBeGreaterThan(0);
+  });
+
+  it("labels recommended actions as NLW next steps, not data conclusions", () => {
+    render(<AnalyticsResultView value={fixture} />);
+    const actions = screen.getByRole("region", { name: "Recommended actions" });
+    expect(actions).toHaveTextContent("not conclusions from the data");
+    expect(within(actions).getByRole("link", { name: "Ask a follow-up question" })).toHaveAttribute(
+      "href",
+      "/workflows/new",
+    );
+  });
+
+  it("offers sharing only for a READY result", () => {
+    render(
+      <AnalyticsResultView value={{ ...fixture, status: "PARTIAL", run_outcome: "FAILED" }} />,
+    );
+    expect(screen.getByRole("region", { name: "Recommended actions" })).not.toHaveTextContent(
+      /Share the summary/,
+    );
   });
 });

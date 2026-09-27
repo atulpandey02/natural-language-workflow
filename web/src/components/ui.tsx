@@ -46,6 +46,7 @@ function FriendlyPanel({
     >
       <strong>{friendly.title}</strong>
       <p>{friendly.explanation}</p>
+      {friendly.changed ? <p className="changed">{friendly.changed}</p> : null}
       <p>
         {friendly.action} <span className="muted">{RETRY_TEXT[friendly.retry]}</span>
       </p>

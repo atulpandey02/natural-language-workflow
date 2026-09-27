@@ -1,13 +1,15 @@
 "use client";
 import { ResponsiveDetails } from "@/components/ResponsiveDetails";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { PlanReview } from "@/components/PlanReview";
 import { DatasetPicker } from "@/components/DatasetPicker";
 import { ErrorBanner } from "@/components/ui";
 import { useCreatePlan } from "@/lib/api/hooks";
 import type { PlanProposalOut } from "@/lib/api/types";
+import { takeDraftQuestion } from "@/lib/draft-question";
+import { EvidenceChain } from "@/components/EvidenceChain";
 
 export default function NewWorkflowPage() {
   const createPlan = useCreatePlan();
@@ -22,6 +24,15 @@ export default function NewWorkflowPage() {
       ? null
       : new URLSearchParams(window.location.search).get("dataset"),
   );
+  // A question typed on the home page arrives through session storage, once.
+  // Storage is only readable after hydration, so this syncs from it in an effect.
+  useEffect(() => {
+    const draft = takeDraftQuestion();
+    if (!draft) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time read of external storage
+    setPrompt(draft);
+    composer.current?.focus();
+  }, []);
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     // One plan request at a time: a double click or Enter while planning is ignored.
@@ -36,11 +47,12 @@ export default function NewWorkflowPage() {
   }
   return (
     <AppShell>
-      <p className="eyebrow">YOUR DATA, A CLEARER PICTURE</p>
+      <p className="eyebrow">New analysis</p>
       <h1>What would you like to understand?</h1>
       <p className="lead muted">
         Ask a business question. Review the steps, run the analysis, and explore the evidence.
       </p>
+      <EvidenceChain current={proposal ? "Plan" : "Request"} />
       <div className="analysis-layout">
         <div className="analysis-main">
           <DatasetPicker

@@ -58,6 +58,23 @@ describe("ApprovalsPage", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
   });
 
+  it("keeps requester, destination, policy reason, content and evidence together", () => {
+    setup("admin", [approval()]);
+    render(<ApprovalsPage />);
+    const card = screen.getByRole("article", { name: "Share to Slack (after approval)" });
+    for (const text of ["Destination", "Why approval is needed", "Supporting evidence"]) {
+      expect(card).toHaveTextContent(text);
+    }
+    expect(screen.getByRole("link", { name: "Open the run" })).toHaveAttribute(
+      "href",
+      "/runs/11111111-2222-3333-4444-555555555555",
+    );
+    const approve = screen.getByRole("button", { name: "Approve" });
+    expect(approve).toHaveClass("approve");
+    expect(approve).toHaveAccessibleDescription(/second admin or owner/);
+    expect(screen.getByRole("button", { name: "Reject" })).toHaveClass("danger");
+  });
+
   it("tells the requester someone else must approve (no controls)", () => {
     setup("owner", [
       approval({

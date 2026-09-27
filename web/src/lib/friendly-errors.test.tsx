@@ -204,3 +204,25 @@ describe("analysis journey copy", () => {
     expect(JSON.stringify(f)).not.toContain("no provenance");
   });
 });
+
+describe("every state says whether anything changed", () => {
+  it("reads and rejected requests changed nothing; server errors say to check", () => {
+    expect(describeError(api(404, "not_found", "x"))?.changed).toBe("Nothing was changed.");
+    expect(describeError(api(422, "validation_error", "x"))?.changed).toBe("Nothing was changed.");
+    expect(describeError(new TypeError("Failed to fetch"))?.changed).toBe("Nothing was changed.");
+    expect(describeError(api(500, "internal_error", "x"))?.changed).toMatch(/check whether/);
+  });
+
+  it("outcomes state what ran; UNKNOWN is explicitly not a success", () => {
+    expect(describeOutcome("FAILED")?.changed).toMatch(/Completed steps .* kept/);
+    expect(describeOutcome("PARTIAL")?.changed).toMatch(/Nothing was shared/);
+    expect(describeOutcome("FAILED_WITH_UNKNOWN")?.changed).toBe(
+      "The external action may have happened. This is not a success.",
+    );
+  });
+
+  it("renders the changed line in the panel", () => {
+    render(<ErrorBanner error={api(403, "forbidden", "insufficient role")} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Nothing was changed.");
+  });
+});

@@ -125,3 +125,44 @@ In this folder (all synthetic):
   show a short 8-character run reference.
 - Signup and password reset are intentionally absent (invitation-only pilot).
 - Real Slack delivery, staging and production were not exercised.
+
+## 7. Visual refinement (frontend only)
+
+A light enterprise design: a `#F5F7FB` canvas, white surfaces and a compact navy (`#172033`)
+sidebar. Colors carry fixed meanings: indigo for primary actions, cyan for data and evidence,
+violet only for AI-drafted content, green for ready or completed, amber for approval or
+attention, red for failed or denied, and coral for restrained brand emphasis.
+
+No backend behavior, API contract, authorization, tenancy, planner, execution, approval,
+dataset, migration, deployment or connector behavior changed. Grounding is unchanged:
+
+- The report's "What changed" and "Needs attention" sections regroup the backend's
+  grounded finding text verbatim, with its source links.
+- "Recommended actions" lists NLW next steps and is labeled "not conclusions from the data".
+
+| Area | Change |
+| --- | --- |
+| Sign-in | Form first (and first on mobile), product value on the navy panel beside it. Invitation return and friendly errors are unchanged. |
+| Home and onboarding | A prominent question composer (hands the question to New analysis through session storage, never the URL), Sales and Support sample choices, and Staffing shown as unavailable in this pilot. New workspaces also get a guided analysis, sample data, invite and connect actions. |
+| Navigation | Grouped as Analyze / Operate / Workspace, with a coral active marker and a drawer on narrow screens. |
+| Evidence chain | A small request → plan → approval → execution → result trail on sign-in, onboarding, New analysis and runs. UNKNOWN, failed and partial runs never show as completed. |
+| Analytics | White report canvas, a leading KPI, one full-width primary chart followed by paired breakdowns, and series colors ≥ 3:1 on white. |
+| Plan review | Separate sections: proposed workflow (with a violet "Drafted by the AI planner" tag), steps, data and connectors, safety checks, next action. |
+| Approvals | Requester, destination, connector, policy reason, evidence link and the exact content together. Green Approve and red-outline Reject; the requester sees a note instead of buttons. |
+| Failure states | Every panel now states whether anything changed, as well as what happened, the next step and a compact reference. |
+
+Screenshots (`visual/`): sign-in (desktop, mobile), home and onboarding (desktop, mobile), plan
+review, Sales report (desktop, tablet, mobile), Support report, members, connector validation,
+approval (requester, approver), denied, partial or failed, and outcome unknown.
+
+The top-level `launch-*.png` files in this folder record the interface before this refinement.
+
+Validation for the refinement:
+
+- Prettier, ESLint, tsc and `next build` clean.
+- Vitest: 41 files, 244 tests.
+- Pilot harness: launch 4, golden 2, failed/partial/UNKNOWN 1; all passed with 0 skipped.
+
+The golden spec's layout check was updated for the new chart layout. It still verifies
+tooltip bounds, keyboard chart inspection, reduced motion and the absence of page-level
+horizontal scroll at 1440, 1280, 768 and 390 px.

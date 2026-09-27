@@ -12,8 +12,10 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import Link from "next/link";
 import {
   analyticsSchema,
+  type AnalyticsResult,
   type AnalyticsTable,
   type Visualization,
   formatValue,
@@ -26,6 +28,8 @@ import {
   unitLabel,
 } from "@/lib/analytics-presentation";
 import { Empty, StatusBadge } from "./ui";
+
+type Finding = AnalyticsResult["findings"][number];
 
 function SeriesMark({ label }: { label: string }) {
   const style = seriesStyle(label);
@@ -79,10 +83,10 @@ function Chart({ chart, index }: { chart: Visualization; index: number }) {
   };
   const categoryAxis = { type: "category" as const, dataKey: "label" };
   const axis = {
-    stroke: "#9caebe",
+    stroke: "#8a94a7",
     tickLine: false,
     axisLine: false,
-    tick: { fontSize: 12 },
+    tick: { fontSize: 12, fill: "#667085" },
     tickMargin: 10,
   };
   return (
@@ -109,7 +113,7 @@ function Chart({ chart, index }: { chart: Visualization; index: number }) {
             margin={{ top: 12, right: 22, left: 0, bottom: 8 }}
           >
             <CartesianGrid
-              stroke="#283643"
+              stroke="#e3e8f0"
               strokeDasharray="2 5"
               horizontal={!horizontal}
               vertical={horizontal}
@@ -128,7 +132,7 @@ function Chart({ chart, index }: { chart: Visualization; index: number }) {
             />
             <Tooltip
               cursor={
-                horizontal ? { fill: "#ffffff06" } : { stroke: "#9caebe", strokeDasharray: "3 3" }
+                horizontal ? { fill: "#5165d60d" } : { stroke: "#8a94a7", strokeDasharray: "3 3" }
               }
               allowEscapeViewBox={{ x: false, y: false }}
               content={({ active, label }) => {
@@ -163,7 +167,7 @@ function Chart({ chart, index }: { chart: Visualization; index: number }) {
                   stroke={seriesStyle(s.label).color}
                   strokeDasharray={seriesStyle(s.label).dash}
                   strokeWidth={2.5}
-                  dot={{ r: 3.5, strokeWidth: 2, fill: "#101b25" }}
+                  dot={{ r: 3.5, strokeWidth: 2, fill: "#ffffff" }}
                   activeDot={{ r: 5 }}
                   connectNulls={false}
                   isAnimationActive={false}
@@ -289,6 +293,64 @@ function SupportingTable({ table }: { table: AnalyticsTable }) {
     </details>
   );
 }
+// Presentation grouping only: the grounded finding text is shown unchanged and
+// keeps its source links; nothing here adds a claim about the data.
+const ATTENTION =
+  /\b(declin|decreas|drop|fell|fall|below|backlog|breach|miss|worse|risk|overdue|reopen|slipp)/i;
+
+function Insights({ findings, ready }: { findings: Finding[]; ready: boolean }) {
+  const attention = findings.filter((f) => ATTENTION.test(f.text));
+  const changed = findings.filter((f) => !ATTENTION.test(f.text));
+  const list = (items: Finding[], offset: number) => (
+    <ol>
+      {items.map((f, i) => (
+        <li key={i}>
+          <span className="finding-index" aria-hidden="true">
+            {String(offset + i + 1).padStart(2, "0")}
+          </span>
+          <div>
+            {f.text}
+            <Sources ids={f.source_step_ids} />
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+  return (
+    <div className="insight-grid findings">
+      <section className="insight" aria-labelledby="changed-title">
+        <h3 id="changed-title">What changed</h3>
+        {changed.length ? (
+          list(changed, 0)
+        ) : (
+          <p className="muted small">No other findings in this sample.</p>
+        )}
+      </section>
+      <section className="insight attention" aria-labelledby="attention-title">
+        <h3 id="attention-title">Needs attention</h3>
+        {attention.length ? (
+          list(attention, changed.length)
+        ) : (
+          <p className="muted small">Nothing in these findings was flagged for attention.</p>
+        )}
+      </section>
+      <section className="insight actions" aria-labelledby="actions-title">
+        <h3 id="actions-title">Recommended actions</h3>
+        <ul>
+          <li>Open a finding&apos;s source step to check the evidence behind it.</li>
+          {ready ? (
+            <li>Share the summary with your team below; a second admin approves it first.</li>
+          ) : null}
+          <li>
+            <Link href="/workflows/new">Ask a follow-up question</Link>
+          </li>
+        </ul>
+        <p className="insight-note">Suggested next steps in NLW, not conclusions from the data.</p>
+      </section>
+    </div>
+  );
+}
+
 export function AnalyticsResultView({ value }: { value: unknown }) {
   const parsed = analyticsSchema.safeParse(value);
   if (!parsed.success || parsed.data.status === "INVALID")
@@ -321,7 +383,7 @@ export function AnalyticsResultView({ value }: { value: unknown }) {
     >
       <div className="row result-heading">
         <div>
-          <p className="eyebrow">PERFORMANCE / OVERVIEW</p>
+          <p className="eyebrow">Analysis report</p>
           <h2>{title}</h2>
         </div>
         <StatusBadge status={result.run_outcome} />
@@ -360,25 +422,7 @@ export function AnalyticsResultView({ value }: { value: unknown }) {
           </article>
         ))}
       </div>
-      <section className="findings" aria-labelledby="findings-title">
-        <div>
-          <p className="eyebrow">GROUNDED FINDINGS</p>
-          <h3 id="findings-title">What the data shows</h3>
-        </div>
-        <ol>
-          {result.findings.map((f, i) => (
-            <li key={i}>
-              <span className="finding-index" aria-hidden="true">
-                {String(i + 1).padStart(2, "0")}
-              </span>
-              <div>
-                {f.text}
-                <Sources ids={f.source_step_ids} />
-              </div>
-            </li>
-          ))}
-        </ol>
-      </section>
+      <Insights findings={result.findings} ready={result.status === "READY"} />
       <div className="chart-section-heading">
         <h3>Performance trends & breakdowns</h3>
         <span>Hover or focus a chart and use arrow keys to inspect</span>
