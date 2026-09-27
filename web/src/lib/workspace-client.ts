@@ -1,4 +1,5 @@
 "use client";
+import { UserFacingError } from "@/lib/friendly-errors";
 
 // Client helpers for changing the active workspace. Changing tenant context is a
 // hard boundary: after the server-signed cookie is written we do a FULL
@@ -13,7 +14,13 @@ export async function postWorkspaceSelection(workspaceId: string): Promise<void>
     body: JSON.stringify({ workspace_id: workspaceId }),
   });
   if (!res.ok) {
-    throw new Error("Could not switch workspace. Please try again.");
+    throw new UserFacingError("workspace_switch_failed", {
+      title: "Couldn't open that workspace",
+      explanation: "Your selection wasn't saved.",
+      action: "Try again. If it keeps happening, sign out and back in.",
+      retry: "now",
+      tone: "error",
+    });
   }
 }
 

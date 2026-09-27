@@ -1,22 +1,54 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { ApiError, userMessageForStatus } from "@/lib/errors";
+import {
+  RETRY_TEXT,
+  describeError,
+  describeOutcome,
+  type FriendlyError,
+} from "@/lib/friendly-errors";
 
+/**
+ * The ONE way pages show a failure: a short title, a plain explanation, a safe
+ * next step and retry guidance (lib/friendly-errors). Raw provider/API/Pydantic
+ * text, internal identifiers and stack traces are never rendered; only a
+ * sanitized request reference is.
+ */
 export function ErrorBanner({ error }: { error: unknown }) {
-  if (!error) return null;
-  let message = "Something went wrong.";
-  let requestId: string | undefined;
-  if (error instanceof ApiError) {
-    message = userMessageForStatus(error.status, error.message);
-    requestId = error.requestId;
-  } else if (error instanceof Error) {
-    message = error.message;
-  }
+  const friendly = describeError(error);
+  if (!friendly) return null;
+  return <FriendlyPanel friendly={friendly} />;
+}
+
+/** Friendly explanation of a non-successful workflow outcome (FAILED, PARTIAL, UNKNOWN). */
+export function OutcomeNotice({ outcome }: { outcome: string | undefined }) {
+  const friendly = describeOutcome(outcome);
+  if (!friendly) return null;
+  return <FriendlyPanel friendly={friendly} live="polite" />;
+}
+
+function FriendlyPanel({
+  friendly,
+  live = "assertive",
+}: {
+  friendly: FriendlyError;
+  live?: "polite" | "assertive";
+}) {
+  const tone = friendly.tone === "error" ? "" : ` ${friendly.tone}`;
   return (
-    <div className="banner" role="alert" aria-live="assertive">
-      {message}
-      {requestId ? <span className="muted"> (ref: {requestId})</span> : null}
+    <div
+      className={`error-panel${tone}`}
+      role={live === "assertive" ? "alert" : "status"}
+      aria-live={live}
+      data-testid="friendly-error"
+      data-kind={friendly.kind}
+    >
+      <strong>{friendly.title}</strong>
+      <p>{friendly.explanation}</p>
+      <p>
+        {friendly.action} <span className="muted">{RETRY_TEXT[friendly.retry]}</span>
+      </p>
+      {friendly.reference ? <p className="ref">Reference: {friendly.reference}</p> : null}
     </div>
   );
 }

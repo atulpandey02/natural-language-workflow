@@ -117,14 +117,15 @@ describe("RunDetailPage result summary", () => {
         status: 404,
         code: "not_found",
         message: "Unknown resource.",
-        requestId: "req-1",
+        requestId: "5f2c9a1e-8b7d-4c3a-9e1f-0a2b3c4d5e6f",
       }),
     });
     renderPage();
     const card = await screen.findByTestId("run-summary-error");
     expect(card).toHaveTextContent("Result summary");
-    expect(screen.getByRole("alert")).toHaveTextContent("Unknown resource.");
-    expect(screen.getByRole("alert")).toHaveTextContent("req-1");
+    expect(screen.getByRole("alert")).toHaveTextContent("We couldn't find that");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("Unknown resource.");
+    expect(screen.getByRole("alert")).toHaveTextContent("Reference: 5f2c9a1e-8b7");
     expect(screen.queryByTestId("run-summary")).not.toBeInTheDocument();
   });
 
@@ -134,7 +135,7 @@ describe("RunDetailPage result summary", () => {
     });
     renderPage();
     await screen.findByTestId("run-summary-error");
-    expect(screen.getByRole("alert")).toHaveTextContent("temporarily unavailable");
+    expect(screen.getByRole("alert")).toHaveTextContent("Temporarily unavailable");
     expect(screen.getByRole("alert")).not.toHaveTextContent("upstream");
   });
 

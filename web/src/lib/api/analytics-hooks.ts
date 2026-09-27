@@ -4,6 +4,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "./client";
 import { type Dataset, analyticsSchema } from "@/lib/analytics";
 import type { PlanProposalOut } from "./types";
+import { UserFacingError } from "@/lib/friendly-errors";
 
 export function useDatasets() {
   return useQuery({
@@ -17,7 +18,14 @@ export function useRunAnalytics(id: string) {
     queryFn: async () => {
       const parsed = analyticsSchema.safeParse(await api.get<unknown>(`/runs/${id}/analytics`));
       if (!parsed.success)
-        throw new Error("This analysis could not be validated. No charts have been shown.");
+        throw new UserFacingError("analytics_invalid", {
+          title: "This analysis could not be validated",
+          explanation:
+            "Its results didn't pass NLW's integrity checks, so no charts or figures are shown.",
+          action: "Run the analysis again. If it keeps happening, contact your administrator.",
+          retry: "now",
+          tone: "warn",
+        });
       return parsed.data;
     },
     enabled: Boolean(id),

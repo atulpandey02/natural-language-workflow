@@ -6,12 +6,15 @@ export interface ApiErrorShape {
   code: string;
   message: string;
   requestId?: string;
+  /** 422 field details ({loc, type}); used only to point at fields, never shown raw. */
+  details?: unknown;
 }
 
 export class ApiError extends Error {
   status: number;
   code: string;
   requestId?: string;
+  details?: unknown;
 
   constructor(shape: ApiErrorShape) {
     super(shape.message);
@@ -19,6 +22,7 @@ export class ApiError extends Error {
     this.status = shape.status;
     this.code = shape.code;
     this.requestId = shape.requestId;
+    this.details = shape.details;
   }
 }
 
@@ -26,12 +30,14 @@ export class ApiError extends Error {
 export function toApiError(status: number, body: unknown, requestId?: string): ApiError {
   let code = "error";
   let message = "Something went wrong.";
+  let details: unknown;
   if (body && typeof body === "object" && "error" in body) {
-    const err = (body as { error?: { code?: string; message?: string } }).error;
+    const err = (body as { error?: { code?: string; message?: string; details?: unknown } }).error;
     if (err?.code) code = err.code;
     if (err?.message) message = err.message;
+    details = err?.details;
   }
-  return new ApiError({ status, code, message, requestId });
+  return new ApiError({ status, code, message, requestId, details });
 }
 
 /** A human-facing, status-aware summary the UI can show in a banner. */

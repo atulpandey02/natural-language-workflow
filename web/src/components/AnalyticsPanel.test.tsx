@@ -27,6 +27,7 @@ vi.mock("@/lib/api/hooks", () => ({
 vi.mock("./AnalyticsResult", () => ({ AnalyticsResultView: () => <div>Validated result</div> }));
 vi.mock("./PlanReview", () => ({ PlanReview: () => <div>Immutable proposal review</div> }));
 import { AnalyticsPanel } from "./AnalyticsPanel";
+import { UserFacingError } from "@/lib/friendly-errors";
 beforeEach(() => {
   state.data = undefined;
   state.error = null;
@@ -40,9 +41,10 @@ describe("analytics result states and server-owned Slack message", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Loading analytical evidence");
   });
   it("shows read errors", () => {
-    state.error = new Error("Result unavailable");
+    state.error = new Error("Result unavailable: psycopg.OperationalError at 10.0.0.5");
     render(<AnalyticsPanel runId="r" />);
-    expect(screen.getByRole("alert")).toHaveTextContent("Result unavailable");
+    expect(screen.getByRole("alert")).toHaveTextContent("Something went wrong");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("psycopg"); // never raw
   });
   it("sends only connector and channel to the backend", async () => {
     state.data = fixture;
@@ -93,7 +95,13 @@ describe("analytics result states and server-owned Slack message", () => {
   });
   it("hides cached READY sharing when the latest query rejects its result", () => {
     state.data = fixture;
-    state.error = new Error("This analysis could not be validated.");
+    state.error = new UserFacingError("analytics_invalid", {
+      title: "This analysis could not be validated",
+      explanation: "Its results didn't pass NLW's integrity checks.",
+      action: "Run the analysis again.",
+      retry: "now",
+      tone: "warn",
+    });
     render(<AnalyticsPanel runId="r" />);
     expect(screen.getByRole("alert")).toHaveTextContent("could not be validated");
     expect(screen.queryByRole("button", { name: "Send summary to Slack" })).toBeNull();

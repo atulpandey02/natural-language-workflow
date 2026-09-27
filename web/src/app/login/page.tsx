@@ -4,12 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { safeNextPath } from "@/lib/next-path";
+import { describeAuthError } from "@/lib/friendly-errors";
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ReturnType<typeof describeAuthError>>(null);
   const [busy, setBusy] = useState(false);
   // An allowlisted return path (only the invitation-accept page). Read once, kept
   // in memory, and scrubbed from the address bar so the token does not linger.
@@ -27,7 +28,7 @@ export default function LoginPage() {
     const { error } = await getSupabaseBrowserClient().auth.signInWithPassword({ email, password });
     setBusy(false);
     if (error) {
-      setError(error.message);
+      setError(describeAuthError(error));
       return;
     }
     router.push(next.current ?? "/");
@@ -40,8 +41,9 @@ export default function LoginPage() {
       <p className="muted">Access your natural-language workflow console.</p>
       <form onSubmit={onSubmit} noValidate>
         {error ? (
-          <div className="banner" role="alert">
-            {error}
+          <div className="error-panel" role="alert" data-testid="login-error">
+            <strong>{error.title}</strong>
+            <p>{error.explanation}</p>
           </div>
         ) : null}
         <label htmlFor="email">Email</label>
