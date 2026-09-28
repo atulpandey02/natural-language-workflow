@@ -8,7 +8,7 @@
 > **Controlled pilot.** NLW runs on AWS-hosted staging at **[app.nlwplatform.com](https://app.nlwplatform.com)** with two synthetic datasets. It is not a production service for real customer data, and there is no public sign-up.
 
 <p align="center">
-  <img src="docs/evidence/launch-closure/visual/00-support-report-hero.png" width="820" alt="NLW Support analysis report: KPI cards, grouped findings and a trend chart, each linked to its source step"/>
+  <img src="docs/evidence/live-pilot/sales-report.png" width="820" alt="Completed Sales analysis report on the live pilot: KPI cards, grouped findings and recommended next steps, each linked to its source step"/>
 </p>
 
 ## What NLW does
@@ -48,11 +48,11 @@ The design rule behind all of this: **models reason; code enforces the invariant
 
 | | |
 | --- | --- |
-| <img src="docs/evidence/launch-closure/visual/03-home-onboarding-desktop.png" alt="Home page with a question composer, sample workflows and setup actions"/> **Home:** ask a question or start from a sample. | <img src="docs/evidence/launch-closure/visual/05-plan-review-desktop.png" alt="Plan review showing proposed steps, data bindings, safety checks and a Save workflow action"/> **Plan review:** the proposed workflow, its data and its safety checks, before anything runs. |
+| <img src="docs/evidence/live-pilot/planner-clarification.png" alt="Live planner response marked Needs detail, with AI-generated clarification questions and the plan blocked from saving"/> **Checked, not trusted:** the planner's proposal is labelled *Needs detail* by NLW's checks; its questions are marked AI-generated, and the plan can't be saved yet. | <img src="docs/evidence/launch-closure/visual/05-plan-review-desktop.png" alt="Plan review showing proposed steps, data bindings, safety checks and a Save workflow action"/> **Plan review:** a plan that passed its checks, shown before anything runs. |
 | <img src="docs/evidence/launch-closure/visual/13-approval-approver.png" alt="Approval card showing the requester, destination, policy reason and the exact outgoing Slack message"/> **Approver view:** the exact outgoing message and destination. | <img src="docs/evidence/launch-closure/visual/12-approval-requester.png" alt="Requester's view of the same approval: no approve button and a note that someone else must approve"/> **Requester view:** self-approval is blocked. |
 | <img src="docs/evidence/launch-closure/visual/16-outcome-unknown.png" alt="Run page explaining that an external action's outcome could not be confirmed and must not be blindly retried"/> **Honest outcomes:** an unconfirmed delivery is shown as *Outcome unknown*, never as success. | <img src="docs/evidence/launch-closure/visual/08-sales-report-mobile.png" width="260" alt="Sales report on a phone-sized screen"/> **Responsive:** tested at desktop, tablet and phone widths. |
 
-All screenshots use synthetic data and synthetic `example.test` accounts. More screenshots are in [`docs/evidence/launch-closure/visual/`](docs/evidence/launch-closure/visual/).
+All screenshots show synthetic data. The hero and live-pilot images come from the deployed staging pilot, with account details redacted ([`docs/evidence/live-pilot/`](docs/evidence/live-pilot/README.md)). The rest come from the automated browser harness, using synthetic `example.test` accounts ([`docs/evidence/launch-closure/visual/`](docs/evidence/launch-closure/visual/)).
 
 ## Pilot use cases
 
@@ -60,6 +60,10 @@ All screenshots use synthetic data and synthetic `example.test` accounts. More s
 | --- | --- | --- |
 | **Sales operations** (one synthetic order per row, snapshot 2026-09-01) | Revenue, orders, average order value and units; monthly trends; best and worst categories; regional and product performance | *"Analyze the last six months of sales. Show revenue and order trends, best and worst categories, regional performance and meaningful decline."* |
 | **Support operations** (one synthetic ticket per row, snapshot 2026-09-01) | SLA compliance, open backlog, issue categories, resolution and satisfaction trends, teams needing attention | *"Analyze support performance for the last six months. Show SLA compliance, backlog, recurring issue categories and satisfaction trends."* |
+
+<p align="center">
+  <img src="docs/evidence/live-pilot/support-report.png" width="720" alt="Completed Support analysis report on the live pilot: SLA compliance, open backlog, resolution time and satisfaction, with grouped findings"/>
+</p>
 
 Each report shows:
 - **What changed** and **Needs attention:** the backend's grounded findings, verbatim, with source links.
