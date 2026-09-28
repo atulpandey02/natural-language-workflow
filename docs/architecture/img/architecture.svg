@@ -149,7 +149,7 @@
   <text class="body" x="378" y="550">per-tenant isolation enforced in the database, never by the model</text>
   <text class="mono" x="378" y="574" fill="#065f46">runs · steps · approvals · schedules · connectors</text>
   <text class="mono" x="378" y="590" fill="#065f46">external_actions · memberships · invitations · authz_audit</text>
-  <text class="body" x="378" y="614">20 Alembic migrations · owner-only DDL · restore-validated</text>
+  <text class="body" x="378" y="614">21 Alembic migrations · owner-only DDL · restore-validated</text>
 
   <rect x="864" y="486" width="244" height="128" rx="12" class="redis"/>
   <text class="title" x="878" y="510" fill="#9a3412">Redis + Dramatiq</text>
