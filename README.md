@@ -5,7 +5,9 @@
 [![CI](https://github.com/atulpandey02/natural-language-workflow/actions/workflows/ci.yml/badge.svg)](https://github.com/atulpandey02/natural-language-workflow/actions/workflows/ci.yml)
 [![E2E](https://github.com/atulpandey02/natural-language-workflow/actions/workflows/e2e.yml/badge.svg)](https://github.com/atulpandey02/natural-language-workflow/actions/workflows/e2e.yml)
 
-> **Controlled pilot.** NLW runs on AWS-hosted staging at **[app.nlwplatform.com](https://app.nlwplatform.com)** with two synthetic datasets. It is not a production service for real customer data, and there is no public sign-up.
+**[Live pilot](https://app.nlwplatform.com)** (invitation-only) · **[Demo video](https://drive.google.com/file/d/1PiC-y1g_NARMfrF-oL4t-_q1dDAH7jO5/view?usp=sharing)** · [Architecture](#architecture) · [Validation evidence](#validation-evidence)
+
+> **Controlled pilot.** NLW runs as a production-style staging deployment on AWS with two synthetic, fixed-snapshot datasets. It is not a production service for real customer data, and there is no public sign-up.
 
 <p align="center">
   <img src="docs/evidence/live-pilot/sales-report.png" width="820" alt="Completed Sales analysis report on the live pilot: KPI cards, grouped findings and recommended next steps, each linked to its source step"/>
@@ -71,9 +73,29 @@ Each report shows:
 
 ## Architecture
 
-<p align="center">
-  <img src="docs/architecture/img/architecture.svg" width="100%" alt="NLW system architecture: browser and Caddy, FastAPI control plane with LLM planner and feasibility engine, PostgreSQL system of record, Redis transport, worker and scheduler"/>
-</p>
+```mermaid
+flowchart LR
+  B["Browser<br/>Next.js app"] --> API["FastAPI API"]
+  API --> P["LLM planner<br/>proposes a typed plan"]
+  P --> F["Feasibility engine<br/>deterministic checks"]
+  F -->|"reviewed, saved version"| DB[("PostgreSQL<br/>system of record · RLS")]
+  API -->|"run id only"| Q[("Redis<br/>queue transport")]
+  Q --> W["Worker<br/>checkpointed steps"]
+  W <--> DB
+  W --> T["Registered analytics tools<br/>synthetic Sales · Support"]
+  T --> R["Report<br/>KPIs · charts · findings · evidence"]
+  W --> AP{"Independent<br/>approval"}
+  AP -->|"approved exact message"| S["Slack connector<br/>at-least-once · UNKNOWN if unconfirmed"]
+
+  classDef model fill:#f3eefe,stroke:#8b5cf6,color:#182134
+  classDef code fill:#eef0fd,stroke:#5165d6,color:#182134
+  classDef human fill:#fcf3e4,stroke:#c17a18,color:#182134
+  class P model
+  class API,F,W,T,S code
+  class AP human
+```
+
+Violet is model output (a proposal only); blue is deterministic code; amber is a human decision. A more detailed component diagram is in [`docs/architecture/img/architecture.svg`](docs/architecture/img/architecture.svg).
 
 | Component | Responsibility |
 | --- | --- |
@@ -107,6 +129,7 @@ In plain terms:
 - **Nothing ambiguous is re-sent.** Durable, idempotent execution means a crash resumes from the last checkpoint instead of repeating side effects.
 - **Deployments are verified.** Releases ship as attested images with SLSA provenance, verified before any host is contacted. A phased rollout takes and verifies an encrypted off-host backup before any database change, and a final GO gate requires verified alert delivery and working public routes.
 - **Recoverable.** Backups are encrypted with restic, stored off-host and restore-validated.
+- **Accessible, responsive UI.** Keyboard navigation and visible focus are tested in the browser suite, text colors are checked for at least 4.5:1 contrast, motion is reduced when requested, and layouts are checked at seven widths from 390 to 1440 px.
 
 Implementation details and threat model: [`docs/security/`](docs/security/), [ADR-024 signed database context](docs/adr/ADR-024-signed-database-context.md), [ADR-013 action side-effect safety](docs/adr/ADR-013-action-side-effect-safety.md).
 
