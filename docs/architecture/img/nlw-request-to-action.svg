@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 610" width="1040" height="610" role="img" aria-labelledby="t d">
+  <title id="t">NLW: from a business question to a governed result and an approved action</title>
+  <desc id="d">Plan: a business user asks in the Next.js app; the FastAPI API sends the request to the LLM planner, which returns a typed proposal only; deterministic feasibility checks decide. Execute: the approved plan is saved as a version in PostgreSQL, the system of record protected by row-level security and a signed tenant context; Redis and Dramatiq carry only the run identifier to the worker, which checkpoints state in PostgreSQL and runs registered analytics tools to produce a grounded result with evidence. Share (optional): the result becomes an immutable Slack proposal; an admin or owner other than the requester approves it; only the worker resolves the Slack credential; delivery is at-least-once, and an unconfirmed send becomes terminal UNKNOWN and is never resent automatically.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#475467"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #182134; }
+      .name { font-size: 15px; font-weight: 600; }
+      .sub { font-size: 12.5px; fill: #475467; }
+      .phase { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; fill: #667085; }
+      .lbl { font-size: 12px; fill: #475467; }
+      .edge { stroke: #475467; stroke-width: 1.6; fill: none; }
+      .opt { stroke-dasharray: 5 4; }
+      .model { fill: #f3eefe; stroke: #7c4ddb; }
+      .code { fill: #eef0fd; stroke: #4153bd; }
+      .human { fill: #fcf3e4; stroke: #b36f12; }
+      .ok { fill: #e8f5ef; stroke: #168a63; }
+      .store { fill: #f2f4f7; stroke: #8a94a7; }
+      .note { fill: #ffffff; stroke: #8a94a7; stroke-dasharray: 5 4; }
+      .actor { fill: #ffffff; stroke: #667085; }
+      rect.box { stroke-width: 1.6; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1039" height="609" rx="12" fill="#ffffff" stroke="#e3e8f0"/>
+  <text x="20" y="36" class="name" style="font-size:17px">From question to governed result — and, optionally, an approved action</text>
+
+  <!-- PLAN -->
+  <text x="20" y="70" class="phase">1  PLAN</text>
+  <rect class="box actor" x="20" y="80" width="172" height="70" rx="8"/>
+  <text x="106" y="107" class="name" text-anchor="middle">Business user</text>
+  <text x="106" y="127" class="sub" text-anchor="middle">asks in plain English</text>
+
+  <rect class="box code" x="227" y="80" width="172" height="70" rx="8"/>
+  <text x="313" y="107" class="name" text-anchor="middle">Next.js app</text>
+  <text x="313" y="127" class="sub" text-anchor="middle">review · reports · approvals</text>
+
+  <rect class="box code" x="434" y="80" width="172" height="70" rx="8"/>
+  <text x="520" y="107" class="name" text-anchor="middle">FastAPI API</text>
+  <text x="520" y="127" class="sub" text-anchor="middle">identity · workspace scope</text>
+
+  <rect class="box model" x="641" y="80" width="172" height="70" rx="8"/>
+  <text x="727" y="102" class="name" text-anchor="middle">LLM planner</text>
+  <text x="727" y="121" class="sub" text-anchor="middle">typed proposal only</text>
+  <text x="727" y="138" class="sub" text-anchor="middle">no tools, data or secrets</text>
+
+  <rect class="box code" x="848" y="80" width="172" height="70" rx="8"/>
+  <text x="934" y="102" class="name" text-anchor="middle">Feasibility checks</text>
+  <text x="934" y="121" class="sub" text-anchor="middle">registry · policy · SQL</text>
+  <text x="934" y="138" class="sub" text-anchor="middle">code decides, not model</text>
+
+  <path class="edge" d="M192 115 H225" marker-end="url(#a)"/>
+  <path class="edge" d="M399 115 H432" marker-end="url(#a)"/>
+  <path class="edge" d="M606 115 H639" marker-end="url(#a)"/>
+  <path class="edge" d="M813 115 H846" marker-end="url(#a)"/>
+
+  <!-- checks -> PostgreSQL -->
+  <path class="edge" d="M934 150 V190 H106 V228" marker-end="url(#a)"/>
+  <text x="520" y="183" class="lbl" text-anchor="middle">reviewed plan saved as an immutable version</text>
+
+  <!-- EXECUTE -->
+  <text x="20" y="220" class="phase">2  EXECUTE</text>
+  <rect class="box store" x="20" y="230" width="172" height="70" rx="8"/>
+  <text x="106" y="252" class="name" text-anchor="middle">PostgreSQL</text>
+  <text x="106" y="271" class="sub" text-anchor="middle">system of record</text>
+  <text x="106" y="288" class="sub" text-anchor="middle">RLS · signed context</text>
+
+  <rect class="box store" x="227" y="230" width="172" height="70" rx="8"/>
+  <text x="313" y="252" class="name" text-anchor="middle">Redis · Dramatiq</text>
+  <text x="313" y="271" class="sub" text-anchor="middle">carries run IDs</text>
+  <text x="313" y="288" class="sub" text-anchor="middle">not authoritative state</text>
+
+  <rect class="box code" x="434" y="230" width="172" height="70" rx="8"/>
+  <text x="520" y="257" class="name" text-anchor="middle">Worker</text>
+  <text x="520" y="277" class="sub" text-anchor="middle">one checkpointed step</text>
+
+  <rect class="box code" x="641" y="230" width="172" height="70" rx="8"/>
+  <text x="727" y="257" class="name" text-anchor="middle">Registered tools</text>
+  <text x="727" y="277" class="sub" text-anchor="middle">Sales · Support analyses</text>
+
+  <rect class="box ok" x="848" y="230" width="172" height="70" rx="8"/>
+  <text x="934" y="252" class="name" text-anchor="middle">Grounded result</text>
+  <text x="934" y="271" class="sub" text-anchor="middle">KPIs · findings</text>
+  <text x="934" y="288" class="sub" text-anchor="middle">each linked to a step</text>
+
+  <path class="edge" d="M192 265 H225" marker-end="url(#a)"/>
+  <path class="edge" d="M399 265 H432" marker-end="url(#a)"/>
+  <path class="edge" d="M606 265 H639" marker-end="url(#a)"/>
+  <path class="edge" d="M813 265 H846" marker-end="url(#a)"/>
+
+  <!-- worker <-> PostgreSQL checkpoints -->
+  <path class="edge" d="M470 302 V326 H60 V302" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="265" y="320" class="lbl" text-anchor="middle">plan, state and checkpoints</text>
+
+  <!-- result -> proposal (optional) -->
+  <path class="edge opt" d="M934 300 V366 H150 V398" marker-end="url(#a)"/>
+  <text x="560" y="359" class="lbl" text-anchor="middle">optional: propose sharing the exact summary</text>
+
+  <!-- SHARE -->
+  <text x="20" y="390" class="phase">3  SHARE</text>
+  <rect class="box code" x="20" y="400" width="172" height="70" rx="8"/>
+  <text x="106" y="427" class="name" text-anchor="middle">Slack proposal</text>
+  <text x="106" y="447" class="sub" text-anchor="middle">immutable message</text>
+
+  <rect class="box human" x="227" y="400" width="172" height="70" rx="8"/>
+  <text x="313" y="422" class="name" text-anchor="middle">Admin approval</text>
+  <text x="313" y="441" class="sub" text-anchor="middle">admin or owner</text>
+  <text x="313" y="458" class="sub" text-anchor="middle">never the requester</text>
+
+  <rect class="box code" x="434" y="400" width="172" height="70" rx="8"/>
+  <text x="520" y="422" class="name" text-anchor="middle">Credential lookup</text>
+  <text x="520" y="441" class="sub" text-anchor="middle">in the worker only</text>
+  <text x="520" y="458" class="sub" text-anchor="middle">per workspace</text>
+
+  <rect class="box ok" x="641" y="400" width="172" height="70" rx="8"/>
+  <text x="727" y="422" class="name" text-anchor="middle">Slack delivery</text>
+  <text x="727" y="441" class="sub" text-anchor="middle">at-least-once</text>
+  <text x="727" y="458" class="sub" text-anchor="middle">recorded in audit</text>
+
+  <rect class="box note" x="848" y="400" width="172" height="70" rx="8"/>
+  <text x="934" y="422" class="name" text-anchor="middle">UNKNOWN</text>
+  <text x="934" y="441" class="sub" text-anchor="middle">send not confirmed</text>
+  <text x="934" y="458" class="sub" text-anchor="middle">never resent automatically</text>
+
+  <path class="edge" d="M192 435 H225" marker-end="url(#a)"/>
+  <path class="edge" d="M399 435 H432" marker-end="url(#a)"/>
+  <path class="edge" d="M606 435 H639" marker-end="url(#a)"/>
+  <path class="edge opt" d="M813 435 H846" marker-end="url(#a)"/>
+
+  <!-- legend -->
+  <line x1="20" y1="500" x2="1020" y2="500" stroke="#e3e8f0"/>
+  <rect class="box model" x="20" y="520" width="18" height="14" rx="3"/>
+  <text x="46" y="532" class="lbl">model proposal</text>
+  <rect class="box code" x="165" y="520" width="18" height="14" rx="3"/>
+  <text x="191" y="532" class="lbl">deterministic code</text>
+  <rect class="box human" x="325" y="520" width="18" height="14" rx="3"/>
+  <text x="351" y="532" class="lbl">human decision</text>
+  <rect class="box ok" x="468" y="520" width="18" height="14" rx="3"/>
+  <text x="494" y="532" class="lbl">grounded result / approved action</text>
+  <rect class="box store" x="720" y="520" width="18" height="14" rx="3"/>
+  <text x="746" y="532" class="lbl">data and transport</text>
+  <path class="edge opt" d="M880 527 H915"/>
+  <text x="923" y="532" class="lbl">optional path</text>
+  <text x="20" y="570" class="sub">Connector credentials never reach the browser, the API or the planner. Every tenant query carries a signed context that PostgreSQL verifies.</text>
+  <text x="20" y="590" class="sub">Redis carries only run IDs; PostgreSQL holds the plan, state and checkpoints, so incomplete work can be detected and recovered.</text>
+</svg>
