@@ -44,6 +44,11 @@ action; nothing in the M11.5 P2 package performs it.
       local drill does not).
 - [ ] Confirm quiescence counts are sane and `restore_ready` is true before any
       runtime start.
+- [ ] **Deletion log** (mandatory once workspace offboarding exists; see
+      [offboarding-and-deletion](../security/offboarding-and-deletion.md)):
+      before any runtime starts, re-apply every deletion recorded after the
+      restored snapshot's time. Until offboarding is implemented, record
+      `deletion_log_step: not_applicable_no_offboarding_yet` — never "applied".
 
 ## Record & decide
 
@@ -51,8 +56,12 @@ action; nothing in the M11.5 P2 package performs it.
       against the objectives (**RPO ≤ 24h**, **RTO ≤ 4h**). These are the numbers
       that justify (or refute) the objectives for production — the local drill's
       numbers do not.
-- [ ] File the drill result (date, provider, measured RPO/RTO, issues) under
-      `docs/incidents/` or an ops log.
+- [ ] Write the drill record as JSON from the drill's own outputs (validator
+      JSON, recorded timestamps; repository **redacted**, no credentials) to
+      `docs/ops/dr-drills/<date>.json` and evaluate it:
+      `python -m nlw.ops.dr_evidence check docs/ops/dr-drills/<date>.json`.
+      Only a `PASS` from the tool is reported as a passed drill; a `FAIL` is
+      filed with its reasons. Fields: see `nlw.ops.dr_evidence.DrillRecord`.
 - [ ] Tear down the disposable VPS. If you used the production repo, prune the
       drill's test snapshot with a human-gated delete credential.
 
