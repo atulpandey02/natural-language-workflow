@@ -160,6 +160,12 @@ repository cannot see. Any provisioned identity could found unlimited tenants.
 a `users` row only). Invitations remain the only way to join an existing
 workspace; accepting one does not grant the right to found a new one.
 
+**Downgrade.** Reverting `0022` restores the ungated bootstrap and drops the
+grant ledger (audit rows remain). It must never be applied to a live
+environment; `WORKSPACE_CREATION_MODE=closed` is the emergency stop and the
+restore validator / rollout gate report an ungated bootstrap as NO-GO
+([runbook](../runbooks/workspace-creation-grants.md#downgrade-security-sensitive)).
+
 **Consequences.** Tenant bootstrap is an operator action with an audit trail.
 The hosted Supabase signup setting now affects only how many identities can be
 provisioned, not whether they can create tenants (owner question 5 remains open).

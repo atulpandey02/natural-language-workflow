@@ -29,7 +29,10 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    is restored with the database, but it only verifies contexts signed with the
    same material; without the files, install fresh keys after the restore per
    [signed-context-keys](signed-context-keys.md) (owner credential) before
-   starting any runtime.
+   starting any runtime. Either way, every restore ends with the
+   [post-restore signing-key rotation](#post-restore-signing-key-rotation-required)
+   below: the restored registry holds the old secrets, so they are replaced once
+   the restored environment is proven.
 4. `/opt/nlw/.env.restore` filled from [`.env.restore.example`](../../.env.restore.example)
    (mode 0600). Set `NLW_RESTORE_TARGET_ID` to the exact fresh target and
    `NLW_RESTORE_CONFIRM` to the same value to authorize the destructive restore.
@@ -134,6 +137,58 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
 
 7. **Record** the incident: snapshot id/age, the measured RTO, the quiescence
    counts, and (if a real provider) note it in `docs/incidents/`.
+
+## Post-restore signing-key rotation (required)
+
+Owner decisions (2026-09-29): `ctx_keys` stays in the encrypted database
+backups; restoring still needs the matching host/escrow key files; and after a
+restored environment is validated, the API, worker and scheduler signing keys
+are rotated and escrow is updated. The dump therefore carries the old secret
+material ([ADR-022 note](../adr/ADR-022-encrypted-offhost-backup-dr.md#note-2026-09-29--the-signed-context-key-registry-in-database-backups));
+this sequence retires it. Commands use the owner credential
+(`DATABASE_MIGRATION_URL`) through the release image, exactly as in
+[signed-context-keys](signed-context-keys.md); none prints key material.
+Record every step's time and the fingerprints in the incident record.
+
+1. **Restore the database** (steps 1–7 above). The runtime stays down.
+2. **Install or recover the matching escrowed runtime keys.** Recover
+   `/srv/nlw/ctx-keys/{api,worker,scheduler}.key` from escrow (never from the
+   dump) and prove they match the restored registry, by fingerprint only:
+   `python -m nlw.ctxkeys fingerprint --dir /srv/nlw/ctx-keys --key-id-api <id> --key-id-worker <id> --key-id-scheduler <id>`
+   and `python -m nlw.ctxkeys check --class <class> --key-id <id> --secret-file /run/nlw/keys/<class>.key`
+   for each class (must succeed). If the files are lost, skip to step 4 and
+   install replacements **before** any runtime starts; the restored keys are
+   then never used.
+3. **Validate the isolated restored environment** with the recovered keys:
+   restore validator all `ok`, `enable-runtime`, runtime up on the isolated
+   host only, readiness `signed_context` and `recovery` ready, one controlled
+   run COMPLETED. No customer traffic or external delivery yet.
+4. **Generate and install replacement keys** under NEW key ids, one per class,
+   into a NEW directory (the old files stay in place for rollback):
+   `python -m nlw.ctxkeys prepare --dir /srv/nlw/ctx-keys-<date> --class <class> --owner 10001:10001`
+   then `python -m nlw.ctxkeys install --class <class> --key-id <new-id> --secret-file <file>`.
+   During the overlap both the restored and the new keys verify.
+5. **Activate and verify the new keys.** Set `NLW_CTX_KEYS_DIR` and
+   `NLW_CTX_{API,WORKER,SCHEDULER}_KEY_ID` in `.env.prod` to the new directory
+   and ids, recreate `api`, `worker` and `scheduler`, then confirm
+   `python -m nlw.ctxkeys check` succeeds for each new id, readiness reports
+   `signed_context` ready, and a fresh controlled run completes.
+6. **Revoke the restored keys only after step 5 succeeded:**
+   `python -m nlw.ctxkeys revoke --key-id <restored-id>` for each class. If step
+   5 failed, do not revoke: point `.env.prod` back at the restored ids and
+   directory, recreate the runtime, and investigate.
+7. **Update escrow and record fingerprints.** Escrow the new directory off-host
+   per [signed-context-keys § Escrow](signed-context-keys.md#escrow-mandatory-before-migration-0016),
+   verify by fingerprint, and run `python -m nlw.ops.rollout verify-escrow`
+   with a new attestation. Only then destroy the superseded escrow copy.
+8. **Confirm old signatures fail.** `python -m nlw.ctxkeys list` shows each
+   restored id as `revoked`, and `python -m nlw.ctxkeys check --class <class>
+   --key-id <restored-id> --secret-file <old file>` now **fails** for every
+   class. Revocation is immediate: any context signed with a revoked key
+   verifies to nothing (fail closed). Then securely delete the old key files
+   from the host.
+
+This rotates keys only; it does not change what the backup contains.
 
 ## Data-loss expectation (RPO)
 

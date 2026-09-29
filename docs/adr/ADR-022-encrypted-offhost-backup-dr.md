@@ -286,12 +286,13 @@ holds every tenant's data; using the key material against a live database would
 additionally need a runtime role password (not in the dump) and network access,
 and `ctxkeys revoke` invalidates leaked material immediately.
 
-Policy (current, kept): the registry is backed up and restored with the
-database; key files, escrow and the restic passphrase stay outside the backup.
-Recommended addition (not yet in the restore runbook): rotate the signing keys
-after any restore, using the overlap procedure in
-[signed-context-keys](../runbooks/signed-context-keys.md). The alternative
-(`--exclude-table-data=public.ctx_keys`, reinstall from escrow before any
-runtime starts) removes signing material from backups at the cost of making
-every restore depend on escrow; adopting it is an owner decision and would need
-a drill proving the reinstall path.
+Policy (owner decisions, 2026-09-29): the registry stays in the encrypted
+database backups and is restored with the database; key files, escrow and the
+restic passphrase stay outside the backup, and restoring still needs the
+matching host/escrow key files (or carefully installed replacements). After a
+restored environment is validated, the API, worker and scheduler signing keys
+are rotated and escrow is updated: the exact sequence is
+[dr-fresh-host-restore § Post-restore signing-key rotation](../runbooks/dr-fresh-host-restore.md#post-restore-signing-key-rotation-required).
+The rejected alternative (`--exclude-table-data=public.ctx_keys`, reinstall
+from escrow before any runtime starts) would remove signing material from
+backups at the cost of making every restore depend on escrow.

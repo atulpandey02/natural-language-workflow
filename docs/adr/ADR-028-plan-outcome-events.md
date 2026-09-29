@@ -31,8 +31,12 @@ before anything changes ("measure before optimising", Phase 2 plan §11–§12).
   `FeasibilityCode` to be classified.
 - **Same transaction as the proposal**, inside a SAVEPOINT, so the event
   commits with the proposal and a measurement failure never fails or alters the
-  planning response. Provider failures (no proposal, request rolled back) are
-  written in a short signed transaction of their own.
+  planning response; the event is also built inside that guard, so a
+  classification error cannot fail planning either. Provider failures (timeout
+  and unavailable -> 503, rejected or missing platform key -> 502; no
+  proposal, request rolled back) are written as `INFRA_FAIL` in a short signed
+  transaction of their own. A prompt over the platform budget (422, refused
+  before any provider call) is not a planning attempt and writes no event.
 - **RLS on the signed context:** `nlw_app` inserts for its request's workspace;
   owners/admins read their own workspace; no runtime role may update or delete.
   The signed-policy inventory becomes 53 (51 + 2) in the rollout gate, the
@@ -55,6 +59,11 @@ before anything changes ("measure before optimising", Phase 2 plan §11–§12).
   `repair_attempted`/`repair_succeeded` columns exist and stay false/null.
 - The analytics-to-Slack handoff creates `plan_proposals` rows without a
   planner call; it is not a planning attempt and writes no event.
+
+Downgrading `0023` drops `plan_outcome_events` (the measurement history is
+lost; no access boundary changes) and the signed-policy inventory returns to
+51, so the rollout gate and restore validator of this release would then fail
+until the release is rolled back as well.
 
 ## Consequences
 

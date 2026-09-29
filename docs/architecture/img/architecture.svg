@@ -145,7 +145,7 @@
   <rect x="360" y="466" width="470" height="168" rx="12" class="state"/>
   <text class="title" x="378" y="492" fill="#065f46">PostgreSQL — system of record</text>
   <text class="body" x="378" y="514">Row-Level Security · signed, expiring HMAC context (ADR-024)</text>
-  <text class="body" x="378" y="532">51 policies trust only verified accessors · nlw_app has no BYPASSRLS</text>
+  <text class="body" x="378" y="532">53 policies trust only verified accessors · nlw_app has no BYPASSRLS</text>
   <text class="body" x="378" y="550">per-tenant isolation enforced in the database, never by the model</text>
   <text class="mono" x="378" y="574" fill="#065f46">runs · steps · approvals · schedules · connectors</text>
   <text class="mono" x="378" y="590" fill="#065f46">external_actions · memberships · invitations · authz_audit</text>

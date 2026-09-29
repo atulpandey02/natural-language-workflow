@@ -52,10 +52,32 @@ aborts with 413 past the cap (`LocalBlobStore.put_stream(max_bytes=...)`
 already leaves no object behind on overflow). This is the "route-scoped
 streaming cap" alternative in plan §21.
 
+## Hostile-input limits (independent review, 2026-09-29)
+
+- Delimiter sniffing sees at most the first 16 KiB (`SNIFF_CHARS`):
+  `csv.Sniffer` is quadratic on quote-heavy input and runs before the
+  wall-clock check could stop it. The timeout is checked after sniffing.
+- Parsing is strict: an unterminated quote or data after a closing quote is
+  `PARSE_ERROR`, never the rest of the file folded into one field.
+- `LocalBlobStore` lists and deletes crash-orphaned `.upload-*` partial files
+  with the dataset, so deletion verification accounts for every byte.
+- **Memory is bounded only by the input cap, not limited in-process.** Measured
+  peak (tracemalloc) for accepted ≤ 25 MB files: 225–336 MB (about 14× the
+  input); worst measured wall time 6.9 s (200 columns). The ingestion worker
+  must therefore run under a container memory limit (≥ 512 MB) with the
+  profiler as its only large allocation. `csv.field_size_limit` is
+  process-global, so the profiler must not share a process with other CSV
+  readers.
+
 ## Remaining for the first PR (in dependency order)
 
-1. Owner decisions: dependency approval (DuckDB/pyarrow, S3 client),
-   deletion statement (plan §0.6), named operator.
+1. Owner decisions (2026-09-29): DuckDB is approved only for the later
+   deterministic-query milestone; PyArrow is deferred; an S3 client may be
+   proposed later through its own ADR; an email provider is deferred; Atul is
+   the primary operator and a second operator/reviewer is required before
+   external customer onboarding; uploads stay disabled until deletion works
+   end to end. Still open: the customer deletion statement (plan §0.6), whose
+   retention figures are pilot proposals, not commitments.
 2. Migration: `datasets`, `dataset_uploads`, `dataset_profiles`, a
    tombstone table; RLS (update `EXPECTED_SIGNED_POLICIES` in all three
    places); `nlw_ingest` role in `docker/postgres/initdb/00-roles.sh` and
