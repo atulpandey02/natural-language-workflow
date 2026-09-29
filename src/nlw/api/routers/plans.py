@@ -16,10 +16,10 @@ feasibility owns the final status — a parsed plan is not executable.
 
 import time
 import uuid
+from collections.abc import Callable
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import nlw.tools.builtin  # noqa: F401  (populates the tool + connector-type registries)
@@ -106,30 +106,35 @@ async def _compute_connector_bindings(
 
 
 async def _record_outcome(
-    session: AsyncSession, tenant_id: uuid.UUID, event: plan_outcomes.OutcomeEvent
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    build: Callable[[], plan_outcomes.OutcomeEvent],
 ) -> None:
     """Append the redacted outcome event inside a SAVEPOINT of the request
-    transaction: it commits with the proposal, and a measurement failure is
-    logged and counted but never fails or alters the planning response."""
+    transaction: it commits with the proposal, and a measurement failure
+    (classifying the event or writing it) is logged and counted but never fails
+    or alters the planning response."""
     try:
+        event = build()
         async with session.begin_nested():
             await plan_outcomes.insert_event(session, tenant_id, event)
-    except SQLAlchemyError as exc:
+    except Exception as exc:  # noqa: BLE001 - measurement must never fail planning
         metrics.record_error("plan_outcome_event")
         log.warning("plan_outcome.write_failed", error_class=type(exc).__name__)
 
 
 async def _record_infra_failure(
-    request: Request, ctx: TenantContext, event: plan_outcomes.OutcomeEvent
+    request: Request, ctx: TenantContext, build: Callable[[], plan_outcomes.OutcomeEvent]
 ) -> None:
     """A provider failure writes no proposal and the request transaction rolls
     back, so the INFRA_FAIL event gets its own short, signed transaction."""
     try:
+        event = build()
         signer = get_ctx_signer(request, Purpose.API_REQUEST)
         async with request.app.state.sessionmaker() as session, session.begin():
             await set_request_context(session, signer, ctx)
             await plan_outcomes.insert_event(session, ctx.tenant_id, event)
-    except Exception as exc:  # noqa: BLE001 - measurement must never mask the 503
+    except Exception as exc:  # noqa: BLE001 - measurement must never mask the 5xx
         metrics.record_error("plan_outcome_event")
         log.warning("plan_outcome.write_failed", error_class=type(exc).__name__)
 
@@ -162,6 +167,16 @@ async def create_plan(
     )
 
     planner_start = time.perf_counter()
+
+    def infra_event() -> plan_outcomes.OutcomeEvent:
+        return plan_outcomes.infra_failure(
+            request=prompt,
+            provider=settings.llm_provider,
+            model=settings.llm_model if settings.llm_provider != "stub" else "stub",
+            contract_version=PLANNER_CONTRACT_VERSION,
+            latency_ms=int((time.perf_counter() - planner_start) * 1000),
+        )
+
     try:
         result = await plan_and_check(
             provider=provider,
@@ -178,23 +193,16 @@ async def create_plan(
         log.warning(
             "planner.provider_error", error_class="unavailable", provider=settings.llm_provider
         )
-        await _record_infra_failure(
-            request,
-            ctx,
-            plan_outcomes.infra_failure(
-                request=prompt,
-                provider=settings.llm_provider,
-                model=settings.llm_model if settings.llm_provider != "stub" else "stub",
-                contract_version=PLANNER_CONTRACT_VERSION,
-                latency_ms=int((time.perf_counter() - planner_start) * 1000),
-            ),
-        )
+        await _record_infra_failure(request, ctx, infra_event)
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, "planner provider unavailable"
         ) from exc
     except LLMAuthError as exc:
         metrics.record_error("planner_auth")
         log.error("planner.provider_error", error_class="auth", provider=settings.llm_provider)
+        # A rejected or missing platform key is a provider failure too (the 502
+        # is unchanged); without this event it would be invisible to B02.
+        await _record_infra_failure(request, ctx, infra_event)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "planner provider misconfigured") from exc
     except PromptBudgetError as exc:
         # Deterministic: the assembled prompt/tool catalog exceeded its budget.
@@ -245,7 +253,7 @@ async def create_plan(
     await _record_outcome(
         session,
         ctx.tenant_id,
-        plan_outcomes.from_report(
+        lambda: plan_outcomes.from_report(
             report,
             request=prompt,
             step_count=len(result.output.steps) if result.output else 0,

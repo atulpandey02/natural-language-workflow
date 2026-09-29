@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from nlw.api.app import create_app
 from nlw.api.deps import get_llm_provider
-from nlw.planner.provider import LLMRequest, LLMResult, LLMUnavailableError
+from nlw.planner.provider import LLMAuthError, LLMRequest, LLMResult, LLMUnavailableError
 from nlw.planner.schema import PlannerOutput
 from nlw.tenancy.signing import Purpose
 
@@ -203,3 +203,73 @@ def test_schema_refuses_free_text(pg_stack: SimpleNamespace) -> None:
     )
     names = {str(c[0]) for c in columns}
     assert not names & {"request_text", "message", "detail", "prompt", "user_id", "created_by"}
+
+
+class Unauthorized:
+    model = "unauthorized"
+
+    async def generate_plan(self, req: LLMRequest) -> LLMResult:
+        raise LLMAuthError("provider rejected the platform key")
+
+
+def _proposals(pg_stack: SimpleNamespace, ws: str) -> int:
+    with psycopg.connect(pg_stack.owner_libpq) as conn:
+        row = conn.execute("SELECT count(*) FROM plan_proposals WHERE tenant_id=%s", (ws,))
+        return int(row.fetchone()[0])  # type: ignore[index]
+
+
+def test_provider_auth_failure_records_infra_fail_and_keeps_the_502(
+    pg_stack: SimpleNamespace,
+) -> None:
+    client, h, ws = _setup(pg_stack, Unauthorized(), "po-auth")
+    r = client.post("/plans", json={"prompt": "show sales"}, headers=h)
+    assert r.status_code == 502
+    assert r.json()["error"]["message"] == "planner provider misconfigured"
+    assert _proposals(pg_stack, ws) == 0
+    [(outcome, category, codes, proposal_id, *_rest)] = _events(pg_stack, ws)
+    assert (outcome, category, codes, proposal_id) == ("INFRA_FAIL", "INFRA_FAILURE", [], None)
+
+
+def test_classification_failure_never_fails_planning(
+    pg_stack: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nlw.observability import plan_outcomes
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise KeyError("an unclassified feasibility code")
+
+    monkeypatch.setattr(plan_outcomes, "from_report", _boom)
+    out = PlannerOutput.model_validate(
+        {"workflow_name": "x", "steps": [{"id": "a", "tool": "made.up.tool"}]}
+    )
+    client, h, ws = _setup(pg_stack, Scripted(out), "po-classify-fail")
+    r = client.post("/plans", json={"prompt": "show sales"}, headers=h)
+    assert r.status_code == 201 and r.json()["status"] == "REJECT"
+    assert _proposals(pg_stack, ws) == 1
+    assert _events(pg_stack, ws) == []
+
+
+def test_rejected_event_insert_rolls_back_only_its_savepoint(
+    pg_stack: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real database error on the event INSERT (a CHECK violation) aborts
+    only the SAVEPOINT: the proposal still commits and the response is 201."""
+    import dataclasses
+
+    from nlw.observability import plan_outcomes
+
+    real_insert = plan_outcomes.insert_event
+
+    async def _bad_insert(session: object, tenant_id: uuid.UUID, event: object) -> None:
+        bad = dataclasses.replace(event, outcome="NOT_AN_OUTCOME")  # type: ignore[type-var]
+        await real_insert(session, tenant_id, bad)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(plan_outcomes, "insert_event", _bad_insert)
+    out = PlannerOutput.model_validate(
+        {"workflow_name": "x", "steps": [{"id": "a", "tool": "made.up.tool"}]}
+    )
+    client, h, ws = _setup(pg_stack, Scripted(out), "po-insert-fail")
+    r = client.post("/plans", json={"prompt": "show sales"}, headers=h)
+    assert r.status_code == 201 and r.json()["status"] == "REJECT"
+    assert _proposals(pg_stack, ws) == 1
+    assert _events(pg_stack, ws) == []
