@@ -3,6 +3,34 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Phase 2 foundations (branch `feat/phase2-foundations`, awaiting review)
+
+Implements the unblocked parts of the Phase 2 plan (Edition 2) on top of `main`
+at `fcfd4d5`. Not pushed, not deployed; staging still runs `b1a3058` at
+revision `0021`, so deploying this branch is a migration-requiring release
+(`0021 → 0023`) through the gated rollout.
+
+- **B01 — workspace-creation grants** (migration `0022`, [ADR-023 amendment 1](adr/ADR-023-membership-approval-sod.md#amendment-1--founding-a-workspace-requires-an-operator-grant-phase-2-b01-2026-09-29),
+  [runbook](runbooks/workspace-creation-grants.md)): founding a workspace needs
+  a single-use, email-bound operator grant enforced inside the SECURITY DEFINER
+  bootstrap; 403 `WORKSPACE_CREATION_NOT_GRANTED`; `identity.provisioned` and
+  `workspace.created` audit events; rollout and restore validator refuse an
+  ungated bootstrap.
+- **B02 — plan outcome events** (migration `0023`, [ADR-028](adr/ADR-028-plan-outcome-events.md)):
+  redacted, append-only, codes-only measurement of every planning attempt; the
+  signed-policy inventory is now **53**; operator report
+  `python -m nlw.ops.outcomes report`; benchmark runs use the same taxonomy.
+- **B03 — code parts:** staging/production refuse to start an anthropic planner
+  without an explicit `NLW_LLM_MODEL`; `python -m nlw.ops.dr_evidence check`
+  evaluates a real-provider DR drill record. The drill itself is **not run**.
+- **B04 — library layer only:** tenant-scoped blob store and a bounded,
+  deterministic CSV profiler (`profile-1`) with no planner, provider or query
+  path ([development notes](development/datasets.md), including the pinned
+  Starlette/FastAPI body-limit finding). No dataset tables, API or worker yet.
+- **Offboarding contract:** every table classified; read-only inventory;
+  customer statement awaiting owner approval
+  ([offboarding-and-deletion](security/offboarding-and-deletion.md)).
+
 ## Pilot launch closure (local, awaiting review)
 
 On `feat/staging-custom-domain`, after the unchanged custom-domain commits: a
@@ -482,6 +510,8 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-024 — Signed database context (M11.5 P3B, migration `0016`)](adr/ADR-024-signed-database-context.md)
 - [ADR-025 — Release-manifest provenance (M12A-Prep)](adr/ADR-025-release-manifest-provenance.md)
 - [ADR-026 — AI execution architecture (M12B-A): deterministic engine with an LLM planner](adr/ADR-026-ai-execution-architecture.md)
+- [ADR-027 — Grounded pilot analytics](adr/ADR-027-grounded-pilot-analytics.md)
+- [ADR-028 — Redacted plan outcome events (Phase 2 B02)](adr/ADR-028-plan-outcome-events.md)
 
 Planned: ADR-008 Deployment strategy.
 
@@ -535,6 +565,8 @@ independent-review caveats on what it does and does not measure live in
 ## Runbooks
 
 - [staging-signed-context-rollout](runbooks/staging-signed-context-rollout.md) — **M12A**: the phased, gated upgrade of the staging VPS from schema `0010` to `0016` (`python -m nlw.ops.rollout --release <CI manifest>`; read-only default; verify-release, authorization, escrow and backup-before-mutation gates; the CI-generated, **attested** `release-manifest-<sha>` artifact + `deploy/staging/target.env` are the identity source — `deploy/staging/release.example.json` is a rejected template; provenance: [ADR-025](adr/ADR-025-release-manifest-provenance.md)). Rehearsal: `scripts/ops/rehearse-0010-to-0016.sh`. Alerting boundary: [docs/ops/alerting](ops/alerting.md).
+
+- [workspace-creation-grants](runbooks/workspace-creation-grants.md) — **Phase 2 B01**: issue, list and revoke operator grants for founding a workspace; emergency `WORKSPACE_CREATION_MODE=closed`.
 
 [`docs/runbooks/`](runbooks/) — see its [README](runbooks/README.md) for the
 index. Security-sensitive: [signed-context-keys.md](runbooks/signed-context-keys.md)
