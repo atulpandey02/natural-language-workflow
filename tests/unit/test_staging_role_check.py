@@ -10,6 +10,7 @@ import json
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -140,7 +141,7 @@ def test_former_list_order_choice_reproduces_the_409_and_now_fails_the_step(
     """The pre-fix step took ``aWorkflows[0]`` (newest first = the version-less
     approval workflow) and hid the 409 behind ``|| true``. The same choice now
     fails the step; the exported runnable id reaches a worker-set COMPLETED."""
-    listed = [APPROVAL, RUNNABLE]  # GET /workflows order: created_at DESC
+    listed: list[Mapping[str, object]] = [APPROVAL, RUNNABLE]  # created_at DESC order
     by_workflow = {
         "wf-appr": (409, {"error": {"code": "conflict", "message": "no current version"}}),
         "wf-run": (201, {"id": RUN_ID}),
