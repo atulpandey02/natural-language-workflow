@@ -32,6 +32,9 @@ from collections.abc import Callable
 from typing import Any
 
 TERMINAL = {"COMPLETED", "FAILED"}
+# Only these run statuses are ever printed; anything else is reported as
+# "unrecognised" so no server-supplied text reaches the CI log.
+KNOWN_STATUSES = {"PENDING", "RUNNING", "WAITING_APPROVAL", *TERMINAL}
 _CODE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
@@ -92,7 +95,11 @@ def wait_for_worker(
         status, body = http("GET", f"{api}/runs/{run_id}", headers)
         if status != 200:
             raise CheckFailed(f"run read returned HTTP {status} ({sanitized_code(body)})")
-        last = str(json.loads(body).get("status", "unknown"))
+        try:
+            reported = json.loads(body).get("status")
+        except (ValueError, AttributeError) as exc:
+            raise CheckFailed("run read returned an unparseable body") from exc
+        last = reported if reported in KNOWN_STATUSES else "unrecognised"
         if last in TERMINAL:
             return last
         if clock() >= end:

@@ -132,3 +132,59 @@ def test_workflow_step_is_strict_and_seed_exports_the_runnable_id() -> None:
     assert "E2E_RUNNABLE_WORKFLOW_ID=${wf}" in seed
     load = (ROOT / "tests" / "load" / "seed_staging.mjs").read_text()
     assert "aWorkflows[0]" not in load
+
+
+def test_former_list_order_choice_reproduces_the_409_and_now_fails_the_step(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-fix step took ``aWorkflows[0]`` (newest first = the version-less
+    approval workflow) and hid the 409 behind ``|| true``. The same choice now
+    fails the step; the exported runnable id reaches a worker-set COMPLETED."""
+    listed = [APPROVAL, RUNNABLE]  # GET /workflows order: created_at DESC
+    by_workflow = {
+        "wf-appr": (409, {"error": {"code": "conflict", "message": "no current version"}}),
+        "wf-run": (201, {"id": RUN_ID}),
+    }
+    calls: list[tuple[str, str]] = []
+
+    def api(method: str, url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        calls.append((method, url))
+        if method == "POST":
+            code, body = by_workflow[url.split("/workflows/")[1].split("/")[0]]
+            return code, json.dumps(body).encode()
+        return 200, json.dumps({"id": RUN_ID, "status": "COMPLETED"}).encode()
+
+    monkeypatch.setattr(rc.time, "sleep", lambda _s: None)
+    former_choice = str(listed[0]["id"])
+    assert former_choice == "wf-appr"
+    assert rc.main(["--api", "http://x", "--workflow", former_choice], http=api) == 1
+    assert "HTTP 409 (conflict)" in capsys.readouterr().err
+    assert [m for m, _ in calls] == ["POST"]
+    calls.clear()
+    assert rc.main(["--api", "http://x", "--workflow", str(RUNNABLE["id"])], http=api) == 0
+    assert [m for m, _ in calls] == ["POST", "GET"]
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        (b'{"status": "PWNED token=abc"}', r"status unrecognised"),
+        (b'{"status": "PARTIAL"}', r"status unrecognised"),
+        (b"<html>gateway</html>", r"unparseable body"),
+        (b'["not", "an", "object"]', r"unparseable body"),
+    ],
+)
+def test_only_allowlisted_run_statuses_are_ever_printed(body: bytes, match: str) -> None:
+    now = [0.0]
+
+    def api(method: str, url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        return 200, body
+
+    def sleep(s: float) -> None:
+        now[0] += s
+
+    with pytest.raises(rc.CheckFailed, match=match) as exc:
+        rc.wait_for_worker(
+            api, "http://x", {}, RUN_ID, deadline_s=2, clock=lambda: now[0], sleep=sleep
+        )
+    assert "PWNED" not in str(exc.value) and "gateway" not in str(exc.value)
