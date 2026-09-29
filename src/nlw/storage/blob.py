@@ -24,6 +24,10 @@ from typing import BinaryIO, Protocol
 
 AREAS = ("quarantine", "datasets")
 _SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+# An in-progress (or crash-orphaned) LocalBlobStore upload: never a caller key,
+# but still customer bytes, so dataset listing and deletion must see it.
+_PARTIAL_PREFIX = ".upload-"
+_PARTIAL = re.compile(r"^\.upload-[a-z0-9_]{1,64}$")
 _CHUNK = 1 << 20
 
 
@@ -64,8 +68,12 @@ class LocalBlobStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def _path(self, key: str) -> Path:
-        validate_key(key)
+    def _path(self, key: str, *, partial_ok: bool = False) -> Path:
+        head, _, last = key.rpartition("/")
+        if partial_ok and head and _PARTIAL.match(last):
+            validate_key(head)
+        else:
+            validate_key(key)
         path = (self.root / key).resolve()
         if self.root not in path.parents:
             raise BlobKeyError("key escapes the store root")
@@ -76,7 +84,7 @@ class LocalBlobStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
         size = 0
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".upload-")
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=_PARTIAL_PREFIX)
         try:
             with os.fdopen(fd, "wb") as out:
                 while chunk := stream.read(_CHUNK):
@@ -95,17 +103,20 @@ class LocalBlobStore:
         return self._path(key).open("rb")
 
     def exists(self, key: str) -> bool:
-        return self._path(key).is_file()
+        return self._path(key, partial_ok=True).is_file()
 
     def delete(self, key: str) -> None:
-        self._path(key).unlink(missing_ok=True)
+        self._path(key, partial_ok=True).unlink(missing_ok=True)
 
     def list_prefix(self, prefix: str) -> Iterator[str]:
+        """Every stored file under ``prefix``, INCLUDING partial uploads a
+        crashed writer left behind (``.upload-*``): deletion and its
+        verification must account for all bytes, not only completed objects."""
         base = self._path(prefix)
         if not base.exists():
             return
         for p in sorted(base.rglob("*")):
-            if p.is_file() and not p.name.startswith(".upload-"):
+            if p.is_file():
                 yield p.relative_to(self.root).as_posix()
 
 

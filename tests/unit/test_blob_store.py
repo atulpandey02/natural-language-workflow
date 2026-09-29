@@ -88,3 +88,28 @@ def test_delete_dataset_removes_both_areas_and_verifies(tmp_path: Path) -> None:
     assert a.list_dataset("datasets", ds) == [] and a.list_dataset("quarantine", ds) == []
     assert a.exists(keep) and b.exists(keep_b)
     assert a.delete_dataset_and_verify(ds) is True  # idempotent
+
+
+def test_orphaned_partial_upload_is_deleted_and_verified(tmp_path: Path) -> None:
+    """A writer killed mid-upload leaves ``.upload-*`` bytes behind (no except
+    block runs on SIGKILL). Dataset deletion must remove them too, and must
+    not report success while any byte under the dataset prefix remains."""
+    inner, a, _ = _stores(tmp_path)
+    ds = uuid.uuid4()
+    key = a.key("quarantine", ds, "upload.csv")
+    a.put_stream(key, io.BytesIO(b"a,b\n"), max_bytes=100)
+    orphan = inner.root / "quarantine" / str(a.tenant_id) / str(ds) / ".upload-abc123_x"
+    orphan.write_bytes(b"customer bytes from a crashed upload")
+
+    assert any(k.endswith(".upload-abc123_x") for k in a.list_dataset("quarantine", ds))
+    assert a.delete_dataset_and_verify(ds) is True
+    assert not orphan.exists() and not inner.exists(key)
+
+
+def test_partial_upload_names_are_not_caller_keys(tmp_path: Path) -> None:
+    _, a, _ = _stores(tmp_path)
+    ds = uuid.uuid4()
+    with pytest.raises(BlobKeyError):
+        a.key("quarantine", ds, ".upload-abc123")
+    with pytest.raises(BlobKeyError):
+        a.open(f"quarantine/{a.tenant_id}/{ds}/.upload-abc123")

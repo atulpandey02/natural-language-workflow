@@ -47,6 +47,7 @@ DELIMITERS = (",", ";", "\t", "|")
 TYPE_THRESHOLD = 0.98
 DISTINCT_EXACT_LIMIT = 1000
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+SNIFF_CHARS = 16 * 1024
 
 
 @dataclass(frozen=True)
@@ -251,7 +252,9 @@ def detect_sensitivity(name: str, values: list[str], distinct: int | None) -> li
 
 # ------------------------------------------------------------------ parsing
 def _sniff_delimiter(text: str) -> tuple[str, list[str]]:
-    head = "\n".join(text.splitlines()[:50])
+    # csv.Sniffer's quote regex is quadratic in its input and runs before any
+    # timeout check can interrupt it, so it only ever sees a bounded prefix.
+    head = "\n".join(text[:SNIFF_CHARS].splitlines()[:50])
     try:
         found = csv.Sniffer().sniff(head, delimiters="".join(DELIMITERS)).delimiter
         return found, []
@@ -288,8 +291,14 @@ def profile_csv(data: bytes, *, limits: Limits | None = None) -> Profile:
     if text.count("\n") > limits.max_rows + 2:
         raise FileRejected(RejectCode.TOO_MANY_ROWS)
     delimiter, warnings = _sniff_delimiter(text)
+    if time.monotonic() - started > limits.timeout_s:
+        raise FileRejected(RejectCode.PARSE_TIMEOUT)
     csv.field_size_limit(limits.max_field_chars + 1)
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, quotechar='"')
+    # strict: an unterminated quote is a PARSE_ERROR, never the rest of the file
+    # silently folded into one field.
+    reader = csv.reader(
+        io.StringIO(text, newline=""), delimiter=delimiter, quotechar='"', strict=True
+    )
     rows: list[list[str]] = []
     try:
         for i, row in enumerate(reader):

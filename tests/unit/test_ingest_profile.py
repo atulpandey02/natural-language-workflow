@@ -168,3 +168,40 @@ def test_contract_rejects_extra_fields_and_samples_on_flagged_columns() -> None:
         ColumnProfile.model_validate({**base, "rows": [["a"]]})
     with pytest.raises(ValidationError):
         ColumnProfile.model_validate({**base, "distinct_count": 51, "sample_values": ["x"]})
+
+
+def test_delimiter_sniffer_only_sees_a_bounded_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """csv.Sniffer is quadratic on quote-heavy input and runs before the
+    wall-clock check, so it must never receive more than SNIFF_CHARS."""
+    import csv
+
+    from nlw.ingest import profile as prof
+
+    seen: list[int] = []
+    real = csv.Sniffer.sniff
+
+    def _spy(self: csv.Sniffer, sample: str, delimiters: str | None = None) -> type[csv.Dialect]:
+        seen.append(len(sample))
+        return real(self, sample, delimiters)
+
+    monkeypatch.setattr(csv.Sniffer, "sniff", _spy)
+    hostile = (',"a' * 330_000 + "\n") * 3  # ~3 MB of unclosed-quote starts
+    with pytest.raises(FileRejected):
+        profile_csv(hostile.encode())
+    assert seen and max(seen) <= prof.SNIFF_CHARS
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b'a,b\n1,"2\n3,4\n',  # unterminated quote would swallow the rest of the file
+        b'a,b\n1,"x"y\n',  # data after a closing quote
+    ],
+)
+def test_malformed_quoting_is_a_parse_error(data: bytes) -> None:
+    assert _code(data) == RejectCode.PARSE_ERROR
+
+
+def test_valid_quoting_and_embedded_newlines_still_parse() -> None:
+    p = profile_csv(b'a,b\n1,"x\ny"\n2,"he said ""hi"""\n')
+    assert (p.row_count, p.column_count) == (2, 2)
