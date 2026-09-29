@@ -231,6 +231,15 @@ class Settings(BaseSettings):
             raise ValueError("invitation_max_pending_per_workspace must be >= 1")
         if not (1 <= self.ctx_ttl_s <= 600):
             raise ValueError("ctx_ttl_s must be within 1..600 seconds")
+        # Phase 2 B03: a staging/production planner must name its model; the code
+        # default is for local development and must never silently choose the
+        # model a deployed pilot plans with.
+        if (
+            self.app_env in ("staging", "production")
+            and self.llm_provider == "anthropic"
+            and "llm_model" not in self.model_fields_set
+        ):
+            raise ValueError("NLW_LLM_MODEL must be set explicitly in staging/production")
         return self
 
     @property
