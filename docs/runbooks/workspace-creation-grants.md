@@ -9,6 +9,16 @@ Grants are single-use, bound to one normalised email (`lower(trim(email))`),
 expire (default 72h, maximum 30 days), and are never deleted: consumption and
 revocation are recorded on the row. At most one open grant exists per email.
 
+## Trust boundary
+
+A grant (like an invitation) is bound to the **email claim in the identity
+provider's token**. It is exactly as strong as the provider's proof that the
+signer-in owns that address: if the hosted Supabase project allows sign-up
+without email confirmation, someone who registers the grantee's address first
+could consume the grant. Confirm the hosted signup and confirmation settings
+(Phase 2 plan §22, question 5) before issuing grants to external customers, and
+issue grants shortly before the founder signs in.
+
 ## Who may run this
 
 The named operator for the pilot (owner decision pending: Phase 2 plan §22,
