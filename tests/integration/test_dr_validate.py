@@ -99,3 +99,42 @@ def test_validation_fails_if_non_terminal_work_not_quiesced(pg_stack: SimpleName
     quiesce(engine)  # quiesces it -> so validation should PASS; assert quiescence fixed it
     report = validate_restore(engine)
     assert _check(report, "non_terminal_runs_quiesced") is True
+
+
+def _ungated_bootstrap_sql() -> str:
+    """The pre-0022 (ungated) bootstrap body, taken from the migration itself."""
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations/versions/0022_workspace_creation_grants.py"
+    )
+    spec = importlib.util.spec_from_file_location("m0022", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return str(module._SQL_CREATE_WORKSPACE_0016)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["ungated_bootstrap", "runtime_reads_grants", "public_reads_grants"],
+)
+def test_validation_fails_on_an_ungated_or_exposed_workspace_bootstrap(
+    pg_stack: SimpleNamespace, tamper: str
+) -> None:
+    """A restored database whose bootstrap no longer enforces operator grants,
+    or whose grant ledger a runtime role/PUBLIC can read, must not validate."""
+    with psycopg.connect(pg_stack.owner_libpq, autocommit=True) as c:
+        if tamper == "ungated_bootstrap":
+            c.execute(_ungated_bootstrap_sql())
+        elif tamper == "runtime_reads_grants":
+            c.execute("GRANT SELECT ON workspace_creation_grants TO nlw_worker")
+        else:
+            c.execute("GRANT SELECT ON workspace_creation_grants TO PUBLIC")
+    engine = create_engine(pg_stack.owner_sa)
+    quiesce(engine)
+    report = validate_restore(engine)
+    assert report["ok"] is False
+    assert _check(report, "workspace_bootstrap_requires_grant") is False
