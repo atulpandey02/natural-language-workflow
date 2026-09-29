@@ -34,6 +34,7 @@ _FORCED_RLS_TABLES = (
     "connectors",
     "workspace_invitations",
     "authz_audit_events",
+    "plan_outcome_events",
 )
 _SECURITY_DEFINER_FUNCS = {
     "resolve_run_tenant": "nlw_rls_bypass",
@@ -511,7 +512,7 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
         ]
         add(
             "no_policy_trusts_unsigned_context",
-            not legacy and not uncond and not helper_legacy and len(pols) == 51,
+            not legacy and not uncond and not helper_legacy and len(pols) == 53,
             f"legacy={legacy} unconditional={uncond} helpers={helper_legacy} n={len(pols)}",
         )
 

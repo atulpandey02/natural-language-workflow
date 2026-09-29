@@ -76,7 +76,8 @@ from nlw.ops.rollout.gates import GateError
 from nlw.ops.rollout.release import KEY_CLASSES, ReleaseSpec
 from nlw.ops.rollout.remote import OperatorAlerting, Remote, TargetConfig
 
-EXPECTED_SIGNED_POLICIES = 51
+# 51 signed policies from 0016 + 2 on plan_outcome_events (0023, Phase 2 B02).
+EXPECTED_SIGNED_POLICIES = 53
 # Caddy serves 503 for every request while this file exists on its `caddy_maint`
 # volume (docker/caddy/Caddyfile `@maintenance`). Toggled with `exec`, no reload.
 MAINTENANCE_FLAG = "/srv/maint/MAINTENANCE"

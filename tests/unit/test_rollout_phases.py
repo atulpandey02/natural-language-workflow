@@ -1645,7 +1645,7 @@ def test_code_only_release_migrates_as_a_verified_noop() -> None:
     same = replace(REL, expected_current_revision="0016_signed_database_context")
     table = _base_table(roles=ROLES_ALL, rev="0016_signed_database_context") + [
         (r"--profile migration run --rm --no-deps -T  migrate $", ""),
-        (r"FROM pg_policies", "51|0"),
+        (r"FROM pg_policies", "53|0"),
         (r"tablename=", "nlw_ctx_verifier"),
         (r"proname=.*create_workspace_for_current_user", "1|t"),
         (r"has_table_privilege", "f"),
@@ -2145,7 +2145,7 @@ def test_migrate_refuses_an_ungated_workspace_bootstrap() -> None:
     same = replace(REL, expected_current_revision="0016_signed_database_context")
     table = _base_table(roles=ROLES_ALL, rev="0016_signed_database_context") + [
         (r"--profile migration run --rm --no-deps -T  migrate $", ""),
-        (r"FROM pg_policies", "51|0"),
+        (r"FROM pg_policies", "53|0"),
         (r"tablename=", "nlw_ctx_verifier"),
         (r"proname=.*create_workspace_for_current_user", "1|f"),
         (r"has_table_privilege", "f"),

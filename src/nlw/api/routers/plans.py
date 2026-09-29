@@ -18,7 +18,8 @@ import time
 import uuid
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import nlw.tools.builtin  # noqa: F401  (populates the tool + connector-type registries)
@@ -26,6 +27,7 @@ from nlw.analytics.service import validate_handoff
 from nlw.api.capability import build_tenant_view
 from nlw.api.deps import (
     get_app_settings,
+    get_ctx_signer,
     get_llm_provider,
     get_session,
     get_tenant_context,
@@ -46,7 +48,7 @@ from nlw.feasibility.connector_binding import build_binding
 from nlw.feasibility.engine import FeasibilityReport
 from nlw.feasibility.limits import DEFAULT_LIMITS
 from nlw.feasibility.revalidation import revalidate_plan
-from nlw.observability import metrics
+from nlw.observability import metrics, plan_outcomes
 from nlw.planner.budget import PromptBudgetError
 from nlw.planner.planner import plan_and_check
 from nlw.planner.provenance import (
@@ -63,6 +65,8 @@ from nlw.planner.provider import (
 from nlw.planner.schema import PLANNER_CONTRACT_VERSION
 from nlw.registry.registry import REGISTRY
 from nlw.tenancy.context import TenantContext
+from nlw.tenancy.session import set_request_context
+from nlw.tenancy.signing import Purpose
 
 router = APIRouter()
 log = structlog.get_logger(__name__)
@@ -101,6 +105,35 @@ async def _compute_connector_bindings(
     return bindings
 
 
+async def _record_outcome(
+    session: AsyncSession, tenant_id: uuid.UUID, event: plan_outcomes.OutcomeEvent
+) -> None:
+    """Append the redacted outcome event inside a SAVEPOINT of the request
+    transaction: it commits with the proposal, and a measurement failure is
+    logged and counted but never fails or alters the planning response."""
+    try:
+        async with session.begin_nested():
+            await plan_outcomes.insert_event(session, tenant_id, event)
+    except SQLAlchemyError as exc:
+        metrics.record_error("plan_outcome_event")
+        log.warning("plan_outcome.write_failed", error_class=type(exc).__name__)
+
+
+async def _record_infra_failure(
+    request: Request, ctx: TenantContext, event: plan_outcomes.OutcomeEvent
+) -> None:
+    """A provider failure writes no proposal and the request transaction rolls
+    back, so the INFRA_FAIL event gets its own short, signed transaction."""
+    try:
+        signer = get_ctx_signer(request, Purpose.API_REQUEST)
+        async with request.app.state.sessionmaker() as session, session.begin():
+            await set_request_context(session, signer, ctx)
+            await plan_outcomes.insert_event(session, ctx.tenant_id, event)
+    except Exception as exc:  # noqa: BLE001 - measurement must never mask the 503
+        metrics.record_error("plan_outcome_event")
+        log.warning("plan_outcome.write_failed", error_class=type(exc).__name__)
+
+
 @router.post(
     "/plans",
     response_model=PlanProposalDetailOut,
@@ -109,6 +142,7 @@ async def _compute_connector_bindings(
 )
 async def create_plan(
     body: PlanRequest,
+    request: Request,
     ctx: TenantContext = Depends(get_tenant_context),
     session: AsyncSession = Depends(get_session),
     provider: LLMProvider = Depends(get_llm_provider),
@@ -144,6 +178,17 @@ async def create_plan(
         log.warning(
             "planner.provider_error", error_class="unavailable", provider=settings.llm_provider
         )
+        await _record_infra_failure(
+            request,
+            ctx,
+            plan_outcomes.infra_failure(
+                request=prompt,
+                provider=settings.llm_provider,
+                model=settings.llm_model if settings.llm_provider != "stub" else "stub",
+                contract_version=PLANNER_CONTRACT_VERSION,
+                latency_ms=int((time.perf_counter() - planner_start) * 1000),
+            ),
+        )
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, "planner provider unavailable"
         ) from exc
@@ -157,7 +202,8 @@ async def create_plan(
         metrics.record_error("planner_prompt_budget")
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     finally:
-        metrics.observe_planner(time.perf_counter() - planner_start)
+        planner_elapsed = time.perf_counter() - planner_start
+        metrics.observe_planner(planner_elapsed)
 
     report = result.report
     metrics.record_plan(report.status.value)
@@ -194,6 +240,23 @@ async def create_plan(
         request_text=prompt,
         request_sha256=compute_request_digest(prompt),
         planner_contract_version=PLANNER_CONTRACT_VERSION,
+    )
+
+    await _record_outcome(
+        session,
+        ctx.tenant_id,
+        plan_outcomes.from_report(
+            report,
+            request=prompt,
+            step_count=len(result.output.steps) if result.output else 0,
+            provider=settings.llm_provider,
+            model=result.model,
+            contract_version=PLANNER_CONTRACT_VERSION,
+            latency_ms=int(planner_elapsed * 1000),
+            tokens_in=result.input_tokens,
+            tokens_out=result.output_tokens,
+            proposal_id=proposal.id,
+        ),
     )
 
     # Observability: metadata only. Never the raw prompt (not even at DEBUG).
