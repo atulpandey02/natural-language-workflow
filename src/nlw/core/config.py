@@ -237,7 +237,7 @@ class Settings(BaseSettings):
         if (
             self.app_env in ("staging", "production")
             and self.llm_provider == "anthropic"
-            and "llm_model" not in self.model_fields_set
+            and ("llm_model" not in self.model_fields_set or not self.llm_model.strip())
         ):
             raise ValueError("NLW_LLM_MODEL must be set explicitly in staging/production")
         return self

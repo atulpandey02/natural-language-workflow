@@ -928,7 +928,8 @@ def test_drain_stops_on_non_terminal_work_and_never_stops_api() -> None:
     assert fake.ran(r"stop scheduler") and not fake.ran(r"stop worker api")
     assert fake.ran(
         rf"cd '{STAGED}' && env -u DEMO_TOOLS_ENABLED -u PUBLIC_HOSTNAME "
-        r"-u PUBLIC_HOSTNAME_FALLBACK docker compose -p app .* "
+        r"-u PUBLIC_HOSTNAME_FALLBACK -u NLW_LLM_PROVIDER -u NLW_LLM_MODEL -u NLW_LLM_API_KEY "
+        r"docker compose -p app .* "
         r"up -d --no-deps --force-recreate caddy"
     )
 

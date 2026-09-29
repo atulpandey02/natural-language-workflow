@@ -43,3 +43,24 @@ def test_prod_compose_always_passes_the_deployed_model() -> None:
 
     text = (Path(__file__).resolve().parents[2] / "docker-compose.prod.yml").read_text()
     assert "NLW_LLM_MODEL: ${NLW_LLM_MODEL:-claude-haiku-4-5-20251001}" in text
+
+
+@pytest.mark.parametrize("env", ["staging", "production"])
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_deployed_model_is_not_explicit(
+    env: str, blank: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NLW_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("NLW_LLM_MODEL", blank)
+    with pytest.raises(ValidationError, match="NLW_LLM_MODEL must be set explicitly"):
+        _settings(app_env=env)
+
+
+def test_model_errors_never_echo_the_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    canary = "sk-ant-canary-" + "0" * 24
+    monkeypatch.setenv("NLW_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("NLW_LLM_API_KEY", canary)
+    monkeypatch.delenv("NLW_LLM_MODEL", raising=False)
+    with pytest.raises(ValidationError) as exc:
+        _settings(app_env="production")
+    assert canary not in str(exc.value) and canary not in repr(exc.value)
