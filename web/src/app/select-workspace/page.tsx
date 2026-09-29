@@ -103,8 +103,9 @@ export default function SelectWorkspacePage() {
             </section>
           ) : (
             <p className="muted" data-testid="no-workspaces">
-              You aren&apos;t in a workspace yet. Create one below, or open the invitation link a
-              teammate sent you to join theirs.
+              You aren&apos;t in a workspace yet. Open the invitation link a teammate sent you to
+              join theirs, or, if your administrator has approved you to set one up, create it
+              below.
             </p>
           )}
         </div>
@@ -113,7 +114,8 @@ export default function SelectWorkspacePage() {
       <form onSubmit={create} className="card" noValidate aria-labelledby="create-title">
         <h2 id="create-title">{has ? "Create another workspace" : "Create your workspace"}</h2>
         <p className="muted small">
-          You&apos;ll be its owner and can invite teammates from Members. Pilot data is synthetic.
+          Needs your administrator&apos;s approval. You&apos;ll be its owner and can invite
+          teammates from Members. Pilot data is synthetic.
         </p>
         <ErrorBanner error={createWorkspace.error} />
         <label htmlFor="ws-name">Workspace name</label>

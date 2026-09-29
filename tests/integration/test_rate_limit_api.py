@@ -87,8 +87,13 @@ def test_cap_holds_under_concurrency(pg_stack: SimpleNamespace, redis_url: str) 
 
 def test_fails_closed_when_backend_unavailable(pg_stack: SimpleNamespace) -> None:
     # Point the limiter at an unreachable Redis; cost/mutating endpoints must 503.
+    h = _auth("rl-c", "c@example.com")
+    with TestClient(create_app(pg_stack.settings)) as setup:  # limiter disabled
+        ws = _workspace(setup, h)
     with _client(pg_stack, redis_url="redis://127.0.0.1:1/0", rate_limit_fail_open=False) as client:
-        h = _auth("rl-c", "c@example.com")
-        h = {**h, "X-Workspace-Id": _workspace(client, h)}
-        resp = client.post("/connectors", json=_connector_body("c"), headers=h)
+        # Founding a workspace is write-limited per user (Phase 2 B01): closed too.
+        assert client.post("/workspaces", json={"name": "W2"}, headers=h).status_code == 503
+        resp = client.post(
+            "/connectors", json=_connector_body("c"), headers={**h, "X-Workspace-Id": ws}
+        )
         assert resp.status_code == 503

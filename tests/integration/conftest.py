@@ -71,8 +71,52 @@ def _bootstrap_roles(owner_libpq: str, db: str) -> None:
         conn.execute("GRANT nlw_ctx_verifier TO CURRENT_USER")
 
 
+# TEST HARNESS ONLY (never a migration). Founding a workspace requires an
+# operator grant since migration 0022, enforced inside the SECURITY DEFINER
+# bootstrap. Most integration tests exercise other features and simply need a
+# workspace, so by default the harness plays the operator: every new identity
+# receives one open grant, and consuming a harness grant issues the next one.
+# The real function still checks, locks and consumes a real grant each time.
+# Tests of the gate itself opt out with ``@pytest.mark.workspace_grants_enforced``.
+_TEST_AUTO_GRANTS = """
+CREATE FUNCTION nlw_test_auto_grant(p_email text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+    BEGIN
+        INSERT INTO public.workspace_creation_grants
+            (id, email_normalized, granted_by, expires_at)
+        VALUES (gen_random_uuid(), lower(btrim(p_email)), 'test-harness',
+                now() + interval '1 day')
+        ON CONFLICT DO NOTHING;
+    EXCEPTION
+        WHEN check_violation THEN
+            NULL;  -- an email the grant table cannot hold simply gets no grant
+        WHEN undefined_table THEN
+            NULL;  -- a reversibility test downgraded below 0022
+    END $$;
+CREATE FUNCTION nlw_test_auto_grant_user() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+    BEGIN PERFORM public.nlw_test_auto_grant(NEW.email); RETURN NEW; END $$;
+CREATE FUNCTION nlw_test_auto_regrant() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+    BEGIN
+        IF NEW.granted_by = 'test-harness' AND OLD.consumed_at IS NULL
+           AND NEW.consumed_at IS NOT NULL THEN
+            PERFORM public.nlw_test_auto_grant(NEW.email_normalized);
+        END IF;
+        RETURN NEW;
+    END $$;
+CREATE TRIGGER nlw_test_auto_grant_user AFTER INSERT OR UPDATE OF email ON users
+    FOR EACH ROW EXECUTE FUNCTION nlw_test_auto_grant_user();
+CREATE TRIGGER nlw_test_auto_regrant AFTER UPDATE ON workspace_creation_grants
+    FOR EACH ROW EXECUTE FUNCTION nlw_test_auto_regrant();
+REVOKE ALL ON FUNCTION nlw_test_auto_grant(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION nlw_test_auto_grant_user() FROM PUBLIC;
+REVOKE ALL ON FUNCTION nlw_test_auto_regrant() FROM PUBLIC;
+"""
+
+
 @pytest.fixture
-def pg_stack() -> Iterator[SimpleNamespace]:
+def pg_stack(request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
     with PostgresContainer("postgres:16") as pg:
         host, port = pg.get_container_host_ip(), pg.get_exposed_port(5432)
         owner_user, owner_password, db = pg.username, pg.password, pg.dbname
@@ -87,6 +131,9 @@ def pg_stack() -> Iterator[SimpleNamespace]:
         cfg = Config("alembic.ini")
         cfg.set_main_option("sqlalchemy.url", owner_sa)
         command.upgrade(cfg, "head")
+        if request.node.get_closest_marker("workspace_grants_enforced") is None:
+            with psycopg.connect(owner_libpq, autocommit=True) as conn:
+                conn.execute(_TEST_AUTO_GRANTS)
 
         # --- TEST-ONLY signed-context keys (M11.5 P3B) ---------------------
         # One fresh random key per runtime class, installed into ctx_keys as the
@@ -199,6 +246,19 @@ def pg_stack() -> Iterator[SimpleNamespace]:
                 )
             return uid
 
+        def grant_workspace_creation(email: str, *, expires: str = "1 day") -> uuid.UUID:
+            """Issue one open workspace-creation grant (as the operator would)."""
+            gid = uuid.uuid4()
+            with psycopg.connect(owner_libpq, autocommit=True) as conn:
+                conn.execute(
+                    "INSERT INTO workspace_creation_grants "
+                    "(id, email_normalized, granted_by, created_at, expires_at) "
+                    "VALUES (%s, lower(btrim(%s)), 'test-operator', "
+                    "now() - interval '1 day', now() + %s::interval)",
+                    (gid, email, expires),
+                )
+            return gid
+
         def seed_member(role: str = "owner") -> SimpleNamespace:
             """Create a user + workspace + one membership with ``role`` (as owner)."""
             uid, tid = seed_user(), uuid.uuid4()
@@ -241,6 +301,7 @@ def pg_stack() -> Iterator[SimpleNamespace]:
                 scheduler_libpq=_libpq("nlw_scheduler", "nlw_scheduler", host, port, db),
                 seed_user=seed_user,
                 seed_member=seed_member,
+                grant_workspace_creation=grant_workspace_creation,
                 add_membership=add_membership,
                 # Signed-context test helpers (P3B)
                 signers=signers,

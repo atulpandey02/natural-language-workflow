@@ -411,6 +411,18 @@ def check_policy_cutover(policy_count: int, legacy_count: int, *, expected_polic
         )
 
 
+def check_workspace_bootstrap_gated(overloads: int, gated: bool, runtime_access: list[str]) -> None:
+    """Phase 2 B01 (migration 0022): exactly one workspace bootstrap function
+    exists and its body enforces the operator grant; no runtime role can touch
+    the grant table. A host still running the ungated bootstrap is NO-GO."""
+    if overloads != 1:
+        raise GateError(f"{overloads} create_workspace_for_current_user overloads, expected 1")
+    if not gated:
+        raise GateError("create_workspace_for_current_user does not enforce creation grants")
+    if runtime_access:
+        raise GateError(f"runtime roles can access workspace_creation_grants: {runtime_access}")
+
+
 def check_running_images(images: dict[str, str], release: ReleaseSpec) -> None:
     """Every runtime container must run the release digests (never the old runtime)."""
     for svc in ("api", "worker", "scheduler"):

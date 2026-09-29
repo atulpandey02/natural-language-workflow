@@ -44,6 +44,7 @@ _SECURITY_DEFINER_FUNCS = {
     "app_ctx_claims": "nlw_ctx_verifier",
     "resolve_or_create_user": "nlw_workspace_bootstrap",
     "create_workspace_for_current_user": "nlw_workspace_bootstrap",
+    "has_workspace_creation_grant": "nlw_workspace_bootstrap",
     "accept_workspace_invitation": "nlw_workspace_bootstrap",
     "manage_membership": "nlw_membership_admin",
     # M12B Part 4: fail-closed schedule authorization checker (0020).
@@ -203,6 +204,26 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
             if not cfg or "search_path" not in cfg:
                 secdef_issues.append(f"{fn}:search_path-unset")
         add("security_definer_owners_and_search_path", not secdef_issues, f"issues={secdef_issues}")
+        # Phase 2 B01: the restored bootstrap enforces operator grants and no
+        # runtime role can read or write the grant table.
+        boot = _q(
+            conn,
+            "SELECT count(*), coalesce(bool_and(prosrc LIKE '%workspace_creation_grants%' "
+            "AND prosrc LIKE '%42501%'), false) FROM pg_proc "
+            "WHERE proname='create_workspace_for_current_user'",
+        ).one()
+        grant_access = _q(
+            conn,
+            "SELECT r FROM unnest(ARRAY['nlw_app','nlw_worker','nlw_scheduler','public']) r "
+            "WHERE to_regclass('public.workspace_creation_grants') IS NULL "
+            "OR has_table_privilege(r, 'public.workspace_creation_grants', "
+            "'SELECT,INSERT,UPDATE,DELETE')",
+        ).all()
+        add(
+            "workspace_bootstrap_requires_grant",
+            boot[0] == 1 and bool(boot[1]) and not grant_access,
+            f"overloads={boot[0]} gated={bool(boot[1])} access={[r[0] for r in grant_access]}",
+        )
         # No unintended PUBLIC EXECUTE on the SECURITY DEFINER helpers.
         public_exec = _q(
             conn,

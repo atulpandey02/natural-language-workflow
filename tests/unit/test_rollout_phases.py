@@ -1647,6 +1647,7 @@ def test_code_only_release_migrates_as_a_verified_noop() -> None:
         (r"--profile migration run --rm --no-deps -T  migrate $", ""),
         (r"FROM pg_policies", "51|0"),
         (r"tablename=", "nlw_ctx_verifier"),
+        (r"proname=.*create_workspace_for_current_user", "1|t"),
         (r"has_table_privilege", "f"),
     ]
     fake = FakeRemote(table, state=_done("verify-backup", "drain", "prepare-roles"))
@@ -2136,3 +2137,27 @@ def test_edge_rendered_mount_compares_cleaned_paths_without_widening() -> None:
     fake2 = FakeRemote(_edge_first((r"config --format json", moved)) + _base_table())
     with pytest.raises(GateError, match="does not mount this release"):
         _edge_rollout(fake2, target=target).check_rendered_edge()
+
+
+def test_migrate_refuses_an_ungated_workspace_bootstrap() -> None:
+    """Phase 2 B01: after `alembic upgrade head` the live bootstrap must enforce
+    creation grants; a host still running the ungated body is NO-GO."""
+    same = replace(REL, expected_current_revision="0016_signed_database_context")
+    table = _base_table(roles=ROLES_ALL, rev="0016_signed_database_context") + [
+        (r"--profile migration run --rm --no-deps -T  migrate $", ""),
+        (r"FROM pg_policies", "51|0"),
+        (r"tablename=", "nlw_ctx_verifier"),
+        (r"proname=.*create_workspace_for_current_user", "1|f"),
+        (r"has_table_privilege", "f"),
+    ]
+    r = Rollout(
+        release=same,
+        target=TGT,
+        remote=FakeRemote(table, state=_done("verify-backup", "drain", "prepare-roles")),
+        operator=Operator(authorization=AUTHORIZATION_PHRASE),
+        log=lambda _m: None,
+        now=lambda: NOW,
+        receipt=RECEIPT,
+    )
+    with pytest.raises(GateError, match="does not enforce creation grants"):
+        r.migrate()

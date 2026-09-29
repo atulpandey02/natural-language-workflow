@@ -1278,6 +1278,21 @@ class Rollout:
                 raise GateError(f"{r} can read ctx_keys")
         if self._psql("SELECT has_table_privilege('public','ctx_keys','SELECT')") != "f":
             raise GateError("PUBLIC can read ctx_keys")
+        n, gated = self._psql(
+            "SELECT count(*), coalesce(bool_and(prosrc LIKE '%workspace_creation_grants%' "
+            "AND prosrc LIKE '%42501%'), false) FROM pg_proc "
+            "WHERE proname='create_workspace_for_current_user'"
+        ).split("|")
+        runtime_access = [
+            r
+            for r in (*gates.RUNTIME_ROLES, "public")
+            if self._psql(
+                f"SELECT has_table_privilege('{r}','workspace_creation_grants',"
+                "'SELECT,INSERT,UPDATE,DELETE')"
+            )
+            != "f"
+        ]
+        gates.check_workspace_bootstrap_gated(int(n), gated == "t", runtime_access)
 
     def install_context_keys(self, *, keys_dir: str) -> None:
         self._require_mutation_authority()

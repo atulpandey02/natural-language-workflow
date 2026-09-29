@@ -198,6 +198,14 @@ class Settings(BaseSettings):
     # it explicitly; staging/production leave it unset or set it to false.
     demo_tools_enabled: bool | None = None
 
+    # --- Workspace creation (Phase 2 B01) ---
+    # Founding a workspace requires an operator-issued grant, enforced inside the
+    # SECURITY DEFINER bootstrap function (migration 0022); the API pre-checks it.
+    # ``closed`` refuses every creation at the API, even with a grant. There is
+    # deliberately no ``open`` mode: the database has no ungated bootstrap path,
+    # so any other value refuses to start in every environment.
+    workspace_creation_mode: Literal["grant", "closed"] = "grant"
+
     @property
     def demo_tools_visible(self) -> bool:
         """Demo tools reach new planning only on an explicit operator ``true``."""

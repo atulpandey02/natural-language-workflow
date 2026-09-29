@@ -149,6 +149,21 @@ const PATTERNS: Array<[RegExp, number, Copy]> = [
 
 // Stable, author-controlled backend codes/messages -> purpose-written copy.
 const KNOWN: Record<string, Copy> = {
+  WORKSPACE_CREATION_NOT_GRANTED: {
+    title: "Ask your administrator to set up your workspace",
+    explanation:
+      "Creating a workspace in this pilot needs approval from your NLW administrator. Joining a teammate's workspace only needs their invitation link.",
+    action: "Ask your administrator for access, or open the invitation link a teammate sent you.",
+    retry: "no",
+    tone: "info",
+  },
+  WORKSPACE_CREATION_CLOSED: {
+    title: "New workspaces aren't available here",
+    explanation: "Creating workspaces is turned off on this deployment.",
+    action: "Ask your administrator, or open the invitation link a teammate sent you.",
+    retry: "no",
+    tone: "info",
+  },
   STALE_PLAN: {
     title: "This plan is out of date",
     explanation:
