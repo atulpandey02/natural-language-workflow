@@ -299,3 +299,129 @@ def test_invitation_path_is_unaffected_by_the_gate(
     assert acc.json()["workspace_id"] == ws
     # ...and joining did not grant the right to found a new tenant.
     assert client.post("/workspaces", json={"name": "Mine"}, headers=joiner).status_code == 403
+
+
+def test_concurrent_founding_consumes_one_grant_exactly_once(pg_stack: SimpleNamespace) -> None:
+    """Two sessions race on ONE grant. The first locks it FOR UPDATE; the second
+    blocks on that lock and, once the first commits, re-reads the consumed row
+    and is refused with 42501. One workspace, one consumption, one audit row."""
+    import threading
+
+    user = pg_stack.seed_user()
+    gid = pg_stack.grant_workspace_creation(f"{user}@example.com")
+    before = _workspaces(pg_stack)
+    ctx = pg_stack.sign(Purpose.API_IDENTITY, user_id=user)
+    second: dict[str, object] = {}
+
+    def racer() -> None:
+        with psycopg.connect(pg_stack.app_libpq) as conn:
+            pg_stack.apply_ctx(conn, ctx)
+            conn.execute("SET application_name = 'grant-racer-b'")
+            try:
+                conn.execute("SELECT create_workspace_for_current_user('B', 'race-b')")
+                conn.commit()
+                second["result"] = "created"
+            except psycopg.errors.InsufficientPrivilege:
+                second["result"] = "refused"
+
+    with psycopg.connect(pg_stack.app_libpq) as first:
+        pg_stack.apply_ctx(first, ctx)
+        ws_a = first.execute("SELECT create_workspace_for_current_user('A', 'race-a')").fetchone()
+        # First holds the grant row lock (uncommitted). Start the second and wait
+        # until it is provably blocked on that lock before committing.
+        t = threading.Thread(target=racer)
+        t.start()
+        deadline = time.monotonic() + 20
+        while (
+            _count(
+                pg_stack,
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE application_name='grant-racer-b' AND wait_event_type='Lock'",
+            )
+            == 0
+        ):
+            assert time.monotonic() < deadline, "second session never blocked on the grant lock"
+            time.sleep(0.05)
+        first.commit()
+    t.join(timeout=20)
+    assert not t.is_alive()
+
+    assert ws_a is not None and second == {"result": "refused"}
+    assert _workspaces(pg_stack) == before + 1
+    assert (
+        _count(
+            pg_stack,
+            "SELECT count(*) FROM workspace_creation_grants "
+            "WHERE id=%s AND consumed_workspace_id=%s",
+            gid,
+            ws_a[0],
+        )
+        == 1
+    )
+    assert (
+        _count(
+            pg_stack,
+            "SELECT count(*) FROM authz_audit_events WHERE event_type='workspace.created' "
+            "AND actor_user_id=%s",
+            user,
+        )
+        == 1
+    )
+
+
+def test_a_failed_bootstrap_leaves_no_partial_state_and_keeps_the_grant(
+    pg_stack: SimpleNamespace,
+) -> None:
+    """The grant is locked, then the workspace INSERT fails (slug collision): the
+    whole call aborts. No workspace, membership or audit row survives and the
+    grant is still open for a retry."""
+    taken = pg_stack.seed_user()
+    pg_stack.grant_workspace_creation(f"{taken}@example.com")
+    with psycopg.connect(pg_stack.app_libpq) as conn:
+        pg_stack.apply_ctx(conn, pg_stack.sign(Purpose.API_IDENTITY, user_id=taken))
+        conn.execute("SELECT create_workspace_for_current_user('Taken', 'collide')")
+        conn.commit()
+
+    user = pg_stack.seed_user()
+    gid = pg_stack.grant_workspace_creation(f"{user}@example.com")
+    before = (
+        _workspaces(pg_stack),
+        _count(pg_stack, "SELECT count(*) FROM memberships"),
+        _count(pg_stack, "SELECT count(*) FROM authz_audit_events"),
+    )
+    with psycopg.connect(pg_stack.app_libpq) as conn:
+        pg_stack.apply_ctx(conn, pg_stack.sign(Purpose.API_IDENTITY, user_id=user))
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute("SELECT create_workspace_for_current_user('Mine', 'collide')")
+        conn.rollback()
+
+    assert (
+        _workspaces(pg_stack),
+        _count(pg_stack, "SELECT count(*) FROM memberships"),
+        _count(pg_stack, "SELECT count(*) FROM authz_audit_events"),
+    ) == before
+    assert (
+        _count(
+            pg_stack,
+            "SELECT count(*) FROM workspace_creation_grants "
+            "WHERE id=%s AND consumed_at IS NULL AND revoked_at IS NULL",
+            gid,
+        )
+        == 1
+    )
+    with psycopg.connect(pg_stack.app_libpq) as conn:  # the grant is still usable
+        pg_stack.apply_ctx(conn, pg_stack.sign(Purpose.API_IDENTITY, user_id=user))
+        assert conn.execute("SELECT has_workspace_creation_grant()").fetchone() == (True,)
+
+
+def test_grant_helpers_are_not_executable_by_worker_scheduler_or_public(
+    pg_stack: SimpleNamespace,
+) -> None:
+    with psycopg.connect(pg_stack.owner_libpq) as conn:
+        rows = conn.execute(
+            "SELECT p.proname, r, has_function_privilege(r, p.oid, 'EXECUTE') "
+            "FROM pg_proc p, unnest(ARRAY['nlw_worker','nlw_scheduler','public']) r "
+            "WHERE p.proname IN ('create_workspace_for_current_user', "
+            "'has_workspace_creation_grant')"
+        ).fetchall()
+    assert rows and [row for row in rows if row[2]] == []
