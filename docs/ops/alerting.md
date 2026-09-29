@@ -87,6 +87,13 @@ Steps (root on the host):
 Until this is done, "alert delivery" is an **open launch gate** in the M12
 checklist — never report it as complete because the null pipeline is healthy.
 
+**Status of the deployed staging pilot** (reported operational evidence, owner,
+2026-09-29; host-side files are not in the repository): the running
+Alertmanager routes to the operator-owned receiver `slack-ops` (the committed
+null file is not used), a controlled delivery was confirmed by a human and
+recorded, and the rollout's `go-check` returned PASS. The delivery record counts
+for 7 days only, so every later rollout must re-establish it.
+
 ### What "effective configuration" means
 
 `validate`, `reopen` and `go-check` do **not** read a file in a checkout. They

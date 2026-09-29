@@ -254,3 +254,44 @@ change (migration `0014` unchanged).
   enable step passes gate-check, a brand-new post-restore run executes to
   COMPLETED, restored work is not replayed, and the gate cannot be reused for a
   second destination.
+
+## Note (2026-09-29) — the signed-context key registry in database backups
+
+Recorded so it is not re-litigated (Phase 2 plan §0.3). Facts, from the code:
+
+- `ctx_keys` (migration `0016`, ADR-024) holds `key_id` (identifier),
+  `key_class` (`api`/`worker`/`scheduler`), `secret bytea` (≥ 32 bytes: the
+  **symmetric HMAC-SHA256 key**, byte-identical to the host key file, so it is
+  signing-capable secret material, not a public verification key),
+  `secret_sha256` (fingerprint), and lifecycle metadata (`status`,
+  `activated_at`, `retired_at`, `revoked_at`, `created_at`). `ctx_key_events`
+  holds lifecycle events and no material. Both are owned by the NOLOGIN
+  `nlw_ctx_verifier` with no grant to any login role or PUBLIC.
+- The runtime copies of the secrets are host files
+  `/srv/nlw/ctx-keys/{api,worker,scheduler}.key` (0400, uid 10001), each
+  mounted read-only into exactly its own service (`docker-compose.prod.yml`;
+  `tests/unit/test_ctx_compose_isolation.py` asserts backup/restore services
+  mount none), plus the operator's off-host escrow.
+- `nlw.backup` runs `pg_dump --format=custom` with the owner credential and no
+  `--exclude-table`, so **the dump includes `ctx_keys` rows with their
+  secrets**. The dump is encrypted client-side by restic; role passwords are not
+  in it (`pg_dumpall --roles-only --no-role-passwords`).
+- This is intended: [dr-fresh-host-restore](../runbooks/dr-fresh-host-restore.md)
+  item 3a restores the registry with the database and pairs it with the
+  separately kept key files (or installs fresh keys when the files are lost),
+  and the restore validator checks `ctx_keys_registry_protected`.
+
+Assessment: not a defect. Anyone able to decrypt the restic repository already
+holds every tenant's data; using the key material against a live database would
+additionally need a runtime role password (not in the dump) and network access,
+and `ctxkeys revoke` invalidates leaked material immediately.
+
+Policy (current, kept): the registry is backed up and restored with the
+database; key files, escrow and the restic passphrase stay outside the backup.
+Recommended addition (not yet in the restore runbook): rotate the signing keys
+after any restore, using the overlap procedure in
+[signed-context-keys](../runbooks/signed-context-keys.md). The alternative
+(`--exclude-table-data=public.ctx_keys`, reinstall from escrow before any
+runtime starts) removes signing material from backups at the cost of making
+every restore depend on escrow; adopting it is an owner decision and would need
+a drill proving the reinstall path.
