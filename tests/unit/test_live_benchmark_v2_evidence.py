@@ -84,3 +84,17 @@ def test_evidence_is_sanitized() -> None:
                 }
         assert all(len(q) <= 300 for q in r["clarification_questions_sanitized"])
         assert len(r["clarification_questions_sanitized"]) <= 10
+
+
+def test_runs_carry_the_production_outcome_taxonomy() -> None:
+    """Phase 2 B02: benchmark runs use the same code-owned classification as
+    plan_outcome_events, so a live benchmark and pilot traffic are comparable."""
+    from nlw.observability.plan_outcomes import CATEGORY_PRECEDENCE
+
+    allowed_outcomes = {"PASS", "APPROVAL", "CLARIFY", "REJECT", "INVALID_OUTPUT"}
+    for r in _evidence()["per_run"]:
+        assert r["outcome"] in allowed_outcomes
+        assert r["outcome_category"] is None or r["outcome_category"] in CATEGORY_PRECEDENCE
+        assert all(c.isupper() or "_" in c for c in r["finding_codes"])
+        if r["status"] == "NEEDS_CLARIFICATION":
+            assert (r["outcome"], r["outcome_category"]) == ("CLARIFY", "UNDERSPECIFIED_REQUEST")

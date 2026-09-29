@@ -23,6 +23,7 @@ import datetime as _dt
 import json
 import statistics
 import sys
+import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ from nlw.eval.corpus_v2 import (
 )
 from nlw.feasibility.engine import FeasibilityStatus, Severity
 from nlw.feasibility.limits import DEFAULT_LIMITS
+from nlw.observability.plan_outcomes import from_report
 from nlw.planner.capabilities import build_capability_view
 from nlw.planner.planner import plan_and_check
 from nlw.planner.provider import build_llm_provider
@@ -90,9 +92,26 @@ async def _run(settings: Settings, repeats: int) -> dict[str, Any]:
                 report.clarification_questions,
                 reject_codes,
             )
+            # Same code-owned taxonomy as production plan_outcome_events (B02),
+            # so benchmark runs and pilot traffic are directly comparable.
+            outcome = from_report(
+                report,
+                request="",
+                step_count=0,
+                provider=settings.llm_provider,
+                model=result.model,
+                contract_version=PLANNER_CONTRACT_VERSION,
+                latency_ms=None,
+                tokens_in=None,
+                tokens_out=None,
+                proposal_id=uuid.uuid4(),
+            )
             runs.append(
                 {
                     **grade.model_dump(mode="json"),
+                    "outcome": outcome.outcome,
+                    "outcome_category": outcome.category,
+                    "finding_codes": outcome.finding_codes,
                     "repeat": r,
                     "latency_s": round(latency, 3),
                     "input_tokens": result.input_tokens,
