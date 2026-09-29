@@ -199,6 +199,9 @@ async function main() {
       `E2E_MEMBER_PASSWORD=${MEMBER.password}`,
       `E2E_INVITED_EMAIL=${INVITED.email}`,
       `E2E_INVITED_PASSWORD=${INVITED.password}`,
+      // The exact runnable (materialized) workflow: consumers must not pick one
+      // by list order, which puts the version-less approval workflow first.
+      `E2E_RUNNABLE_WORKFLOW_ID=${wf}`,
       "",
     ].join("\n"),
   );

@@ -11,6 +11,7 @@
 // Dependency-free (GoTrue REST + the NLW API). No production/customer data.
 
 import { appendFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 const SUPABASE = process.env.SUPABASE_API_URL;
 const ANON = process.env.SUPABASE_ANON_KEY;
@@ -42,6 +43,18 @@ function emit(lines) {
   appendFileSync(GITHUB_ENV, lines.join("\n") + "\n");
 }
 
+/**
+ * Return `expectedId` only if tenant A lists it AND it has a current
+ * (materialized) version; otherwise throw. Pure, for tests.
+ */
+export function selectRunnableWorkflow(workflows, expectedId) {
+  if (!expectedId) throw new Error("E2E_RUNNABLE_WORKFLOW_ID is not set (run web/e2e/seed.mjs first)");
+  const wf = workflows.find((w) => w.id === expectedId);
+  if (!wf) throw new Error("seeded runnable workflow is not visible in tenant A");
+  if (!wf.current_version_id) throw new Error("seeded workflow has no current version");
+  return wf.id;
+}
+
 async function main() {
   const token = await signIn(ADMIN);
   if (!token) throw new Error("empty admin token");
@@ -53,9 +66,10 @@ async function main() {
   const tenantA = workspaces[0].id;
   const tenantB = workspaces[1].id;
 
-  // A resource owned by tenant A (the seeded workflow) for cross-tenant asserts.
+  // The exact runnable workflow seeded in tenant A (exported by seed.mjs), checked
+  // against tenant A's list: never chosen by list order.
   const aWorkflows = await apiGet("/workflows", token, tenantA);
-  const aWorkflowId = aWorkflows.length ? aWorkflows[0].id : "";
+  const aWorkflowId = selectRunnableWorkflow(aWorkflows, process.env.E2E_RUNNABLE_WORKFLOW_ID);
 
   // Mask the token in the runner logs; then write env WITHOUT printing the value.
   process.stdout.write(`::add-mask::${token}\n`);
@@ -70,7 +84,9 @@ async function main() {
   console.log(`seed_staging: tenants A=${tenantA} B=${tenantB}; token=<masked, len ${token.length}>`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
