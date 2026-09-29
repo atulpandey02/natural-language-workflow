@@ -46,7 +46,9 @@ class TableClass:
 
 
 # The contract (plan section 0.6). "retain" rows are kept by design and are
-# listed so the customer statement can say so explicitly.
+# listed so the customer statement can say so explicitly. Retention PERIODS are
+# pilot policy proposals awaiting owner approval, never legal or compliance
+# commitments (owner decision, 2026-09-29), so none is stated as settled here.
 TABLES: dict[str, TableClass] = {
     "workspaces": TableClass("workspace_metadata", "id", "purge after dependants; tombstone kept"),
     "memberships": TableClass("workspace_metadata", "workspace_id", "purge"),
@@ -67,9 +69,13 @@ TABLES: dict[str, TableClass] = {
         "connector_reference", "tenant_id", "purge row; secret versions deleted in the store"
     ),
     "authz_audit_events": TableClass(
-        "audit", "tenant_id", "retain per published policy; tenant marker after tombstone period"
+        "audit",
+        "tenant_id",
+        "retain (ids/codes only); period is a pilot proposal, not yet approved",
     ),
-    "plan_outcome_events": TableClass("audit", "tenant_id", "retain 13 months (codes only)"),
+    "plan_outcome_events": TableClass(
+        "audit", "tenant_id", "retain (codes only); proposed 13 months, not yet approved"
+    ),
     # Platform tables: not tenant data.
     "users": TableClass("platform", "none", "identity rows are not workspace data"),
     "workspace_creation_grants": TableClass("platform", "none", "operator grant ledger"),
@@ -128,7 +134,7 @@ def inventory(conn: psycopg.Connection[Any], workspace_id: uuid.UUID) -> dict[st
         "not_in_database": [
             "dataset object bytes and derived artefacts (object store, Phase 2A)",
             "messages already delivered to Slack (cannot be recalled by NLW)",
-            "encrypted database backups (expire on the published retention schedule)",
+            "encrypted database backups (expire on the configured restic retention; not edited)",
         ],
     }
 
