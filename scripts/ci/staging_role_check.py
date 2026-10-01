@@ -70,7 +70,7 @@ def trigger_run(http: Http, api: str, headers: dict[str, str], workflow_id: str)
     if status != 201:
         raise CheckFailed(f"run trigger returned HTTP {status} ({sanitized_code(body)})")
     try:
-        run_id = json.loads(body)["id"]
+        run_id = json.loads(body)["run_id"]  # RunCreateOut (api/schemas.py)
     except (ValueError, KeyError, TypeError) as exc:
         raise CheckFailed("run trigger response has no run id") from exc
     if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", run_id):

@@ -10,10 +10,13 @@ import json
 import shutil
 import subprocess
 import sys
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+
+from nlw.api.schemas import RunCreateOut
 
 ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
@@ -25,6 +28,11 @@ sys.modules["staging_role_check"] = rc
 _spec.loader.exec_module(rc)
 
 RUN_ID = "11111111-2222-3333-4444-555555555555"
+# The real POST /workflows/{id}/runs body (RunCreateOut), built from the schema
+# itself so this fake cannot drift from the API contract again.
+CREATED = RunCreateOut(run_id=uuid.UUID(RUN_ID), status="PENDING", idempotent_hit=False).model_dump(
+    mode="json"
+)
 RUNNABLE = {"id": "wf-run", "name": "E2E Seeded Workflow", "current_version_id": "v1"}
 APPROVAL = {"id": "wf-appr", "name": "E2E Approval WF", "current_version_id": None}
 
@@ -52,7 +60,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_success_requires_a_worker_owned_terminal_status(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    api = FakeApi((201, {"id": RUN_ID}), ["PENDING", "RUNNING", "COMPLETED"])
+    api = FakeApi((201, CREATED), ["PENDING", "RUNNING", "COMPLETED"])
     monkeypatch.setattr(rc.time, "sleep", lambda _s: None)
     assert rc.main(["--api", "http://x", "--workflow", "wf-run"], http=api) == 0
     assert [m for m, _ in api.calls] == ["POST", "GET", "GET", "GET"]
@@ -87,13 +95,13 @@ def test_run_no_worker_picks_up_fails_at_the_deadline() -> None:
     def sleep(s: float) -> None:
         now[0] += s
 
-    api = FakeApi((201, {"id": RUN_ID}), ["PENDING"])
+    api = FakeApi((201, CREATED), ["PENDING"])
     with pytest.raises(rc.CheckFailed, match="no worker finished the run within 5s"):
         rc.wait_for_worker(api, "http://x", {}, RUN_ID, deadline_s=5, clock=clock, sleep=sleep)
 
 
 def test_failed_run_fails_the_check() -> None:
-    api = FakeApi((201, {"id": RUN_ID}), ["FAILED"])
+    api = FakeApi((201, CREATED), ["FAILED"])
     assert rc.main(["--api", "http://x", "--workflow", "wf-run"], http=api) == 1
 
 
@@ -144,7 +152,7 @@ def test_former_list_order_choice_reproduces_the_409_and_now_fails_the_step(
     listed: list[Mapping[str, object]] = [APPROVAL, RUNNABLE]  # created_at DESC order
     by_workflow = {
         "wf-appr": (409, {"error": {"code": "conflict", "message": "no current version"}}),
-        "wf-run": (201, {"id": RUN_ID}),
+        "wf-run": (201, CREATED),
     }
     calls: list[tuple[str, str]] = []
 
@@ -189,3 +197,15 @@ def test_only_allowlisted_run_statuses_are_ever_printed(body: bytes, match: str)
             api, "http://x", {}, RUN_ID, deadline_s=2, clock=lambda: now[0], sleep=sleep
         )
     assert "PWNED" not in str(exc.value) and "gateway" not in str(exc.value)
+
+
+def test_trigger_reads_run_id_from_the_real_create_contract() -> None:
+    """Regression (PR #42 staging-validation): the script read ``id`` but the API
+    returns ``run_id``, so a 201 trigger failed as "has no run id"."""
+
+    def api(method: str, url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        return 201, json.dumps(CREATED).encode()
+
+    assert rc.trigger_run(api, "http://x", {}, "wf-run") == RUN_ID
+    with pytest.raises(rc.CheckFailed, match="has no run id"):
+        rc.trigger_run(lambda *_a: (201, b'{"id": "%s"}' % RUN_ID.encode()), "http://x", {}, "w")
