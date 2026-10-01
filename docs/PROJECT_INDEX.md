@@ -3,7 +3,36 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
-## Pilot launch closure (local, awaiting review)
+## Phase 2 foundations (branch `feat/phase2-foundations`, awaiting review)
+
+Implements the unblocked parts of the Phase 2 plan (Edition 2) on top of `main`
+at `fcfd4d5`. Not pushed, not deployed; staging still runs `b1a3058` at
+revision `0021`, so deploying this branch is a migration-requiring release
+(`0021 → 0023`) through the gated rollout.
+
+- **B01 — workspace-creation grants** (migration `0022`, [ADR-023 amendment 1](adr/ADR-023-membership-approval-sod.md#amendment-1--founding-a-workspace-requires-an-operator-grant-phase-2-b01-2026-09-29),
+  [runbook](runbooks/workspace-creation-grants.md)): founding a workspace needs
+  a single-use, email-bound operator grant enforced inside the SECURITY DEFINER
+  bootstrap; 403 `WORKSPACE_CREATION_NOT_GRANTED`; `identity.provisioned` and
+  `workspace.created` audit events; rollout and restore validator refuse an
+  ungated bootstrap.
+- **B02 — plan outcome events** (migration `0023`, [ADR-028](adr/ADR-028-plan-outcome-events.md)):
+  redacted, append-only, codes-only measurement of every planning attempt; the
+  signed-policy inventory is now **53**; operator report
+  `python -m nlw.ops.outcomes report`; benchmark runs use the same taxonomy.
+- **B03 — code parts:** staging/production refuse to start an anthropic planner
+  without an explicit `NLW_LLM_MODEL`; `python -m nlw.ops.dr_evidence check`
+  evaluates a real-provider DR drill record. The drill itself is **not run**.
+- **B04 — library layer only:** tenant-scoped blob store and a bounded,
+  deterministic CSV profiler (`profile-1`) with no planner, provider or query
+  path ([development notes](development/datasets.md), including the pinned
+  Starlette/FastAPI body-limit finding). No dataset tables, API or worker yet.
+  **Customers cannot upload data**: ingestion is planned, not available.
+- **Offboarding contract:** every table classified; read-only inventory;
+  customer statement awaiting owner approval
+  ([offboarding-and-deletion](security/offboarding-and-deletion.md)).
+
+## Pilot launch closure (merged as `b1a3058`, PR #40; deployed to staging)
 
 On `feat/staging-custom-domain`, after the unchanged custom-domain commits: a
 discoverable Members page with invitations and safe acceptance, one friendly
@@ -13,7 +42,8 @@ connector form (plus a 409 for duplicate connector names instead of a 500), and
 a readable approval review. Real-browser launch journeys run as a third step of
 the isolated pilot harness job, still asserting exactly one mock delivery.
 Co-member emails remain hidden pending a reviewed SECURITY DEFINER directory
-function. Not pushed or deployed.
+function. (Historical note: this section was written before the push; the
+work merged as `b1a3058` and is the release running on staging.)
 
 - [Discovery, journeys, screenshots, demo script and limitations](evidence/launch-closure/README.md)
 
@@ -53,11 +83,13 @@ the separate pilot-launch gates below are unchanged. No VPS was contacted.
 
 | Field | Value |
 |---|---|
-| Current phase | Pre-launch hardening: M12B delivered on `main`; evidence-backed corrections from three independent repository audits in progress |
-| Current milestone | **M12B — AI core production readiness** (merged to `main` as `9d1bff0`, PR #32): request→plan provenance (`0017`: bounded `request_text` + SHA-256 digest), durable transmission boundary (`0018`), connector identity binding (`0019`), fail-closed schedule authorization (`0020`), deterministic (non-LLM) run summaries, NL evaluation corpus v2 with committed sanitized live-benchmark evidence — see the M12B-A section below. Builds on **M12A-Prep** (merged as `aa7d1cd`, PR #31): CI-generated release manifests with GitHub artifact-attestation provenance verified before any host contact (ADR-025) and the phased, gated, read-only-by-default `python -m nlw.ops.rollout` (real off-host backup taken and verified before any database mutation; drain → roles → migrate to the release's target head → install keys → activate → validate → reopen; `go-check`), idempotent role provisioning, `nlw.ctxkeys prepare/fingerprint`, Prometheus rule mounting + Alertmanager skeleton (null receiver = open launch gate), backup evidence bound to instance/db/release. M11.5 P3B (migration `0016`, ADR-024) is merged (`1eebf2e`). |
-| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 · M11.5 (P0 · P1A–P1D · P2 · P3A · P3B) · M12A-Prep · M12B |
-| Next milestone | M12C — controlled pilot launch. Blocked on open launch gates: a real, verified off-host backup provider on the pilot host; verified alert delivery (Alertmanager receiver); production signing-key preparation + escrow evidence; GitHub `main` branch protection + a production-environment approval gate. |
-| Release status | **production-hardened pilot candidate** — not a launched production platform. Real-VPS validated (CONDITIONAL GO); the first M12C read-only preflight was NO-GO (READY TO PREPARE). See *Open risks* and *Known technical debt* below. |
+| Current phase | **Phase 2 foundations** (branch `feat/phase2-foundations`, local, awaiting review). The controlled staging pilot runs on synthetic data only; **customer-data ingestion is planned, not available** (only a library layer exists, reachable from no API, worker or planner). |
+| Current milestone | Phase 2 prerequisites from the Phase 2 plan (Edition 2): B01 workspace-creation grants and B02 outcome events implemented locally; B03 code parts done, real-provider DR drill not run; B04 library layer only. See the *Phase 2 foundations* section above. |
+| Completed milestones | M0 · M1a · M1b · M2a · M2b · M3 · M4 · M5 · M6 · M7 · M8 · M9 · M10 · M11 · M11.5 (P0 · P1A–P1D · P2 · P3A · P3B) · M12A-Prep · M12B · M12C (staging pilot rollout) |
+| Deployed staging (historical fact) | Release `b1a3058` (PR #40, merged 2026-09-27) at schema `0021_analytics_handoff`, rolled out with `python -m nlw.ops.rollout` through `go-check`, which returned **M12 GO check: PASS** against the checks it implements. Alerting (reported operational evidence, owner, 2026-09-29): the operator-owned receiver `slack-ops` with a recorded, human-confirmed controlled delivery — not the committed null receiver. Planner (reported, owner, sanitised runtime inspection): provider `anthropic`, model `claude-haiku-4-5-20251001`. Backup timer (`nlw-backup.timer`) not installed at rollout time (needs root). |
+| Configuration inconsistency | The source default `llm_model = "claude-sonnet-5"` (`core/config.py`) differs from the deployed model, which `docker-compose.prod.yml` supplies (`NLW_LLM_MODEL` default `claude-haiku-4-5-20251001`). On `feat/phase2-foundations`, staging/production refuse to start an anthropic planner without an explicit, non-blank `NLW_LLM_MODEL`, so the source default can no longer be used silently there. Under Compose that value always comes from `.env.prod` or, if unset there, the reviewed `docker-compose.prod.yml` pin; the reviewed rollout unsets `NLW_LLM_PROVIDER`/`NLW_LLM_MODEL`/`NLW_LLM_API_KEY` from the operator shell so neither can be replaced silently. |
+| Not enforced by `go-check` | Post-rollout drills in [real-vps-checklist](staging/real-vps-checklist.md): key rotation, k6 and failure drills, the **real-provider isolated fresh-host DR drill** (not run; a Phase 2 prerequisite before any customer data, B03), reboot, real Slack delivery. |
+| Release status | **Controlled pilot on staging, synthetic data, invitation-only** — not a launched production platform. See *Open risks* and *Known technical debt* below. |
 
 M11.5 P0 (runtime credential isolation) closes the top verified review finding:
 the privileged `DATABASE_MIGRATION_URL` (owner) is removed from every long-running
@@ -438,7 +470,8 @@ the components they protect — not deferred to the end.
 | M11.5 | Pre-M12 hardening from external reviews (P0 credential isolation · P1A–D authorization, SQL/egress, action delivery, scheduler · P2 encrypted off-host backup/DR · P3A membership/approval SoD · P3B signed DB context) | delivered | ADR-021, ADR-022, ADR-023, ADR-024 |
 | M12A-Prep | Attested release manifests + phased, gated rollout tooling | delivered | ADR-025 |
 | M12B | AI core production readiness (provenance, transmission boundary, connector binding, schedule authorization, deterministic summaries, eval v2) | delivered | ADR-026 |
-| M12C | Controlled pilot launch | tbd (launch gates open) | — |
+| M12C | Controlled pilot launch (staging, synthetic data) | delivered (`b1a3058`, go-check PASS) | ADR-027 |
+| Phase 2 | Customer-data platform (plan Edition 2) | in progress: `feat/phase2-foundations` (local) | ADR-023 amendment 1, ADR-028 |
 
 **First-release connector scope:** PostgreSQL (source), Webhook + Slack (actions).
 Demonstration workflow target:
@@ -482,6 +515,8 @@ See [`docs/adr/`](adr/). Accepted so far:
 - [ADR-024 — Signed database context (M11.5 P3B, migration `0016`)](adr/ADR-024-signed-database-context.md)
 - [ADR-025 — Release-manifest provenance (M12A-Prep)](adr/ADR-025-release-manifest-provenance.md)
 - [ADR-026 — AI execution architecture (M12B-A): deterministic engine with an LLM planner](adr/ADR-026-ai-execution-architecture.md)
+- [ADR-027 — Grounded pilot analytics](adr/ADR-027-grounded-pilot-analytics.md)
+- [ADR-028 — Redacted plan outcome events (Phase 2 B02)](adr/ADR-028-plan-outcome-events.md)
 
 Planned: ADR-008 Deployment strategy.
 
@@ -535,6 +570,8 @@ independent-review caveats on what it does and does not measure live in
 ## Runbooks
 
 - [staging-signed-context-rollout](runbooks/staging-signed-context-rollout.md) — **M12A**: the phased, gated upgrade of the staging VPS from schema `0010` to `0016` (`python -m nlw.ops.rollout --release <CI manifest>`; read-only default; verify-release, authorization, escrow and backup-before-mutation gates; the CI-generated, **attested** `release-manifest-<sha>` artifact + `deploy/staging/target.env` are the identity source — `deploy/staging/release.example.json` is a rejected template; provenance: [ADR-025](adr/ADR-025-release-manifest-provenance.md)). Rehearsal: `scripts/ops/rehearse-0010-to-0016.sh`. Alerting boundary: [docs/ops/alerting](ops/alerting.md).
+
+- [workspace-creation-grants](runbooks/workspace-creation-grants.md) — **Phase 2 B01**: issue, list and revoke operator grants for founding a workspace; emergency `WORKSPACE_CREATION_MODE=closed`.
 
 [`docs/runbooks/`](runbooks/) — see its [README](runbooks/README.md) for the
 index. Security-sensitive: [signed-context-keys.md](runbooks/signed-context-keys.md)

@@ -125,3 +125,30 @@ producing an executable but harmless plan); the injected `DROP`/exfiltration pay
 is never executable (SQL-safety + table allowlist), so injection resistance is 1.0
 and D = 0. Deterministic rejection of the 14 adversarial plan FIXTURES is proven
 separately (`tests/eval/test_corpus_v2.py`).
+
+## Phase 2 measurement baseline (B02) — how to measure before changing the planner
+
+Two instruments now share one code-owned taxonomy
+(`nlw.observability.plan_outcomes`, [ADR-028](../adr/ADR-028-plan-outcome-events.md)):
+
+1. **Pilot traffic.** Every `POST /plans` appends a redacted
+   `plan_outcome_events` row (outcome, category, finding codes, length bucket,
+   shape tags, model, contract version, latency, tokens; no text). Weekly
+   report, owner credential, aggregates only:
+   `python -m nlw.ops.outcomes report --days 7`.
+2. **Benchmarks.** Runs produced by `nlw.eval.live_runner_v2` from this
+   revision on carry `outcome`, `outcome_category` and `finding_codes` per run,
+   classified by the same code as production events.
+
+The committed `live-benchmark-v2-2026-09-23.json` predates this and is left
+unchanged (it is bound to the corpus by digest); its per-run records have no
+finding codes, so its failures cannot be re-categorised retrospectively. The
+73.3 % (33/45) first-pass figure remains the headline baseline for that
+catalogue and model.
+
+Not yet measured (credential-gated, spends tokens, owner-authorised budget
+required, plan §18 decision 8): a repeat of the v2 run with the new fields, and
+the corpus-v3 comparison between the deployed Haiku 4.5 baseline and a
+mid-tier model. The repeat command is unchanged:
+`set -a; source .env.eval.local; set +a; uv run python -m nlw.eval.live_runner_v2 --repeats 3 --out <path>`.
+No planner behaviour was changed by this instrumentation.

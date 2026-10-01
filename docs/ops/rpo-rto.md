@@ -39,6 +39,14 @@ To validate the objectives against reality, run
 [dr-real-vps-checklist](../runbooks/dr-real-vps-checklist.md) on a disposable VPS
 against the real provider and record the measured numbers there.
 
+**Status (2026-09-29): not recorded.** A verified, encrypted, off-host backup on
+a real provider was taken and checked by the rollout `verify-backup` gate, and
+the local disposable rehearsals pass; a real-provider, isolated, fresh-host
+restore with measured RPO/RTO has not been run (Phase 2 B03). When it is, its
+record is evaluated by `python -m nlw.ops.dr_evidence check` (observed RPO =
+declaration − snapshot time; observed RTO = runtime-ready − declaration) and
+stored under `docs/ops/dr-drills/`.
+
 ## Dependencies outside this RPO/RTO
 
 - **Supabase Auth** (identity) has its **own** backup/restore and its own RPO/RTO.

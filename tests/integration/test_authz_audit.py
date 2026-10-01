@@ -148,7 +148,8 @@ def test_invitation_lifecycle_audit(client: TestClient, pg_stack: SimpleNamespac
     assert client.post(f"/invitations/{inv['id']}/revoke", headers=owner_h).status_code == 204
     evs = _events(pg_stack.owner_libpq, tid)
     types = [e[0] for e in evs]
-    assert types == ["invitation.created", "invitation.revoked"]
+    # Founding the workspace is itself audited (Phase 2 B01, grant-gated bootstrap).
+    assert types == ["workspace.created", "invitation.created", "invitation.revoked"]
     raw = inv["token"]
     # No event detail/subject exposes the raw token or its hash.
     for _t, _actor, subject, detail in evs:
@@ -173,7 +174,12 @@ def test_accept_emits_membership_and_acceptance(
     types = [e[0] for e in _events(pg_stack.owner_libpq, tid)]
     # Same-transaction events share a now() timestamp, so assert the multiset (one
     # each, no duplicates), not an order.
-    assert sorted(types) == ["invitation.accepted", "invitation.created", "membership.added"]
+    assert sorted(types) == [
+        "invitation.accepted",
+        "invitation.created",
+        "membership.added",
+        "workspace.created",
+    ]
 
 
 # --- C5: an approval decision emits one event; idempotent re-decide adds none ---

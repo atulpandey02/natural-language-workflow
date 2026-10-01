@@ -158,16 +158,19 @@ jobs:
         run: |
           test -n "$K6_ADMIN_TOKEN" || { echo "K6_ADMIN_TOKEN empty"; exit 1; }
           test -n "$K6_WORKSPACE" || { echo "K6_WORKSPACE empty"; exit 1; }
-          # Trigger a run so the worker actually connects, then inspect roles.
-          curl -fsS -X POST "http://127.0.0.1:8000/workflows/${TENANT_A_WORKFLOW_ID}/runs" \
-            -H "Authorization: Bearer $K6_ADMIN_TOKEN" -H "X-Workspace-Id: $K6_WORKSPACE" \
-            -H "Idempotency-Key: role-check-1" -H "Content-Type: application/json" >/dev/null || true
-          sleep 5
-          roles=$($COMPOSE exec -T postgres psql -U nlw -d nlw -tAc \
-            "SELECT string_agg(DISTINCT usename, ',') FROM pg_stat_activity WHERE usename LIKE 'nlw%'")
-          echo "active DB roles: $roles"
-          for r in nlw_app nlw_worker nlw_scheduler; do
-            echo "$roles" | grep -q "$r" || { echo "FAIL: role $r not observed"; exit 1; }
+          test -n "$TENANT_A_WORKFLOW_ID" || { echo "TENANT_A_WORKFLOW_ID empty"; exit 1; }
+          # The worker must actually execute the seeded runnable workflow: a
+          # non-201 trigger or a run no worker finishes fails the step (no
+          # failure suppression, no fixed sleep). Only status + sanitized code print.
+          python3 scripts/ci/staging_role_check.py --api http://127.0.0.1:8000 \
+            --workflow "$TENANT_A_WORKFLOW_ID"
+          # Direct proof of each service's configured database role (no reliance
+          # on catching a transient connection in the activity view).
+          for pair in api:nlw_app worker:nlw_worker scheduler:nlw_scheduler; do
+            svc="${pair%%:*}"; want="${pair##*:}"
+            got=$($COMPOSE exec -T "$svc" python -c 'import psycopg; from nlw.core.config import get_settings; u = get_settings().database_url.replace("+psycopg", "", 1); print(psycopg.connect(u).execute("SELECT current_user").fetchone()[0])' | tr -d '[:space:]')
+            echo "$svc connects as: $got"
+            [ "$got" = "$want" ] || { echo "FAIL: $svc connects as '$got', expected $want"; exit 1; }
           done
 
       - name: Assert rate limits RAISED (capacity phase)

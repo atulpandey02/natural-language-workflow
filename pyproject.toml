@@ -101,5 +101,6 @@ addopts = "-ra"
 asyncio_mode = "auto"
 markers = [
     "integration: tests requiring external services (Postgres/Redis) via testcontainers",
+    "workspace_grants_enforced: pg_stack without the harness auto-grant (B01 gate tests)",
 ]
 

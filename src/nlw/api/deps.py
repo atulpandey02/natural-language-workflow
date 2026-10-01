@@ -176,3 +176,31 @@ def rate_limit(
             ) from exc
 
     return dependency
+
+
+def rate_limit_user(endpoint: str) -> Callable[[Request, User], Awaitable[None]]:
+    """Per-USER write limit for an endpoint that has no tenant yet (for example
+    founding a workspace). Same fail-closed semantics as :func:`rate_limit`."""
+
+    async def dependency(request: Request, user: User = Depends(get_current_user)) -> None:
+        settings: Settings = request.app.state.settings
+        if not settings.rate_limit_enabled:
+            return
+        limiter: RateLimiter = request.app.state.rate_limiter
+        try:
+            await limiter.check(
+                f"nlw:rl:{endpoint}:u:{user.id.hex}", settings.rate_limit_writes_per_min
+            )
+        except RateLimitExceeded as exc:
+            metrics.record_rate_limit_rejected(endpoint)
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "rate limit exceeded",
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from exc
+        except RateLimitBackendError as exc:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "rate limiter unavailable"
+            ) from exc
+
+    return dependency

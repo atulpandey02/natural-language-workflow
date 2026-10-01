@@ -58,7 +58,9 @@ here on the real host (not in ephemeral CI).
 The **code gate** closed with P3B (`1eebf2e`) and the M12A-Prep tooling; the
 **operational gate** is the list below. Every item needs real evidence (not the
 CI "staging simulation" job, which contacts no host). Decision = GO only when
-all boxes are ticked.
+every box **down to and including the `go-check` item** is ticked: those are the
+checks `python -m nlw.ops.rollout go-check` implements. The boxes after it are
+post-rollout drills that `go-check` does not evaluate (see the note below them).
 
 - [ ] Release manifest artifact `release-manifest-<sha>` downloaded from the
       successful `Delivery` run of the **merged main** commit (never a PR build;
@@ -121,3 +123,14 @@ all boxes are ticked.
 - [ ] Real-provider fresh-host DR drill (not MinIO) — `dr-real-vps-checklist.md`.
 - [ ] Interactive reboot drill.
 - [ ] Real Slack/webhook delivery test — deliberately **last**.
+
+> **Reconciliation (2026-09-29).** The completed M12 staging rollout
+> (`b1a3058`) passed its implemented `go-check` (M12 GO check: PASS); that
+> result stands. The drills above are not part of it and none is recorded in the
+> repository. In particular the **real-provider, isolated, fresh-host DR drill**
+> with measured RPO/RTO has not been run: it is a **prerequisite before any
+> customer data is accepted** (Phase 2 plan B03), recorded with
+> `python -m nlw.ops.dr_evidence check` per
+> [dr-real-vps-checklist](../runbooks/dr-real-vps-checklist.md). A verified,
+> encrypted, off-host backup on the real provider already exists (enforced by
+> `verify-backup`); that is a different fact from a measured restore.

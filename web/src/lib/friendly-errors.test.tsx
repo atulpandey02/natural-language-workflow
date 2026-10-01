@@ -378,3 +378,23 @@ describe("fully composed banners never contradict the mutation state (B2)", () =
     unmount();
   });
 });
+
+describe("workspace-creation gate (B01)", () => {
+  it.each([
+    ["WORKSPACE_CREATION_NOT_GRANTED", "Ask your administrator to set up your workspace"],
+    ["WORKSPACE_CREATION_CLOSED", "New workspaces aren't available here"],
+  ])(
+    "%s has purpose-written copy, states nothing changed and does not invite a retry",
+    (code, title) => {
+      const f = describeError(
+        api(403, code, "server text that must not be shown", { method: "POST" }),
+      )!;
+      expect(f.kind).toBe(code);
+      expect(f.title).toBe(title);
+      expect(f.retry).toBe("no");
+      expect(f.mutation).toBe("unchanged");
+      expect(`${f.title} ${f.explanation} ${f.action}`).not.toMatch(/server text/);
+      expect(f.action).toMatch(/administrator/);
+    },
+  );
+});

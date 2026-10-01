@@ -37,7 +37,7 @@ def _render_authority(
 ) -> None:
     for file in ("docker-compose.prod.yml", "docker-compose.staging.yml"):
         shutil.copyfile(ROOT / file, tmp_path / file)
-    (tmp_path / ".env.prod").write_text(f"{FLAG}={reviewed}\n")
+    (tmp_path / ".env.prod").write_text(f"{FLAG}={reviewed}\nNLW_LLM_MODEL=reviewed-model\n")
     (tmp_path / ".env.backup").write_text("")
     target = replace(
         load_target(ROOT / "deploy/staging/target.env"),
@@ -51,8 +51,8 @@ def _render_authority(
         "backup": target.dc_backup_in(str(tmp_path)),
     }[invocation]
     assert (
-        "env -u DEMO_TOOLS_ENABLED -u PUBLIC_HOSTNAME -u PUBLIC_HOSTNAME_FALLBACK docker compose"
-        in command
+        "env -u DEMO_TOOLS_ENABLED -u PUBLIC_HOSTNAME -u PUBLIC_HOSTNAME_FALLBACK "
+        "-u NLW_LLM_PROVIDER -u NLW_LLM_MODEL -u NLW_LLM_API_KEY docker compose" in command
     )
     if not protected:
         command = re.sub(r"env( -u [A-Z_]+)+ ", "", command)  # the parent (unprotected) form
@@ -64,7 +64,7 @@ def _render_authority(
         PATH=os.environ["PATH"],
         NLW_CTX_KEYS_DIR="/srv/nlw/ctx-keys",
         DEMO_TOOLS_ENABLED=ambient,
-        NLW_LLM_MODEL="preserved-from-shell",
+        NLW_LLM_MODEL="from-operator-shell",
     )
     result = subprocess.run(
         ["bash", "-c", command + " --profile '*' config --format json"],
@@ -76,7 +76,11 @@ def _render_authority(
     assert result.returncode == 0, result.stderr
     services = json.loads(result.stdout)["services"]
     assert services["api"]["environment"][FLAG] == (reviewed if protected else ambient)
-    assert services["api"]["environment"]["NLW_LLM_MODEL"] == "preserved-from-shell"
+    # The reviewed planner model comes from .env.prod; an operator shell export
+    # can no longer silently replace it (Compose ranks the shell above --env-file).
+    assert services["api"]["environment"]["NLW_LLM_MODEL"] == (
+        "reviewed-model" if protected else "from-operator-shell"
+    )
     assert {n for n, s in services.items() if FLAG in s.get("environment", {})} == {"api"}
 
 

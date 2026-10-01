@@ -76,7 +76,8 @@ from nlw.ops.rollout.gates import GateError
 from nlw.ops.rollout.release import KEY_CLASSES, ReleaseSpec
 from nlw.ops.rollout.remote import OperatorAlerting, Remote, TargetConfig
 
-EXPECTED_SIGNED_POLICIES = 51
+# 51 signed policies from 0016 + 2 on plan_outcome_events (0023, Phase 2 B02).
+EXPECTED_SIGNED_POLICIES = 53
 # Caddy serves 503 for every request while this file exists on its `caddy_maint`
 # volume (docker/caddy/Caddyfile `@maintenance`). Toggled with `exec`, no reload.
 MAINTENANCE_FLAG = "/srv/maint/MAINTENANCE"
@@ -1278,6 +1279,21 @@ class Rollout:
                 raise GateError(f"{r} can read ctx_keys")
         if self._psql("SELECT has_table_privilege('public','ctx_keys','SELECT')") != "f":
             raise GateError("PUBLIC can read ctx_keys")
+        n, gated = self._psql(
+            "SELECT count(*), coalesce(bool_and(prosrc LIKE '%workspace_creation_grants%' "
+            "AND prosrc LIKE '%42501%'), false) FROM pg_proc "
+            "WHERE proname='create_workspace_for_current_user'"
+        ).split("|")
+        runtime_access = [
+            r
+            for r in (*gates.RUNTIME_ROLES, "public")
+            if self._psql(
+                f"SELECT has_table_privilege('{r}','workspace_creation_grants',"
+                "'SELECT,INSERT,UPDATE,DELETE')"
+            )
+            != "f"
+        ]
+        gates.check_workspace_bootstrap_gated(int(n), gated == "t", runtime_access)
 
     def install_context_keys(self, *, keys_dir: str) -> None:
         self._require_mutation_authority()

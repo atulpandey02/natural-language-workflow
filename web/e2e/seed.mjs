@@ -52,6 +52,16 @@ async function apiGet(path, token, workspaceId) {
   return res.json();
 }
 
+// Founding a workspace needs an operator grant (migration 0022, Phase 2 B01).
+// The seed plays the operator with the owner credential, exactly like
+// `python -m nlw.ops.grants add`; grants are single-use, one open per email.
+function grantWorkspaceCreation(email) {
+  psql(
+    `INSERT INTO workspace_creation_grants (id, email_normalized, granted_by, note, expires_at) ` +
+      `VALUES (gen_random_uuid(), lower(btrim('${email}')), 'e2e-seed', 'E2E', now() + interval '1 day')`,
+  );
+}
+
 async function createWorkspace(token, name) {
   const res = await fetch(`${API}/workspaces`, {
     method: "POST",
@@ -99,8 +109,13 @@ async function main() {
   }
 
   await apiGet("/me", adminToken); // provision the admin app-user row
+  grantWorkspaceCreation(ADMIN.email);
   const ws1 = await createWorkspace(adminToken, "E2E Primary");
+  grantWorkspaceCreation(ADMIN.email);
   await createWorkspace(adminToken, "E2E Secondary"); // 2nd workspace for the switch test
+  // One open grant remains for the launch journey, which founds a workspace
+  // from onboarding in the browser (pilot-launch.spec.ts step 1).
+  grantWorkspaceCreation(ADMIN.email);
 
   // Seed a materialized fake.echo workflow in the primary workspace so the UI has
   // a runnable target for Run-now / observe / double-click. The CI planner is the
@@ -184,6 +199,9 @@ async function main() {
       `E2E_MEMBER_PASSWORD=${MEMBER.password}`,
       `E2E_INVITED_EMAIL=${INVITED.email}`,
       `E2E_INVITED_PASSWORD=${INVITED.password}`,
+      // The exact runnable (materialized) workflow: consumers must not pick one
+      // by list order, which puts the version-less approval workflow first.
+      `E2E_RUNNABLE_WORKFLOW_ID=${wf}`,
       "",
     ].join("\n"),
   );

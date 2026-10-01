@@ -118,3 +118,57 @@ attacker-controlled volume).
   flagged in the migration and requiring operator review.
 - New tables/functions/trigger must survive a DR restore — added to the restore
   validation surface (P3B).
+
+## Amendment 1 — Founding a workspace requires an operator grant (Phase 2 B01, 2026-09-29)
+
+Status: Accepted (implementation on `feat/phase2-foundations`, migration
+`0022_workspace_creation_grants`).
+
+**Context.** Joining a workspace was invitation-gated by this ADR, but *founding*
+one was not: `create_workspace_for_current_user` checked only that a user was in
+the signed context, and `resolve_or_create_user` provisions any identity the auth
+provider mints on its first API call. "Invite-only" therefore rested on the login
+page having no signup button and on the hosted Supabase signup setting, which the
+repository cannot see. Any provisioned identity could found unlimited tenants.
+
+**Decision.**
+
+- A platform table `workspace_creation_grants` (no RLS, no privilege for any
+  login role; read/update only by the NOLOGIN function owner
+  `nlw_workspace_bootstrap`) holds operator-issued, single-use, email-bound,
+  expiring grants. At most one open grant per normalised email.
+- `create_workspace_for_current_user` is replaced in place (same signature, so
+  no ungated overload remains). Inside the SECURITY DEFINER body it resolves the
+  caller's email from `users`, locks one open, unexpired grant `FOR UPDATE`,
+  raises SQLSTATE `42501` without one, creates the workspace and owner
+  membership, consumes the grant and appends `workspace.created` (detail = grant
+  id) to `authz_audit_events`, all in one transaction. The database is the
+  authority, as for approvals and membership changes.
+- `resolve_or_create_user` appends `identity.provisioned` (tenant-less) when it
+  inserts a new identity; its lookup/insert behaviour is unchanged.
+- The API pre-checks with `has_workspace_creation_grant()` and answers
+  `403 {code: WORKSPACE_CREATION_NOT_GRANTED}`; the database refusal maps to the
+  same 403, never 500. `POST /workspaces` has a per-user write rate limit.
+- `WORKSPACE_CREATION_MODE ∈ {grant, closed}` (default `grant`). `closed`
+  refuses every creation with `WORKSPACE_CREATION_CLOSED`. There is no `open`
+  mode in any environment because no ungated database path exists; any other
+  value refuses to start.
+- Operators manage grants with `python -m nlw.ops.grants add|list|revoke` and the
+  owner credential ([runbook](../runbooks/workspace-creation-grants.md)).
+
+**Not changed.** Identity provisioning on first call is still allowed (it creates
+a `users` row only). Invitations remain the only way to join an existing
+workspace; accepting one does not grant the right to found a new one.
+
+**Downgrade.** Reverting `0022` restores the ungated bootstrap and drops the
+grant ledger (audit rows remain). It must never be applied to a live
+environment; `WORKSPACE_CREATION_MODE=closed` is the emergency stop and the
+restore validator / rollout gate report an ungated bootstrap as NO-GO
+([runbook](../runbooks/workspace-creation-grants.md#downgrade-security-sensitive)).
+
+**Consequences.** Tenant bootstrap is an operator action with an audit trail.
+The hosted Supabase signup setting now affects only how many identities can be
+provisioned, not whether they can create tenants (owner question 5 remains open).
+Tests of other features use a test-harness auto-grant in
+`tests/integration/conftest.py`; the gate tests
+(`tests/integration/test_workspace_creation_gate.py`) run without it.

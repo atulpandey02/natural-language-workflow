@@ -53,8 +53,16 @@ _SINGLE_KEYS = (
 # Interpolation values a reviewed rollout must never take from the operator's
 # shell: Compose ranks the shell environment ABOVE `--env-file`, so each one is
 # removed from every rollout Compose invocation and only the staged .env.prod
-# (written by stage-release from the reviewed target/manifest) supplies it.
-AMBIENT_UNSET = ("DEMO_TOOLS_ENABLED", "PUBLIC_HOSTNAME", "PUBLIC_HOSTNAME_FALLBACK")
+# supplies it (written by stage-release from the reviewed target/manifest, or,
+# for the planner provider/model/key, carried from the active .env.prod).
+AMBIENT_UNSET = (
+    "DEMO_TOOLS_ENABLED",
+    "PUBLIC_HOSTNAME",
+    "PUBLIC_HOSTNAME_FALLBACK",
+    "NLW_LLM_PROVIDER",
+    "NLW_LLM_MODEL",
+    "NLW_LLM_API_KEY",
+)
 _ENV_UNSET = "env " + " ".join(f"-u {name}" for name in AMBIENT_UNSET)
 _OPERATOR_ALERTING_KEYS = (
     "NLW_STAGING_ALERTMANAGER_CONFIG",
