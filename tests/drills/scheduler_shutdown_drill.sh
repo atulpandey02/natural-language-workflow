@@ -15,7 +15,25 @@
 #
 # Synthetic credentials and keys are generated per run, never printed, and
 # removed with the project (volumes included) on exit.
+#
+#   tests/drills/scheduler_shutdown_drill.sh --verdict ELAPSED_MS EXIT_CODE "ALLOWED" QUEUE_LEN MAX_STOP_S
+# evaluates only the PASS/FAIL rule below (no Docker), for deterministic tests.
 set -euo pipefail
+
+# PASS only if the exit code is allowed, the stop finished inside MAX_STOP_S,
+# and the Redis queue length is an integer equal to 0 (missing/malformed fails).
+verdict() { # elapsed_ms exit_code allowed_codes queue_len max_stop_s
+  local elapsed_ms="$1" code="$2" allowed=" $3 " qlen="$4" max_s="$5"
+  if [[ "$allowed" != *" $code "* ]]; then echo FAIL; return; fi
+  if ! [[ "$elapsed_ms" =~ ^[0-9]+$ ]] || [ "$elapsed_ms" -ge $((max_s * 1000)) ]; then echo FAIL; return; fi
+  if ! [[ "$qlen" =~ ^[0-9]+$ ]] || [ "$qlen" -ne 0 ]; then echo FAIL; return; fi
+  echo PASS
+}
+if [ "${1:-}" = "--verdict" ]; then
+  shift
+  verdict "$@"
+  exit 0
+fi
 
 : "${NLW_IMAGE:?set NLW_IMAGE to the backend image under test}"
 PROJECT="${DRILL_PROJECT:-nlw-sched-shutdown-drill}"
@@ -100,10 +118,12 @@ now_ms() { python3 -c 'import time; print(int(time.monotonic() * 1000))'; }
 
 fail=0
 record() { # name elapsed_ms code [allowed exit codes, default "0"]
-  local secs; secs=$(python3 -c "print(f'{$2/1000:.2f}')")
-  local allowed=" ${4:-0} " verdict=PASS
-  if [[ "$allowed" != *" $3 "* ]] || [ "$2" -ge $((MAX_STOP_S * 1000)) ]; then verdict=FAIL; fail=1; fi
-  echo "round=$1 stop_s=$secs exit_code=$3 queue_len=$(queue_len) $verdict"
+  local secs qlen result
+  secs=$(python3 -c "print(f'{$2/1000:.2f}')")
+  qlen=$(queue_len 2>/dev/null || true) # captured ONCE; judged and printed from this value
+  result=$(verdict "$2" "$3" "${4:-0}" "$qlen" "$MAX_STOP_S")
+  [ "$result" = PASS ] || fail=1
+  echo "round=$1 stop_s=$secs exit_code=$3 queue_len=${qlen:-<missing>} $result"
 }
 
 # Round 1: idle steady state (fresh DB: nothing due, nothing in flight).

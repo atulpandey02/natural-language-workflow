@@ -17,9 +17,14 @@ flat; reconcile not running.
 already in progress completes: it commits its run rows and then enqueues exactly
 those runs (the existing commit-then-enqueue order), so shutdown neither
 duplicates nor drops work. If the stop arrives during startup, no tick runs. The
-database engine and the Redis broker are closed, and the process exits `0` in
-well under a second, far inside Docker's 10 s grace period. Further stop signals
-after the first are ignored, so they cannot interrupt cleanup. A hard kill
+database engine and the Redis broker are closed. On the demonstrated healthy
+paths the process stops in well under a second, far inside Docker's 10 s grace
+period: exit `0` when idle or after the current tick, and exit `143` when the
+stop lands in the first moments of startup, before any work. Startup, or a tick
+in progress, that is blocked on an external dependency (Postgres, Redis) is
+bounded instead by that dependency's timeouts and, ultimately, by Docker's
+SIGKILL at the end of the grace period (see Remaining limitations). Further stop
+signals after the first are ignored, so they cannot interrupt cleanup. A hard kill
 mid-tick (power loss, `docker kill -s KILL`) remains safe for the reasons above:
 due-scan is idempotent and the reconciler re-enqueues stale `PENDING` runs.
 
