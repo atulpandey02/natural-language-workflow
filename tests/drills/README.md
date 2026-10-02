@@ -11,6 +11,7 @@ Each drill maps to a runbook (docs/runbooks):
 | D scheduler restart | scheduler-lagging.md |
 | backup/restore (`backup_restore_drill.sh`) | restore-from-backup.md |
 | migration (`migration_drill.sh`) | failed-migration.md |
+| scheduler shutdown (`scheduler_shutdown_drill.sh`; isolated project, runs in CI) | scheduler-lagging.md |
 
 Windows A(4)/E/F/G/H/I/J/K and the historical crash windows (M3/M7 W1-W3/M8/M10)
 are covered by the integration suite (test_crash_windows.py, test_action_execution.py,

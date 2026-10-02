@@ -281,3 +281,25 @@ def test_prod_flows_use_migrate_service_not_api_alembic() -> None:
         t = (ROOT / rel).read_text()
         assert "run --rm api alembic" not in t, f"{rel} still runs alembic via api"
         assert "--profile migration run --rm migrate" in t, f"{rel} must use the migrate service"
+
+
+def test_scheduler_runs_under_init_and_other_runtimes_are_unchanged() -> None:
+    """The scheduler must not be PID 1 (the kernel discards a handler-less
+    SIGTERM sent to PID 1, which ended in SIGKILL/137 during rollout drain).
+    Docker's init forwards signals; the command stays exec-form so the init's
+    child is Python itself. API and worker process models are unchanged."""
+    svc = _load("docker-compose.prod.yml")["services"]
+    assert svc["scheduler"].get("init") is True
+    assert svc["scheduler"]["command"] == ["python", "-m", "nlw.scheduler"]
+    assert "stop_grace_period" not in svc["scheduler"]  # fixed in code, not by waiting longer
+    assert "init" not in svc["api"] and "command" not in svc["api"]  # image CMD (uvicorn)
+    assert "init" not in svc["worker"]
+    assert svc["worker"]["command"] == [
+        "dramatiq",
+        "nlw.worker.actors",
+        "--processes",
+        "2",
+        "--threads",
+        "4",
+    ]
+    assert svc["worker"]["stop_grace_period"] == "60s"

@@ -179,6 +179,12 @@ services:
 
   scheduler:
     <<: *app-hardening
+    # Docker's init (tini) is PID 1 and forwards signals, so the scheduler is not
+    # PID 1: a SIGTERM that lands before its handler is installed (interpreter
+    # startup, imports) terminates it at once instead of being discarded by the
+    # kernel and ending in SIGKILL at the grace period. After startup, SIGTERM
+    # reaches the scheduler's graceful-stop handler (exit 0).
+    init: true
     command: ["python", "-m", "nlw.scheduler"]
     environment:
       <<: *app-env
