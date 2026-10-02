@@ -219,6 +219,14 @@ jobs:
           NLW_CTX_WORKER_KEY_ID: ci-worker
           NLW_CTX_SCHEDULER_KEY_ID: ci-scheduler
         run: docker compose -f docker-compose.prod.yml --profile migration config >/dev/null
+      # The rollout `drain` stops the scheduler with `docker compose stop`; it must
+      # exit 0 well inside Docker's 10 s grace period (never SIGKILL / 137). Real
+      # container, production-shaped Compose, isolated throwaway project.
+      - name: Scheduler graceful-shutdown drill (real container)
+        env:
+          NLW_IMAGE: nlw:ci
+          NLW_WEB_IMAGE: nlw-web:ci
+        run: bash tests/drills/scheduler_shutdown_drill.sh
 
   web:
     name: Frontend (format, lint, typecheck, test, build)
