@@ -58,12 +58,21 @@ were run, and then the mutation was restored (byte-identical, checked by `diff`)
 | Migration allows `QUARANTINED → PROFILED / ACTIVE` | **2 failed**: unit parity with the trigger table, DB invalid-transition test |
 | Terminal `DELETED` guard removed from both triggers | **1 failed**: `test_deleted_is_terminal_even_for_the_table_owner` |
 | One-ACTIVE unique index made non-unique **and** the consistency trigger's count check removed | **1 failed**: `test_at_most_one_active_version_and_the_pointer_must_agree` |
+| Every policy keeps the membership check but loses its signed-tenant binding (`tenant_id = ctx_tenant_id()`) | **1 failed**: `test_policies_bind_to_the_signed_tenant_not_just_membership` (reads) — added after review; before it, **all 74 dataset tests passed** under this mutation |
+| Only the INSERT/UPDATE (admin) policies lose the signed-tenant binding | **1 failed**: the same test (forged inserts into the other workspace) |
 
 The first terminal-guard mutation run also allowed `DELETED → DELETING/ACTIVE`
 in the transition table. Only the parity test failed, because the row-shape
 CHECK constraints still refused every resurrection. The terminal test was then
 pinned to the guard's own error, and the guard-only mutation was rerun. The
 result is the one in the table above.
+
+Review finding (PR #46): the original tenant tests used a user who belonged
+to only one workspace, so they could not tell the signed-tenant binding apart
+from the membership check. A user who belongs to two workspaces, with the
+binding removed, could read and write the other workspace's rows, and no test
+failed. The regression test uses one user who owns both workspaces and signs
+into the wrong one.
 
 The API cross-tenant test stays green under the RLS mutation, by design: the
 service's own `tenant_id` predicates are a second, independent layer.
@@ -76,7 +85,7 @@ service's own `tenant_id` predicates are a second, independent layer.
 | `mypy` (342 files) | clean |
 | `alembic heads` | single head `0024_dataset_lifecycle` |
 | Unit suite | 1522 passed |
-| New integration suites | lifecycle DB 45, service 16, API 13 — all pass |
+| New integration suites | lifecycle DB 46, service 16, API 13 — all pass |
 | Full integration suite (excluding the browser harness, which CI runs) | 540 passed (25 min); dataset suites re-run on the final tree: 132 passed |
 | `pip-audit` (CI's command) | no known vulnerabilities; `uv.lock`/`pyproject.toml` unchanged |
 | Secret pattern scan of changed files | no findings in this diff |

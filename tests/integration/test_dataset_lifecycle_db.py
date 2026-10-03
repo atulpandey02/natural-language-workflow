@@ -571,6 +571,97 @@ def test_tenant_b_cannot_see_or_touch_tenant_a(pg_stack: SimpleNamespace) -> Non
         assert conn.execute("SELECT count(*) FROM datasets WHERE id=%s", (did,)).fetchone() == (1,)
 
 
+def test_policies_bind_to_the_signed_tenant_not_just_membership(
+    pg_stack: SimpleNamespace,
+) -> None:
+    """One user who is owner of BOTH workspaces, signed into B, must not reach
+    A's rows. Membership alone would allow it; only the policies' own
+    ``tenant_id = ctx_tenant_id()`` binding refuses it (the service's tenant
+    filter is a separate layer and is not involved here)."""
+    a = pg_stack.seed_member("owner")
+    b = pg_stack.seed_member("owner")
+    with _owner(pg_stack) as c:
+        c.execute(
+            "INSERT INTO memberships (id, user_id, workspace_id, role) VALUES (%s,%s,%s,'owner')",
+            (uuid.uuid4(), a.user_id, b.tenant_id),
+        )
+        did = _mk_dataset(c, a.tenant_id, a.user_id)
+        _mk_version(c, a.tenant_id, did, a.user_id)
+        c.execute(
+            "INSERT INTO dataset_events (id, tenant_id, dataset_id, event_type, to_status, "
+            "actor_kind, actor_user_id) VALUES (%s, %s, %s, 'DATASET_CREATED', 'ACTIVE', "
+            "'user', %s)",
+            (uuid.uuid4(), a.tenant_id, did, a.user_id),
+        )
+        # Prime the counter so a forged version insert is otherwise well-formed.
+        c.execute(
+            "UPDATE datasets SET last_version_number = last_version_number + 1 WHERE id = %s",
+            (did,),
+        )
+        next_n = c.execute(
+            "SELECT last_version_number FROM datasets WHERE id = %s", (did,)
+        ).fetchone()
+        assert next_n is not None
+
+    def counts(conn: psycopg.Connection[Any]) -> tuple[Any, ...]:
+        row = conn.execute(
+            "SELECT (SELECT count(*) FROM datasets WHERE tenant_id = %s), "
+            "(SELECT count(*) FROM dataset_versions WHERE tenant_id = %s), "
+            "(SELECT count(*) FROM dataset_events WHERE tenant_id = %s)",
+            (a.tenant_id, a.tenant_id, a.tenant_id),
+        ).fetchone()
+        assert row is not None
+        return tuple(row)
+
+    with _app(pg_stack, a.user_id, a.tenant_id) as conn:
+        assert counts(conn) == (1, 1, 1)  # the same user, signed into A, sees them
+
+    forged = (
+        (
+            "INSERT INTO datasets (id, tenant_id, name, normalized_name, status, created_by) "
+            "VALUES (%s, %s, 'Forged', 'forged', 'ACTIVE', %s)",
+            (uuid.uuid4(), a.tenant_id, a.user_id),
+        ),
+        (
+            "INSERT INTO dataset_versions (id, tenant_id, dataset_id, version_number, status, "
+            "original_filename, media_type, declared_size_bytes, created_by) "
+            "VALUES (%s, %s, %s, %s, 'QUARANTINED', 'f.csv', 'text/csv', 1, %s)",
+            (uuid.uuid4(), a.tenant_id, did, next_n[0], a.user_id),
+        ),
+        (
+            "INSERT INTO dataset_events (id, tenant_id, dataset_id, event_type, to_status, "
+            "actor_kind, actor_user_id) VALUES (%s, %s, %s, 'DATASET_CREATED', 'ACTIVE', "
+            "'user', %s)",
+            (uuid.uuid4(), a.tenant_id, did, a.user_id),
+        ),
+    )
+    with _app(pg_stack, a.user_id, b.tenant_id) as conn:
+        assert counts(conn) == (0, 0, 0)
+        for table in ("datasets", "dataset_versions"):
+            res = conn.execute(
+                f"UPDATE {table} SET updated_at = now() WHERE tenant_id = %s",  # noqa: S608
+                (a.tenant_id,),
+            )
+            assert res.rowcount == 0, table
+        for sql, args in forged:
+            with pytest.raises(
+                (psycopg.errors.InsufficientPrivilege, psycopg.errors.CheckViolation)
+            ):
+                conn.execute(sql, args)
+            conn.rollback()
+            pg_stack.apply_ctx(
+                conn, pg_stack.sign(Purpose.API_REQUEST, user_id=a.user_id, tenant_id=b.tenant_id)
+            )
+    with _owner(pg_stack) as c:
+        row = c.execute(
+            "SELECT (SELECT count(*) FROM datasets WHERE tenant_id = %s), "
+            "(SELECT count(*) FROM dataset_versions WHERE tenant_id = %s), "
+            "(SELECT count(*) FROM dataset_events WHERE tenant_id = %s)",
+            (a.tenant_id, a.tenant_id, a.tenant_id),
+        ).fetchone()
+    assert row == (1, 1, 1)  # nothing was forged into A
+
+
 def test_runtime_app_role_can_never_write_or_touch_a_tombstone(
     pg_stack: SimpleNamespace, ws: SimpleNamespace
 ) -> None:
