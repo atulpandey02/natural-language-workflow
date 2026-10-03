@@ -697,6 +697,39 @@ def test_runtime_app_role_can_never_write_or_touch_a_tombstone(
             conn.execute("UPDATE dataset_events SET reason_code = NULL")
 
 
+def test_runtime_app_role_cannot_forge_tombstone_or_operator_events(
+    pg_stack: SimpleNamespace, ws: SimpleNamespace
+) -> None:
+    """The audit trail's tombstone/operator entries can only come from the
+    operator path: an owner in the app role is refused by the events INSERT
+    policy (well-formed rows, so no CHECK constraint is what refuses them)."""
+    with _owner(pg_stack) as c:
+        did = _mk_dataset(c, ws.tenant, ws.user)
+        c.execute("UPDATE datasets SET status = 'DELETING' WHERE id = %s", (did,))
+    forged = (
+        ("DATASET_TOMBSTONED", "DELETING", "DELETED", "operator", None, "OPERATOR_TOMBSTONE"),
+        ("DATASET_TOMBSTONED", "DELETING", "DELETED", "user", ws.user, "OPERATOR_TOMBSTONE"),
+        ("DATASET_DELETION_REQUESTED", "ACTIVE", "DELETING", "operator", None, "USER_REQUEST"),
+    )
+    with _app(pg_stack, ws.user, ws.tenant) as conn:
+        for event_type, src, dst, kind, actor, reason in forged:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                conn.execute(
+                    "INSERT INTO dataset_events (id, tenant_id, dataset_id, event_type, "
+                    "from_status, to_status, actor_kind, actor_user_id, reason_code) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (uuid.uuid4(), ws.tenant, did, event_type, src, dst, kind, actor, reason),
+                )
+            conn.rollback()
+            pg_stack.apply_ctx(
+                conn, pg_stack.sign(Purpose.API_REQUEST, user_id=ws.user, tenant_id=ws.tenant)
+            )
+    with _owner(pg_stack) as c:
+        assert c.execute(
+            "SELECT count(*) FROM dataset_events WHERE dataset_id = %s", (did,)
+        ).fetchone() == (0,)
+
+
 @pytest.mark.parametrize("role", ["nlw_worker", "nlw_scheduler", "public"])
 def test_worker_scheduler_and_public_have_no_dataset_privileges(
     pg_stack: SimpleNamespace, role: str

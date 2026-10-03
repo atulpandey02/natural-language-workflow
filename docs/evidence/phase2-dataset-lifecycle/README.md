@@ -60,6 +60,7 @@ were run, and then the mutation was restored (byte-identical, checked by `diff`)
 | One-ACTIVE unique index made non-unique **and** the consistency trigger's count check removed | **1 failed**: `test_at_most_one_active_version_and_the_pointer_must_agree` |
 | Every policy keeps the membership check but loses its signed-tenant binding (`tenant_id = ctx_tenant_id()`) | **1 failed**: `test_policies_bind_to_the_signed_tenant_not_just_membership` (reads) — added after review; before it, **all 74 dataset tests passed** under this mutation |
 | Only the INSERT/UPDATE (admin) policies lose the signed-tenant binding | **1 failed**: the same test (forged inserts into the other workspace) |
+| Events INSERT policy loses `actor_kind <> 'operator' AND to_status <> 'DELETED'` | **1 failed**: `test_runtime_app_role_cannot_forge_tombstone_or_operator_events` — added after review; nothing caught it before |
 
 The first terminal-guard mutation run also allowed `DELETED → DELETING/ACTIVE`
 in the transition table. Only the parity test failed, because the row-shape
@@ -85,7 +86,7 @@ service's own `tenant_id` predicates are a second, independent layer.
 | `mypy` (342 files) | clean |
 | `alembic heads` | single head `0024_dataset_lifecycle` |
 | Unit suite | 1522 passed |
-| New integration suites | lifecycle DB 46, service 16, API 13 — all pass |
+| New integration suites | lifecycle DB 47, service 16, API 13 — all pass |
 | Full integration suite (excluding the browser harness, which CI runs) | 540 passed (25 min); dataset suites re-run on the final tree: 132 passed |
 | `pip-audit` (CI's command) | no known vulnerabilities; `uv.lock`/`pyproject.toml` unchanged |
 | Secret pattern scan of changed files | no findings in this diff |
