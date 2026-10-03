@@ -253,8 +253,9 @@ of a `0600` file and **never** echoed, logged, passed on argv, or committed.
 ### After activation: every later rollout follows `current` (N → N+1)
 
 * The first rollout is done: `deploy/staging/target.env` now names
-  `NLW_STAGING_REMOTE_APP=/opt/nlw/current` and (since the M12C rollout)
-  `NLW_STAGING_CURRENT_REVISION=0021_analytics_handoff`. Every phase
+  `NLW_STAGING_REMOTE_APP=/opt/nlw/current` and (since the Phase 2 rollout of
+  `10820a8`) `NLW_STAGING_CURRENT_REVISION=0023_plan_outcome_events`. Update it in
+  the same change after every rollout that migrates the host. Every phase
   reads, stops, `exec`s into and clones **through `current`** (the previous
   release N); `stage-release` fetches the release SHA from the reviewed
   `NLW_STAGING_GIT_REMOTE` (GitHub), not the local clone chain; `prepare-keys`

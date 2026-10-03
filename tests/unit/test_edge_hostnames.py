@@ -105,7 +105,7 @@ def test_committed_target_names_the_reviewed_primary_and_fallback() -> None:
     values = parse_target_env(TARGET.read_text())
     assert values["NLW_STAGING_PUBLIC_HOSTNAME"] == PRIMARY
     assert values["NLW_STAGING_PUBLIC_HOSTNAME_FALLBACK"] == FALLBACK
-    assert values["NLW_STAGING_CURRENT_REVISION"] == "0021_analytics_handoff"
+    assert values["NLW_STAGING_CURRENT_REVISION"] == "0023_plan_outcome_events"
     target = load_target(TARGET)
     assert (target.public_hostname, target.public_hostname_fallback) == (PRIMARY, FALLBACK)
 
