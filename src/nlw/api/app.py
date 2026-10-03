@@ -38,6 +38,7 @@ from nlw.api.routers import (
     analytics,
     approvals,
     connectors,
+    datasets,
     identity,
     members,
     plans,
@@ -167,6 +168,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(workflows.router)
     app.include_router(analytics.router)
     app.include_router(runs.router)
+    # Dataset metadata routes (ADR-029) exist only when explicitly enabled; the
+    # setting is refused in staging/production until upload and deletion exist.
+    if settings.datasets_api_enabled:
+        app.include_router(datasets.router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

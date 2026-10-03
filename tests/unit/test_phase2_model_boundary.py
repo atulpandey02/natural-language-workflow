@@ -16,7 +16,7 @@ import pytest
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "nlw"
 PLANNING_PATH = ("planner", "feasibility", "registry", "tools", "api/capability.py", "eval")
-NEW_PACKAGES = ("nlw.ingest", "nlw.storage")
+NEW_PACKAGES = ("nlw.ingest", "nlw.storage", "nlw.datasets")
 FORBIDDEN_FOR_INGEST = (
     "nlw.planner",
     "nlw.feasibility",
@@ -94,3 +94,44 @@ def test_profiling_opens_no_socket(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "create_connection", _no_network)
     p = profile_csv(b"site,open\nA,1\nB,2\n")
     assert p.row_count == 2
+
+
+# Dataset metadata (ADR-029) may use the database, but never the planner, tools,
+# a model provider, HTTP, sockets, a query engine or the ingestion/storage layer
+# (no bytes are read or written yet).
+FORBIDDEN_FOR_DATASETS = (
+    "nlw.planner",
+    "nlw.feasibility",
+    "nlw.registry",
+    "nlw.tools",
+    "nlw.connectors",
+    "nlw.engine",
+    "nlw.ingest",
+    "nlw.storage",
+    "anthropic",
+    "httpx",
+    "requests",
+    "socket",
+    "urllib",
+    "sqlglot",
+    "duckdb",
+)
+
+
+def test_dataset_metadata_imports_no_planner_provider_storage_or_query_engine() -> None:
+    offenders = [
+        f"{f.relative_to(SRC)}:{m}"
+        for f in _files("datasets")
+        for m in _imports(f)
+        if any(m == bad or m.startswith(bad + ".") for bad in FORBIDDEN_FOR_DATASETS)
+    ]
+    assert _files("datasets"), "the dataset package must exist"
+    assert offenders == []
+
+
+def test_planner_capability_view_has_no_dataset_route_or_tool() -> None:
+    import nlw.tools.builtin  # noqa: F401  (populate the registry as the API does)
+    from nlw.registry.registry import REGISTRY
+
+    names = [t.name for t in REGISTRY.all()]
+    assert not [n for n in names if "dataset" in n.lower()]

@@ -206,6 +206,12 @@ class Settings(BaseSettings):
     # so any other value refuses to start in every environment.
     workspace_creation_mode: Literal["grant", "closed"] = "grant"
 
+    # --- Dataset metadata API (Phase 2A, ADR-029) ---
+    # Metadata-only `/datasets` routes are mounted ONLY when true. Uploads and
+    # end-to-end deletion do not exist yet (owner decision 12), so staging and
+    # production refuse to start with this enabled.
+    datasets_api_enabled: bool = False
+
     @property
     def demo_tools_visible(self) -> bool:
         """Demo tools reach new planning only on an explicit operator ``true``."""
@@ -240,6 +246,11 @@ class Settings(BaseSettings):
             and ("llm_model" not in self.model_fields_set or not self.llm_model.strip())
         ):
             raise ValueError("NLW_LLM_MODEL must be set explicitly in staging/production")
+        if self.datasets_api_enabled and self.app_env in ("staging", "production"):
+            raise ValueError(
+                "DATASETS_API_ENABLED is not allowed in staging/production until dataset "
+                "upload and end-to-end deletion exist"
+            )
         return self
 
     @property

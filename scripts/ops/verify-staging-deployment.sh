@@ -132,7 +132,7 @@ if [ -n "$alv" ] && [ -n "$alhead" ] && [ "$alv" = "$alhead" ]; then ok "schema 
 ctx="$(rsh "$DC exec -T postgres psql -U nlw -d nlw -tAc \"SELECT (SELECT tableowner FROM pg_tables WHERE tablename='ctx_keys')||'|'||(SELECT count(*) FROM pg_policies)||'|'||(SELECT count(*) FROM pg_policies WHERE qual LIKE '%app.user_id%' OR qual LIKE '%app.tenant_id%' OR with_check LIKE '%app.user_id%' OR with_check LIKE '%app.tenant_id%')||'|'||(SELECT count(*) FROM ctx_keys WHERE status='active')\"" 2>/dev/null | tr -d '[:space:]')"
 info "ctx_keys owner|policies|legacy|active_keys = ${ctx:-<query failed>}"
 case "$ctx" in
-  nlw_ctx_verifier\|53\|0\|[3-9]*) ok "signed-context registry: verifier-owned, 53 policies (0016 + 0023), 0 legacy, >=3 active keys" ;;
+  nlw_ctx_verifier\|61\|0\|[3-9]*) ok "signed-context registry: verifier-owned, 61 policies (0016 + 0023 + 0024), 0 legacy, >=3 active keys" ;;
   *) flag "signed-context registry posture not as expected" ;;
 esac
 

@@ -27,6 +27,7 @@ from psycopg import sql
 
 Artefact = Literal[
     "workspace_metadata",
+    "dataset_metadata",
     "workflow_definitions",
     "reports_and_results",
     "external_delivery_record",
@@ -72,6 +73,20 @@ TABLES: dict[str, TableClass] = {
         "audit",
         "tenant_id",
         "retain (ids/codes only); period is a pilot proposal, not yet approved",
+    ),
+    # Dataset metadata (ADR-029): no file bytes or rows live in these tables.
+    "datasets": TableClass(
+        "dataset_metadata",
+        "tenant_id",
+        "request deletion -> DELETING; operator tombstone -> DELETED (names scrubbed)",
+    ),
+    "dataset_versions": TableClass(
+        "dataset_metadata",
+        "tenant_id",
+        "-> DELETING with the dataset; operator tombstone scrubs filename and storage key",
+    ),
+    "dataset_events": TableClass(
+        "audit", "tenant_id", "retain (codes and ids only); period is a pilot proposal"
     ),
     "plan_outcome_events": TableClass(
         "audit", "tenant_id", "retain (codes only); proposed 13 months, not yet approved"
