@@ -3,7 +3,27 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
-## Phase 2 foundations (branch `feat/phase2-foundations`, awaiting review)
+## Phase 2A — dataset lifecycle foundation (branch `feat/phase2-dataset-lifecycle`, awaiting review)
+
+Branched from `main` at `9972830` (staging runs that release at revision
+`0023`). Migration `0024_dataset_lifecycle` makes this a migration release
+(`0023 → 0024`); the signed-policy inventory becomes **61** (53 + 8).
+[ADR-029](adr/ADR-029-dataset-lifecycle-foundation.md) ·
+[runbook](runbooks/dataset-metadata-deletion.md) ·
+[evidence](evidence/phase2-dataset-lifecycle/README.md).
+
+- Tenant-isolated `datasets`, immutable `dataset_versions` and append-only
+  `dataset_events` with forced RLS on the signed context; explicit states
+  enforced by database triggers (nothing leaves `DELETED`, one active version,
+  pointer consistency, atomic version numbering).
+- Admin/owner deletion **requests** (`DELETING`, idempotent); an operator-only
+  tombstone (`DELETED`, names scrubbed, evidence kept).
+- Metadata API behind `DATASETS_API_ENABLED`, **refused in staging and
+  production**. **No upload, no customer file or object, no profiling table,
+  no planner or model access, no query execution.** Customers still cannot
+  upload data.
+
+## Phase 2 foundations (merged; historical notes written before the push)
 
 Implements the unblocked parts of the Phase 2 plan (Edition 2) on top of `main`
 at `fcfd4d5`. Not pushed, not deployed; staging still runs `b1a3058` at

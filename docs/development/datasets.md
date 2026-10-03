@@ -1,8 +1,12 @@
 # Datasets (Phase 2 B04) — development notes
 
-Status: **library layer only.** Nothing here is reachable from the API, the
-worker, the planner or any model call. The first PR's database, API, ingestion
-worker and UI are not implemented yet (see "Remaining" below).
+Status: **library layer + metadata lifecycle foundation.** The ingestion
+libraries below are reachable from no API, worker, planner or model call. The
+dataset **metadata** lifecycle (tables, states, authorization, tombstones;
+[ADR-029](../adr/ADR-029-dataset-lifecycle-foundation.md), migration `0024`)
+exists, behind a flag that staging and production refuse. There is still **no
+upload, no stored customer file, no profile table, no planner access and no
+query execution** (see "Remaining" below).
 
 ## What exists
 
@@ -12,6 +16,11 @@ worker and UI are not implemented yet (see "Remaining" below).
 | `nlw.ingest.validate` | Stable reject codes; magic-byte refusal (zip/xlsx, PDF, OLE, ELF, PE, gzip/bzip2/xz/7z/rar, images, Parquet/Arrow, SQLite); NUL bytes refused unless UTF-16 BOM; encoding detection (UTF-8 with/without BOM, UTF-16 with BOM accepted; Windows-1252 accepted only with user confirmation; UTF-32 refused); control-character and line-length checks. |
 | `nlw.ingest.schema` | `profile-1` Pydantic contract (`extra="forbid"`): a flagged column carries no samples and no min/max; samples only for columns with ≤ 50 distinct values, ≤ 10 values, ≤ 32 chars each. |
 | `nlw.ingest.profile` | Deterministic, bounded profiler: byte/row/column/field/time limits; delimiter sniffing among `, ; \t \|`; header detection and normalisation (snake_case, ASCII fold, leading-digit prefix, ≤ 63 chars, duplicate suffixes); null tokens; type inference at ≥ 98 % (slash dates are never guessed); formula-prefix census; deterministic sensitivity detectors (header keywords; SSN, Luhn card, email, phone, ZIP+4 values; high-cardinality free text). SSN and card are `EXCLUDE` with `hard=true`. |
+
+| `nlw.datasets.lifecycle` | Dataset/version states, the transition table (equal to the migration's trigger, by test), closed event/reason/rejection vocabularies, and metadata normalizers (names, descriptions, filenames, declared size, media type) with stable error codes. |
+| `nlw.datasets.service` | Tenant-scoped async operations on `nlw_app` under a signed `api_request` context: create dataset, create version (atomic numbering), profiling/rejection transitions, activation (supersedes the previous version), idempotent dataset/version deletion requests; one append-only event per transition. |
+| `nlw.api.routers.datasets` | Metadata routes (list/create/read/delete datasets; list/read/delete versions), mounted only when `DATASETS_API_ENABLED=true` (refused in staging/production). No version-create, upload, activation or status route. |
+| `nlw.ops.datasets` | Operator `pending` / `tombstone` CLI (owner credential; [runbook](../runbooks/dataset-metadata-deletion.md)). |
 
 Boundary regressions (`tests/unit/test_phase2_model_boundary.py`): the planning
 path imports neither package; the ingestion packages import no planner,
@@ -78,14 +87,18 @@ streaming cap" alternative in plan §21.
    external customer onboarding; uploads stay disabled until deletion works
    end to end. Still open: the customer deletion statement (plan §0.6), whose
    retention figures are pilot proposals, not commitments.
-2. Migration: `datasets`, `dataset_uploads`, `dataset_profiles`, a
-   tombstone table; RLS (update `EXPECTED_SIGNED_POLICIES` in all three
-   places); `nlw_ingest` role in `docker/postgres/initdb/00-roles.sh` and
+2. **Done in `0024` (ADR-029):** `datasets`, `dataset_versions` (the
+   sketch's `dataset_uploads`), append-only `dataset_events`; the tombstone is
+   the scrubbed `DELETED` row plus its events rather than a separate table;
+   forced RLS with 8 signed-context policies (`EXPECTED_SIGNED_POLICIES = 61`).
+   **Still remaining:** `dataset_profiles`; `nlw_ingest` role in `docker/postgres/initdb/00-roles.sh` and
    `nlw.ops.roles`; `ingest_execution` purpose in `nlw.tenancy.signing` and the
    verifier's purpose→role map; ingest key class for `nlw.ctxkeys`.
-3. API: `POST/GET /datasets`, `POST /datasets/{id}/uploads` (streaming cap
-   above), `GET /uploads/{id}`, `GET /uploads/{id}/profile`,
-   `DELETE /datasets/{id}` behind `DATASETS_ENABLED`; audit events.
+3. API: metadata `POST/GET/DELETE /datasets…` and version reads exist behind
+   `DATASETS_API_ENABLED` (ADR-029). **Still remaining:**
+   `POST /datasets/{id}/uploads` (streaming cap above), the profile read,
+   physical object deletion before the tombstone, and the external deletion
+   log (launch gate).
 4. Ingestion actor on queue `ingest` (idempotent per upload, 3 attempts,
    stuck gauge), Compose service and rollout `validate` checks.
 5. Web: datasets pages, dropzone, profile table; Playwright journey.

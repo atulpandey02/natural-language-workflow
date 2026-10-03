@@ -28,3 +28,4 @@ control plane) and the internal Prometheus metrics (ADR-016).
 - [inspect-failed-run.md](inspect-failed-run.md)
 - [action-outcome-unknown.md](action-outcome-unknown.md) — reconcile an ambiguous (UNKNOWN) external action
 - [workspace-creation-grants.md](workspace-creation-grants.md) — issue/revoke operator grants for founding a workspace (Phase 2 B01)
+- [dataset-metadata-deletion.md](dataset-metadata-deletion.md) — list and tombstone deleted dataset metadata (ADR-029; metadata only, no objects yet)
