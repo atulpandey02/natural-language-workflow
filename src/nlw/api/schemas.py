@@ -1,9 +1,10 @@
 """Request/response models for the API."""
 
 import uuid
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class UserOut(BaseModel):
@@ -299,3 +300,52 @@ class RunCreateOut(BaseModel):
     run_id: uuid.UUID
     status: str
     idempotent_hit: bool
+
+
+# --- Datasets (Phase 2A, ADR-029): metadata only -----------------------------
+# Raw input bounds are generous upper limits; the service applies the exact
+# normalized contract (nlw.datasets.lifecycle) and refuses with a stable code.
+# extra="forbid": tenant, actor, status, version numbers and the active-version
+# pointer are always derived server-side and can never be supplied.
+
+
+class DatasetCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class DatasetOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    description: str | None
+    status: Literal["ACTIVE", "DELETING"]
+    active_version_id: uuid.UUID | None
+    version_count: int
+    created_by: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+    deletion_requested_at: datetime | None
+
+
+class DatasetVersionOut(BaseModel):
+    """No storage key, URL or path is ever returned."""
+
+    id: uuid.UUID
+    dataset_id: uuid.UUID
+    version_number: int
+    status: Literal[
+        "QUARANTINED", "PROFILING", "PROFILED", "ACTIVE", "SUPERSEDED", "REJECTED", "DELETING"
+    ]
+    original_filename: str
+    media_type: str
+    declared_size_bytes: int
+    content_sha256: str | None
+    rejection_code: str | None
+    created_by: uuid.UUID
+    created_at: datetime
+    activated_at: datetime | None
+    superseded_at: datetime | None
+    rejected_at: datetime | None
+    deletion_requested_at: datetime | None
