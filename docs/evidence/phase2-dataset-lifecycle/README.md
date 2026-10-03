@@ -61,6 +61,7 @@ were run, and then the mutation was restored (byte-identical, checked by `diff`)
 | Every policy keeps the membership check but loses its signed-tenant binding (`tenant_id = ctx_tenant_id()`) | **1 failed**: `test_policies_bind_to_the_signed_tenant_not_just_membership` (reads) — added after review; before it, **all 74 dataset tests passed** under this mutation |
 | Only the INSERT/UPDATE (admin) policies lose the signed-tenant binding | **1 failed**: the same test (forged inserts into the other workspace) |
 | Events INSERT policy loses `actor_kind <> 'operator' AND to_status <> 'DELETED'` | **1 failed**: `test_runtime_app_role_cannot_forge_tombstone_or_operator_events` — added after review; nothing caught it before |
+| Service drops `tenant_id = :t` from a statement (module constant, or inline `text()`) | **1 failed**: unit `test_every_service_statement_is_scoped_to_the_callers_tenant` — with RLS intact no integration test can see this layer, so it is pinned statically |
 
 The first terminal-guard mutation run also allowed `DELETED → DELETING/ACTIVE`
 in the transition table. Only the parity test failed, because the row-shape

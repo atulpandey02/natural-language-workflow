@@ -245,3 +245,40 @@ def test_metadata_api_flag_is_refused_where_customers_are(env: str) -> None:
 def test_metadata_api_flag_defaults_off_and_is_allowed_locally() -> None:
     assert Settings(_env_file=None).datasets_api_enabled is False  # type: ignore[call-arg]
     assert Settings(_env_file=None, app_env="local", datasets_api_enabled=True).datasets_api_enabled  # type: ignore[call-arg]
+
+
+# --- service tenant filter (a layer independent of RLS) ---------------------------
+
+
+def _service_sql() -> list[str]:
+    import ast
+
+    from nlw.datasets import service
+
+    # Every module-level statement, plus every literal passed to text() inline;
+    # a text() argument that is a name must be one of those constants or the
+    # local ``sql`` that selects between them.
+    statements = [v for k, v in vars(service).items() if k.startswith("_SQL_")]
+    tree = ast.parse(Path(service.__file__).read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "text":
+            arg = node.args[0]
+            if isinstance(arg, ast.Name):
+                assert arg.id == "sql" or arg.id.startswith("_SQL_"), arg.id
+            else:
+                assert isinstance(arg, ast.Constant), ast.dump(arg)
+                statements.append(arg.value)
+    return statements
+
+
+def test_every_service_statement_is_scoped_to_the_callers_tenant() -> None:
+    """RLS is the primary isolation layer; the service's own tenant predicate is
+    the second. With RLS intact a missing predicate is invisible to integration
+    tests, so it is pinned here, statement by statement."""
+    statements = _service_sql()
+    assert len(statements) >= 12
+    for sql in statements:
+        if sql.lstrip().upper().startswith("INSERT"):
+            assert "tenant_id" in sql and (":t," in sql or ":tenant_id" in sql), sql
+        else:
+            assert "tenant_id = :t" in sql, sql
