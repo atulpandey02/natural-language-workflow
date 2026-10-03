@@ -84,16 +84,18 @@ def test_generator_derives_target_revision_from_this_checkout() -> None:
     assert doc["expected_current_revision"] == "0010_readiness_schema_grant"
 
 
-def test_committed_target_env_yields_a_migration_release_from_0021() -> None:
-    """The host is recorded at 0021 (M12C rollout); this checkout's head is 0023
-    (Phase 2 B01 grants + B02 outcome events), so CI produces a MIGRATION-REQUIRING
-    release from the committed target: expected 0021, target 0023, the image gate
-    requires every migration file through 0023 and the live-revision gate stays.
-    The manifest records the reviewed PRIMARY hostname (the fallback never)."""
+def test_committed_target_env_yields_a_code_only_release_from_0023() -> None:
+    """The host is recorded at 0023 (the Phase 2 rollout of 10820a8 migrated it
+    0021 -> 0023) and this checkout's head is 0023, so CI produces a CODE-ONLY
+    release from the committed target: expected 0023, target 0023. The image gate
+    requires the image's migration head to be exactly 0023 (no new migration files
+    are required between equal revisions), and the live-revision gate refuses the
+    stale 0021 the target used to record. The manifest records the reviewed
+    PRIMARY hostname (the fallback never)."""
     text = COMMITTED_TARGET_ENV.read_text()
-    assert "NLW_STAGING_CURRENT_REVISION=0021_analytics_handoff" in text
+    assert "NLW_STAGING_CURRENT_REVISION=0023_plan_outcome_events" in text
     doc = _gen(target_env=COMMITTED_TARGET_ENV, target_revision=None)
-    assert doc["expected_current_revision"] == "0021_analytics_handoff"
+    assert doc["expected_current_revision"] == "0023_plan_outcome_events"
     assert doc["target_revision"] == "0023_plan_outcome_events"
     assert doc["public_hostname"] == "app.nlwplatform.com"
     assert "sslip" not in json.dumps(doc)
@@ -101,10 +103,19 @@ def test_committed_target_env_yields_a_migration_release_from_0021() -> None:
     info = dict(GOOD_INFO, alembic_head="0023_plan_outcome_events",
                 migrations=[f"{n:04d}_x.py" for n in range(1, 24)])  # fmt: skip
     gates.check_image_info(info, m)
-    with pytest.raises(GateError):
-        gates.check_image_info({**info, "migrations": info["migrations"][:-1]}, m)
+    with pytest.raises(GateError, match="migration head"):
+        gates.check_image_info({**info, "alembic_head": "0022_workspace_creation_grants"}, m)
+    gates.check_current_revision("0023_plan_outcome_events", m.expected_current_revision)
     with pytest.raises(GateError, match="unknown migration state"):
-        gates.check_current_revision("0020_schedule_authorization", m.expected_current_revision)
+        gates.check_current_revision("0021_analytics_handoff", m.expected_current_revision)
+
+
+def test_a_0021_target_still_yields_the_0021_to_0023_migration_release() -> None:
+    # The migration-requiring path (a host recorded at 0021) stays covered from an
+    # explicit 0021 copy of the committed target.
+    doc = _gen(target_env=_target_env_at("0021_analytics_handoff"), target_revision=None)
+    assert doc["expected_current_revision"] == "0021_analytics_handoff"
+    assert doc["target_revision"] == "0023_plan_outcome_events"
 
 
 def test_checkout_head_requires_new_migrations_from_a_0020_target(tmp_path: Path) -> None:
@@ -113,7 +124,7 @@ def test_checkout_head_requires_new_migrations_from_a_0020_target(tmp_path: Path
     target = tmp_path / "target.env"
     target.write_text(
         COMMITTED_TARGET_ENV.read_text().replace(
-            "NLW_STAGING_CURRENT_REVISION=0021_analytics_handoff",
+            "NLW_STAGING_CURRENT_REVISION=0023_plan_outcome_events",
             "NLW_STAGING_CURRENT_REVISION=0020_schedule_authorization",
         )
     )

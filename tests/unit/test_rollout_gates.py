@@ -75,9 +75,9 @@ def test_committed_example_is_rejected_and_target_env_is_consistent() -> None:
         load_release(ROOT / "deploy" / "staging" / "release.example.json")
     tgt = parse_target_env((ROOT / "deploy" / "staging" / "target.env").read_text())
     assert tgt["NLW_STAGING_INSTANCE_ID"] == REL.instance_id
-    # The M12C rollout completed: the host is at 0021 and served through current;
-    # the edge serves the reviewed primary plus the instance's sslip fallback.
-    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0021_analytics_handoff"
+    # The Phase 2 (10820a8) rollout completed: the host is at 0023 and served through
+    # current; the edge serves the reviewed primary plus the instance's sslip fallback.
+    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0023_plan_outcome_events"
     assert tgt["NLW_STAGING_PUBLIC_HOSTNAME"] == "app.nlwplatform.com"
     assert tgt["NLW_STAGING_PUBLIC_HOSTNAME_FALLBACK"] == "32-197-83-193.sslip.io"
     assert tgt["NLW_STAGING_REMOTE_APP"] == "/opt/nlw/current"
