@@ -520,8 +520,9 @@ def test_no_live_policy_or_helper_trusts_unsigned_gucs(pg_stack: SimpleNamespace
             "SELECT p.proname, p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
             "WHERE n.nspname='public'"
         ).fetchall()
-    # The complete inventory survived the cutover: 51 from 0016 + 2 from 0023.
-    assert len(pols) == 53
+    # The complete inventory survived the cutover: 51 from 0016 + 2 from 0023
+    # + 8 from 0024 (dataset metadata).
+    assert len(pols) == 61
     offenders = [
         f"{t}.{n}" for n, t, q, w in pols if "app.user_id" in q + w or "app.tenant_id" in q + w
     ]
