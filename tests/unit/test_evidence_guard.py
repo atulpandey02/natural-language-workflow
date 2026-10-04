@@ -7,11 +7,9 @@ name files and rule ids only, never the matched value.
 
 from __future__ import annotations
 
-import base64
 import importlib.util
 import io
 import sys
-import zipfile
 from pathlib import Path
 from types import ModuleType
 
@@ -66,8 +64,9 @@ SECRETS = [
 ]
 
 
-def test_the_built_in_canary_self_test_passes_for_all_ten_canaries() -> None:
-    assert len(G._CANARIES) == 10
+def test_the_built_in_canary_self_test_passes_for_all_eleven_canaries() -> None:
+    assert len(G._CANARIES) == 11
+    assert "typed-password" in G._CANARIES
     assert G.self_test() == []
     assert G.main(["self-test"]) == 0
 
@@ -107,46 +106,93 @@ def test_environment_secret_values_are_detected_wherever_they_appear() -> None:
     ]
 
 
-def _report(payload: str) -> str:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("report.json", payload)
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    return (
-        "<html><script>window.playwrightReportBase64 = "
-        f"'data:application/zip;base64,{b64}';</script></html>"
-    )
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+WEBM = b"\x1a\x45\xdf\xa3" + b"\x00" * 16
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16
 
 
-def test_scan_inspects_the_zip_embedded_in_the_html_report(tmp_path: Path) -> None:
-    clean = tmp_path / "clean"
-    (clean / "playwright-report").mkdir(parents=True)
-    (clean / "playwright-report/index.html").write_text(_report('{"title": "happy path"}'))
-    assert G.scan(clean, SECRETS) == []
-
-    dirty = tmp_path / "dirty"
-    (dirty / "playwright-report").mkdir(parents=True)
-    (dirty / "playwright-report/index.html").write_text(
-        _report('{"step": "Authorization: Bearer abcdefghijklmnopQRST1234"}')
-    )
-    hits = G.scan(dirty, SECRETS)
-    assert ("playwright-report/index.html!report.json", "auth-header") in hits
-
-
-def test_scan_fails_closed_on_traces_archives_and_undecodable_reports(tmp_path: Path) -> None:
-    (tmp_path / "test-results/t1").mkdir(parents=True)
-    (tmp_path / "test-results/t1/trace.zip").write_bytes(b"PK\x03\x04")
-    (tmp_path / "test-results/t1/trace").write_text("{}")
-    (tmp_path / "index.html").write_text("data:application/zip;base64,bm90LWEtemlw")
-    rules = {rule for _, rule in G.scan(tmp_path, [])}
-    assert {"trace-or-archive", "undecodable-report"} <= rules
+def test_scan_is_an_allowlist_html_reports_traces_zips_and_dumps_are_never_safe(
+    tmp_path: Path,
+) -> None:
+    for rel in (
+        "playwright-report/index.html",
+        "test-results/t1/trace.zip",
+        "test-results/t1/trace",
+        "test-results/t1/report.json",
+        "test-results/.env",
+        "test-results/.env.local",
+        "db.dump",
+        "globals.sql",
+        "id_rsa.key",
+        "cookies.txt.bak",
+    ):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes(b"x")
+    hits = dict(G.scan(tmp_path, []))
+    assert set(hits.values()) == {"disallowed-file-type"}
+    assert len(hits) == 10
 
 
-def test_binary_screenshots_and_video_are_kept_but_not_text_scanned(tmp_path: Path) -> None:
-    (tmp_path / "shot.png").write_bytes(b"\x89PNG password=hunter2hunter2")
-    (tmp_path / "video.webm").write_bytes(b"\x1aE\xdf\xa3")
+def test_binary_artifacts_must_match_their_format(tmp_path: Path) -> None:
+    (tmp_path / "shot.png").write_bytes(PNG)
+    (tmp_path / "shot.jpg").write_bytes(JPEG)
+    (tmp_path / "video.webm").write_bytes(WEBM)
     (tmp_path / "error-context.md").write_text("# Page snapshot\n- heading 'Connectors'\n")
     assert G.scan(tmp_path, SECRETS) == []
+    # A text file disguised as a screenshot (or a truncated signature) is unsafe.
+    (tmp_path / "disguised.png").write_bytes(b"\x89PNG password=hunter2hunter2")
+    (tmp_path / "fake.webm").write_text("Authorization: Bearer abcdefghijklmnopQRST1234")
+    hits = dict(G.scan(tmp_path, SECRETS))
+    assert hits == {
+        "disguised.png": "unexpected-binary-content",
+        "fake.webm": "unexpected-binary-content",
+    }
+
+
+def test_malformed_text_and_symlinks_fail_closed(tmp_path: Path) -> None:
+    (tmp_path / "bad.md").write_bytes(b"\xff\xfe not utf-8")
+    (tmp_path / "nul.txt").write_bytes(b"ok\x00hidden")
+    (tmp_path / "target.md").write_text("fine")
+    (tmp_path / "link.md").symlink_to(tmp_path / "target.md")
+    hits = dict(G.scan(tmp_path, []))
+    assert hits == {"bad.md": "malformed-text", "nul.txt": "malformed-text", "link.md": "symlink"}
+    with pytest.raises(ValueError):
+        G.redact_tree(tmp_path, [])
+    assert G.main(["redact-tree", str(tmp_path)]) == 3
+
+
+def test_typed_input_arguments_are_redacted_and_detected() -> None:
+    for line in (
+        '  - locator.fill("hunter2hunter2")',
+        "await page.getByLabel('Password').type('hunter2hunter2')",
+        "pressSequentially(`hunter2hunter2`)",
+        'keyboard.insertText("hunter2hunter2")',
+    ):
+        assert "typed-input" in G.findings(line, [])
+        redacted = G.redact(line)
+        assert "hunter2hunter2" not in redacted and "[REDACTED]" in redacted
+        assert G.findings(redacted, []) == []
+
+
+def test_literal_job_secret_values_are_redacted() -> None:
+    secret = _fake("e2e-pass-")
+    text = f'- textbox "Password" [value={secret}]\nTyped {secret} into the form'
+    redacted = G.redact(text, [secret])
+    assert secret not in redacted and redacted.count("[REDACTED]") == 2
+    assert G.findings(redacted, [secret]) == []
+
+
+def test_redact_tree_redacts_every_text_artifact_in_place(tmp_path: Path) -> None:
+    secret = _fake("e2e-pass-")
+    (tmp_path / "t1").mkdir()
+    (tmp_path / "t1/error-context.md").write_text(f'locator.fill("{secret}")\nPassword: {secret}')
+    (tmp_path / "t1/notes.txt").write_text(f"Cookie: sb={secret}")
+    (tmp_path / "t1/shot.png").write_bytes(PNG)
+    assert G.redact_tree(tmp_path, [secret]) == 2
+    for name in ("t1/error-context.md", "t1/notes.txt"):
+        assert secret not in (tmp_path / name).read_text()
+    assert (tmp_path / "t1/shot.png").read_bytes() == PNG  # binaries untouched
+    assert G.scan(tmp_path, [secret]) == []
 
 
 def test_diagnostics_name_files_and_rules_but_never_the_value(

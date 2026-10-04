@@ -241,8 +241,8 @@ jobs:
         env:
           E2E_REQUIRED: "1"
           E2E_BASE_URL: http://127.0.0.1:8080
-          # Screenshots + video of FAILED tests and an HTML report (traces stay
-          # off: they would carry cookies and authorization headers).
+          # Screenshots + video of FAILED tests (no HTML report: it embeds raw
+          # authenticated report data; traces stay off: cookies/auth headers).
           E2E_FAILURE_EVIDENCE: "1"
         run: |
           npm ci
@@ -250,10 +250,11 @@ jobs:
           npx playwright test
 
       # Only when the browser suite itself failed, while the stack is still up.
-      # The collector copies screenshots/video/error-context/HTML report (never
-      # traces), adds a bounded REDACTED api/web/worker log slice, and scans the
-      # result fail-closed (scripts/ci/evidence_guard.py): any credential-like
-      # content -> logs dropped, or nothing uploaded at all.
+      # The collector copies screenshots/video/error-context.md by allowlist
+      # (never the HTML report, traces, ZIPs, JSON, .env* or dumps), REDACTS every
+      # text artifact and a bounded api/web/worker log slice, and scans the result
+      # fail-closed (scripts/ci/evidence_guard.py): credential-like content in logs
+      # -> logs dropped; anything unsafe elsewhere -> nothing uploaded at all.
       - name: Collect browser failure evidence (sanitized)
         id: browser_evidence
         if: failure() && steps.playwright.outcome == 'failure'

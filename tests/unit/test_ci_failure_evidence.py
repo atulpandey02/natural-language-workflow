@@ -45,15 +45,13 @@ def test_traces_are_disabled_everywhere() -> None:
     )
 
 
-def test_screenshots_video_and_html_report_only_with_failure_evidence_enabled() -> None:
+def test_screenshots_and_video_only_with_failure_evidence_and_never_an_html_report() -> None:
     text = CONFIG.read_text()
     assert 'const failureEvidence = process.env.E2E_FAILURE_EVIDENCE === "1";' in text
     assert 'screenshot: failureEvidence ? "only-on-failure" : "off"' in text
     assert 'video: failureEvidence ? "retain-on-failure" : "off"' in text
-    assert (
-        'if (failureEvidence) reporters.push(["html", { open: "never", outputFolder: '
-        '"playwright-report" }]);' in text
-    )
+    # The HTML report embeds raw authenticated report data: never generated.
+    assert '["html"' not in text and "playwright-report" not in text
 
 
 # --- staging-validation workflow ---------------------------------------------------
@@ -96,26 +94,51 @@ def test_upload_is_bounded_to_the_scanned_directory_for_seven_days() -> None:
 # --- collector -------------------------------------------------------------------------
 
 
-def test_collector_excludes_traces_archives_and_env_files_and_bounds_everything() -> None:
+def test_collector_copies_by_allowlist_and_never_the_html_report() -> None:
     text = COLLECTOR.read_text()
-    for exclude in ("--exclude='*.zip'", "--exclude='trace*'", "--exclude='.env*'"):
-        assert exclude in text, exclude
+    assert "web/playwright-report" not in text.split("set -euo pipefail", 1)[1]
+    rsync = text[text.index("rsync -a") : text.index('web/test-results/ "$OUT/test-results/"')]
+    for flag in (
+        "--no-links",
+        "--exclude='trace*'",
+        "--exclude='*.trace'",
+        "--exclude='.env*'",
+        "--include='*/'",
+        "--include='*.png'",
+        "--include='*.jpg'",
+        "--include='*.jpeg'",
+        "--include='*.webm'",
+        "--include='*.md'",
+        "--include='*.txt'",
+        "--exclude='*'",
+    ):
+        assert flag in rsync, flag
+    # Excludes come before the allowlist; the catch-all exclude comes last.
+    assert rsync.index("--exclude='.env*'") < rsync.index("--include='*/'")
+    assert rsync.rstrip(" \\\n").endswith("--exclude='*'")
+
+
+def test_collector_bounds_and_redacts_logs() -> None:
+    text = COLLECTOR.read_text()
     assert 'LOG_SINCE="${EVIDENCE_LOG_SINCE:-20m}"' in text
     assert 'LOG_TAIL="${EVIDENCE_LOG_TAIL:-1500}"' in text
     assert 'MAX_MB="${EVIDENCE_MAX_MB:-200}"' in text
-    # Video is dropped before giving up on size.
-    assert text.index("-name '*.webm' -delete") < text.index("even without video")
-    # Only api/web/worker logs, and only after the redactor proves itself.
+    assert text.index("-name '*.webm' -delete") < text.rindex("even without video")
     assert "for svc in api web worker; do" in text
     assert text.index("guard self-test") < text.index("logs --no-color")
-    assert "| guard redact >" in text
+    assert 'guard redact < "$RAW" > "$OUT/logs/$svc.log"' in text
+    assert "logs_ok=false" in text and 'rm -rf "$OUT/logs"' in text
 
 
-def test_collector_fails_closed_before_marking_evidence_ready() -> None:
+def test_collector_redacts_text_artifacts_before_the_final_scan_and_fails_closed() -> None:
     text = COLLECTOR.read_text()
     assert "set -euo pipefail" in text
+    redact_tree = text.index('if ! guard redact-tree "$OUT"; then')
     final_scan = text.index('if ! guard scan "$OUT"; then')
-    assert 'rm -rf "$OUT"; ready false; exit 0' in text[final_scan : final_scan + 200]
+    assert redact_tree < final_scan
+    assert 'nothing "text artifact redaction failed"' in text[redact_tree : redact_tree + 120]
+    assert "nothing " in text[final_scan : final_scan + 120]
+    assert 'nothing() { echo "$1: nothing uploaded"; rm -rf "$OUT"; ready false; exit 0; }' in text
     assert text.rstrip().endswith("ready true")
     assert text.index('guard scan "$OUT/logs"') < final_scan
 

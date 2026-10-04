@@ -10,8 +10,9 @@ import { specRouting } from "./e2e/routing";
 // collected, skipped and failed counts.
 //
 // E2E_FAILURE_EVIDENCE=1 (staging-validation only) keeps screenshots and video
-// of FAILED tests and writes an HTML report, which CI uploads after
-// scripts/ci/collect_browser_evidence.sh has scanned it. Traces stay OFF
+// of FAILED tests (plus Playwright's error-context.md), which CI uploads after
+// scripts/ci/collect_browser_evidence.sh has redacted and scanned them. No HTML
+// report is written: it embeds raw authenticated report data. Traces stay OFF
 // everywhere: they record request headers, session cookies and authorization
 // material, so they are never captured or uploaded.
 const jsonReport = process.env.E2E_JSON_REPORT;
@@ -19,7 +20,6 @@ const failureEvidence = process.env.E2E_FAILURE_EVIDENCE === "1";
 type Reporter = [string] | [string, Record<string, unknown>];
 const reporters: Reporter[] = [["list"]];
 if (jsonReport) reporters.push(["json", { outputFile: jsonReport }]);
-if (failureEvidence) reporters.push(["html", { open: "never", outputFolder: "playwright-report" }]);
 export default defineConfig({
   testDir: "./e2e",
   ...specRouting(process.env),
