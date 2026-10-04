@@ -1,4 +1,4 @@
-import { type Page, test, expect } from "@playwright/test";
+import { type Locator, type Page, test, expect } from "@playwright/test";
 
 // Shared E2E helpers. Credentials + base URL come from the environment so the
 // same specs run against local, CI, or staging with a seeded Supabase project.
@@ -104,4 +104,43 @@ export async function signIn(page: Page, email: string, password: string): Promi
     await page.waitForURL(/\/$/, { timeout: 15000 });
   }
   await expect(page).toHaveURL(/\/$/);
+}
+
+// The two workspaces web/e2e/seed.mjs founds for the seeded admin. The primary
+// one holds the seeded workflow; the secondary one is empty.
+export const E2E_PRIMARY_WORKSPACE = "E2E Primary";
+export const E2E_SECONDARY_WORKSPACE = "E2E Secondary";
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The switcher option for exactly this workspace (labels render "<name> (<role>)"). */
+export function workspaceOption(switcher: Locator, name: string): Locator {
+  return switcher.locator("option").filter({ hasText: new RegExp(`^${escapeRegExp(name)} \\(`) });
+}
+
+/**
+ * Wait until the workspace switcher lists EVERY expected workspace, by name.
+ *
+ * The switcher renders a placeholder until the workspaces query resolves, so a
+ * one-shot read of its options (``locator.all()`` does not wait) can observe an
+ * empty or partial list. This waits for the identities the test needs, not for
+ * an option count: other or look-alike workspaces never satisfy it. Uses
+ * Playwright's auto-waiting assertions with the default timeout (no sleeps).
+ */
+export async function waitForWorkspaceOptions(
+  page: Page,
+  names: readonly string[],
+  options: { timeout?: number } = {},
+): Promise<Locator> {
+  const switcher = page.getByRole("combobox", { name: /select workspace/i });
+  await expect(switcher, "workspace switcher").toBeVisible(options);
+  for (const name of names) {
+    await expect(
+      workspaceOption(switcher, name),
+      `expected workspace option "${name}"`,
+    ).toHaveCount(1, options);
+  }
+  return switcher;
 }

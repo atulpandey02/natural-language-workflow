@@ -1,5 +1,14 @@
 import { test, expect } from "@playwright/test";
-import { env, liveStackConfigured, requireEnv, signIn } from "./helpers";
+import {
+  E2E_PRIMARY_WORKSPACE,
+  E2E_SECONDARY_WORKSPACE,
+  env,
+  liveStackConfigured,
+  requireEnv,
+  signIn,
+  waitForWorkspaceOptions,
+  workspaceOption,
+} from "./helpers";
 
 test.describe("access + safety guards", () => {
   test("unauthenticated users are redirected to sign in", async ({ page }) => {
@@ -91,10 +100,27 @@ test.describe("access + safety guards", () => {
     // The primary workspace has the seeded workflow visible.
     await expect(page.getByRole("link", { name: "E2E Seeded Workflow" })).toBeVisible();
 
-    const switcher = page.getByLabel(/select workspace/i);
-    const options = await switcher.locator("option").all();
-    requireEnv(options.length >= 2, "needs at least two workspaces");
-    await switcher.selectOption({ index: 1 });
+    // Wait until the switcher lists BOTH seeded workspaces by name: it renders a
+    // placeholder until the workspaces query resolves, and a one-shot read of
+    // its options can observe an empty list (see workspace-readiness.spec.ts).
+    const switcher = await waitForWorkspaceOptions(page, [
+      E2E_PRIMARY_WORKSPACE,
+      E2E_SECONDARY_WORKSPACE,
+    ]);
+    await expect(switcher.locator("option:checked")).toHaveText(
+      new RegExp(`^${E2E_PRIMARY_WORKSPACE} \\(`),
+    );
+    // Switch by identity (not list position) to the empty secondary workspace.
+    const secondary = await workspaceOption(switcher, E2E_SECONDARY_WORKSPACE).getAttribute(
+      "value",
+    );
+    expect(secondary, "secondary workspace option value").toBeTruthy();
+    await switcher.selectOption(secondary as string);
+
+    // The tenant switch completed (hard reload) before checking for stale data.
+    await expect(
+      page.getByRole("combobox", { name: /select workspace/i }).locator("option:checked"),
+    ).toHaveText(new RegExp(`^${E2E_SECONDARY_WORKSPACE} \\(`));
 
     // Switching clears tenant-scoped caches: the previous tenant's workflow must
     // NOT still be shown for the (empty) secondary workspace.
