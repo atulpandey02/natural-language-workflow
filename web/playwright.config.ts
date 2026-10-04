@@ -8,16 +8,29 @@ import { specRouting } from "./e2e/routing";
 // Harness-only pilot specs are routed to their own job — see e2e/routing.ts.
 // E2E_JSON_REPORT additionally writes a JSON report that CI checks for
 // collected, skipped and failed counts.
+//
+// E2E_FAILURE_EVIDENCE=1 (staging-validation only) keeps screenshots and video
+// of FAILED tests and writes an HTML report, which CI uploads after
+// scripts/ci/collect_browser_evidence.sh has scanned it. Traces stay OFF
+// everywhere: they record request headers, session cookies and authorization
+// material, so they are never captured or uploaded.
 const jsonReport = process.env.E2E_JSON_REPORT;
+const failureEvidence = process.env.E2E_FAILURE_EVIDENCE === "1";
+type Reporter = [string] | [string, Record<string, unknown>];
+const reporters: Reporter[] = [["list"]];
+if (jsonReport) reporters.push(["json", { outputFile: jsonReport }]);
+if (failureEvidence) reporters.push(["html", { open: "never", outputFolder: "playwright-report" }]);
 export default defineConfig({
   testDir: "./e2e",
   ...specRouting(process.env),
   globalSetup: "./e2e/global-setup.ts",
   fullyParallel: false,
   forbidOnly: process.env.E2E_REQUIRED === "1",
-  reporter: jsonReport ? [["list"], ["json", { outputFile: jsonReport }]] : [["list"]],
+  reporter: reporters,
   use: {
     baseURL: process.env.E2E_BASE_URL ?? "http://localhost:3000",
-    trace: "on-first-retry",
+    trace: "off",
+    screenshot: failureEvidence ? "only-on-failure" : "off",
+    video: failureEvidence ? "retain-on-failure" : "off",
   },
 });

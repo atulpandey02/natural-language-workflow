@@ -225,14 +225,38 @@ jobs:
             grafana/k6:0.54.0 run /scripts/rate-limit.js
 
       - name: Required Playwright E2E against staging
+        id: playwright
         working-directory: web
         env:
           E2E_REQUIRED: "1"
           E2E_BASE_URL: http://127.0.0.1:8080
+          # Screenshots + video of FAILED tests and an HTML report (traces stay
+          # off: they would carry cookies and authorization headers).
+          E2E_FAILURE_EVIDENCE: "1"
         run: |
           npm ci
           npx playwright install --with-deps chromium
           npx playwright test
+
+      # Only when the browser suite itself failed, while the stack is still up.
+      # The collector copies screenshots/video/error-context/HTML report (never
+      # traces), adds a bounded REDACTED api/web/worker log slice, and scans the
+      # result fail-closed (scripts/ci/evidence_guard.py): any credential-like
+      # content -> logs dropped, or nothing uploaded at all.
+      - name: Collect browser failure evidence (sanitized)
+        id: browser_evidence
+        if: failure() && steps.playwright.outcome == 'failure'
+        env:
+          COMPOSE: ${{ env.COMPOSE }}
+        run: bash scripts/ci/collect_browser_evidence.sh "${RUNNER_TEMP}/browser-evidence"
+      - name: Upload browser failure evidence
+        if: failure() && steps.browser_evidence.outputs.ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-failure-evidence
+          path: ${{ runner.temp }}/browser-evidence/
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Backup / restore drill (GATING)
         env:

@@ -142,6 +142,49 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL
+      # Visibility only (NON-gating, exit-code 0): the third-party textfile-only
+      # node-exporter the backup-freshness monitoring fix adds (PR #48). Pinned to
+      # the tag that PR adopts; no suppression file.
+      # Fixed CRITICAL findings are reported in the job summary and as a warning;
+      # they are an owner decision, not an automatic failure. The two app-image
+      # scans above keep their gating thresholds unchanged.
+      # continue-on-error: a scanner or install failure must never fail the job
+      # or skip the compose validation below; the summary then reports NO RESULT.
+      # Trivy version: the pinned action's default, same as the app scans above.
+      - name: Trivy scan (node-exporter, non-gating)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        continue-on-error: true
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: prom/node-exporter:v1.12.1
+          format: json
+          output: node-exporter-trivy.json
+          exit-code: "0"
+          ignore-unfixed: true
+          severity: CRITICAL
+      - name: Summarize node-exporter scan
+        if: always()
+        run: |
+          if [ ! -s node-exporter-trivy.json ]; then
+            echo "### node-exporter Trivy scan: NO RESULT (scan did not produce output)" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=node-exporter scan::no Trivy result"
+            exit 0
+          fi
+          n=$(jq '[.Results[]?.Vulnerabilities[]?] | length' node-exporter-trivy.json)
+          {
+            echo "### node-exporter Trivy scan (prom/node-exporter:v1.12.1, linux/amd64)"
+            echo "Fixed CRITICAL vulnerabilities: **${n}** (non-gating)"
+            if [ "$n" -gt 0 ]; then
+              echo ""
+              echo "| ID | Package | Installed | Fixed |"
+              echo "|---|---|---|---|"
+              jq -r '.Results[]?.Vulnerabilities[]? | "| \(.VulnerabilityID) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion) |"' node-exporter-trivy.json
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$n" -gt 0 ]; then
+            echo "::warning title=node-exporter scan::${n} fixed CRITICAL vulnerabilities (owner decision required)"
+          fi
       - name: Validate dev compose config
         env:
           SUPABASE_URL: https://proj.supabase.co
