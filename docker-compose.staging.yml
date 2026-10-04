@@ -6,7 +6,8 @@
 #
 # This overlay:
 #   - sets APP_ENV=staging on the app services (docs off, prod-shaped),
-#   - adds an internal Prometheus that scrapes each role's metrics port.
+#   - adds an internal Prometheus that scrapes each role's metrics port and the
+#     backup job's freshness textfile (via a textfile-only node-exporter).
 #
 # Real-VPS staging uses docker-compose.prod.yml directly with a real
 # PUBLIC_HOSTNAME + Caddy ACME TLS + APP_ENV=staging (see
@@ -52,6 +53,35 @@ services:
       - worker
       - scheduler
       - alertmanager
+      - node-exporter
+
+  # Backup freshness exporter (ADR-022 amendment 1): the backup job (the ONLY
+  # writer) atomically writes /textfile/nlw_backup.prom into the
+  # `backup_textfile` volume; this exporter reads it READ-ONLY and serves it to
+  # Prometheus, so the NlwBackupStale dead-man alert sees the real series.
+  # Textfile collector only: every default host collector is disabled and no host
+  # path (/proc, /sys, /) is mounted. Internal only, non-root, read-only root
+  # filesystem, no capabilities.
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    restart: unless-stopped
+    user: "65534:65534"
+    command:
+      - --collector.disable-defaults
+      - --collector.textfile
+      - --collector.textfile.directory=/textfile
+      - --web.listen-address=:9100
+    volumes:
+      - backup_textfile:/textfile:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    expose:
+      - "9100"
+    networks:
+      - internal
 
   # Alertmanager (M12A-Prep §K): internal only, null receiver until an operator
   # wires a real infrastructure channel (docs/ops/alerting.md). No public port.

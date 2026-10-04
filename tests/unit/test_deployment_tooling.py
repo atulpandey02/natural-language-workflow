@@ -176,17 +176,52 @@ def test_rendered_staging_keeps_runtime_key_isolation_and_maintenance_volume() -
             assert mounts[0].get("read_only") is True
         else:
             assert mounts == [], f"{name} must not mount a key file"
-    # The backup evidence volume is mounted by the backup job ONLY (runtime roles
-    # cannot write accepted evidence).
+    # The backup evidence volume is WRITTEN by the backup job only (runtime roles
+    # cannot write accepted evidence). The textfile-only node-exporter is its single
+    # reader, read-only (ADR-022 amendment 1).
     for name, svc in services.items():
-        targets = {m.get("target") for m in (svc.get("volumes") or [])}
-        if name != "backup":
-            assert "/textfile" not in targets, f"{name} mounts the backup evidence volume"
+        textfile = [m for m in (svc.get("volumes") or []) if m.get("target") == "/textfile"]
+        if name == "node-exporter":
+            assert len(textfile) == 1 and textfile[0].get("read_only") is True
+            assert textfile[0].get("source") == "backup_textfile"
+        elif name != "backup":
+            assert textfile == [], f"{name} mounts the backup evidence volume"
     caddy_targets = {m["target"] for m in services["caddy"]["volumes"]}
     assert "/srv/maint" in caddy_targets
     prom_targets = {m["target"] for m in services["prometheus"]["volumes"]}
     assert {"/etc/prometheus/prometheus.yml", "/etc/prometheus/alerts"} <= prom_targets
     assert "alertmanager" in services and not services["alertmanager"].get("ports")
+
+
+def test_backup_freshness_exporter_is_textfile_only_and_scraped() -> None:
+    """NlwBackupStale only works if the backup job's series is actually scraped
+    (ADR-022 amendment 1): a hardened, textfile-only node-exporter reads the
+    backup volume read-only and Prometheus scrapes it."""
+    svc = _rendered_staging()["services"]["node-exporter"]
+    assert svc["image"].startswith("prom/node-exporter:v")
+    assert svc.get("user") == "65534:65534" and svc.get("read_only") is True
+    assert svc.get("cap_drop") == ["ALL"]
+    assert "no-new-privileges:true" in (svc.get("security_opt") or [])
+    assert not svc.get("ports") and "privileged" not in svc and "network_mode" not in svc
+    assert svc["command"][:2] == ["--collector.disable-defaults", "--collector.textfile"]
+    assert "--collector.textfile.directory=/textfile" in svc["command"]
+    # No host path at all: only the named backup volume, read-only.
+    assert [(m.get("type"), m.get("target"), m.get("read_only")) for m in svc["volumes"]] == [
+        ("volume", "/textfile", True)
+    ]
+    jobs = {j["job_name"]: j for j in _load("docker/prometheus/prometheus.yml")["scrape_configs"]}
+    assert jobs["nlw-backup"]["static_configs"][0]["targets"] == ["node-exporter:9100"]
+    # The dead-man rule still covers BOTH a stale and an absent series.
+    rule = next(
+        r
+        for g in _load("docker/prometheus/alerts/backup.rules.yml")["groups"]
+        for r in g["rules"]
+        if r.get("alert") == "NlwBackupStale"
+    )
+    assert (
+        "26 * 3600" in rule["expr"]
+        and "absent(nlw_backup_last_success_timestamp_seconds)" in rule["expr"]
+    )
 
 
 def test_caddyfile_has_maintenance_matcher() -> None:

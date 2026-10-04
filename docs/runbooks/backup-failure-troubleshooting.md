@@ -10,8 +10,13 @@ No verified backup within the freshness budget, **or the metric is absent**.
 
 1. `systemctl list-timers nlw-backup.timer` — is the timer active and firing?
 2. `journalctl -u nlw-backup.service -n 200` — did recent runs fail?
-3. Is node_exporter's `--collector.textfile.directory` still pointed at the
-   metrics dir, and does `nlw_backup.prom` exist and update?
+3. Is the series scraped? On staging the `node-exporter` service (textfile
+   collector only) reads `nlw_backup.prom` from the `backup_textfile` volume and
+   Prometheus scrapes it as job `nlw-backup`:
+   `docker compose -p app ps node-exporter` (running?), Prometheus
+   `/api/v1/targets` (job `nlw-backup` up?), and
+   `nlw_backup_last_success_timestamp_seconds` present in Prometheus. A missing
+   series alone fires this alert after 15m (ADR-022 amendment 1).
 4. If the timer stopped: `systemctl enable --now nlw-backup.timer`. Run one now:
    `systemctl start nlw-backup.service`. Confirm the timestamp advances.
 

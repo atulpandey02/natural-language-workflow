@@ -86,9 +86,12 @@ The job atomically writes a node_exporter **textfile** with the freshness/succes
 series. Under the `backup` Compose service the path is fixed to
 `/textfile/nlw_backup.prom` inside the **`backup_textfile`** named volume (the
 compose file sets `NLW_BACKUP_METRICS_FILE` explicitly, so the value in
-`.env.backup` is only used for a bare, non-Compose run). Mount that same
-`backup_textfile` volume into your node_exporter container and point
-`--collector.textfile.directory` at it, so Prometheus scrapes the series. The file
+`.env.backup` is only used for a bare, non-Compose run). The staging overlay
+(`docker-compose.staging.yml`) runs a textfile-only `node-exporter` that mounts
+that same `backup_textfile` volume **read-only** at `/textfile`
+(`--collector.textfile.directory=/textfile`), and Prometheus scrapes it as job
+`nlw-backup` (ADR-022 amendment 1). The rollout recreates it with the rest of
+the monitoring stack. The file
 is written even on failure (with `nlw_backup_success 0`), and the last-success
 timestamp advances **only** on a verified off-host snapshot.
 

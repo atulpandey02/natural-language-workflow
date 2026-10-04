@@ -83,6 +83,11 @@ EXPECTED_SIGNED_POLICIES = 61
 # volume (docker/caddy/Caddyfile `@maintenance`). Toggled with `exec`, no reload.
 MAINTENANCE_FLAG = "/srv/maint/MAINTENANCE"
 RUNTIME_SERVICES = ("api", "worker", "scheduler")
+# Monitoring services the rollout (re)creates after the runtimes.
+MONITORING_SERVICES = ("node-exporter", "prometheus", "alertmanager")
+# The backup job is the ONLY writer of the backup evidence volume; the
+# textfile-only node-exporter may read it, and only read-only.
+BACKUP_TEXTFILE_READERS = ("node-exporter",)
 DRAIN_WAIT_S = 120
 REVISION_LABEL = "org.opencontainers.image.revision"
 # The public edge: the release's own Caddyfile, mounted read-only by the caddy
@@ -1382,7 +1387,9 @@ class Rollout:
             timeout=600,
         )
         services = self._run(f"{self.dc_staged} config --services").split()
-        monitoring = [s for s in ("prometheus", "alertmanager") if s in services]
+        # node-exporter serves the backup freshness textfile Prometheus alerts on
+        # (ADR-022 amendment 1); it comes up with the rest of the monitoring stack.
+        monitoring = [s for s in MONITORING_SERVICES if s in services]
         if monitoring:
             self._run(
                 f"{self.dc_staged} up -d --force-recreate --no-deps {' '.join(monitoring)}",
@@ -1408,7 +1415,8 @@ class Rollout:
 
     def verify_mount_isolation(self, keys_dir: str) -> None:
         out = self._run(
-            f"for s in api worker scheduler web postgres redis caddy prometheus alertmanager; do "
+            "for s in api worker scheduler web postgres redis caddy prometheus alertmanager "
+            f"node-exporter; do "
             f'c=$({self.dc_staged} ps -q $s 2>/dev/null | head -1); [ -z "$c" ] && continue; '
             'echo "$s $(docker inspect --format '
             "'{{range .Mounts}}{{.Source}}:{{.Destination}}:{{.RW}} {{end}}"
@@ -1424,11 +1432,12 @@ class Rollout:
                     raise GateError(f"{svc} key mounts are {key_mounts}, want [{want}]")
             elif key_mounts:
                 raise GateError(f"{svc} must not mount a key file: {key_mounts}")
-            if (
-                any("backup_textfile" in m or "/textfile" in m for m in mounts.split())
-                and svc != "backup"
-            ):
-                raise GateError(f"{svc} must not mount the backup evidence volume")
+            textfile = [m for m in mounts.split() if "backup_textfile" in m or "/textfile" in m]
+            if textfile and svc != "backup":
+                if svc not in BACKUP_TEXTFILE_READERS:
+                    raise GateError(f"{svc} must not mount the backup evidence volume")
+                if any(not m.endswith(":/textfile:false") for m in textfile):
+                    raise GateError(f"{svc} may mount the backup evidence volume read-only only")
             contract = self.target.operator_alerting
             am_mounts = [
                 m
