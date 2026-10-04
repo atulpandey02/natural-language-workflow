@@ -36,7 +36,10 @@ def test_node_exporter_scan_is_pinned_critical_fixed_only_and_non_gating() -> No
     assert step["with"]["severity"] == "CRITICAL"
     assert step["with"]["ignore-unfixed"] is True
     assert step["with"]["exit-code"] == "0"
-    assert step["with"]["version"] == "v0.65.0"
+    # A scanner/install failure can never fail the job or skip later steps.
+    assert step["continue-on-error"] is True
+    # Same Trivy as the gating app scans: the SHA-pinned action's default.
+    assert "version" not in step["with"]
     assert step["env"]["TRIVY_PLATFORM"] == "linux/amd64"
     assert "trivyignores" not in step["with"] and "skip-files" not in step["with"]
     assert not (ROOT / ".trivyignore").exists()

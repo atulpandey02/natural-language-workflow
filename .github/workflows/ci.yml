@@ -148,12 +148,15 @@ jobs:
       # Fixed CRITICAL findings are reported in the job summary and as a warning;
       # they are an owner decision, not an automatic failure. The two app-image
       # scans above keep their gating thresholds unchanged.
+      # continue-on-error: a scanner or install failure must never fail the job
+      # or skip the compose validation below; the summary then reports NO RESULT.
+      # Trivy version: the pinned action's default, same as the app scans above.
       - name: Trivy scan (node-exporter, non-gating)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        continue-on-error: true
         env:
           TRIVY_PLATFORM: linux/amd64
         with:
-          version: v0.65.0
           image-ref: prom/node-exporter:v1.12.1
           format: json
           output: node-exporter-trivy.json
