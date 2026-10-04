@@ -60,3 +60,9 @@ def test_scan_result_is_summarized_and_warned_on() -> None:
     assert summary["if"] == "always()"
     assert "$GITHUB_STEP_SUMMARY" in summary["run"]
     assert "::warning title=node-exporter scan::" in summary["run"]
+
+
+def test_scanned_tag_is_the_tag_staging_runs() -> None:
+    """The visibility scan must cover the exact image the staging overlay runs."""
+    compose: dict[str, Any] = yaml.safe_load((ROOT / "docker-compose.staging.yml").read_text())
+    assert compose["services"]["node-exporter"]["image"] == NODE_EXPORTER

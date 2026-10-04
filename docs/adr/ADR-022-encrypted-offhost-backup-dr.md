@@ -267,7 +267,7 @@ permanently firing critical alert trains operators to ignore real incidents.
 
 **Decision.**
 
-- The staging overlay adds `node-exporter` (`prom/node-exporter`, pinned tag)
+- The staging overlay adds `node-exporter` (`prom/node-exporter:v1.12.1`)
   with **only** the textfile collector (`--collector.disable-defaults
   --collector.textfile`), no host mounts, non-root (`65534`), read-only root
   filesystem, no capabilities, `no-new-privileges`, internal network only, no
@@ -284,6 +284,16 @@ permanently firing critical alert trains operators to ignore real incidents.
   absent**. promtool unit tests (`docker/prometheus/tests/`) prove it stays
   silent while a fresh backup is scraped, fires when stale or absent, and
   clears on recovery.
+
+**Image selection (2026-10-04).** `prom/node-exporter:v1.12.1` (multi-arch
+index `sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0`;
+the tested linux/amd64 binary embeds Go 1.26.5). Trivy CRITICAL scans of fixed
+vulnerabilities found **zero** findings, with v0.70.0 (DB 2026-10-04 01:47 UTC),
+v0.65.0 (DB 2026-10-03 19:02 UTC) and CI's non-gating scan. CVE-2025-68121
+(present in v1.9.1 through v1.10.2) is absent. There is **no** risk acceptance
+and **no** `.trivyignore`. The tag in `docker-compose.staging.yml` is the one
+CI's visibility scan checks. Digest pinning and the upstream distroless variant
+are separate supply-chain decisions, not made here.
 
 **Consequence.** The fix reaches staging only through a normal migration-free
 release rollout (its `recreate-runtime` starts the exporter). Until then the

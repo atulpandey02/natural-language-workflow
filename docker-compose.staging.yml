@@ -63,7 +63,7 @@ services:
   # path (/proc, /sys, /) is mounted. Internal only, non-root, read-only root
   # filesystem, no capabilities.
   node-exporter:
-    image: prom/node-exporter:v1.9.1
+    image: prom/node-exporter:v1.12.1
     restart: unless-stopped
     user: "65534:65534"
     command:
