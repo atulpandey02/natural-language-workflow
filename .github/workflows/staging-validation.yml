@@ -139,6 +139,17 @@ jobs:
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/login >/dev/null 2>&1 && break; sleep 2; done
           curl -fsS http://127.0.0.1:8000/health/ready
 
+      # GATING, and BEFORE seeding / drills / k6 / Playwright so an unrelated later
+      # failure cannot skip it (ADR-022 amendment 1). Runs the unchanged real
+      # `backup` service against a LOCAL, EPHEMERAL restic repository inside the
+      # throwaway `backup_run` volume, then proves the chain on the RUNNING
+      # containers: backup -> backup_textfile -> hardened node-exporter ->
+      # Prometheus `nlw-backup` -> timestamp series -> NlwBackupStale loaded and not
+      # firing. Proves the metrics/alert chain, not S3 transport. No external host.
+      - name: Backup metric ingestion evidence (GATING)
+        env:
+          COMPOSE: ${{ env.COMPOSE }}
+        run: bash scripts/ci/backup_metric_evidence.sh
       - name: Seed fixtures (users, workspaces, membership, workflow)
         env:
           SUPABASE_API_URL: ${{ env.SUPABASE_API_URL }}
@@ -286,5 +297,6 @@ jobs:
       - name: Tear down
         if: always()
         run: |
-          $COMPOSE down -v || true
+          docker ps -aq --filter name=nlw-ci-backup-evidence | xargs -r docker rm -f || true
+          $COMPOSE --profile backup --profile migration down -v --remove-orphans || true
           supabase stop || true
