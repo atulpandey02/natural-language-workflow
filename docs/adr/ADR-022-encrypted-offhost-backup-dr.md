@@ -255,6 +255,53 @@ change (migration `0014` unchanged).
   COMPLETED, restored work is not replayed, and the gate cannot be reused for a
   second destination.
 
+## Amendment 1 (2026-10-04) — the backup freshness series is actually scraped
+
+**Finding.** The dead-man `NlwBackupStale` fired permanently on staging. The
+backup job wrote `nlw_backup.prom` into the `backup_textfile` volume as designed,
+but no exporter served it and Prometheus had no scrape target for it, so
+`absent(nlw_backup_last_success_timestamp_seconds)` was always true: every
+Prometheus start produced a false critical alert 15 minutes later, repeated
+hourly to the operator channel, while real backups were succeeding. A
+permanently firing critical alert trains operators to ignore real incidents.
+
+**Decision.**
+
+- The staging overlay adds `node-exporter` (`prom/node-exporter:v1.12.1`)
+  with **only** the textfile collector (`--collector.disable-defaults
+  --collector.textfile`), no host mounts, non-root (`65534`), read-only root
+  filesystem, no capabilities, `no-new-privileges`, internal network only, no
+  published port. It mounts `backup_textfile` **read-only** at `/textfile`.
+- Prometheus scrapes it as job `nlw-backup` (`role=backup`).
+- The evidence-volume invariant becomes: the backup job is the **only writer**;
+  `node-exporter` is the **only other** service that may mount it, and only
+  read-only. The rollout's `validate` mount-isolation gate and the compose tests
+  enforce exactly that.
+- The rollout's `recreate-runtime` (re)creates `node-exporter` with
+  Prometheus and Alertmanager (`MONITORING_SERVICES`), and a contract test
+  requires every monitoring service the overlay adds to be in that list.
+- The alert rule is unchanged: it still fires when the series is stale **or
+  absent**. promtool unit tests (`docker/prometheus/tests/`) prove it stays
+  silent while a fresh backup is scraped, fires when stale or absent, and
+  clears on recovery.
+
+**Image selection (2026-10-04).** `prom/node-exporter:v1.12.1` (multi-arch
+index `sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0`;
+the tested linux/amd64 binary embeds Go 1.26.5). Trivy CRITICAL scans of fixed
+vulnerabilities found **zero** findings, with v0.70.0 (DB 2026-10-04 01:47 UTC),
+v0.65.0 (DB 2026-10-03 19:02 UTC) and CI's non-gating scan. CVE-2025-68121
+(present in v1.9.1 through v1.10.2) is absent. There is **no** risk acceptance
+and **no** `.trivyignore`. The tag in `docker-compose.staging.yml` is the one
+CI's visibility scan checks. Digest pinning and the upstream distroless variant
+are separate supply-chain decisions, not made here.
+
+**Consequence.** The fix reaches staging only through a normal migration-free
+release rollout (its `recreate-runtime` starts the exporter). Until then the
+alert keeps firing. Alternatives rejected: relaxing the rule (loses the
+dead-man), exposing backup metrics from an application process (couples backup
+evidence to the runtime it exists to recover), or a host-level node_exporter
+(broader host access than a single read-only volume).
+
 ## Note (2026-09-29) — the signed-context key registry in database backups
 
 Recorded so it is not re-litigated (Phase 2 plan §0.3). Facts, from the code:

@@ -5,8 +5,8 @@ global:
   evaluation_interval: 10s
 
 # Backup / DR dead-man + failure alerts (M11.5 P2, ADR-022). Fed by the
-# node_exporter textfile the backup job writes; requires a node_exporter scrape
-# target with --collector.textfile.directory pointed at the metrics dir.
+# textfile the backup job writes (nlw_backup.prom in the `backup_textfile`
+# volume), served by the textfile-only `node-exporter` scraped below.
 # Alertmanager is the internal `alertmanager` service (docker-compose.staging.yml);
 # it ships with a null receiver until an operator wires a real channel
 # (docs/ops/alerting.md). Unreachable Alertmanager only logs errors here.
@@ -36,3 +36,10 @@ scrape_configs:
     static_configs:
       - targets: ["scheduler:9100"]
         labels: { role: scheduler }
+  # The backup job's freshness/success series (nlw_backup_*). Without this
+  # target the NlwBackupStale dead-man only ever sees an ABSENT series and fires
+  # permanently (ADR-022 amendment 1).
+  - job_name: nlw-backup
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels: { role: backup }

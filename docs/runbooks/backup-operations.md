@@ -54,7 +54,9 @@ version each snapshot carries.
 ## Metrics (node_exporter textfile)
 
 Written atomically to `NLW_BACKUP_METRICS_FILE`
-(default `/var/lib/node_exporter/textfile/nlw_backup.prom`):
+(default `/var/lib/node_exporter/textfile/nlw_backup.prom`; under Compose
+`/textfile/nlw_backup.prom` in the `backup_textfile` volume, read-only by the
+staging `node-exporter` and scraped by Prometheus as job `nlw-backup`):
 
 | Metric | Meaning |
 |---|---|

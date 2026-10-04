@@ -2162,3 +2162,62 @@ def test_migrate_refuses_an_ungated_workspace_bootstrap() -> None:
     )
     with pytest.raises(GateError, match="does not enforce creation grants"):
         r.migrate()
+
+
+# ADR-022 amendment 1 — the backup freshness exporter. The backup job stays the
+# ONLY writer of the backup evidence volume; the textfile-only node-exporter may
+# read it, read-only; every other service is still refused. Every monitoring
+# service the staging overlay adds is (re)created by the rollout and covered by
+# the mount-isolation gate, so a new exporter can never be silently left stopped.
+_TEXTFILE_RO = "/var/lib/docker/volumes/app_backup_textfile/_data:/textfile:false"
+_TEXTFILE_RW = "/var/lib/docker/volumes/app_backup_textfile/_data:/textfile:true"
+
+
+def _mount_isolation(lines: str) -> None:
+    fake = FakeRemote(
+        [
+            (r"for s in api worker scheduler web postgres redis caddy", lines),
+            (r"docker ps -a --filter name=app-migrate", ""),
+        ]
+    )
+    _rollout_op(fake).verify_mount_isolation(KEYS)
+
+
+def test_node_exporter_may_read_the_backup_textfile_read_only() -> None:
+    _mount_isolation(f"node-exporter {_TEXTFILE_RO} |PATH=/bin")
+
+
+def test_node_exporter_may_not_mount_the_backup_textfile_writable() -> None:
+    with pytest.raises(GateError, match="read-only only"):
+        _mount_isolation(f"node-exporter {_TEXTFILE_RW} |PATH=/bin")
+
+
+@pytest.mark.parametrize("svc", ["prometheus", "alertmanager", "caddy", "web", "postgres"])
+def test_no_other_service_may_mount_the_backup_textfile(svc: str) -> None:
+    with pytest.raises(GateError, match="must not mount the backup evidence volume"):
+        _mount_isolation(f"{svc} {_TEXTFILE_RO} |PATH=/bin")
+
+
+def test_mount_isolation_inspects_node_exporter() -> None:
+    fake = FakeRemote(
+        [
+            (r"for s in api worker scheduler web postgres redis caddy", ""),
+            (r"docker ps -a --filter name=app-migrate", ""),
+        ]
+    )
+    _rollout_op(fake).verify_mount_isolation(KEYS)
+    assert fake.ran(r"for s in [^;]*\bnode-exporter\b[^;]*; do")
+
+
+def test_every_staging_monitoring_service_is_recreated_by_the_rollout() -> None:
+    import yaml
+
+    from nlw.ops.rollout.phases import MONITORING_SERVICES
+
+    root = Path(__file__).resolve().parents[2]
+    prod = yaml.safe_load((root / "docker-compose.prod.yml").read_text())["services"]
+    staging = yaml.safe_load((root / "docker-compose.staging.yml").read_text())["services"]
+    added = set(staging) - set(prod)
+    assert added == set(MONITORING_SERVICES), (added, MONITORING_SERVICES)
+    # node-exporter starts before Prometheus scrapes it.
+    assert MONITORING_SERVICES.index("node-exporter") < MONITORING_SERVICES.index("prometheus")
