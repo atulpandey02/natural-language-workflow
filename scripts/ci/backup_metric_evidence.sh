@@ -4,7 +4,8 @@
 #
 #   real `backup` service -> real metrics writer -> backup_textfile volume
 #   -> hardened node-exporter -> Prometheus target `nlw-backup`
-#   -> nlw_backup_last_success_timestamp_seconds -> NlwBackupStale loaded, not firing
+#   -> nlw_backup_last_success_timestamp_seconds -> NlwBackupStale loaded and settled
+#      INACTIVE (neither pending nor firing) after a post-scrape rule evaluation
 #
 # The restic repository is LOCAL and EPHEMERAL (inside the stack's throwaway
 # `backup_run` volume): this proves the metrics/alert chain, NOT S3 transport or
@@ -126,14 +127,14 @@ done
 if echo "$METRICS" | grep -qE '^node_(cpu|filesystem|memory|network)_'; then fail "host collectors exposed"; fi
 ok "exporter: HTTP OK, node_textfile_scrape_error 0, all 5 nlw_backup_* series, no host collectors"
 
-# --- (4) Prometheus: target, series, rule, alert (bounded retries) ---------------------
+# --- (4) Prometheus: target, series, rule (bounded retries) -----------------------------
 api() { docker exec "$PROM" wget -qO- "http://127.0.0.1:9090/api/v1/$1"; }
 QUERY='nlw_backup_last_success_timestamp_seconds%7Bjob%3D%22nlw-backup%22%2Crole%3D%22backup%22%7D'
 check_prom() {
-  python3 - "$FILE_TS" "$FRESH_S" "$(api targets)" "$(api "query?query=${QUERY}")" "$(api rules)" "$(api alerts)" <<'PY'
+  python3 - "$FILE_TS" "$FRESH_S" "$(api targets)" "$(api "query?query=${QUERY}")" "$(api rules)" <<'PY'
 import json, sys, time
 file_ts, fresh_s = float(sys.argv[1]), float(sys.argv[2])
-targets, query, rules, alerts = (json.loads(a) for a in sys.argv[3:7])
+targets, query, rules = (json.loads(a) for a in sys.argv[3:6])
 backup = [t for t in targets["data"]["activeTargets"] if t["labels"].get("job") == "nlw-backup"]
 assert len(backup) == 1, "nlw-backup target count %d" % len(backup)
 t = backup[0]
@@ -150,11 +151,8 @@ assert len(stale) == 1, "NlwBackupStale loaded %d times" % len(stale)
 q = stale[0]["query"]
 assert "26 * 3600" in q and "absent(nlw_backup_last_success_timestamp_seconds)" in q, q
 assert stale[0].get("duration") == 900, stale[0].get("duration")
-firing = [a for a in alerts["data"]["alerts"]
-          if a["labels"].get("alertname") == "NlwBackupStale" and a["state"] == "firing"]
-assert not firing, "NlwBackupStale is firing"
-state = stale[0].get("state")
-print("target=up series=1 ts_match=%ss rule_state=%s" % (abs(value - file_ts), state))
+print("target=up series=1 ts_match=%ss" % abs(value - file_ts))
+print("LAST_SCRAPE=" + t["lastScrape"])
 PY
 }
 for i in $(seq 1 18); do
@@ -162,6 +160,95 @@ for i in $(seq 1 18); do
   [ "$i" -eq 18 ] && { echo "$out" | tail -3 >&2; fail "Prometheus evidence not satisfied within 180s"; }
   sleep 10
 done
-ok "Prometheus: job nlw-backup -> node-exporter:9100 up, lastError empty; ${out}"
-ok "NlwBackupStale loaded (26h stale OR absent(...), for 15m) and not firing for fresh evidence"
+LAST_SCRAPE=$(echo "$out" | sed -n 's/^LAST_SCRAPE=//p')
+ok "Prometheus: job nlw-backup -> node-exporter:9100 up, lastError empty; $(echo "$out" | head -1)"
+ok "NlwBackupStale loaded (26h stale OR absent(...), for 15m)"
+
+# --- (5) the alert must SETTLE to inactive on the fresh evidence ------------------------
+# Pending = the expression is still TRUE (only the 15m `for` has not elapsed), so
+# "not firing" proves nothing. Wait (bounded) for a rule evaluation AFTER the
+# successful scrape and require the rule inactive AND no active NlwBackupStale
+# alert in any state. Only state names are printed, never labels/annotations.
+SETTLE_INTERVAL_S="${EVIDENCE_SETTLE_INTERVAL_S:-5}"
+SETTLE_TIMEOUT_S="${EVIDENCE_SETTLE_TIMEOUT_S:-90}"
+if ! settled=$(python3 - "$LAST_SCRAPE" "$SETTLE_INTERVAL_S" "$SETTLE_TIMEOUT_S" \
+  docker exec "$PROM" wget -qO- <<'SETTLE'
+import json, subprocess, sys, time
+from datetime import datetime
+
+KNOWN = {"inactive", "pending", "firing"}
+MAX_TIMEOUT_S = 90
+
+
+def ts(value):
+    """RFC 3339 with up to nanoseconds -> epoch seconds (fail closed)."""
+    head, _, frac = value.rstrip("Z").partition(".")
+    base = datetime.fromisoformat(head + "+00:00").timestamp()
+    return base + (float("0." + frac[:9]) if frac else 0.0)
+
+
+def fetch(prefix, endpoint):
+    out = subprocess.run(
+        prefix + ["http://127.0.0.1:9090/api/v1/" + endpoint],
+        capture_output=True, text=True, timeout=15, check=True,
+    ).stdout
+    doc = json.loads(out)
+    if doc.get("status") != "success":
+        raise ValueError("api status")
+    return doc["data"]
+
+
+def verdict(last_scrape, rules, alerts):
+    """("pass"|"wait", state) or raises on anything malformed/unknown."""
+    stale = [r for g in rules["groups"] for r in g["rules"] if r.get("name") == "NlwBackupStale"]
+    if len(stale) != 1:
+        raise ValueError("rule count")
+    state = stale[0]["state"]
+    if state not in KNOWN:
+        raise ValueError("unknown rule state")
+    active = [a for a in alerts["alerts"] if a["labels"].get("alertname") == "NlwBackupStale"]
+    for a in active:
+        if a["state"] not in KNOWN:
+            raise ValueError("unknown alert state")
+    evaluated_after_scrape = ts(stale[0]["lastEvaluation"]) > ts(last_scrape)
+    if state == "inactive" and not active and evaluated_after_scrape:
+        return "pass", state
+    if active:
+        state = "firing" if any(a["state"] == "firing" for a in active) else "pending"
+    return "wait", state
+
+
+def main(argv):
+    last_scrape, interval, timeout = argv[0], float(argv[1]), float(argv[2])
+    prefix = argv[3:]
+    if not prefix or timeout > MAX_TIMEOUT_S or interval <= 0 or interval > timeout:
+        print("bad settle bounds")
+        return 1
+    ts(last_scrape)  # malformed -> fail closed
+    deadline = time.monotonic() + timeout
+    seen = None
+    while True:
+        try:
+            result, state = verdict(last_scrape, fetch(prefix, "rules"), fetch(prefix, "alerts"))
+        except Exception as exc:  # API error, malformed or unknown state: fail closed
+            print("api-error " + type(exc).__name__)
+            return 1
+        if state != seen:
+            print("alert state: " + state)
+            seen = state
+        if result == "pass":
+            return 0
+        if time.monotonic() + interval > deadline:
+            print("timeout (last state: %s)" % state)
+            return 1
+        time.sleep(interval)
+
+
+sys.exit(main(sys.argv[1:]))
+SETTLE
+); then
+  echo "$settled" >&2
+  fail "NlwBackupStale did not settle to inactive after a post-scrape evaluation"
+fi
+ok "NlwBackupStale settled inactive after a post-scrape rule evaluation ($(echo "$settled" | tr '\n' ';' | sed 's/;$//'))"
 echo "backup metric ingestion evidence: PASS"

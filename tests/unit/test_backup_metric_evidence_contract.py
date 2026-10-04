@@ -245,6 +245,7 @@ def _prom_docs(ts: float) -> dict[str, Any]:
                         "labels": {"job": "nlw-backup", "instance": "node-exporter:9100"},
                         "health": "up",
                         "lastError": "",
+                        "lastScrape": "2026-10-04T13:00:00.123456789Z",
                     },
                     {"labels": {"job": "nlw-api", "instance": "api:9100"}, "health": "up",
                      "lastError": ""},
@@ -267,14 +268,12 @@ def _prom_docs(ts: float) -> dict[str, Any]:
                                 "name": "NlwBackupStale",
                                 "query": STALE_EXPR,
                                 "duration": 900,
-                                "state": "inactive",
                             }
                         ]
                     }
                 ]
             }
         },
-        "alerts": {"data": {"alerts": []}},
     }  # fmt: skip
 
 
@@ -288,7 +287,6 @@ def _run_prom(docs: dict[str, Any], file_ts: float) -> subprocess.CompletedProce
             json.dumps(docs["targets"]),
             json.dumps(docs["query"]),
             json.dumps(docs["rules"]),
-            json.dumps(docs["alerts"]),
         ],
         input=_prom_checker(),
         capture_output=True,
@@ -302,6 +300,7 @@ def test_prometheus_checker_accepts_fresh_ingested_evidence() -> None:
     res = _run_prom(_prom_docs(ts), ts)
     assert res.returncode == 0, res.stdout + res.stderr
     assert "target=up series=1" in res.stdout
+    assert "LAST_SCRAPE=2026-10-04T13:00:00.123456789Z" in res.stdout
 
 
 def _prom_mutations(ts: float) -> dict[str, dict[str, Any]]:
@@ -342,12 +341,6 @@ def _prom_mutations(ts: float) -> dict[str, dict[str, Any]]:
         ),
     )
     m("for changed", lambda d: d["rules"]["data"]["groups"][0]["rules"][0].update(duration=3600))
-    m(
-        "alert firing",
-        lambda d: d["alerts"]["data"].update(
-            alerts=[{"labels": {"alertname": "NlwBackupStale"}, "state": "firing"}]
-        ),
-    )
     return out
 
 
@@ -364,7 +357,6 @@ def _prom_mutations(ts: float) -> dict[str, dict[str, Any]]:
         "absent removed",
         "threshold changed",
         "for changed",
-        "alert firing",
     ],
 )
 def test_prometheus_checker_rejects_each_broken_link(name: str) -> None:
@@ -387,8 +379,10 @@ def test_the_exact_timestamp_series_is_queried() -> None:
         "role%3D%22backup%22%7D'" in text
     )
     assert '"$(api "query?query=${QUERY}")"' in text
-    for endpoint in ('"$(api targets)"', '"$(api rules)"', '"$(api alerts)"'):
+    for endpoint in ('"$(api targets)"', '"$(api rules)"'):
         assert endpoint in text
+    # Alert state is judged only by the settle program (rules + alerts APIs).
+    assert 'fetch(prefix, "rules"), fetch(prefix, "alerts")' in _settle_program()
 
 
 def test_compose_exporter_has_no_extra_privilege_port_or_mount() -> None:
@@ -401,3 +395,155 @@ def test_compose_exporter_has_no_extra_privilege_port_or_mount() -> None:
     assert "privileged" not in svc and "ports" not in svc and "network_mode" not in svc
     assert svc["volumes"] == ["backup_textfile:/textfile:ro"]
     assert svc["networks"] == ["internal"]
+
+
+# --- behavioural: the alert must SETTLE to inactive (pending/firing never pass) ------------
+
+SCRAPE = "2026-10-04T13:00:00.500000000Z"
+BEFORE = "2026-10-04T12:59:59.900000000Z"
+AFTER = "2026-10-04T13:00:10.250000000Z"
+
+FAKE_PROM = r"""
+import json, sys
+from pathlib import Path
+plan, endpoint = Path(sys.argv[1]), sys.argv[-1].rsplit("/", 1)[-1]
+docs = json.loads(plan.read_text())
+counter = plan.with_suffix("." + endpoint + ".n")
+n = int(counter.read_text()) if counter.exists() else 0
+counter.write_text(str(n + 1))
+seq = docs[endpoint]
+item = seq[min(n, len(seq) - 1)]
+if item == "API_ERROR":
+    sys.exit(7)
+print(item if isinstance(item, str) else json.dumps(item))
+"""
+
+
+def _settle_program() -> str:
+    m = re.search(r"<<'SETTLE'\n(.*?)\nSETTLE\n", _script(), re.S)
+    assert m, "settle program not found"
+    return m.group(1)
+
+
+def _rules(state: str, last_eval: str = AFTER) -> dict[str, Any]:
+    return {
+        "status": "success",
+        "data": {
+            "groups": [
+                {"rules": [{"name": "NlwBackupStale", "state": state, "lastEvaluation": last_eval}]}
+            ]
+        },
+    }
+
+
+def _alerts(*states: str) -> dict[str, Any]:
+    alerts = [{"labels": {"alertname": "NlwBackupStale"}, "state": st} for st in states]
+    return {"status": "success", "data": {"alerts": alerts}}
+
+
+def _settle(
+    tmp_path: Path, rules: list[Any], alerts: list[Any], timeout: str = "2"
+) -> subprocess.CompletedProcess[str]:
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"rules": rules, "alerts": alerts}))
+    fake = tmp_path / "fake_prom.py"
+    fake.write_text(FAKE_PROM)
+    return subprocess.run(
+        [sys.executable, "-", SCRAPE, "0.05", timeout, sys.executable, str(fake), str(plan)],
+        input=_settle_program(),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+
+def test_settle_passes_when_inactive_and_absent_after_a_post_scrape_evaluation(
+    tmp_path: Path,
+) -> None:
+    res = _settle(tmp_path, [_rules("inactive")], [_alerts()])
+    assert res.returncode == 0, res.stdout
+    assert res.stdout.splitlines() == ["alert state: inactive"]
+
+
+def test_settle_rejects_pending(tmp_path: Path) -> None:
+    res = _settle(tmp_path, [_rules("pending")], [_alerts("pending")], timeout="0.3")
+    assert res.returncode == 1
+    assert "alert state: pending" in res.stdout and "timeout (last state: pending)" in res.stdout
+
+
+def test_settle_rejects_firing(tmp_path: Path) -> None:
+    res = _settle(tmp_path, [_rules("firing")], [_alerts("firing")], timeout="0.3")
+    assert res.returncode == 1
+    assert "alert state: firing" in res.stdout and "timeout" in res.stdout
+
+
+def test_settle_accepts_pending_followed_by_inactive(tmp_path: Path) -> None:
+    res = _settle(
+        tmp_path,
+        [_rules("pending"), _rules("pending"), _rules("inactive")],
+        [_alerts("pending"), _alerts("pending"), _alerts()],
+    )
+    assert res.returncode == 0, res.stdout
+    assert res.stdout.splitlines() == ["alert state: pending", "alert state: inactive"]
+
+
+def test_settle_requires_an_evaluation_after_the_scrape(tmp_path: Path) -> None:
+    res = _settle(tmp_path, [_rules("inactive", last_eval=BEFORE)], [_alerts()], timeout="0.3")
+    assert res.returncode == 1 and "timeout" in res.stdout
+
+
+def test_settle_requires_no_active_alert_even_if_the_rule_reads_inactive(tmp_path: Path) -> None:
+    res = _settle(tmp_path, [_rules("inactive")], [_alerts("pending")], timeout="0.3")
+    assert res.returncode == 1 and "alert state: pending" in res.stdout
+
+
+@pytest.mark.parametrize(
+    ("rules", "alerts"),
+    [
+        (["API_ERROR"], [_alerts()]),
+        ([_rules("inactive")], ["API_ERROR"]),
+        (["not json"], [_alerts()]),
+        ([{"status": "error", "data": {}}], [_alerts()]),
+        ([_rules("weird")], [_alerts()]),
+        ([_rules("inactive")], [_alerts("unknown")]),
+        ([_rules("inactive", last_eval="not-a-time")], [_alerts()]),
+        ([{"status": "success", "data": {"groups": []}}], [_alerts()]),
+    ],
+)
+def test_settle_fails_closed_on_api_errors_malformed_or_unknown_state(
+    tmp_path: Path, rules: list[Any], alerts: list[Any]
+) -> None:
+    res = _settle(tmp_path, rules, alerts)
+    assert res.returncode == 1
+    assert "api-error" in res.stdout
+
+
+def test_settle_output_is_state_names_only(tmp_path: Path) -> None:
+    alerts = _alerts("pending")
+    alerts["data"]["alerts"][0]["labels"]["secretish"] = "do-not-print-me"
+    alerts["data"]["alerts"][0]["annotations"] = {"summary": "do-not-print-me"}
+    res = _settle(tmp_path, [_rules("pending")], [alerts], timeout="0.2")
+    assert "do-not-print-me" not in res.stdout + res.stderr
+    for line in res.stdout.splitlines():
+        assert re.fullmatch(
+            r"alert state: (inactive|pending|firing)|timeout \(last state: \w+\)", line
+        )
+
+
+def test_settle_polling_is_bounded(tmp_path: Path) -> None:
+    text = _script()
+    assert 'SETTLE_INTERVAL_S="${EVIDENCE_SETTLE_INTERVAL_S:-5}"' in text
+    assert 'SETTLE_TIMEOUT_S="${EVIDENCE_SETTLE_TIMEOUT_S:-90}"' in text
+    assert "MAX_TIMEOUT_S = 90" in _settle_program()
+    res = _settle(tmp_path, [_rules("inactive")], [_alerts()], timeout="120")
+    assert res.returncode == 1 and "bad settle bounds" in res.stdout
+
+
+def test_the_script_cannot_accept_merely_not_firing() -> None:
+    text = _script()
+    assert "not firing for fresh evidence" not in text
+    program = _settle_program()
+    assert 'if state == "inactive" and not active and evaluated_after_scrape:' in program
+    assert program.count('return "pass", state') == 1  # the ONLY way to pass
+    assert 'fail "NlwBackupStale did not settle to inactive' in text
