@@ -1567,7 +1567,7 @@ def test_second_rollout_follows_current_and_expects_the_live_revision() -> None:
         (Path(__file__).resolve().parents[2] / "deploy/staging/target.env").read_text()
     )
     assert tgt["NLW_STAGING_REMOTE_APP"] == "/opt/nlw/current"
-    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0023_plan_outcome_events"
+    assert tgt["NLW_STAGING_CURRENT_REVISION"] == "0024_dataset_lifecycle"
     assert (
         tgt["NLW_STAGING_COMPOSE_PROJECT"] == "app"
         and tgt["NLW_STAGING_INSTANCE_ID"] == "i-0d1e65cdc9401dbb9"
