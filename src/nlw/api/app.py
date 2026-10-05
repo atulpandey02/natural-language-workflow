@@ -38,6 +38,7 @@ from nlw.api.routers import (
     analytics,
     approvals,
     connectors,
+    dataset_uploads,
     datasets,
     identity,
     members,
@@ -54,6 +55,7 @@ from nlw.db.session import check_connection, create_engine, create_sessionmaker
 from nlw.observability import metrics
 from nlw.planner.provider import build_llm_provider
 from nlw.ratelimit.limiter import RateLimiter
+from nlw.storage.factory import dataset_store
 from nlw.tenancy.keys import build_signer
 from nlw.tenancy.readiness import check_signed_context
 from nlw.tenancy.signing import ContextSigningError, Purpose
@@ -155,7 +157,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
     app.add_middleware(ObservabilityMiddleware, settings=settings)
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+    # Dataset object store (ADR-030): None unless a local store is configured
+    # (refused in staging/production). Upload routes exist only with a store.
+    app.state.dataset_store = dataset_store(settings) if settings.datasets_api_enabled else None
+    uploads_enabled = app.state.dataset_store is not None
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=settings.max_request_body_bytes,
+        streamed=(("PUT", dataset_uploads.CONTENT_PATH),) if uploads_enabled else (),
+    )
 
     install_exception_handlers(app)
 
@@ -172,6 +182,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # setting is refused in staging/production until upload and deletion exist.
     if settings.datasets_api_enabled:
         app.include_router(datasets.router)
+    if uploads_enabled:
+        app.include_router(dataset_uploads.router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

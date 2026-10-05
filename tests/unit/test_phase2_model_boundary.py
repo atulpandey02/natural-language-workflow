@@ -153,15 +153,35 @@ FORBIDDEN_FOR_DATASETS = (
 )
 
 
+# ADR-030: ``nlw.datasets.ingestion`` is the ONE dataset module that touches
+# bytes, through the storage abstraction and the strict profiler. Every other
+# rule still applies to it, and every other dataset module stays byte-free.
+BYTE_MODULES = {"datasets/ingestion.py"}
+BYTE_PACKAGES = ("nlw.ingest", "nlw.storage")
+
+
 def test_dataset_metadata_imports_no_planner_provider_storage_or_query_engine() -> None:
-    offenders = [
-        f"{f.relative_to(SRC)}:{m}"
-        for f in _files("datasets")
-        for m in _imports(f)
-        if any(m == bad or m.startswith(bad + ".") for bad in FORBIDDEN_FOR_DATASETS)
-    ]
+    offenders = []
+    for f in _files("datasets"):
+        rel = str(f.relative_to(SRC))
+        for m in _imports(f):
+            for bad in FORBIDDEN_FOR_DATASETS:
+                if not (m == bad or m.startswith(bad + ".")):
+                    continue
+                if rel in BYTE_MODULES and bad in BYTE_PACKAGES:
+                    continue
+                offenders.append(f"{rel}:{m}")
     assert _files("datasets"), "the dataset package must exist"
     assert offenders == []
+
+
+def test_only_the_ingestion_module_reads_bytes() -> None:
+    users = sorted(
+        str(f.relative_to(SRC))
+        for f in _files("datasets")
+        if any(m.startswith(BYTE_PACKAGES) for m in _imports(f))
+    )
+    assert users == sorted(BYTE_MODULES)
 
 
 def test_planner_capability_view_has_no_dataset_route_or_tool() -> None:

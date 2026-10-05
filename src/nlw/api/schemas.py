@@ -349,3 +349,46 @@ class DatasetVersionOut(BaseModel):
     superseded_at: datetime | None
     rejected_at: datetime | None
     deletion_requested_at: datetime | None
+    # Phase 2B (ADR-030): whether bytes were received, and processing times.
+    has_content: bool = False
+    profiling_started_at: datetime | None = None
+    profiled_at: datetime | None = None
+
+
+class DatasetVersionCreate(BaseModel):
+    """Initiate an upload. The client names the file and its exact size; the
+    server assigns every id, number, status and storage location."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    original_filename: str = Field(min_length=1, max_length=300)
+    declared_size_bytes: int = Field(ge=1, le=25_000_000)
+    media_type: Literal["text/csv"] = "text/csv"
+
+
+class SemanticColumnIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=63)
+    label: str = Field(min_length=1, max_length=200)
+    semantic_type: str = Field(min_length=1, max_length=32)
+    role: str = Field(min_length=1, max_length=32)
+    analysis_allowed: bool
+    description: str | None = Field(default=None, max_length=400)
+
+
+class SemanticConfirmIn(BaseModel):
+    """Validated against the closed ``semantics-1`` vocabularies and the profile
+    by ``nlw.datasets.semantics``; nothing here is executable."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    columns: list[SemanticColumnIn] = Field(min_length=1, max_length=200)
+
+
+class SemanticRevisionOut(BaseModel):
+    id: uuid.UUID
+    revision_number: int
+    mapping: dict[str, Any]
+    confirmed_by: uuid.UUID
+    confirmed_at: datetime

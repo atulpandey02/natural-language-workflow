@@ -8,6 +8,7 @@
   cardinality), and applies security headers.
 """
 
+import re
 import time
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -95,14 +96,28 @@ class BodySizeLimitMiddleware:
     and replayed to the app unchanged. Draining here (rather than raising from a
     wrapped ``receive``) keeps the 413 from being swallowed by the app's inner
     ServerError/Exception handling.
+
+    ``streamed`` lists exact (method, path pattern) pairs that are passed
+    through UNBUFFERED because the route enforces its own streamed cap (the
+    dataset content upload, ADR-030). Nothing else is exempt.
     """
 
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        max_bytes: int,
+        streamed: tuple[tuple[str, re.Pattern[str]], ...] = (),
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.streamed = streamed
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        method, path = scope.get("method", ""), scope.get("path", "")
+        if any(method == m and p.match(path) for m, p in self.streamed):
             await self.app(scope, receive, send)
             return
 
