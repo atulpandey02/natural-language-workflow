@@ -1,0 +1,502 @@
+"""Pre-PR review (adversarial) scenarios for dataset ingestion (ADR-030).
+
+Crash windows are simulated by reproducing the exact state a process killed at
+that point leaves behind (an object without a database record, a stale
+PROFILING lease, a published object with its quarantine copy still present, a
+REJECTED version whose bytes were not yet removed), then driving the normal
+recovery path. Concurrency uses separate sessions or requests that really race.
+"""
+
+import asyncio
+import hashlib
+import io
+import json
+import os
+import threading
+import time
+import uuid
+from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import jwt
+import psycopg
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from nlw.api.app import create_app
+from nlw.datasets import ingestion
+from nlw.datasets import service as svc
+from nlw.datasets.deletion_log import LocalFakeDeletionLog
+from nlw.datasets.lifecycle import VersionStatus
+from nlw.datasets.service import Actor
+from nlw.ingest.strict import StrictLimits
+from nlw.ops import datasets as ops
+from nlw.storage.blob import LocalBlobStore, TenantScopedBlobStore
+from nlw.tenancy.context import Role, TenantContext
+from nlw.tenancy.signing import Purpose
+
+pytestmark = pytest.mark.integration
+
+CSV = b"region,amount\n" + b"".join(f"r{i % 4},{i}\n".encode() for i in range(40))
+OTHER = b"region,amount\n" + b"".join(f"s{i % 4},{i}\n".encode() for i in range(40))
+assert len(CSV) == len(OTHER)
+CONFIG = ingestion.IngestionConfig(limits=StrictLimits(timeout_s=30), memory_mb=768)
+
+
+class H:
+    def __init__(self, pg: SimpleNamespace, root: Path) -> None:
+        m = pg.seed_member("owner")
+        self.pg = pg
+        self.ctx = TenantContext(user_id=m.user_id, tenant_id=m.tenant_id, role=Role.OWNER)
+        self.engine = create_async_engine(pg.settings.database_url, pool_size=10)
+        self.maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            self.engine, expire_on_commit=False
+        )
+        self.signer = pg.signers[Purpose.API_REQUEST]
+        self.store = LocalBlobStore(root)
+        self.scoped = TenantScopedBlobStore(self.store, self.ctx.tenant_id)
+
+    def as_user(self, user: uuid.UUID, role: Role) -> TenantContext:
+        return TenantContext(user_id=user, tenant_id=self.ctx.tenant_id, role=role)
+
+    async def run(self, fn: Any, ctx: TenantContext | None = None) -> Any:
+        return await ingestion.in_context(self.maker, self.signer, ctx or self.ctx, fn)
+
+    async def dataset(self) -> uuid.UUID:
+        t, a = self.ctx.tenant_id, Actor.user(self.ctx.user_id)
+        d = await self.run(
+            lambda s: svc.create_dataset(
+                s, t, a, name=f"d-{uuid.uuid4().hex[:8]}", description=None
+            )
+        )
+        return d.id  # type: ignore[no-any-return]
+
+    async def version(
+        self, d: uuid.UUID, *, size: int = len(CSV), name: str = "a.csv", key: str | None = None
+    ) -> uuid.UUID:
+        t, a = self.ctx.tenant_id, Actor.user(self.ctx.user_id)
+        v = await self.run(
+            lambda s: svc.create_version(
+                s, t, a, d, original_filename=name, media_type="text/csv",
+                declared_size_bytes=size, idempotency_key=key or uuid.uuid4().hex,
+            )
+        )  # fmt: skip
+        return v.id  # type: ignore[no-any-return]
+
+    async def put(self, d: uuid.UUID, v: uuid.UUID, data: bytes = CSV) -> svc.VersionRecord:
+        async def chunks() -> AsyncIterator[bytes]:
+            for i in range(0, len(data), 7):  # many small chunks
+                yield data[i : i + 7]
+
+        return await ingestion.store_content(
+            maker=self.maker, signer=self.signer, store=self.store, ctx=self.ctx,
+            dataset_id=d, version_id=v, chunks=chunks(), max_bytes=25_000_000,
+        )  # fmt: skip
+
+    async def process(self, d: uuid.UUID, v: uuid.UUID, ctx: TenantContext | None = None) -> str:
+        return await ingestion.process_version(
+            maker=self.maker, signer=self.signer, store=self.store, config=CONFIG,
+            ctx=ctx or self.ctx, dataset_id=d, version_id=v,
+        )  # fmt: skip
+
+    async def get(self, d: uuid.UUID, v: uuid.UUID) -> svc.VersionRecord:
+        t = self.ctx.tenant_id
+        rec: svc.VersionRecord = await self.run(lambda s: svc.get_version(s, t, d, v))
+        return rec
+
+    def age_lease(self, v: uuid.UUID) -> None:
+        """What a crash leaves behind, an hour later: a stale PROFILING lease."""
+        with psycopg.connect(self.pg.owner_libpq, autocommit=True) as c:
+            # The crashed processor's lease, expired by the DATABASE clock.
+            c.execute(
+                "UPDATE dataset_versions "
+                "SET processing_lease_expires_at = now() - interval '1 hour' WHERE id = %s",
+                (v,),
+            )
+
+    def verify(self) -> dict[str, list[str]]:
+        with psycopg.connect(self.pg.owner_libpq, autocommit=True) as c:
+            return ops.verify_objects(c, self.store)
+
+
+@pytest.fixture
+async def h(pg_stack: SimpleNamespace, tmp_path: Path) -> AsyncIterator[H]:
+    harness = H(pg_stack, tmp_path / "store")
+    yield harness
+    await harness.engine.dispose()
+
+
+# --- crash windows -------------------------------------------------------------------------
+
+
+async def test_crash_after_the_object_is_written_but_before_the_db_commit(h: H) -> None:
+    d = await h.dataset()
+    v = await h.version(d)
+    # The killed request linked the object, but never recorded it.
+    h.scoped.put_stream(h.scoped.version_key("quarantine", d, v), io.BytesIO(CSV), max_bytes=10**6)
+    assert (await h.get(d, v)).has_content is False
+    assert h.verify()["unaccounted_objects"] == [str(v)]  # visible to the operator
+    # A retry with DIFFERENT bytes can never replace it ...
+    with pytest.raises(ingestion.ContentError) as exc:
+        await h.put(d, v, OTHER)
+    assert exc.value.code == "CONTENT_CONFLICT"
+    # ... the identical retry adopts it, and processing proceeds normally.
+    rec = await h.put(d, v, CSV)
+    assert rec.has_content and rec.content_sha256 == hashlib.sha256(CSV).hexdigest()
+    assert await h.process(d, v) == "profiled"
+    assert h.verify() == {"missing_objects": [], "digest_mismatches": [], "unaccounted_objects": []}
+
+
+async def test_crash_after_profiling_started_but_before_the_profile_is_stored(h: H) -> None:
+    d = await h.dataset()
+    v = await h.version(d)
+    await h.put(d, v)
+    t, a = h.ctx.tenant_id, Actor.service(h.ctx.user_id)
+    await h.run(
+        lambda s: svc.acquire_processing_lease(s, t, a, d, v, token=uuid.uuid4(), ttl_s=300)
+    )
+    assert await h.process(d, v) == "skipped"  # a live lease is respected
+    h.age_lease(v)
+    assert await h.process(d, v) == "profiled"
+
+
+async def test_crash_after_the_verified_copy_but_before_the_publish_commit(h: H) -> None:
+    d = await h.dataset()
+    v = await h.version(d)
+    await h.put(d, v)
+    t, a = h.ctx.tenant_id, Actor.service(h.ctx.user_id)
+    await h.run(
+        lambda s: svc.acquire_processing_lease(s, t, a, d, v, token=uuid.uuid4(), ttl_s=300)
+    )
+    sha = hashlib.sha256(CSV).hexdigest()
+    h.scoped.copy_verified(
+        h.scoped.version_key("quarantine", d, v), h.scoped.version_key("datasets", d, v),
+        expected_sha256=sha, max_bytes=10**6,
+    )  # fmt: skip
+    h.age_lease(v)
+    assert await h.process(d, v) == "profiled"  # the existing identical copy is accepted
+    assert h.scoped.list_version(d, v) == [h.scoped.version_key("datasets", d, v)]
+
+
+async def test_crash_after_publishing_but_before_quarantine_cleanup(
+    h: H, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = await h.dataset()
+    v = await h.version(d)
+    await h.put(d, v)
+    real_delete = TenantScopedBlobStore.delete
+
+    def killed(self: TenantScopedBlobStore, key: str) -> None:
+        raise OSError("process killed before cleanup")
+
+    monkeypatch.setattr(TenantScopedBlobStore, "delete", killed)
+    assert await h.process(d, v) == "profiled"
+    monkeypatch.setattr(TenantScopedBlobStore, "delete", real_delete)
+    quarantine = h.scoped.version_key("quarantine", d, v)
+    assert h.scoped.exists(quarantine)
+    assert h.verify()["unaccounted_objects"] == [str(v)]
+    # Recovery: re-running processing for the version removes the leftover copy.
+    await h.process(d, v)
+    assert not h.scoped.exists(quarantine)
+    assert h.verify()["unaccounted_objects"] == []
+    assert (await h.get(d, v)).status is VersionStatus.PROFILED
+
+
+async def test_crash_after_rejection_but_before_the_bytes_are_removed(
+    h: H, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bad = b"a,a\n1,2\n"
+    d = await h.dataset()
+    v = await h.version(d, size=len(bad))
+    await h.put(d, v, bad)
+
+    def killed(self: TenantScopedBlobStore, *_a: Any) -> Any:
+        raise OSError("process killed before cleanup")
+
+    real = TenantScopedBlobStore.delete_version_and_verify
+    monkeypatch.setattr(TenantScopedBlobStore, "delete_version_and_verify", killed)
+    assert await h.process(d, v) == "rejected"
+    monkeypatch.setattr(TenantScopedBlobStore, "delete_version_and_verify", real)
+    assert h.scoped.list_version(d, v)  # rejected bytes are still on disk
+    await h.process(d, v)
+    assert h.scoped.list_version(d, v) == []  # recovery removes them
+    assert (await h.get(d, v)).status is VersionStatus.REJECTED
+
+
+async def test_tombstone_refuses_orphan_bytes_of_a_version_without_a_key(h: H) -> None:
+    """A crash after the object was linked but before it was recorded leaves bytes
+    that no storage key points at. The tombstone must still see them."""
+    d = await h.dataset()
+    v = await h.version(d)
+    h.scoped.put_stream(h.scoped.version_key("quarantine", d, v), io.BytesIO(CSV), max_bytes=10**6)
+    t, a = h.ctx.tenant_id, Actor.user(h.ctx.user_id)
+    await h.run(lambda s: svc.request_version_deletion(s, t, a, d, v))
+    with psycopg.connect(h.pg.owner_libpq, autocommit=True) as c:
+        with pytest.raises(ops.TombstoneError, match="still present"):
+            ops.tombstone(c, dataset_id=d, version_id=v, store=h.store)
+        log = LocalFakeDeletionLog(Path(h.store.root).parent / "receipts.jsonl")
+        assert ops.purge(c, h.store, log, dataset_id=d, version_id=v, operator="op",
+                         environment="local")["objects_deleted"] == 1  # fmt: skip
+        # The keyless version's purge produced evidence and a receipt: the
+        # tombstone verifies that receipt too.
+        assert (
+            ops.tombstone(c, dataset_id=d, version_id=v, store=h.store, log=log)[
+                "versions_tombstoned"
+            ]
+            == 1
+        )
+
+
+# --- concurrency and conflicting uploads ---------------------------------------------------
+
+
+async def test_simultaneous_identical_content_uploads_store_one_object(h: H) -> None:
+    d = await h.dataset()
+    v = await h.version(d)
+    results = await asyncio.gather(*(h.put(d, v) for _ in range(5)), return_exceptions=True)
+    kinds = [
+        type(r).__name__ + (f":{r.code}" if hasattr(r, "code") else f":{r!r}"[:120])
+        if not isinstance(r, svc.VersionRecord)
+        else "ok"
+        for r in results
+    ]
+    assert kinds == ["ok"] * 5, kinds
+    assert h.scoped.list_version(d, v) == [h.scoped.version_key("quarantine", d, v)]
+
+
+async def test_simultaneous_different_content_uploads_keep_exactly_one(h: H) -> None:
+    d = await h.dataset()
+    v = await h.version(d)
+    results = await asyncio.gather(h.put(d, v, CSV), h.put(d, v, OTHER), return_exceptions=True)
+    ok = [r for r in results if isinstance(r, svc.VersionRecord)]
+    errors = [r for r in results if isinstance(r, ingestion.ContentError)]
+    assert len(ok) == 1 and len(errors) == 1 and errors[0].code == "CONTENT_CONFLICT"
+    stored = h.scoped.digest(h.scoped.version_key("quarantine", d, v))[1]
+    assert stored == ok[0].content_sha256  # the record and the bytes agree
+
+
+async def test_one_key_two_files(h: H) -> None:
+    d = await h.dataset()
+    key = uuid.uuid4().hex
+    v = await h.version(d, key=key)
+    with pytest.raises(svc.DatasetConflict) as exc:
+        await h.version(d, key=key, name="other.csv")
+    assert exc.value.code == "IDEMPOTENCY_KEY_REUSED"
+    # Same name and size but different bytes: the same version; the second
+    # file can never replace the first.
+    assert await h.version(d, key=key) == v
+    await h.put(d, v, CSV)
+    with pytest.raises(ingestion.ContentError) as content:
+        await h.put(d, v, OTHER)
+    assert content.value.code == "CONTENT_CONFLICT"
+
+
+async def test_same_bytes_under_different_filenames_are_separate_versions(h: H) -> None:
+    d = await h.dataset()
+    v1, v2 = await h.version(d, name="jan.csv"), await h.version(d, name="feb.csv")
+    for v in (v1, v2):
+        await h.put(d, v)
+        assert await h.process(d, v) == "profiled"
+    r1, r2 = await h.get(d, v1), await h.get(d, v2)
+    assert r1.content_sha256 == r2.content_sha256 and r1.version_number != r2.version_number
+    assert h.scoped.list_version(d, v1) != h.scoped.list_version(d, v2)  # separate objects
+
+
+# --- tampering, deletion races, receipts -----------------------------------------------------
+
+
+async def test_tampering_after_publication_is_reported_by_restore_validation(h: H) -> None:
+    d = await h.dataset()
+    v = await h.version(d)
+    await h.put(d, v)
+    assert await h.process(d, v) == "profiled"
+    (h.store.root / h.scoped.version_key("datasets", d, v)).write_bytes(OTHER)
+    assert h.verify()["digest_mismatches"] == [str(v)]
+
+
+async def test_activation_while_deletion_is_requested_is_refused(h: H) -> None:
+    d = await h.dataset()
+    v = await h.version(d)
+    await h.put(d, v)
+    await h.process(d, v)
+    t, a = h.ctx.tenant_id, Actor.user(h.ctx.user_id)
+    mapping = json.dumps({"contract_version": "semantics-1", "columns": [
+        {"name": "region", "label": "Region", "semantic_type": "category", "role": "dimension",
+         "analysis_allowed": True, "description": None},
+        {"name": "amount", "label": "Amount", "semantic_type": "count", "role": "measure",
+         "analysis_allowed": True, "description": None}]})  # fmt: skip
+    await h.run(lambda s: svc.confirm_semantics(s, t, a, d, v, mapping_json=mapping))
+    await h.run(lambda s: svc.request_dataset_deletion(s, t, a, d))
+    with pytest.raises(svc.DatasetConflict):
+        await h.run(lambda s: svc.activate_version(s, t, a, d, v))
+    assert (await h.get(d, v)).status is VersionStatus.DELETING
+
+
+# --- authority changes -------------------------------------------------------------------------
+
+
+async def test_a_changed_signed_user_fails_closed_and_another_admin_can_recover(
+    h: H, pg_stack: SimpleNamespace
+) -> None:
+    d = await h.dataset()
+    v = await h.version(d)
+    await h.put(d, v)
+    member = h.as_user(pg_stack.add_membership(h.ctx.tenant_id, "member"), Role.MEMBER)
+    outsider = pg_stack.seed_member("owner")
+    foreign = TenantContext(user_id=outsider.user_id, tenant_id=h.ctx.tenant_id, role=Role.OWNER)
+    for ctx in (member, foreign):  # demoted, or not a member at all
+        with pytest.raises(svc.DatasetError):
+            await h.process(d, v, ctx=ctx)
+        assert (await h.get(d, v)).status is VersionStatus.QUARANTINED
+    other_admin = h.as_user(pg_stack.add_membership(h.ctx.tenant_id, "admin"), Role.ADMIN)
+    assert await h.process(d, v, ctx=other_admin) == "profiled"
+
+
+# --- profiler process cleanup -----------------------------------------------------------------
+
+
+async def test_a_cancelled_profiling_run_kills_its_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    procs: list[asyncio.subprocess.Process] = []
+    real = asyncio.create_subprocess_exec
+
+    async def capture(*a: Any, **k: Any) -> asyncio.subprocess.Process:
+        p = await real(*a, **k)
+        procs.append(p)
+        return p
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    release = threading.Event()
+
+    class Slow(io.RawIOBase):
+        def readable(self) -> bool:
+            return True
+
+        def read(self, n: int | None = -1) -> bytes:
+            release.wait(5)
+            return b""
+
+    def opener() -> Any:
+        return Slow()
+
+    task = asyncio.create_task(ingestion.run_profiler(opener, CONFIG))
+    for _ in range(100):
+        if procs:
+            break
+        await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    proc = procs[0]
+    for _ in range(100):
+        if proc.returncode is not None:
+            break
+        await asyncio.sleep(0.05)
+    assert proc.returncode is not None, "the profiler child outlived its cancelled parent"
+
+
+# --- values never reach logs or error responses ---------------------------------------------
+
+
+_SECRET = "dev-secret-for-tests-32bytes-min-length"
+
+
+def _hdr(user_id: uuid.UUID, tenant_id: uuid.UUID, **extra: str) -> dict[str, str]:
+    token = jwt.encode(
+        {"iss": "https://proj.supabase.co/auth/v1", "aud": "authenticated",
+         "exp": int(time.time()) + 300, "sub": f"sub-{user_id}", "email": f"{user_id}@example.com"},
+        _SECRET, algorithm="HS256",
+    )  # fmt: skip
+    return {"Authorization": f"Bearer {token}", "X-Workspace-Id": str(tenant_id), **extra}
+
+
+@pytest.fixture
+def api(pg_stack: SimpleNamespace, tmp_path: Path) -> Iterator[TestClient]:
+    settings = pg_stack.settings.model_copy(
+        update={
+            "datasets_api_enabled": True,
+            "dataset_storage_backend": "local",
+            "dataset_storage_root": str(tmp_path / "api-store"),
+        }  # fmt: skip
+    )
+    with TestClient(create_app(settings)) as c:
+        yield c
+
+
+def test_formula_and_sensitive_values_never_reach_logs_errors_or_the_profile(
+    api: TestClient, pg_stack: SimpleNamespace, capfd: pytest.CaptureFixture[str], caplog: Any
+) -> None:
+    m = pg_stack.seed_member("owner")
+    h = _hdr(m.user_id, m.tenant_id)
+    ssn, mail, formula = "123-45-6789", "zz.canary@example.test", '=HYPERLINK("http://x")'
+    rows = [f'{ssn},{mail},"{formula.replace(chr(34), chr(34) * 2)}",{i}' for i in range(25)]
+    good = ("national,contact,note,n\n" + "\n".join(rows) + "\n").encode()
+    bad = good + f"{ssn},{mail}\n".encode()  # ragged last row -> rejected
+    did = api.post("/datasets", headers=h, json={"name": "Canary"}).json()["id"]
+    bodies: list[str] = []
+    for data in (good, bad):
+        r = api.post(
+            f"/datasets/{did}/versions",
+            headers={**h, "Idempotency-Key": uuid.uuid4().hex},
+            json={"original_filename": "c.csv", "declared_size_bytes": len(data)},
+        )
+        vid = r.json()["id"]
+        put = api.put(f"/datasets/{did}/versions/{vid}/content", headers=h, content=data)
+        bodies += [r.text, put.text, api.get(f"/datasets/{did}/versions/{vid}", headers=h).text]
+        prof = api.get(f"/datasets/{did}/versions/{vid}/profile", headers=h)
+        bodies.append(prof.text)
+    # A wrong-size retry error and a semantic error must not echo values either.
+    bodies.append(api.put(f"/datasets/{did}/versions/{vid}/content", headers=h, content=good).text)
+    out, err = capfd.readouterr()
+    everything = out + err + caplog.text + "\n".join(bodies)
+    for canary in (ssn, mail, "HYPERLINK", "http://x"):
+        assert canary not in everything, canary
+    assert os.environ.get("NLW_LLM_API_KEY", "") == "" or "NLW_LLM_API_KEY" not in everything
+
+
+@pytest.mark.parametrize("ch", ["\u0085", "\u009f", "\u0080", "‮"])
+def test_c1_and_format_characters_are_refused_in_every_api_metadata_field(
+    api: TestClient, pg_stack: SimpleNamespace, ch: str
+) -> None:
+    m = pg_stack.seed_member("owner")
+    h = _hdr(m.user_id, m.tenant_id)
+    assert api.post("/datasets", headers=h, json={"name": f"Sales{ch}"}).status_code == 422
+    assert (
+        api.post(
+            "/datasets", headers=h, json={"name": "Ok", "description": f"desc{ch}ription"}
+        ).status_code
+        == 422
+    )
+    did = api.post("/datasets", headers=h, json={"name": f"Ok-{ord(ch)}"}).json()["id"]
+    r = api.post(
+        f"/datasets/{did}/versions",
+        headers={**h, "Idempotency-Key": uuid.uuid4().hex},
+        json={"original_filename": f"a{ch}.csv", "declared_size_bytes": len(CSV)},
+    )
+    assert r.status_code == 422
+    vid = api.post(
+        f"/datasets/{did}/versions",
+        headers={**h, "Idempotency-Key": uuid.uuid4().hex},
+        json={"original_filename": "a.csv", "declared_size_bytes": len(CSV)},
+    ).json()["id"]
+    api.put(f"/datasets/{did}/versions/{vid}/content", headers=h, content=CSV)
+    mapping = {"columns": [
+        {"name": "region", "label": f"Reg{ch}ion", "semantic_type": "category",
+         "role": "dimension", "analysis_allowed": True},
+        {"name": "amount", "label": "Amount", "semantic_type": "count", "role": "measure",
+         "analysis_allowed": True}]}  # fmt: skip
+    sem = api.post(f"/datasets/{did}/versions/{vid}/semantics", headers=h, json=mapping)
+    assert sem.status_code == 422
+    bad_header = f"reg{ch}ion,amount\nx,1\n".encode()
+    vid2 = api.post(
+        f"/datasets/{did}/versions",
+        headers={**h, "Idempotency-Key": uuid.uuid4().hex},
+        json={"original_filename": "b.csv", "declared_size_bytes": len(bad_header)},
+    ).json()["id"]
+    api.put(f"/datasets/{did}/versions/{vid2}/content", headers=h, content=bad_header)
+    got = api.get(f"/datasets/{did}/versions/{vid2}", headers=h).json()
+    assert got["status"] == "REJECTED"
+    assert got["rejection_code"] in ("CONTENT_BINARY", "HEADER_INVALID")

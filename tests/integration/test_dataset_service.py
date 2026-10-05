@@ -418,7 +418,7 @@ async def test_tombstone_refuses_a_version_that_references_a_stored_object(
     await h.run(lambda s: svc.request_dataset_deletion(s, h.tenant, h.actor, d.id))
     with (
         psycopg.connect(pg_stack.owner_libpq, autocommit=True) as c,
-        pytest.raises(ops_datasets.TombstoneError, match="physical deletion"),
+        pytest.raises(ops_datasets.TombstoneError, match="not purged"),
     ):
         ops_datasets.tombstone(c, dataset_id=d.id)
     assert _statuses(h.pg, d.id) == {1: "DELETING"}
