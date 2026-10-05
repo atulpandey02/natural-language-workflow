@@ -64,6 +64,12 @@ def test_planning_path_never_imports_ingestion_or_storage() -> None:
     assert offenders == []
 
 
+# The ONLY permitted exceptions, each proven below: the isolated profiling
+# process imports ``socket`` solely to DISABLE it, and the storage factory reads
+# ``Settings`` (configuration, not a database, provider or network client).
+INGEST_ALLOWED = {("ingest/runner.py", "socket")}
+
+
 def test_ingestion_imports_no_planner_provider_query_engine_or_network() -> None:
     offenders = [
         f"{f.relative_to(SRC)}:{m}"
@@ -71,8 +77,37 @@ def test_ingestion_imports_no_planner_provider_query_engine_or_network() -> None
         for f in _files(pkg)
         for m in _imports(f)
         if any(m == bad or m.startswith(bad + ".") for bad in FORBIDDEN_FOR_INGEST)
+        and (str(f.relative_to(SRC)), m) not in INGEST_ALLOWED
     ]
     assert offenders == []
+
+
+def test_the_profiling_process_disables_the_network() -> None:
+    from nlw.ingest import runner
+
+    real = (socket.socket, socket.create_connection, socket.getaddrinfo)
+    try:
+        runner._disable_network()
+        for attempt in (
+            lambda: socket.socket(),
+            lambda: socket.create_connection(("192.0.2.1", 80)),
+            lambda: socket.getaddrinfo("example.invalid", 80),
+        ):
+            with pytest.raises(OSError, match="network access is disabled"):
+                attempt()
+    finally:
+        socket.socket, socket.create_connection, socket.getaddrinfo = real  # type: ignore[misc]
+
+
+def test_strict_profiling_opens_no_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nlw.ingest.strict import profile_bytes
+
+    def _no_network(*_a: object, **_k: object) -> None:
+        raise AssertionError("profiling attempted network access")
+
+    monkeypatch.setattr(socket, "socket", _no_network)
+    monkeypatch.setattr(socket, "create_connection", _no_network)
+    assert profile_bytes(b"site,open\nA,1\nB,2\n").row_count == 2
 
 
 def test_registry_offers_no_dataset_tool() -> None:
