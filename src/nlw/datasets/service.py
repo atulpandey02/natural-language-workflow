@@ -10,7 +10,8 @@ dataset serialize without deadlock. Every state change is a compare-and-set
 rule (migration ``0024_dataset_lifecycle``).
 
 Nothing here reads or writes file bytes, storage objects or rows of customer
-data, and nothing here is reachable from the planner.
+data (``nlw.datasets.ingestion`` does that around these calls), and nothing here
+is reachable from the planner.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +38,7 @@ from nlw.datasets.lifecycle import (
     normalize_name,
     sanitize_filename,
     validate_declared_size,
+    validate_idempotency_key,
     validate_media_type,
     version_transition_allowed,
 )
@@ -119,18 +121,21 @@ class VersionRecord:
     rejected_at: datetime | None
     deletion_requested_at: datetime | None
     deleted_at: datetime | None
+    has_content: bool = False
 
 
 _DATASET_COLS = (
     "id, tenant_id, name, description, status, active_version_id, last_version_number, "
     "created_by, created_at, updated_at, deletion_requested_at, deleted_at"
 )
-# storage_object_key is deliberately never selected: it is internal and future.
+# storage_object_key is deliberately never selected here: only whether content
+# exists. The key itself is internal (see _SQL_GET_STORAGE_KEY) and never leaves
+# the ingestion module.
 _VERSION_COLS = (
     "id, tenant_id, dataset_id, version_number, status, original_filename, media_type, "
     "declared_size_bytes, content_sha256, rejection_code, created_by, created_at, updated_at, "
     "profiling_started_at, profiled_at, activated_at, superseded_at, rejected_at, "
-    "deletion_requested_at, deleted_at"
+    "deletion_requested_at, deleted_at, (storage_object_key IS NOT NULL) AS has_content"
 )
 
 
@@ -168,6 +173,89 @@ _SQL_CAS_VERSION = (
     "UPDATE dataset_versions SET status = :dst, rejection_code = COALESCE(:code, rejection_code) "
     "WHERE id = :v AND dataset_id = :d AND tenant_id = :t AND status = :src "
     "RETURNING " + _VERSION_COLS
+)
+_SQL_VERSION_BY_IDEMPOTENCY = (
+    "SELECT " + _VERSION_COLS + " FROM dataset_versions WHERE tenant_id = :t "
+    "AND dataset_id = :d AND upload_idempotency_key = :k"
+)
+_SQL_INSERT_VERSION_IDEMPOTENT = (
+    "INSERT INTO dataset_versions (id, tenant_id, dataset_id, version_number, status, "
+    "original_filename, media_type, declared_size_bytes, created_by, upload_idempotency_key) "
+    "VALUES (:id, :t, :d, :n, 'QUARANTINED', :fn, :mt, :size, :by, :k) RETURNING " + _VERSION_COLS
+)
+_SQL_SET_CONTENT = (
+    "UPDATE dataset_versions SET content_sha256 = :sha, storage_object_key = :key "
+    "WHERE id = :v AND dataset_id = :d AND tenant_id = :t AND status = 'QUARANTINED' "
+    "AND storage_object_key IS NULL AND content_sha256 IS NULL RETURNING " + _VERSION_COLS
+)
+_SQL_GET_STORAGE_KEY = (
+    "SELECT storage_object_key FROM dataset_versions WHERE id = :v AND dataset_id = :d "
+    "AND tenant_id = :t AND status <> 'DELETED'"
+)
+# Publication proves CURRENT lease ownership: the token must still be ours (a
+# reclaimer replaces it) and the database refuses an expired lease.
+_SQL_CAS_PUBLISH = (
+    "UPDATE dataset_versions SET status = 'PROFILED', storage_object_key = :key "
+    "WHERE id = :v AND dataset_id = :d AND tenant_id = :t AND status = 'PROFILING' "
+    "AND processing_lease_token = :tok RETURNING " + _VERSION_COLS
+)
+# Processing lease primitives. Every expiry decision uses PostgreSQL's clock
+# (now()); the application host's clock is never consulted. Each is ONE
+# compare-and-set statement, so concurrent claimants cannot both succeed.
+_SQL_LEASE_ACQUIRE = (
+    "UPDATE dataset_versions SET status = 'PROFILING', processing_lease_token = :tok, "
+    "processing_lease_expires_at = now() + make_interval(secs => :ttl) "
+    "WHERE id = :v AND dataset_id = :d AND tenant_id = :t AND status = 'QUARANTINED' "
+    "AND storage_object_key IS NOT NULL RETURNING " + _VERSION_COLS
+)
+_SQL_LEASE_RECLAIM = (
+    "UPDATE dataset_versions SET processing_lease_token = :tok, "
+    "processing_lease_expires_at = now() + make_interval(secs => :ttl) "
+    "WHERE id = :v AND dataset_id = :d AND tenant_id = :t AND status = 'PROFILING' "
+    "AND (processing_lease_token IS NULL OR processing_lease_expires_at < now()) "
+    "RETURNING " + _VERSION_COLS
+)
+_SQL_LEASE_RENEW = (
+    "UPDATE dataset_versions SET "
+    "processing_lease_expires_at = now() + make_interval(secs => :ttl) "
+    "WHERE id = :v AND dataset_id = :d AND tenant_id = :t AND status = 'PROFILING' "
+    "AND processing_lease_token = :tok RETURNING id"
+)
+_SQL_LEASE_REJECT = (
+    "UPDATE dataset_versions SET status = 'REJECTED', rejection_code = :code "
+    "WHERE id = :v AND dataset_id = :d AND tenant_id = :t AND status = 'PROFILING' "
+    "AND processing_lease_token = :tok RETURNING " + _VERSION_COLS
+)
+_SQL_INSERT_PROFILE = (
+    "INSERT INTO dataset_profiles (version_id, tenant_id, dataset_id, contract_version, "
+    "content_sha256, row_count, column_count, profile) VALUES "
+    "(:v, :t, :d, :cv, :sha, :rows, :cols, CAST(:profile AS jsonb))"
+)
+_SQL_GET_PROFILE = (
+    "SELECT p.contract_version, p.profile, p.created_at FROM dataset_profiles p "
+    "JOIN dataset_versions v ON v.id = p.version_id AND v.tenant_id = p.tenant_id "
+    "WHERE p.version_id = :v AND p.dataset_id = :d AND p.tenant_id = :t "
+    "AND p.profile IS NOT NULL AND v.status <> 'DELETED'"
+)
+_SQL_LATEST_SEMANTICS = (
+    "SELECT id, revision_number, mapping, confirmed_by, confirmed_at "
+    "FROM dataset_semantic_revisions WHERE version_id = :v AND dataset_id = :d "
+    "AND tenant_id = :t AND mapping IS NOT NULL ORDER BY revision_number DESC LIMIT 1"
+)
+_SQL_LIST_SEMANTICS = (
+    "SELECT id, revision_number, mapping, confirmed_by, confirmed_at "
+    "FROM dataset_semantic_revisions WHERE version_id = :v AND dataset_id = :d "
+    "AND tenant_id = :t AND mapping IS NOT NULL ORDER BY revision_number"
+)
+_SQL_NEXT_SEMANTIC_NUMBER = (
+    "SELECT coalesce(max(revision_number), 0) + 1 FROM dataset_semantic_revisions "
+    "WHERE version_id = :v AND tenant_id = :t"
+)
+_SQL_INSERT_SEMANTICS = (
+    "INSERT INTO dataset_semantic_revisions (id, tenant_id, dataset_id, version_id, "
+    "revision_number, mapping, confirmed_by) VALUES "
+    "(:id, :t, :d, :v, :n, CAST(:mapping AS jsonb), :by) "
+    "RETURNING id, revision_number, mapping, confirmed_by, confirmed_at"
 )
 _SQL_DATASET_TO_DELETING = (
     "UPDATE datasets SET status = 'DELETING', active_version_id = NULL "
@@ -344,12 +432,33 @@ async def create_version(
     original_filename: str,
     media_type: str,
     declared_size_bytes: int,
+    idempotency_key: str | None = None,
 ) -> VersionRecord:
     """A QUARANTINED version with the next number from the dataset's atomic
-    counter (the UPDATE row-locks the dataset; numbers are never reused)."""
+    counter (numbers are never reused). With ``idempotency_key`` a retried
+    request returns the SAME version: the dataset row is locked first, so two
+    concurrent requests with one key serialize and the second finds the first's
+    version. Reusing a key for a different file is a conflict."""
     filename = sanitize_filename(original_filename)
     media = validate_media_type(media_type)
     size = validate_declared_size(declared_size_bytes)
+    if idempotency_key is not None:
+        idempotency_key = validate_idempotency_key(idempotency_key)
+        await get_dataset(session, tenant_id, dataset_id, for_update=True)
+        existing = (
+            await session.execute(
+                text(_SQL_VERSION_BY_IDEMPOTENCY),
+                {"t": tenant_id, "d": dataset_id, "k": idempotency_key},
+            )
+        ).first()
+        if existing is not None:
+            found = _version(existing)
+            if (found.original_filename, found.declared_size_bytes) != (filename, size):
+                raise DatasetConflict(
+                    "the idempotency key was used for a different upload",
+                    "IDEMPOTENCY_KEY_REUSED",
+                )
+            return found
     allocated = (
         await session.execute(
             text(
@@ -364,21 +473,24 @@ async def create_version(
         await get_dataset(session, tenant_id, dataset_id)  # NotFound if invisible
         raise DatasetConflict("the dataset is not accepting versions", "DATASET_NOT_ACTIVE")
     version_id = uuid.uuid4()
-    row = (
-        await session.execute(
-            text(_SQL_INSERT_VERSION),
-            {
-                "id": version_id,
-                "t": tenant_id,
-                "d": dataset_id,
-                "n": allocated,
-                "fn": filename,
-                "mt": media,
-                "size": size,
-                "by": actor.user_id,
-            },
-        )
-    ).one()
+    params = {
+        "id": version_id,
+        "t": tenant_id,
+        "d": dataset_id,
+        "n": allocated,
+        "fn": filename,
+        "mt": media,
+        "size": size,
+        "by": actor.user_id,
+    }
+    if idempotency_key is None:
+        row = (await session.execute(text(_SQL_INSERT_VERSION), params)).one()
+    else:
+        row = (
+            await session.execute(
+                text(_SQL_INSERT_VERSION_IDEMPOTENT), {**params, "k": idempotency_key}
+            )
+        ).one()
     await _event(
         session,
         tenant_id=tenant_id,
@@ -435,9 +547,10 @@ async def _cas_version(
     return _version(row)
 
 
-_INGEST_TARGETS = frozenset(
-    {VersionStatus.PROFILING, VersionStatus.PROFILED, VersionStatus.REJECTED}
-)
+# PROFILING is entered only by acquire_processing_lease (it needs a lease),
+# PROFILED only by publish_profile (it needs the profile row and the lease), and
+# a PROFILING version is rejected only by its lease owner (reject_processing).
+_INGEST_TARGETS = frozenset({VersionStatus.REJECTED})
 
 
 async def transition_version(
@@ -450,9 +563,10 @@ async def transition_version(
     to: VersionStatus,
     rejection_code: RejectionCode | None = None,
 ) -> VersionRecord:
-    """Ingestion/review transitions only: ``-> PROFILING``, ``-> PROFILED`` and
-    ``-> REJECTED`` (with a constrained code). Activation and deletion have their
-    own operations; there is no generic "set status"."""
+    """Review rejection only: ``-> REJECTED`` with a constrained code, from a
+    version nobody is processing. Processing transitions use the lease functions;
+    activation and deletion have their own operations; there is no generic
+    "set status"."""
     if to not in _INGEST_TARGETS:
         raise DatasetConflict("unsupported transition", "DATASET_VERSION_INVALID_TRANSITION")
     if (to is VersionStatus.REJECTED) != (rejection_code is not None):
@@ -463,7 +577,9 @@ async def transition_version(
     if dataset.status is not DatasetStatus.ACTIVE:
         raise DatasetConflict("the dataset is being deleted", "DATASET_NOT_ACTIVE")
     version = await get_version(session, tenant_id, dataset_id, version_id, for_update=True)
-    if not version_transition_allowed(version.status, to):
+    if version.status is VersionStatus.PROFILING or not version_transition_allowed(
+        version.status, to
+    ):
         raise DatasetConflict(
             f"cannot move a {version.status.value} version to {to.value}",
             "DATASET_VERSION_INVALID_TRANSITION",
@@ -498,6 +614,7 @@ async def activate_version(
         raise DatasetConflict(
             "only a PROFILED version can be activated", "DATASET_VERSION_NOT_ELIGIBLE"
         )
+    await _require_confirmed_semantics(session, tenant_id, dataset_id, version_id)
     if dataset.active_version_id is not None:
         await get_version(
             session, tenant_id, dataset_id, dataset.active_version_id, for_update=True
@@ -616,3 +733,348 @@ async def request_version_deletion(
             {"d": dataset_id, "t": tenant_id, "v": version_id},
         )
     return deleting, True
+
+
+# --- ingestion (internal service, admin authority; ADR-030) ---------------------
+
+
+@dataclass(frozen=True)
+class ProfileRecord:
+    contract_version: str
+    profile: dict[str, Any]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class SemanticRevisionRecord:
+    id: uuid.UUID
+    revision_number: int
+    mapping: dict[str, Any]
+    confirmed_by: uuid.UUID
+    confirmed_at: datetime
+
+
+def _semantics(row: Any) -> SemanticRevisionRecord:
+    return SemanticRevisionRecord(**dict(row._mapping))
+
+
+async def storage_key(
+    session: AsyncSession, tenant_id: uuid.UUID, dataset_id: uuid.UUID, version_id: uuid.UUID
+) -> str | None:
+    """INTERNAL: the version's storage key, for the ingestion module only. Never
+    returned by any route."""
+    return (
+        await session.execute(
+            text(_SQL_GET_STORAGE_KEY), {"v": version_id, "d": dataset_id, "t": tenant_id}
+        )
+    ).scalar()
+
+
+async def record_content(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    dataset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    *,
+    content_sha256: str,
+    storage_object_key: str,
+) -> VersionRecord:
+    """Set the digest and quarantine key ONCE, while QUARANTINED (compare-and-set;
+    the trigger also refuses any later change). Not a state transition: no event."""
+    dataset = await get_dataset(session, tenant_id, dataset_id, for_update=True)
+    if dataset.status is not DatasetStatus.ACTIVE:
+        raise DatasetConflict("the dataset is being deleted", "DATASET_NOT_ACTIVE")
+    version = await get_version(session, tenant_id, dataset_id, version_id, for_update=True)
+    if version.has_content:
+        if version.content_sha256 == content_sha256:
+            return version  # an idempotent replay of the same bytes
+        raise DatasetConflict("the version already has different content", "CONTENT_CONFLICT")
+    if version.status is not VersionStatus.QUARANTINED:
+        raise DatasetConflict("the version no longer accepts content", "DATASET_VERSION_CONFLICT")
+    row = (
+        await session.execute(
+            text(_SQL_SET_CONTENT),
+            {
+                "sha": content_sha256,
+                "key": storage_object_key,
+                "v": version_id,
+                "d": dataset_id,
+                "t": tenant_id,
+            },
+        )
+    ).first()
+    if row is None:  # pragma: no cover - the row is locked above
+        raise DatasetConflict("the version changed concurrently", "DATASET_VERSION_CONFLICT")
+    return _version(row)
+
+
+async def publish_profile(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    actor: Actor,
+    dataset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    *,
+    profile_json: str,
+    contract_version: str,
+    content_sha256: str,
+    row_count: int,
+    column_count: int,
+    published_key: str,
+    lease_token: uuid.UUID,
+) -> VersionRecord:
+    """Record the immutable profile and move ``PROFILING -> PROFILED`` with the
+    storage key moved to the ``datasets/`` area, in one transaction (one event).
+    Only the CURRENT lease owner can publish (``LEASE_LOST`` otherwise, and the
+    profile insert is rolled back). The database refuses PROFILED without this
+    profile, without a live lease, and any other key move."""
+    dataset = await get_dataset(session, tenant_id, dataset_id, for_update=True)
+    if dataset.status is not DatasetStatus.ACTIVE:
+        raise DatasetConflict("the dataset is being deleted", "DATASET_NOT_ACTIVE")
+    version = await get_version(session, tenant_id, dataset_id, version_id, for_update=True)
+    if version.status is not VersionStatus.PROFILING:
+        raise DatasetConflict(
+            f"cannot move a {version.status.value} version to PROFILED",
+            "DATASET_VERSION_INVALID_TRANSITION",
+        )
+    if version.content_sha256 != content_sha256:
+        raise DatasetConflict("the profile does not match the content", "CONTENT_MISMATCH")
+    await session.execute(
+        text(_SQL_INSERT_PROFILE),
+        {
+            "v": version_id,
+            "t": tenant_id,
+            "d": dataset_id,
+            "cv": contract_version,
+            "sha": content_sha256,
+            "rows": row_count,
+            "cols": column_count,
+            "profile": profile_json,
+        },
+    )
+    row = (
+        await session.execute(
+            text(_SQL_CAS_PUBLISH),
+            {
+                "key": published_key,
+                "v": version_id,
+                "d": dataset_id,
+                "t": tenant_id,
+                "tok": lease_token,
+            },
+        )
+    ).first()
+    if row is None:  # the row is locked above: only a lost lease gets here
+        raise DatasetConflict("the processing lease was lost", "LEASE_LOST")
+    await _event(
+        session,
+        tenant_id=tenant_id,
+        dataset_id=dataset_id,
+        version_id=version_id,
+        event_type=EventType.VERSION_PROFILED,
+        from_status=VersionStatus.PROFILING.value,
+        to_status=VersionStatus.PROFILED.value,
+        actor=actor,
+    )
+    return _version(row)
+
+
+async def get_profile(
+    session: AsyncSession, tenant_id: uuid.UUID, dataset_id: uuid.UUID, version_id: uuid.UUID
+) -> ProfileRecord | None:
+    """The version's profile (admin/owner only: RLS hides it from members)."""
+    row = (
+        await session.execute(
+            text(_SQL_GET_PROFILE), {"v": version_id, "d": dataset_id, "t": tenant_id}
+        )
+    ).first()
+    if row is None:
+        return None
+    return ProfileRecord(**dict(row._mapping))
+
+
+async def list_semantic_revisions(
+    session: AsyncSession, tenant_id: uuid.UUID, dataset_id: uuid.UUID, version_id: uuid.UUID
+) -> list[SemanticRevisionRecord]:
+    rows = await session.execute(
+        text(_SQL_LIST_SEMANTICS), {"v": version_id, "d": dataset_id, "t": tenant_id}
+    )
+    return [_semantics(r) for r in rows]
+
+
+async def confirm_semantics(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    actor: Actor,
+    dataset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    *,
+    mapping_json: str,
+) -> SemanticRevisionRecord:
+    """Append a semantic revision for a PROFILED version, confirmed by ``actor``
+    (RLS binds ``confirmed_by`` to the SIGNED user). The caller validates the
+    mapping against the profile (``nlw.datasets.semantics``)."""
+    if actor.user_id is None:
+        raise DatasetConflict("semantics are confirmed by a person", "SEMANTICS_INVALID")
+    await get_dataset(session, tenant_id, dataset_id, for_update=True)
+    version = await get_version(session, tenant_id, dataset_id, version_id, for_update=True)
+    if version.status is not VersionStatus.PROFILED:
+        raise DatasetConflict(
+            "semantics are confirmed only for a PROFILED version", "DATASET_VERSION_NOT_ELIGIBLE"
+        )
+    n = (
+        await session.execute(text(_SQL_NEXT_SEMANTIC_NUMBER), {"v": version_id, "t": tenant_id})
+    ).scalar()
+    row = (
+        await session.execute(
+            text(_SQL_INSERT_SEMANTICS),
+            {
+                "id": uuid.uuid4(),
+                "t": tenant_id,
+                "d": dataset_id,
+                "v": version_id,
+                "n": n,
+                "mapping": mapping_json,
+                "by": actor.user_id,
+            },
+        )
+    ).one()
+    return _semantics(row)
+
+
+async def _require_confirmed_semantics(
+    session: AsyncSession, tenant_id: uuid.UUID, dataset_id: uuid.UUID, version_id: uuid.UUID
+) -> None:
+    from nlw.datasets.semantics import SemanticMappingError, validate_mapping
+
+    latest = (
+        await session.execute(
+            text(_SQL_LATEST_SEMANTICS), {"v": version_id, "d": dataset_id, "t": tenant_id}
+        )
+    ).first()
+    profile = await get_profile(session, tenant_id, dataset_id, version_id)
+    if latest is None or profile is None:
+        raise DatasetConflict("activation requires confirmed semantics", "SEMANTICS_NOT_CONFIRMED")
+    try:
+        validate_mapping(_semantics(latest).mapping, profile.profile)
+    except SemanticMappingError as exc:
+        raise DatasetConflict(
+            "the confirmed semantics no longer match the profile", "SEMANTICS_INVALID"
+        ) from exc
+
+
+# --- processing lease (database time; ADR-030) -----------------------------------
+
+LeaseClaim = Literal["acquired", "reclaimed", "busy", "not_claimable"]
+MAX_LEASE_TTL_S = 900  # the database refuses a lease ending later than 15 minutes
+
+
+async def acquire_processing_lease(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    actor: Actor,
+    dataset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    *,
+    token: uuid.UUID,
+    ttl_s: float,
+) -> tuple[LeaseClaim, VersionRecord]:
+    """Claim the right to profile a version, atomically, on PostgreSQL's clock:
+
+    - ``acquired``: QUARANTINED-with-content -> PROFILING with our token (one
+      event);
+    - ``reclaimed``: a PROFILING version whose lease expired (or never had one)
+      now carries our token (not a transition: no event);
+    - ``busy``: someone else holds a live lease;
+    - ``not_claimable``: any other state (nothing to process).
+
+    Each attempt is a single compare-and-set UPDATE, so two concurrent
+    claimants can never both succeed."""
+    if not 0 < ttl_s <= MAX_LEASE_TTL_S:
+        raise ValueError("lease ttl out of range")
+    dataset = await get_dataset(session, tenant_id, dataset_id, for_update=True)
+    if dataset.status is not DatasetStatus.ACTIVE:
+        raise DatasetConflict("the dataset is being deleted", "DATASET_NOT_ACTIVE")
+    params = {"tok": token, "ttl": ttl_s, "v": version_id, "d": dataset_id, "t": tenant_id}
+    row = (await session.execute(text(_SQL_LEASE_ACQUIRE), params)).first()
+    if row is not None:
+        await _event(
+            session,
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            version_id=version_id,
+            event_type=EventType.VERSION_PROFILING_STARTED,
+            from_status=VersionStatus.QUARANTINED.value,
+            to_status=VersionStatus.PROFILING.value,
+            actor=actor,
+        )
+        return "acquired", _version(row)
+    row = (await session.execute(text(_SQL_LEASE_RECLAIM), params)).first()
+    if row is not None:
+        return "reclaimed", _version(row)
+    current = await get_version(session, tenant_id, dataset_id, version_id)
+    return ("busy" if current.status is VersionStatus.PROFILING else "not_claimable"), current
+
+
+async def renew_processing_lease(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    dataset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    *,
+    token: uuid.UUID,
+    ttl_s: float,
+) -> bool:
+    """Extend our lease (database clock). False means ownership was lost: the
+    version left PROFILING, or a reclaimer replaced the token."""
+    if not 0 < ttl_s <= MAX_LEASE_TTL_S:
+        raise ValueError("lease ttl out of range")
+    row = (
+        await session.execute(
+            text(_SQL_LEASE_RENEW),
+            {"tok": token, "ttl": ttl_s, "v": version_id, "d": dataset_id, "t": tenant_id},
+        )
+    ).first()
+    return row is not None
+
+
+async def reject_processing(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    actor: Actor,
+    dataset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    *,
+    token: uuid.UUID,
+    rejection_code: RejectionCode,
+) -> VersionRecord:
+    """PROFILING -> REJECTED by the CURRENT lease owner only (one event)."""
+    dataset = await get_dataset(session, tenant_id, dataset_id, for_update=True)
+    if dataset.status is not DatasetStatus.ACTIVE:
+        raise DatasetConflict("the dataset is being deleted", "DATASET_NOT_ACTIVE")
+    row = (
+        await session.execute(
+            text(_SQL_LEASE_REJECT),
+            {
+                "code": rejection_code.value,
+                "tok": token,
+                "v": version_id,
+                "d": dataset_id,
+                "t": tenant_id,
+            },
+        )
+    ).first()
+    if row is None:
+        raise DatasetConflict("the processing lease was lost", "LEASE_LOST")
+    await _event(
+        session,
+        tenant_id=tenant_id,
+        dataset_id=dataset_id,
+        version_id=version_id,
+        event_type=EventType.VERSION_REJECTED,
+        from_status=VersionStatus.PROFILING.value,
+        to_status=VersionStatus.REJECTED.value,
+        actor=actor,
+        reason_code=rejection_code.value,
+    )
+    return _version(row)

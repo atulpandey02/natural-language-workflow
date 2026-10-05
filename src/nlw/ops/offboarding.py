@@ -88,6 +88,17 @@ TABLES: dict[str, TableClass] = {
     "dataset_events": TableClass(
         "audit", "tenant_id", "retain (codes and ids only); period is a pilot proposal"
     ),
+    # Phase 2B (ADR-030): derived from uploaded bytes; never rows or samples.
+    "dataset_profiles": TableClass(
+        "dataset_metadata",
+        "tenant_id",
+        "operator tombstone scrubs the profile (counts and digest kept)",
+    ),
+    "dataset_semantic_revisions": TableClass(
+        "dataset_metadata",
+        "tenant_id",
+        "operator tombstone scrubs the mapping (revision numbers and actors kept)",
+    ),
     "plan_outcome_events": TableClass(
         "audit", "tenant_id", "retain (codes only); proposed 13 months, not yet approved"
     ),
@@ -147,7 +158,8 @@ def inventory(conn: psycopg.Connection[Any], workspace_id: uuid.UUID) -> dict[st
         "workspace_id": str(workspace_id),
         "tables": tables,
         "not_in_database": [
-            "dataset object bytes and derived artefacts (object store, Phase 2A)",
+            "uploaded dataset objects (dataset object store; purged by "
+            "`python -m nlw.ops.datasets purge`, receipts in the deletion log)",
             "messages already delivered to Slack (cannot be recalled by NLW)",
             "encrypted database backups (expire on the configured restic retention; not edited)",
         ],

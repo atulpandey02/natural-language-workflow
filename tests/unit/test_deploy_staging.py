@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "scripts" / "ops" / "deploy-staging.sh"
 VERIFY = ROOT / "scripts" / "ops" / "verify-staging-deployment.sh"
 NAMED_REV = "0024_dataset_lifecycle"
+# The repository's Alembic head (staging is still recorded at NAMED_REV).
+HEAD_REV = "0025_dataset_ingestion"
 
 
 def _sh(call: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
@@ -52,7 +54,7 @@ def test_alembic_head_derivation_named_revision() -> None:
         text=True,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == NAMED_REV
+    assert proc.stdout.strip() == HEAD_REV
 
 
 def test_parse_head_line_extracts_named_revision() -> None:
