@@ -78,7 +78,7 @@ from nlw.ops.rollout.remote import OperatorAlerting, Remote, TargetConfig
 
 # 51 signed policies from 0016 + 2 on plan_outcome_events (0023, Phase 2 B02)
 # + 8 on the dataset lifecycle tables (0024, ADR-029).
-EXPECTED_SIGNED_POLICIES = 61
+EXPECTED_SIGNED_POLICIES = 65
 # Caddy serves 503 for every request while this file exists on its `caddy_maint`
 # volume (docker/caddy/Caddyfile `@maintenance`). Toggled with `exec`, no reload.
 MAINTENANCE_FLAG = "/srv/maint/MAINTENANCE"

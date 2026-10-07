@@ -1,9 +1,12 @@
-"""Phase 2 migrations 0022-0024: up/down/up with the documented down-state.
+"""Phase 2 migrations 0022-0025: up/down/up with the documented down-state.
 
 ``pg_stack`` starts at head, and the older reversibility tests only re-upgrade
 to 0016, so neither Phase 2 revision was ever upgraded again after a downgrade.
 This pins the behaviour the grants runbook and ADR-028 document:
 
+- downgrading 0025 drops the profile and semantic-revision tables and their 4
+  policies (61 left) and restores the 0024 version guard (details in
+  ``test_dataset_ingestion_migration.py``);
 - downgrading 0024 drops the three dataset metadata tables, their guard
   functions and 8 policies (53 left) — and with them any dataset metadata, which
   is why the runbook forbids it on a live environment;
@@ -11,7 +14,7 @@ This pins the behaviour the grants runbook and ADR-028 document:
 - downgrading 0022 drops the grant ledger and ``has_workspace_creation_grant``
   and restores the UNGATED bootstrap (why the runbook forbids it on a live
   environment and the restore validator reports it);
-- re-upgrading restores the gated bootstrap, the empty ledger and 61 policies.
+- re-upgrading restores the gated bootstrap, the empty ledger and 65 policies.
 """
 
 from types import SimpleNamespace
@@ -26,6 +29,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.workspace_grants_enforced]
 _BEFORE_PHASE2 = "0021_analytics_handoff"
 _AFTER_0022 = "0022_workspace_creation_grants"
 _AFTER_0023 = "0023_plan_outcome_events"
+_AFTER_0024 = "0024_dataset_lifecycle"
 _DATASET_TABLES = ("datasets", "dataset_versions", "dataset_events")
 
 
@@ -71,10 +75,15 @@ def test_phase2_revisions_go_up_down_up_with_the_documented_down_state(
     cfg.set_main_option("sqlalchemy.url", pg_stack.owner_sa)
 
     head = _posture(pg_stack.owner_libpq)
-    assert head["revision"] == "0024_dataset_lifecycle"
+    assert head["revision"] == "0025_dataset_ingestion"
     assert head["bootstrap_gated"] is True and head["bootstrap_overloads"] == 1
-    assert head["helper"] == 1 and head["policies"] == 61
+    assert head["helper"] == 1 and head["policies"] == 65
     assert head["dataset_tables"] == 3 and head["dataset_funcs"] == 3
+
+    command.downgrade(cfg, _AFTER_0024)
+    lifecycle_only = _posture(pg_stack.owner_libpq)
+    assert lifecycle_only["revision"] == _AFTER_0024 and lifecycle_only["policies"] == 61
+    assert lifecycle_only["dataset_tables"] == 3 and lifecycle_only["dataset_funcs"] == 3
 
     command.downgrade(cfg, _AFTER_0023)
     pre = _posture(pg_stack.owner_libpq)

@@ -7,6 +7,7 @@ trigger) is what keeps the invariants, not the test's own ordering.
 """
 
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
@@ -27,6 +28,32 @@ pytestmark = pytest.mark.integration
 
 T = TypeVar("T")
 
+# Since 0025 the database requires a recorded profile for PROFILED and confirmed
+# semantics for ACTIVE. The harness performs those real steps (with a synthetic
+# one-column profile; no file bytes are involved at this layer).
+SYNTHETIC_SHA = "a" * 64
+SYNTHETIC_PROFILE = {
+    "contract_version": "profile-2",
+    "columns": [{"name": "amount", "inferred_type": "integer", "indicators": []}],
+}
+SYNTHETIC_MAPPING = {
+    "contract_version": "semantics-1",
+    "columns": [
+        {
+            "name": "amount",
+            "label": "Amount",
+            "semantic_type": "count",
+            "role": "measure",
+            "analysis_allowed": True,
+            "description": None,
+        }
+    ],
+}
+
+
+def quarantine_key(tenant: uuid.UUID, dataset_id: uuid.UUID, version_id: uuid.UUID) -> str:
+    return f"quarantine/{tenant}/{dataset_id}/{version_id}"
+
 
 class Harness:
     def __init__(self, pg: SimpleNamespace, user: uuid.UUID, tenant: uuid.UUID) -> None:
@@ -34,6 +61,7 @@ class Harness:
         self.engine = create_async_engine(pg.settings.database_url, pool_size=10)
         self.maker = async_sessionmaker(self.engine, expire_on_commit=False)
         self.actor = Actor.user(user)
+        self.tokens: dict[uuid.UUID, uuid.UUID] = {}  # processing lease per version
 
     async def run(
         self, fn: Callable[[AsyncSession], Awaitable[T]], *, user: uuid.UUID | None = None
@@ -73,6 +101,53 @@ class Harness:
             async def step(
                 s: AsyncSession, st: VersionStatus = st, code: RejectionCode | None = code
             ) -> svc.VersionRecord:
+                current = await svc.get_version(s, self.tenant, dataset_id, version_id)
+                if st is VersionStatus.PROFILED:
+                    return await svc.publish_profile(
+                        s,
+                        self.tenant,
+                        self.actor,
+                        dataset_id,
+                        version_id,
+                        profile_json=json.dumps(SYNTHETIC_PROFILE),
+                        contract_version="profile-2",
+                        content_sha256=SYNTHETIC_SHA,
+                        row_count=1,
+                        column_count=1,
+                        published_key=f"datasets/{self.tenant}/{dataset_id}/{version_id}",
+                        lease_token=self.tokens.get(version_id, uuid.uuid4()),
+                    )
+                if st is VersionStatus.PROFILING:
+                    # PROFILING is entered only by taking the processing lease.
+                    if not current.has_content and current.status is VersionStatus.QUARANTINED:
+                        await svc.record_content(
+                            s,
+                            self.tenant,
+                            dataset_id,
+                            version_id,
+                            content_sha256=SYNTHETIC_SHA,
+                            storage_object_key=quarantine_key(self.tenant, dataset_id, version_id),
+                        )
+                    token = self.tokens.setdefault(version_id, uuid.uuid4())
+                    state, rec = await svc.acquire_processing_lease(
+                        s, self.tenant, self.actor, dataset_id, version_id, token=token, ttl_s=300
+                    )
+                    if state not in ("acquired", "reclaimed"):
+                        raise DatasetConflict(
+                            "the version cannot be processed", "DATASET_VERSION_INVALID_TRANSITION"
+                        )
+                    return rec
+                if st is VersionStatus.REJECTED and current.status is VersionStatus.PROFILING:
+                    assert code is not None
+                    return await svc.reject_processing(
+                        s,
+                        self.tenant,
+                        self.actor,
+                        dataset_id,
+                        version_id,
+                        token=self.tokens[version_id],
+                        rejection_code=code,
+                    )
                 return await svc.transition_version(
                     s, self.tenant, self.actor, dataset_id, version_id, to=st, rejection_code=code
                 )
@@ -85,7 +160,27 @@ class Harness:
         v = await self.version(dataset_id)
         return await self.to(dataset_id, v.id, VersionStatus.PROFILING, VersionStatus.PROFILED)
 
-    async def activate(self, dataset_id: uuid.UUID, version_id: uuid.UUID) -> svc.VersionRecord:
+    async def confirm(self, dataset_id: uuid.UUID, version_id: uuid.UUID) -> None:
+        await self.run(
+            lambda s: svc.confirm_semantics(
+                s,
+                self.tenant,
+                self.actor,
+                dataset_id,
+                version_id,
+                mapping_json=json.dumps(SYNTHETIC_MAPPING),
+            )
+        )
+
+    async def activate(
+        self, dataset_id: uuid.UUID, version_id: uuid.UUID, *, confirm: bool = True
+    ) -> svc.VersionRecord:
+        if confirm:
+            current = await self.run(
+                lambda s: svc.get_version(s, self.tenant, dataset_id, version_id)
+            )
+            if current.status is VersionStatus.PROFILED:
+                await self.confirm(dataset_id, version_id)
         return await self.run(
             lambda s: svc.activate_version(s, self.tenant, self.actor, dataset_id, version_id)
         )
@@ -317,7 +412,7 @@ async def test_tombstone_refuses_a_version_that_references_a_stored_object(
 ) -> None:
     d = await h.dataset()
     v = await h.version(d.id)
-    key = f"quarantine/{h.tenant}/{d.id}/upload.csv"
+    key = f"quarantine/{h.tenant}/{d.id}/{v.id}"
     with psycopg.connect(pg_stack.owner_libpq, autocommit=True) as c:
         c.execute("UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s", (key, v.id))
     await h.run(lambda s: svc.request_dataset_deletion(s, h.tenant, h.actor, d.id))

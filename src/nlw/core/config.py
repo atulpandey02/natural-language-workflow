@@ -4,6 +4,8 @@ A single ``Settings`` object is the only place environment variables are read.
 Secrets are never hard-coded; they arrive via the environment / ``.env``.
 """
 
+import os
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -212,6 +214,29 @@ class Settings(BaseSettings):
     # production refuse to start with this enabled.
     datasets_api_enabled: bool = False
 
+    # --- Dataset upload and profiling (Phase 2B, ADR-030) ---
+    # Where uploaded CSV objects live. ``disabled`` (default): no upload route is
+    # mounted. ``local``: a filesystem store under
+    # ``{dataset_storage_root}/{app_env}``, allowed ONLY in local/dev (refused in
+    # staging and production). There is no S3 adapter yet (owner decision O-2).
+    dataset_storage_backend: Literal["disabled", "local"] = "disabled"
+    dataset_storage_root: str | None = None
+    # Pilot limits (defaults). Each is validated against a hard ceiling in
+    # nlw.ingest.strict, so configuration can never make an operation unbounded.
+    dataset_max_upload_bytes: int = 25_000_000
+    dataset_max_rows: int = 250_000
+    dataset_max_columns: int = 200
+    dataset_max_field_chars: int = 8_192
+    dataset_profile_timeout_s: int = 60
+    dataset_profile_memory_mb: int = 768
+    # Deletion receipts (ADR-030). ``none``: purge refuses to run without a sink.
+    # ``local``: an append-only JSON-lines FAKE for development and tests only;
+    # it is NOT the external deletion log (a launch gate, owner decision O-3).
+    dataset_deletion_log: Literal["none", "local"] = "none"
+    dataset_deletion_log_path: str | None = None
+    # The backup repository (read only to refuse sharing it with dataset storage).
+    backup_restic_repository: str = Field(default="", validation_alias="RESTIC_REPOSITORY")
+
     @property
     def demo_tools_visible(self) -> bool:
         """Demo tools reach new planning only on an explicit operator ``true``."""
@@ -251,7 +276,51 @@ class Settings(BaseSettings):
                 "DATASETS_API_ENABLED is not allowed in staging/production until dataset "
                 "upload and end-to-end deletion exist"
             )
+        self._validate_dataset_ingestion()
         return self
+
+    def _validate_dataset_ingestion(self) -> None:
+        """Phase 2B gates: pilot limits within hard ceilings; local storage and
+        the fake deletion log only outside staging/production; dataset storage
+        never shares the backup repository."""
+        from nlw.ingest.strict import StrictLimits
+
+        StrictLimits(
+            max_bytes=self.dataset_max_upload_bytes,
+            max_rows=self.dataset_max_rows,
+            max_columns=self.dataset_max_columns,
+            max_field_chars=self.dataset_max_field_chars,
+            timeout_s=float(self.dataset_profile_timeout_s),
+        )  # raises ValueError past a ceiling
+        if not (128 <= self.dataset_profile_memory_mb <= 2048):
+            raise ValueError("dataset_profile_memory_mb must be within 128..2048")
+        deployed = self.app_env in ("staging", "production")
+        if self.dataset_storage_backend == "local":
+            if deployed:
+                raise ValueError(
+                    "the local dataset storage backend is refused in staging/production"
+                )
+            root = self.dataset_storage_root
+            if not root or not os.path.isabs(root):
+                raise ValueError("DATASET_STORAGE_ROOT must be an absolute path")
+            repo = self.backup_restic_repository.strip()
+            # A local restic repository is a plain path or ``local:<path>``.
+            if repo and (not re.match(r"^[a-z0-9]+:", repo) or repo.startswith("local:")):
+                repo_path = os.path.realpath(repo.removeprefix("local:"))
+                store = os.path.realpath(root)
+                if (
+                    store == repo_path
+                    or store.startswith(repo_path + os.sep)
+                    or repo_path.startswith(store + os.sep)
+                ):
+                    raise ValueError("dataset storage must not share the backup repository")
+        if self.dataset_deletion_log == "local":
+            if deployed:
+                raise ValueError("the local (fake) deletion log is refused in staging/production")
+            if not self.dataset_deletion_log_path or not os.path.isabs(
+                self.dataset_deletion_log_path
+            ):
+                raise ValueError("DATASET_DELETION_LOG_PATH must be an absolute path")
 
     @property
     def docs_enabled(self) -> bool:

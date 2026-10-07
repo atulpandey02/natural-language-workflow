@@ -43,6 +43,7 @@ decision, numbered and never deleted (supersede instead of removing).
 | [026](ADR-026-ai-execution-architecture.md) | AI execution architecture — planner/executor with deterministic feasibility, not an agent loop; provenance, stale-plan detection, deterministic summaries | Accepted (M12B-A) |
 | [027](ADR-027-grounded-pilot-analytics.md) | Bounded grounded analytics, Recharts rendering and immutable two-proposal Slack handoff | Accepted for M12C; pending visual UX review |
 | [029](ADR-029-dataset-lifecycle-foundation.md) | Dataset lifecycle foundation — tenant-isolated metadata, immutable versions, explicit states, operator tombstones; no upload, no planner access | Accepted for implementation (Phase 2A); PR awaiting review |
+| [030](ADR-030-csv-ingestion-and-profiling.md) | CSV ingestion and deterministic profiling — write-once local storage, strict streaming profiler in an isolated process, semantic confirmation, verified purge before tombstone; disabled outside development | Accepted for local implementation (Phase 2B); not deployed |
 
 ## Template
 

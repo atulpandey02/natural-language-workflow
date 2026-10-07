@@ -1,9 +1,9 @@
 """Pure, deterministic dataset lifecycle rules (ADR-029).
 
-The database enforces the same rules for every role (migration
-``0024_dataset_lifecycle``); this module lets the service refuse an invalid
-request before touching the database and gives tests one source of truth.
-Unit tests assert these tables equal the migration's.
+The database enforces the same rules for every role (migrations
+``0024_dataset_lifecycle`` and ``0025_dataset_ingestion``); this module lets the
+service refuse an invalid request before touching the database and gives tests
+one source of truth. Unit tests assert these tables equal the migrations'.
 """
 
 from __future__ import annotations
@@ -79,6 +79,13 @@ class RejectionCode(enum.StrEnum):
     PARSE_TIMEOUT = "PARSE_TIMEOUT"
     PARSE_ERROR = "PARSE_ERROR"
     REVIEW_REJECTED = "REVIEW_REJECTED"
+    # 0025: strict pilot CSV policy (nlw.ingest.strict) and processing outcomes.
+    HEADER_INVALID = "HEADER_INVALID"
+    HEADER_DUPLICATE = "HEADER_DUPLICATE"
+    NO_DATA_ROWS = "NO_DATA_ROWS"
+    ROW_WIDTH_MISMATCH = "ROW_WIDTH_MISMATCH"
+    CONTENT_MISMATCH = "CONTENT_MISMATCH"
+    PROCESSING_FAILED = "PROCESSING_FAILED"
 
 
 class EventType(enum.StrEnum):
@@ -93,12 +100,17 @@ class EventType(enum.StrEnum):
     VERSION_REJECTED = "VERSION_REJECTED"
     VERSION_DELETION_REQUESTED = "VERSION_DELETION_REQUESTED"
     VERSION_TOMBSTONED = "VERSION_TOMBSTONED"
+    # 0025: operator evidence that a DELETING version's stored objects were
+    # physically deleted and verified absent (DELETING -> DELETING; not a
+    # transition). Runtime roles can never write it.
+    VERSION_OBJECT_PURGED = "VERSION_OBJECT_PURGED"
 
 
 class ReasonCode(enum.StrEnum):
     USER_REQUEST = "USER_REQUEST"
     DATASET_DELETION = "DATASET_DELETION"
     OPERATOR_TOMBSTONE = "OPERATOR_TOMBSTONE"
+    OPERATOR_PURGE = "OPERATOR_PURGE"
 
 
 class ActorKind(enum.StrEnum):
@@ -213,3 +225,13 @@ def validate_media_type(media_type: str) -> str:
     if media_type not in MEDIA_TYPES:
         raise MetadataError("DATASET_MEDIA_TYPE_UNSUPPORTED", "only text/csv is supported")
     return media_type
+
+
+_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+
+
+def validate_idempotency_key(value: str) -> str:
+    """An opaque client retry key: 16-128 of ``[A-Za-z0-9_-]`` (the 0025 CHECK)."""
+    if not isinstance(value, str) or not _IDEMPOTENCY_KEY.match(value):
+        raise MetadataError("IDEMPOTENCY_KEY_INVALID", "invalid idempotency key")
+    return value

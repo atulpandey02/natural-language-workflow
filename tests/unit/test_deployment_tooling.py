@@ -337,7 +337,7 @@ def test_rollout_backup_gate_is_wired_before_migration() -> None:
     assert "evaluate_backup_evidence" in src
     migrate_body = src[src.index("def migrate(") :]
     assert '"verify-backup"' in migrate_body[: migrate_body.index("_migrate_run")]
-    assert phases.EXPECTED_SIGNED_POLICIES == 61
+    assert phases.EXPECTED_SIGNED_POLICIES == 65  # + 4 from 0025 (profiles, semantics)
 
 
 def test_local_executor_timeout_kills_the_whole_process_group() -> None:

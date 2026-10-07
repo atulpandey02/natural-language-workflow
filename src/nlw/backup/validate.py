@@ -38,6 +38,8 @@ _FORCED_RLS_TABLES = (
     "datasets",
     "dataset_versions",
     "dataset_events",
+    "dataset_profiles",
+    "dataset_semantic_revisions",
 )
 _SECURITY_DEFINER_FUNCS = {
     "resolve_run_tenant": "nlw_rls_bypass",
@@ -515,7 +517,7 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
         ]
         add(
             "no_policy_trusts_unsigned_context",
-            not legacy and not uncond and not helper_legacy and len(pols) == 61,
+            not legacy and not uncond and not helper_legacy and len(pols) == 65,
             f"legacy={legacy} unconditional={uncond} helpers={helper_legacy} n={len(pols)}",
         )
 

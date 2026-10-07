@@ -7,6 +7,10 @@
   outside the bound tenant's prefix, or any key containing traversal or
   non-canonical segments, is refused before the backing store is touched.
 
+Objects are write-once: ``put_stream`` never replaces an existing object
+(``BlobExistsError``), so an upload can never alter a stored version. Dataset
+uploads use the version id as the object name (ADR-030), never a filename.
+
 The S3 adapter is deliberately absent: adding an S3 client is a new runtime
 dependency that needs owner approval and an ADR (plan section 22).
 """
@@ -39,11 +43,34 @@ class BlobTooLargeError(ValueError):
     """The stream exceeded the caller's hard byte cap; nothing was stored."""
 
 
+class BlobExistsError(ValueError):
+    """An object already exists at the key; objects are never overwritten.
+
+    When the race is lost at the final link (another writer finished first),
+    the stream has been consumed: ``size`` and ``sha256`` then describe what
+    THIS writer streamed, so the caller can compare it with the winner's
+    object. They are ``None`` when the existence pre-check refused the write
+    before reading anything."""
+
+    def __init__(self, message: str, *, size: int | None = None, sha256: str | None = None) -> None:
+        super().__init__(message)
+        self.size = size
+        self.sha256 = sha256
+
+
+class BlobDigestMismatch(ValueError):
+    """Stored bytes do not match the recorded digest (tampered or truncated)."""
+
+
 class BlobStore(Protocol):
     def put_stream(self, key: str, stream: BinaryIO, *, max_bytes: int) -> tuple[int, str]:
-        """Store the stream at ``key``; return (byte_size, sha256 hex)."""
+        """Store the stream at ``key`` (never replacing an existing object);
+        return (byte_size, sha256 hex)."""
 
     def open(self, key: str) -> BinaryIO: ...
+
+    def digest(self, key: str) -> tuple[int, str]:
+        """(byte_size, sha256 hex) of the stored object, computed by streaming."""
 
     def exists(self, key: str) -> bool: ...
 
@@ -51,6 +78,13 @@ class BlobStore(Protocol):
         """Idempotent: deleting a missing key is not an error."""
 
     def list_prefix(self, prefix: str) -> Iterator[str]: ...
+
+
+def _partial_hint(key: str) -> str:
+    """The partial-file prefix for ``key``: ``.upload-<object name, alnum only>_``
+    so a crashed upload can still be attributed to its version and purged."""
+    name = re.sub(r"[^a-z0-9]", "", key.rpartition("/")[2])[:40]
+    return f"{_PARTIAL_PREFIX}{name}_"
 
 
 def validate_key(key: str) -> list[str]:
@@ -61,8 +95,9 @@ def validate_key(key: str) -> list[str]:
 
 
 class LocalBlobStore:
-    """Filesystem store rooted at ``root``. Writes are atomic (temp + rename) and
-    a stream over ``max_bytes`` leaves no object behind."""
+    """Filesystem store rooted at ``root``. Writes are atomic and write-once
+    (temp file + hard link, which fails if the target exists) and a stream over
+    ``max_bytes`` leaves no object behind."""
 
     def __init__(self, root: str | os.PathLike[str]) -> None:
         self.root = Path(root).resolve()
@@ -81,10 +116,12 @@ class LocalBlobStore:
 
     def put_stream(self, key: str, stream: BinaryIO, *, max_bytes: int) -> tuple[int, str]:
         path = self._path(key)
+        if path.exists():
+            raise BlobExistsError("an object already exists at this key")
         path.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
         size = 0
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=_PARTIAL_PREFIX)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=_partial_hint(key))
         try:
             with os.fdopen(fd, "wb") as out:
                 while chunk := stream.read(_CHUNK):
@@ -93,14 +130,30 @@ class LocalBlobStore:
                         raise BlobTooLargeError("stream exceeds the byte cap")
                     digest.update(chunk)
                     out.write(chunk)
-            os.replace(tmp, path)
-        except BaseException:
+                out.flush()
+                os.fsync(out.fileno())
+            try:
+                # link(2) fails with EEXIST instead of replacing: write-once.
+                os.link(tmp, path)
+            except FileExistsError:
+                raise BlobExistsError(
+                    "an object already exists at this key", size=size, sha256=digest.hexdigest()
+                ) from None
+        finally:
             Path(tmp).unlink(missing_ok=True)
-            raise
         return size, digest.hexdigest()
 
     def open(self, key: str) -> BinaryIO:
         return self._path(key).open("rb")
+
+    def digest(self, key: str) -> tuple[int, str]:
+        h = hashlib.sha256()
+        size = 0
+        with self._path(key).open("rb") as f:
+            while chunk := f.read(_CHUNK):
+                size += len(chunk)
+                h.update(chunk)
+        return size, h.hexdigest()
 
     def exists(self, key: str) -> bool:
         return self._path(key, partial_ok=True).is_file()
@@ -118,6 +171,19 @@ class LocalBlobStore:
         for p in sorted(base.rglob("*")):
             if p.is_file():
                 yield p.relative_to(self.root).as_posix()
+
+
+def list_area(store: LocalBlobStore, area: str) -> Iterator[str]:
+    """OPERATOR ONLY (restore validation): every stored file in one area, across
+    tenants. Runtime code must use ``TenantScopedBlobStore``."""
+    if area not in AREAS:
+        raise BlobKeyError("unknown storage area")
+    base = store.root / area
+    if not base.exists():
+        return
+    for p in sorted(base.rglob("*")):
+        if p.is_file():
+            yield p.relative_to(store.root).as_posix()
 
 
 class TenantScopedBlobStore:
@@ -149,6 +215,10 @@ class TenantScopedBlobStore:
         self._check(key)
         return self._inner.open(key)
 
+    def digest(self, key: str) -> tuple[int, str]:
+        self._check(key)
+        return self._inner.digest(key)
+
     def exists(self, key: str) -> bool:
         self._check(key)
         return self._inner.exists(key)
@@ -172,3 +242,64 @@ class TenantScopedBlobStore:
         return not any(self._inner.exists(k) for k in keys) and not any(
             self.list_dataset(area, dataset_id) for area in AREAS
         )
+
+    # --- per-version helpers (dataset uploads, ADR-030) ---------------------
+
+    def version_key(self, area: str, dataset_id: uuid.UUID, version_id: uuid.UUID) -> str:
+        """The only key a dataset version's bytes may have in ``area``."""
+        return self.key(area, dataset_id, str(version_id))
+
+    def list_version(self, dataset_id: uuid.UUID, version_id: uuid.UUID) -> list[str]:
+        """Every stored file for one version in both areas, including partial
+        uploads a crashed writer left behind for it."""
+        name = str(version_id)
+        partial = _partial_hint(name)
+        out: list[str] = []
+        for area in AREAS:
+            for k in self.list_dataset(area, dataset_id):
+                last = k.rpartition("/")[2]
+                if last == name or last.startswith(partial):
+                    out.append(k)
+        return out
+
+    def delete_version_and_verify(
+        self, dataset_id: uuid.UUID, version_id: uuid.UUID
+    ) -> tuple[list[str], bool]:
+        """Delete every object (and partial) of one version, then verify none
+        remains. Returns (deleted keys, verified). Idempotent: a second call
+        deletes nothing and still verifies."""
+        keys = self.list_version(dataset_id, version_id)
+        for k in keys:
+            self._inner.delete(k)
+        verified = not any(self._inner.exists(k) for k in keys) and not self.list_version(
+            dataset_id, version_id
+        )
+        return keys, verified
+
+    def copy_verified(self, src: str, dst: str, *, expected_sha256: str, max_bytes: int) -> int:
+        """Stream ``src`` to a NEW object ``dst`` and verify both digests equal
+        ``expected_sha256``. On mismatch the new object is removed and
+        ``BlobDigestMismatch`` is raised. If ``dst`` already exists with the
+        expected digest (a retried publish) it is accepted; with any other
+        digest it is refused."""
+        self._check(src)
+        self._check(dst)
+        if self._inner.exists(dst):
+            size, digest = self._inner.digest(dst)
+            if digest != expected_sha256:
+                raise BlobDigestMismatch("existing destination does not match")
+            return size
+        try:
+            with self._inner.open(src) as stream:
+                size, digest = self._inner.put_stream(dst, stream, max_bytes=max_bytes)
+        except BlobExistsError:
+            # A concurrent publisher linked dst first: accept it only if it holds
+            # exactly the expected bytes (never replace it).
+            size, digest = self._inner.digest(dst)
+            if digest != expected_sha256:
+                raise BlobDigestMismatch("existing destination does not match") from None
+            return size
+        if digest != expected_sha256:
+            self._inner.delete(dst)
+            raise BlobDigestMismatch("source bytes do not match the recorded digest")
+        return size

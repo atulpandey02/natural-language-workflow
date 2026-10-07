@@ -23,14 +23,22 @@ from nlw.ingest.validate import RejectCode
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _migration() -> Any:
-    path = ROOT / "migrations/versions/0024_dataset_lifecycle.py"
-    spec = importlib.util.spec_from_file_location("m0024", path)
+def _load(name: str, filename: str) -> Any:
+    path = ROOT / "migrations/versions" / filename
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    sys.modules["m0024"] = module
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _migration() -> Any:
+    return _load("m0024", "0024_dataset_lifecycle.py")
+
+
+def _m0025() -> Any:
+    return _load("m0025", "0025_dataset_ingestion.py")
 
 
 # --- the Python rules equal the database rules --------------------------------
@@ -38,13 +46,16 @@ def _migration() -> Any:
 
 def test_state_vocabularies_match_the_migration() -> None:
     m = _migration()
+    head = _m0025()  # 0025 widens the closed vocabularies; it never narrows them
     assert tuple(s.value for s in lc.DatasetStatus) == m.DATASET_STATES
     assert tuple(s.value for s in lc.VersionStatus) == m.VERSION_STATES
-    assert tuple(c.value for c in lc.RejectionCode) == m.REJECTION_CODES
-    assert tuple(e.value for e in lc.EventType) == m.EVENT_TYPES
+    assert tuple(c.value for c in lc.RejectionCode) == head.rejection_codes()
+    assert tuple(e.value for e in lc.EventType) == head.event_types()
     assert {r.value for r in lc.ReasonCode} | {c.value for c in lc.RejectionCode} == set(
-        m.REASON_CODES
+        head.reason_codes()
     )
+    assert head.rejection_codes()[: len(m.REJECTION_CODES)] == m.REJECTION_CODES
+    assert head.event_types()[: len(m.EVENT_TYPES)] == m.EVENT_TYPES
     assert m.MAX_DECLARED_SIZE_BYTES == lc.MAX_DECLARED_SIZE_BYTES
 
 
@@ -282,3 +293,15 @@ def test_every_service_statement_is_scoped_to_the_callers_tenant() -> None:
             assert "tenant_id" in sql and (":t," in sql or ":tenant_id" in sql), sql
         else:
             assert "tenant_id = :t" in sql, sql
+
+
+@pytest.mark.parametrize("ch", ["\u0080", "\u0085", "\u009f", "\x07", "‮"])
+def test_c1_is_refused_in_every_metadata_field(ch: str) -> None:
+    for fn, value in (
+        (lc.normalize_name, f"Sales{ch}2026"),
+        (lc.normalize_description, f"desc{ch}ription"),
+        (lc.sanitize_filename, f"sales{ch}.csv"),
+    ):
+        with pytest.raises(lc.MetadataError):
+            fn(value)
+    assert lc.sanitize_filename("Größe 地域.csv") == "Größe 地域.csv"

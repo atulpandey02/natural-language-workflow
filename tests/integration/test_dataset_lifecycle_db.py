@@ -60,12 +60,52 @@ def _mk_version(
 
 
 def _move(conn: psycopg.Connection[Any], vid: uuid.UUID, *states: str) -> None:
+    """Move a version through ``states``. Since 0025 the database requires a
+    content digest before profiling, a recorded profile for PROFILED and a
+    confirmed semantic revision for ACTIVE, so those real rows are written on the
+    way (synthetic values; no bytes exist at this layer)."""
     for s in states:
+        if s == "PROFILING":
+            conn.execute(
+                "UPDATE dataset_versions SET content_sha256 = %s "
+                "WHERE id = %s AND content_sha256 IS NULL",
+                (SHA, vid),
+            )
+        if s == "PROFILED":
+            conn.execute(
+                "INSERT INTO dataset_profiles (version_id, tenant_id, dataset_id, "
+                "contract_version, content_sha256, row_count, column_count, profile) "
+                "SELECT id, tenant_id, dataset_id, 'profile-2', content_sha256, 1, 1, "
+                "'{\"columns\": []}'::jsonb FROM dataset_versions WHERE id = %s",
+                (vid,),
+            )
         code = "'REVIEW_REJECTED'" if s == "REJECTED" else "rejection_code"
+        # Entering PROFILING takes a (database-time) processing lease; leaving it
+        # for PROFILED/REJECTED requires that lease to be live (0025).
+        lease = (
+            ", processing_lease_token = gen_random_uuid(), "
+            "processing_lease_expires_at = now() + interval '5 minutes'"
+            if s == "PROFILING"
+            else ""
+        )
         conn.execute(
-            f"UPDATE dataset_versions SET status = %s, rejection_code = {code} WHERE id = %s",  # noqa: S608
+            f"UPDATE dataset_versions SET status = %s, rejection_code = {code}{lease} "  # noqa: S608
+            "WHERE id = %s",
             (s, vid),
         )
+        if s == "PROFILED":
+            _confirm(conn, vid)
+
+
+def _confirm(conn: psycopg.Connection[Any], vid: uuid.UUID) -> None:
+    conn.execute(
+        "INSERT INTO dataset_semantic_revisions (id, tenant_id, dataset_id, version_id, "
+        "revision_number, mapping, confirmed_by) SELECT %s, tenant_id, dataset_id, id, "
+        "(SELECT coalesce(max(revision_number), 0) + 1 FROM dataset_semantic_revisions "
+        "WHERE version_id = %s), '{\"columns\": []}'::jsonb, created_by "
+        "FROM dataset_versions WHERE id = %s",
+        (uuid.uuid4(), vid, vid),
+    )
 
 
 def _activate(conn: psycopg.Connection[Any], did: uuid.UUID, vid: uuid.UUID) -> None:
@@ -190,18 +230,18 @@ def test_storage_key_must_name_this_tenant_and_dataset(
     with _owner(pg_stack) as c:
         did = _mk_dataset(c, ws.tenant, ws.user)
         vid = _mk_version(c, ws.tenant, did, ws.user)
-        foreign = f"quarantine/{other.tenant_id}/{did}/upload.csv"
+        foreign = f"quarantine/{other.tenant_id}/{did}/{vid}"
         with pytest.raises(psycopg.errors.CheckViolation):
             c.execute(
                 "UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s", (foreign, vid)
             )
-        mine = f"quarantine/{ws.tenant}/{did}/upload.csv"
+        mine = f"quarantine/{ws.tenant}/{did}/{vid}"
         c.execute("UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s", (mine, vid))
         # ...and is then immutable (set once, only while QUARANTINED).
         _raises_check(
             lambda: c.execute(
                 "UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s",
-                (f"datasets/{ws.tenant}/{did}/raw.csv", vid),
+                (f"datasets/{ws.tenant}/{did}/{vid}", vid),
             )
         )
 
@@ -219,7 +259,8 @@ def test_digest_is_set_once_while_quarantined(
             )
         )
         v2 = _mk_version(c, ws.tenant, did, ws.user)
-        _move(c, v2, "PROFILING")
+        # Straight to PROFILING with NO digest (not via _move, which records one).
+        c.execute("UPDATE dataset_versions SET status = 'PROFILING' WHERE id = %s", (v2,))
         _raises_check(
             lambda: c.execute(
                 "UPDATE dataset_versions SET content_sha256 = %s WHERE id = %s", (SHA, v2)
@@ -475,10 +516,14 @@ def test_events_reject_free_text_and_mismatched_scope(
                     base + "(%s, %s, %s, NULL, %s, %s, %s, %s, %s, %s)",
                     (uuid.uuid4(), ws.tenant, did, et, fs, ts, kind, actor, reason),
                 )
-        c.execute(
-            base + "(%s, %s, %s, NULL, 'DATASET_CREATED', NULL, 'ACTIVE', 'user', %s, NULL)",
-            (uuid.uuid4(), ws.tenant, did, ws.user),
-        )
+        # A well-formed event is accepted when it records a transition made in
+        # its own transaction (0025 event authenticity).
+        with c.transaction():
+            fresh = _mk_dataset(c, ws.tenant, ws.user, "Fresh")
+            c.execute(
+                base + "(%s, %s, %s, NULL, 'DATASET_CREATED', NULL, 'ACTIVE', 'user', %s, NULL)",
+                (uuid.uuid4(), ws.tenant, fresh, ws.user),
+            )
 
 
 def test_no_free_form_json_or_text_blob_columns(pg_stack: SimpleNamespace) -> None:
@@ -522,10 +567,18 @@ def test_role_matrix_member_reads_admin_writes(pg_stack: SimpleNamespace) -> Non
         res = m.execute("UPDATE datasets SET status = 'DELETING' WHERE id = %s", (did,))
         assert res.rowcount == 0  # USING hides the row from a member's UPDATE
     with _app(pg_stack, admin_id, owner.tenant_id) as a:
+        new_id = uuid.uuid4()
         a.execute(
             "INSERT INTO datasets (id, tenant_id, name, normalized_name, status, created_by) "
             "VALUES (%s, %s, 'A', 'a', 'ACTIVE', %s)",
-            (uuid.uuid4(), owner.tenant_id, admin_id),
+            (new_id, owner.tenant_id, admin_id),
+        )
+        # A runtime-role transition must record its event (deferred check, 0025).
+        a.execute(
+            "INSERT INTO dataset_events (id, tenant_id, dataset_id, event_type, to_status, "
+            "actor_kind, actor_user_id) VALUES (%s, %s, %s, 'DATASET_CREATED', 'ACTIVE', "
+            "'user', %s)",
+            (uuid.uuid4(), owner.tenant_id, new_id, admin_id),
         )
         a.commit()
 
@@ -534,14 +587,15 @@ def test_tenant_b_cannot_see_or_touch_tenant_a(pg_stack: SimpleNamespace) -> Non
     a = pg_stack.seed_member("owner")
     b = pg_stack.seed_member("owner")
     with _owner(pg_stack) as c:
-        did = _mk_dataset(c, a.tenant_id, a.user_id)
+        with c.transaction():  # an event records a transition made in its transaction
+            did = _mk_dataset(c, a.tenant_id, a.user_id)
+            c.execute(
+                "INSERT INTO dataset_events (id, tenant_id, dataset_id, event_type, to_status, "
+                "actor_kind, actor_user_id) VALUES (%s, %s, %s, 'DATASET_CREATED', 'ACTIVE', "
+                "'user', %s)",
+                (uuid.uuid4(), a.tenant_id, did, a.user_id),
+            )
         vid = _mk_version(c, a.tenant_id, did, a.user_id)
-        c.execute(
-            "INSERT INTO dataset_events (id, tenant_id, dataset_id, event_type, to_status, "
-            "actor_kind, actor_user_id) VALUES (%s, %s, %s, 'DATASET_CREATED', 'ACTIVE', "
-            "'user', %s)",
-            (uuid.uuid4(), a.tenant_id, did, a.user_id),
-        )
     with _app(pg_stack, b.user_id, b.tenant_id) as conn:
         for sql, args in (
             ("SELECT count(*) FROM datasets WHERE id = %s", (did,)),
@@ -585,14 +639,15 @@ def test_policies_bind_to_the_signed_tenant_not_just_membership(
             "INSERT INTO memberships (id, user_id, workspace_id, role) VALUES (%s,%s,%s,'owner')",
             (uuid.uuid4(), a.user_id, b.tenant_id),
         )
-        did = _mk_dataset(c, a.tenant_id, a.user_id)
+        with c.transaction():  # an event records a transition made in its transaction
+            did = _mk_dataset(c, a.tenant_id, a.user_id)
+            c.execute(
+                "INSERT INTO dataset_events (id, tenant_id, dataset_id, event_type, to_status, "
+                "actor_kind, actor_user_id) VALUES (%s, %s, %s, 'DATASET_CREATED', 'ACTIVE', "
+                "'user', %s)",
+                (uuid.uuid4(), a.tenant_id, did, a.user_id),
+            )
         _mk_version(c, a.tenant_id, did, a.user_id)
-        c.execute(
-            "INSERT INTO dataset_events (id, tenant_id, dataset_id, event_type, to_status, "
-            "actor_kind, actor_user_id) VALUES (%s, %s, %s, 'DATASET_CREATED', 'ACTIVE', "
-            "'user', %s)",
-            (uuid.uuid4(), a.tenant_id, did, a.user_id),
-        )
         # Prime the counter so a forged version insert is otherwise well-formed.
         c.execute(
             "UPDATE datasets SET last_version_number = last_version_number + 1 WHERE id = %s",
@@ -701,8 +756,7 @@ def test_runtime_app_role_cannot_forge_tombstone_or_operator_events(
     pg_stack: SimpleNamespace, ws: SimpleNamespace
 ) -> None:
     """The audit trail's tombstone/operator entries can only come from the
-    operator path: an owner in the app role is refused by the events INSERT
-    policy (well-formed rows, so no CHECK constraint is what refuses them)."""
+    operator path: an owner in the app role is refused."""
     with _owner(pg_stack) as c:
         did = _mk_dataset(c, ws.tenant, ws.user)
         c.execute("UPDATE datasets SET status = 'DELETING' WHERE id = %s", (did,))
@@ -713,7 +767,12 @@ def test_runtime_app_role_cannot_forge_tombstone_or_operator_events(
     )
     with _app(pg_stack, ws.user, ws.tenant) as conn:
         for event_type, src, dst, kind, actor, reason in forged:
-            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            # Since 0025 the event guard (no such transition in this transaction)
+            # or RLS (operator rows, tombstones) refuses them; either way nothing
+            # is recorded. RLS alone is proven in test_dataset_ingestion_db.
+            with pytest.raises(
+                (psycopg.errors.InsufficientPrivilege, psycopg.errors.CheckViolation)
+            ):
                 conn.execute(
                     "INSERT INTO dataset_events (id, tenant_id, dataset_id, event_type, "
                     "from_status, to_status, actor_kind, actor_user_id, reason_code) "
