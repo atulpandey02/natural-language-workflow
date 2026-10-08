@@ -44,20 +44,19 @@ implementation from a trace of the code at `main` `9bc5f74`.
    - a process-global `csv.field_size_limit` that cannot leak into the API.
 
    It returns either a validated profile or a reject code, never content.
-3. **No new database role in this branch (owner decision flagged).**
-   - Ingestion database writes (`QUARANTINED → PROFILING → PROFILED|REJECTED`,
-     the profile row) run as `nlw_app`, under a freshly signed `api_request`
-     context for the **uploading admin**, with `actor_kind = service`. This is
-     the "internal service, admin authority" row of the ADR-029 matrix, and RLS
-     re-checks admin membership on every transaction (a demoted uploader's
-     processing fails closed).
-   - The general worker gets **nothing**.
-   - A dedicated `nlw_ingest` login role would need a new signed purpose. That
-     means replacing the `SECURITY DEFINER` verifier `app_ctx_claims()`, a new
-     key class, key escrow and a new deployment secret. That is a material
-     deployment expansion with no benefit while processing runs under a human's
-     authority. It becomes necessary only if processing moves to an unattended
-     queue worker. **Owner decision O-1.**
+3. **Processing identity: decided by O-1, see [ADR-031](../adr/ADR-031-dataset-ingest-runtime-boundary.md).**
+   - *Originally* (ADR-030) the processing writes ran as `nlw_app` under the
+     uploading admin's `api_request` context.
+   - **Now** they run in a dedicated runtime, `nlw.ingest_service`, as the
+     least-privilege `nlw_ingest` role under a `dataset_ingest` context signed
+     with its own key: ONE version in one workspace, no human identity
+     (`actor_kind = service`, `actor_user_id` NULL). The API records an
+     immutable processing request and enqueues a database-anchored work
+     envelope; it can no longer take a lease, insert a profile, or publish or
+     reject a version being processed.
+   - The general worker and the scheduler still get **nothing**.
+   - In staging/production the role is dormant (NOLOGIN, no key, no container)
+     until O-6.
 4. **Storage.**
    - The key is `quarantine/{tenant}/{dataset}/{version_id}`: opaque, derived
      server-side, never from the filename.
@@ -178,8 +177,9 @@ These are pilot defaults, not permanent product decisions.
 
 ## 5. Owner decisions (open)
 
-- **O-1** a dedicated `nlw_ingest` role and signed purpose, only if processing
-  moves to an unattended worker;
+- ~~**O-1**~~ **decided**: dedicated `nlw_ingest` role, `dataset_ingest` purpose
+  and ingest runtime ([ADR-031](../adr/ADR-031-dataset-ingest-runtime-boundary.md));
+  dormant outside development until O-6;
 - **O-2** S3-compatible client dependency and its ADR; per-environment bucket;
   object durability;
 - **O-3** external deletion-log provider and record retention;

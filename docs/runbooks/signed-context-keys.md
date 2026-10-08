@@ -10,13 +10,15 @@ expiring context** (`app.ctx_*`, transaction-local). PostgreSQL recomputes the
 HMAC-SHA256 tag inside `app_ctx_claims()` and RLS trusts **only** verified
 claims. Bare `app.user_id` / `app.tenant_id` settings grant nothing.
 
-Three runtime classes, three keys, three login roles:
+Three required runtime classes, three keys, three login roles, plus the
+OPTIONAL ingest class (ADR-031), which is **dormant** in staging and production:
 
 | class       | signer purpose(s)                 | DB login role   | key file (in container)      |
 |-------------|-----------------------------------|-----------------|------------------------------|
 | `api`       | `api_identity`, `api_request`     | `nlw_app`       | `/run/nlw/keys/api.key`      |
 | `worker`    | `worker_execution`                | `nlw_worker`    | `/run/nlw/keys/worker.key`   |
 | `scheduler` | `scheduler_reconcile`             | `nlw_scheduler` | `/run/nlw/keys/scheduler.key`|
+| `ingest` (optional) | `dataset_ingest` (one version, no user) | `nlw_ingest` | `/run/nlw/keys/ingest.key` |
 
 **Be precise about what the key is.** HMAC is symmetric: the material in the
 `ctx_keys` registry is *signing-capable*. "Verify-only" describes the exposed
@@ -160,6 +162,34 @@ key file — only escrow can.
 Unknown, revoked, retired or wrong-class keys, wrong login role, wrong purpose,
 expired / future-issued / over-long contexts, and any tampered field all verify to
 NULL. Runtime roles cannot read or mutate the registry and have no signing oracle.
+
+## The ingest key class (ADR-031) — dormant until O-6
+
+- The verifier accepts `dataset_ingest` contexts only from `nlw_ingest`, only
+  with an active key of class `ingest`, and only with the shape tenant + run
+  (the version id), no user. No other class can mint one, and the ingest key
+  can mint nothing else (tested both ways).
+- **Staging/production today:** no ingest key exists and none is needed.
+  `nlw_ingest` is a NOLOGIN role (the rollout's role gate requires that), there
+  is no ingest container, and `deploy/staging/target.env` names no ingest key id,
+  so releases, escrow attestations and `ctxkeys fingerprint` stay at three keys.
+  The rollout **refuses** any release manifest that declares an ingest key.
+- The key tooling supports the class: `ctxkeys prepare/install/check/revoke
+  --class ingest`; `ctxkeys fingerprint ... --key-id-ingest ID` and
+  `verify-files --include-ingest` cover it only when asked; a manifest or escrow
+  attestation may name exactly the three required keys or the three plus
+  `ingest` (each unique and independent).
+- **Enabling it later (O-6) is a reviewed protocol change**, not an operator
+  shortcut. It must add, in order: a reviewed rollout path that prepares ONLY the
+  missing `ingest.key` (never regenerating the others), an escrow attestation
+  covering four keys with a real recovery test, installation and `check` of the
+  ingest key, setting the `nlw_ingest` password with
+  [rotate-db-role-password](rotate-db-role-password.md) and `ALTER ROLE ... LOGIN`,
+  the role gate's change to expect LOGIN, and a deployed Compose service.
+  Storage (O-2) must exist first: the runtime refuses to boot without a
+  dataset store.
+- Downgrading migration `0026` refuses while any `ingest` key is registered
+  (disposable databases only; fix forward).
 
 ## Rollback (security sensitive)
 

@@ -44,6 +44,7 @@ decision, numbered and never deleted (supersede instead of removing).
 | [027](ADR-027-grounded-pilot-analytics.md) | Bounded grounded analytics, Recharts rendering and immutable two-proposal Slack handoff | Accepted for M12C; pending visual UX review |
 | [029](ADR-029-dataset-lifecycle-foundation.md) | Dataset lifecycle foundation — tenant-isolated metadata, immutable versions, explicit states, operator tombstones; no upload, no planner access | Accepted for implementation (Phase 2A); PR awaiting review |
 | [030](ADR-030-csv-ingestion-and-profiling.md) | CSV ingestion and deterministic profiling — write-once local storage, strict streaming profiler in an isolated process, semantic confirmation, verified purge before tombstone; disabled outside development | Accepted for local implementation (Phase 2B); not deployed |
+| [031](ADR-031-dataset-ingest-runtime-boundary.md) | Dataset ingest runtime boundary (O-1) — `nlw_ingest` role, `dataset_ingest` signed purpose and key, database-anchored work envelopes, exact grants; API leaves the processing path; dormant outside development | Accepted for implementation; not deployed (dormant until O-6) |
 
 ## Template
 
