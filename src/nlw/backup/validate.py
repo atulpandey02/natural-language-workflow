@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-_RUNTIME_ROLES = ("nlw_app", "nlw_worker", "nlw_scheduler")
+_RUNTIME_ROLES = ("nlw_app", "nlw_worker", "nlw_scheduler", "nlw_ingest")
 _ALL_ROLES = _RUNTIME_ROLES + (
     "nlw_rls_bypass",
     "nlw_workspace_bootstrap",
@@ -40,6 +40,7 @@ _FORCED_RLS_TABLES = (
     "dataset_events",
     "dataset_profiles",
     "dataset_semantic_revisions",
+    "dataset_processing_requests",
 )
 _SECURITY_DEFINER_FUNCS = {
     "resolve_run_tenant": "nlw_rls_bypass",
@@ -466,7 +467,8 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
                 "FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner "
                 "JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' "
                 "AND p.proname IN ('app_ctx_claims','app_ctx_canon','ctx_user_id',"
-                "'ctx_tenant_id','ctx_run_id','ctx_purpose')",
+                "'ctx_tenant_id','ctx_run_id','ctx_purpose',"
+                "'ctx_ingest_tenant_id','ctx_ingest_version_id')",
             ).all()
         }
         vissues = []
@@ -477,6 +479,8 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
             "ctx_tenant_id",
             "ctx_run_id",
             "ctx_purpose",
+            "ctx_ingest_tenant_id",
+            "ctx_ingest_version_id",
         ):
             if fn not in vfn:
                 vissues.append(f"{fn}:absent")
@@ -515,9 +519,17 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
                 "OR p.prosrc LIKE '%app.tenant_id%')",
             ).all()
         ]
+        # ADR-031: the ingest runtime role holds EXACTLY its processing grants
+        # after a restore (nothing missing, nothing extra).
+        from nlw.ops.roles import INGEST_GRANTS_SQL, ingest_grant_problems
+
+        ingest_problems = ingest_grant_problems(
+            {str(r[0]) for r in _q(conn, INGEST_GRANTS_SQL).all()}
+        )
+        add("ingest_grants_exact", not ingest_problems, f"problems={ingest_problems}")
         add(
             "no_policy_trusts_unsigned_context",
-            not legacy and not uncond and not helper_legacy and len(pols) == 65,
+            not legacy and not uncond and not helper_legacy and len(pols) == 74,
             f"legacy={legacy} unconditional={uncond} helpers={helper_legacy} n={len(pols)}",
         )
 

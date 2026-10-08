@@ -28,14 +28,17 @@ EXPECTED_ROLES: dict[str, str] = {
     "nlw_workspace_bootstrap": "fft",
     "nlw_membership_admin": "fft",
     "nlw_ctx_verifier": "fff",
+    # Dormant ingest runtime (ADR-031): NOLOGIN until owner decision O-6. A LOGIN
+    # ingest role on a deployed target is an error, never silently accepted.
+    "nlw_ingest": "fff",
 }
-# Roles that must ALREADY exist before the upgrade (M11 set); the two P3A/P3B
-# roles are the ones prepare-roles may create.
+# Roles that must ALREADY exist before the upgrade (M11 set); the P3A/P3B owner
+# roles and the dormant ingest role are the ones prepare-roles may create.
 PRE_UPGRADE_ROLES = frozenset(
     {"nlw_app", "nlw_worker", "nlw_scheduler", "nlw_rls_bypass", "nlw_workspace_bootstrap"}
 )
-PROVISIONABLE_ROLES = frozenset({"nlw_membership_admin", "nlw_ctx_verifier"})
-RUNTIME_ROLES = ("nlw_app", "nlw_worker", "nlw_scheduler")
+PROVISIONABLE_ROLES = frozenset({"nlw_membership_admin", "nlw_ctx_verifier", "nlw_ingest"})
+RUNTIME_ROLES = ("nlw_app", "nlw_worker", "nlw_scheduler", "nlw_ingest")
 
 
 class GateError(RuntimeError):
@@ -345,6 +348,28 @@ def check_roles(roles: dict[str, str], *, require_provisioned: bool) -> None:
     extra = {n for n in roles if n.startswith("nlw_") and n not in EXPECTED_ROLES}
     if extra:
         raise GateError(f"unexpected nlw_* roles present: {sorted(extra)}")
+
+
+def check_ingest_not_declared(release: ReleaseSpec) -> None:
+    """ADR-031: the ingest runtime is dormant on deployed targets until owner
+    decision O-6 makes its enablement (password, key install, service start) part
+    of this protocol. A release declaring an ingest key is refused, never
+    half-deployed."""
+    if release.declares_ingest:
+        raise GateError(
+            "release declares an ingest key: enabling the ingest runtime is owner "
+            "decision O-6 and not supported by this rollout — STOP"
+        )
+
+
+def check_ingest_grants(lines: str) -> None:
+    """The dormant ingest role must hold EXACTLY its ADR-031 privileges: a
+    missing grant breaks enablement, an extra one widens the boundary."""
+    from nlw.ops.roles import ingest_grant_problems
+
+    problems = ingest_grant_problems({ln.strip() for ln in lines.splitlines() if ln.strip()})
+    if problems:
+        raise GateError("ingest privileges differ from ADR-031: " + "; ".join(problems))
 
 
 def check_no_runtime_sessions(count: int) -> None:

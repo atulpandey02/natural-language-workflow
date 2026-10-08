@@ -3,6 +3,19 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Phase 2B — dataset ingest runtime boundary, O-1 (branch `feat/dataset-ingest-runtime-role`, awaiting review)
+
+Builds on the CSV profiling and storage foundation (atulpandey02/natural-language-workflow#52,
+merged as `35bf765`, migration `0025`, [ADR-030](adr/ADR-030-csv-ingestion-and-profiling.md)).
+Migration `0026_dataset_ingest_role` ([ADR-031](adr/ADR-031-dataset-ingest-runtime-boundary.md)):
+a least-privilege `nlw_ingest` role, a `dataset_ingest` signed purpose and key
+class, immutable processing requests anchoring the queue's work envelopes, and
+the `nlw.ingest_service` runtime. The API no longer profiles. **Uploads remain
+disabled**: no upload/processing route, no S3 (O-2), and the ingest runtime is
+dormant in staging/production (NOLOGIN role, no key, no container) until O-6.
+Open owner decisions: O-2 storage, O-3 deletion log, O-4 object backup/restore,
+O-5 retention, O-6 enablement.
+
 ## Phase 2A — dataset lifecycle foundation (branch `feat/phase2-dataset-lifecycle`, awaiting review)
 
 Branched from `main` at `9972830` (staging runs that release at revision

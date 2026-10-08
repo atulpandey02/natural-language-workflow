@@ -89,6 +89,16 @@ def set_worker_context_default(session: Session, tenant_id: uuid.UUID, run_id: u
     set_worker_context_sync(session, process_signer(Purpose.WORKER_EXECUTION), tenant_id, run_id)
 
 
+async def set_ingest_context(
+    session: AsyncSession, signer: ContextSigner, tenant_id: uuid.UUID, version_id: uuid.UUID
+) -> None:
+    """Ingest context for ONE dataset version (ADR-031): the version id travels in
+    the signed run slot; there is no human identity."""
+    if signer.purpose is not Purpose.DATASET_INGEST:
+        raise ValueError("ingest context requires a dataset_ingest signer")
+    await apply_signed_context(session, signer.sign(tenant_id=tenant_id, run_id=version_id))
+
+
 def set_scheduler_context_sync(session: Session, signer: ContextSigner) -> None:
     """``scheduler_reconcile``: cross-tenant scan/reconcile, no human, no tenant."""
     if signer.purpose is not Purpose.SCHEDULER_RECONCILE:

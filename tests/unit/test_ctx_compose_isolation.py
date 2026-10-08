@@ -15,6 +15,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 _KEY_ENV = ("NLW_CTX_KEY_ID", "NLW_CTX_KEY_FILE")
 _HOLDERS = {"api": "api.key", "worker": "worker.key", "scheduler": "scheduler.key"}
+# The ingest runtime (ADR-031) holds its own key where it exists: the development
+# Compose only (opt-in profile). Staging/production have no ingest service (O-6).
+_OPTIONAL_HOLDERS = {"ingest": "ingest.key"}
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -36,24 +39,31 @@ def _volumes(service: dict[str, Any]) -> list[str]:
 
 def _assert_isolation(compose: dict[str, Any], *, require_fail_closed: bool) -> None:
     services = compose["services"]
+    assert set(_HOLDERS) <= set(services)
+    holders = {**_HOLDERS, **{n: f for n, f in _OPTIONAL_HOLDERS.items() if n in services}}
     for name, svc in services.items():
         env, vols = _env(svc), _volumes(svc)
         key_mounts = [v for v in vols if "/run/nlw/keys/" in v]
-        if name in _HOLDERS:
-            assert env.get("NLW_CTX_KEY_FILE") == f"/run/nlw/keys/{_HOLDERS[name]}", name
+        if name in holders:
+            assert env.get("NLW_CTX_KEY_FILE") == f"/run/nlw/keys/{holders[name]}", name
             assert "NLW_CTX_KEY_ID" in env, name
             # Exactly ONE key mount, read-only, for THIS class only.
             assert len(key_mounts) == 1, (name, key_mounts)
-            assert key_mounts[0].endswith(f"/run/nlw/keys/{_HOLDERS[name]}:ro"), key_mounts
-            assert f"/{_HOLDERS[name]}:" in key_mounts[0]
+            assert key_mounts[0].endswith(f"/run/nlw/keys/{holders[name]}:ro"), key_mounts
+            assert f"/{holders[name]}:" in key_mounts[0]
             if require_fail_closed:
                 assert ":?" in env["NLW_CTX_KEY_ID"], f"{name} key id must be required in prod"
         else:
             assert not any(k in env for k in _KEY_ENV), f"{name} must not receive a key id/file"
             assert key_mounts == [], f"{name} must not mount a key file"
-    # The three holders use three DIFFERENT key ids (env expressions) and files.
-    ids = {_env(services[h])["NLW_CTX_KEY_ID"] for h in _HOLDERS}
-    assert len(ids) == 3, ids
+    # Every holder uses a DIFFERENT key id (env expression) and file.
+    ids = {_env(services[h])["NLW_CTX_KEY_ID"] for h in holders}
+    assert len(ids) == len(holders), ids
+
+
+def test_dev_compose_has_the_ingest_key_holder_and_prod_has_none() -> None:
+    assert "ingest" in _load("docker-compose.yml")["services"]
+    assert "ingest" not in _load("docker-compose.prod.yml")["services"]
 
 
 def test_dev_compose_isolates_keys() -> None:

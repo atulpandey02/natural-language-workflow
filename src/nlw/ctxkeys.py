@@ -4,7 +4,8 @@ One-shot operator/installer commands that run with the OWNER/migration credentia
 (``DATABASE_MIGRATION_URL``) — never a runtime container's credential — and read
 secret material ONLY from files (never argv, never env values):
 
-  install  --class api|worker|scheduler --key-id ID --secret-file PATH [--activate-at ISO]
+  install  --class api|worker|scheduler|ingest --key-id ID --secret-file PATH
+           [--activate-at ISO]
            Idempotent by key id: an existing row with the SAME class and material is
            a no-op; a DIFFERENT class or material for that id FAILS (never replaced).
   revoke   --key-id ID [--retire-at ISO]
@@ -23,11 +24,16 @@ File-only commands (NO database; production key preparation, M12A-Prep §E):
            write through a symlink/directory. Prints only "prepared <class> <fp>"
            where <fp> is the sha256 fingerprint — never material.
   fingerprint  --dir DIR --key-id-api ID --key-id-worker ID --key-id-scheduler ID
+               [--key-id-ingest ID]
            Strictly validates each key file's placement (regular file, 0400,
            owner uid, >=32 bytes hex) and prints "<class> <key_id> <sha256>" lines
            for the escrow attestation / rollout gate. Never prints material.
-  verify-files --dir DIR [--owner UID]
-           Placement checks only (exit 0 iff all three files are valid).
+  verify-files --dir DIR [--owner UID] [--include-ingest]
+           Placement checks only (exit 0 iff every required file is valid).
+
+The three runtime classes api/worker/scheduler are always required. ``ingest``
+(ADR-031) is OPTIONAL: it is covered only when explicitly named
+(``--key-id-ingest`` / ``--include-ingest``), so a three-key host is unchanged.
 
 Every lifecycle change appends to ``ctx_key_events`` (id, class, event, actor) —
 never material. Exit codes: 0 ok, 1 operation failed, 2 usage, 3 mismatch.
@@ -56,7 +62,9 @@ from nlw.tenancy.signing import (
 
 log = structlog.get_logger(__name__)
 
-_CLASSES = ("api", "worker", "scheduler")
+REQUIRED_CLASSES = ("api", "worker", "scheduler")
+OPTIONAL_CLASSES = ("ingest",)
+_CLASSES = (*REQUIRED_CLASSES, *OPTIONAL_CLASSES)
 
 
 class KeyMismatch(RuntimeError):
@@ -259,13 +267,16 @@ def _add_file_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser])
     prep.add_argument("--owner", required=True, help="container UID[:GID], e.g. 10001:10001")
     fpr = sub.add_parser("fingerprint")
     fpr.add_argument("--dir", required=True)
-    for c in _CLASSES:
+    for c in REQUIRED_CLASSES:
         fpr.add_argument(f"--key-id-{c}", required=True)
+    for c in OPTIONAL_CLASSES:
+        fpr.add_argument(f"--key-id-{c}", default=None, help="optional class (ADR-031)")
     fpr.add_argument("--owner", default="10001", help="expected file owner UID")
     fpr.add_argument("--insecure-permissions", action="store_true", help="tests/drills only")
     vf = sub.add_parser("verify-files")
     vf.add_argument("--dir", required=True)
     vf.add_argument("--owner", default="10001")
+    vf.add_argument("--include-ingest", action="store_true", help="also require ingest.key")
 
 
 def _run_file_command(args: argparse.Namespace) -> int:
@@ -279,7 +290,14 @@ def _run_file_command(args: argparse.Namespace) -> int:
         owner_uid_opt: int | None = None
     else:
         owner_uid_opt = owner_uid
-    for c in _CLASSES:
+    if args.cmd == "fingerprint":
+        classes = (
+            *REQUIRED_CLASSES,
+            *(c for c in OPTIONAL_CLASSES if getattr(args, f"key_id_{c}")),
+        )
+    else:
+        classes = (*REQUIRED_CLASSES, *(OPTIONAL_CLASSES if args.include_ingest else ()))
+    for c in classes:
         path = directory / f"{c}.key"
         if args.cmd == "fingerprint" and args.insecure_permissions:
             load_key_file(path, strict_permissions=False)  # format only

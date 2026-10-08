@@ -80,13 +80,13 @@ def test_generator_reads_target_env_and_ci_identity_and_validates() -> None:
 
 def test_generator_derives_target_revision_from_this_checkout() -> None:
     doc = _gen(target_revision=None)
-    assert doc["target_revision"] == "0025_dataset_ingestion"
+    assert doc["target_revision"] == "0026_dataset_ingest_role"
     assert doc["expected_current_revision"] == "0010_readiness_schema_grant"
 
 
-def test_committed_target_env_yields_the_0024_to_0025_migration_release() -> None:
+def test_committed_target_env_yields_the_0024_to_0026_migration_release() -> None:
     """The host is recorded at 0024 (the rollout of 6b3d47c migrated it
-    0023 -> 0024) and this checkout's head is 0025 (dataset ingestion, ADR-030),
+    0023 -> 0024) and this checkout's head is 0026 (ingest boundary, ADR-031),
     so CI produces a MIGRATION release from the committed target: expected 0024,
     target 0025. The image gate requires migration file 0025 and head 0025, and
     the live-revision gate refuses the stale 0023 the target used to record. The
@@ -95,12 +95,12 @@ def test_committed_target_env_yields_the_0024_to_0025_migration_release() -> Non
     assert "NLW_STAGING_CURRENT_REVISION=0024_dataset_lifecycle" in text
     doc = _gen(target_env=COMMITTED_TARGET_ENV, target_revision=None)
     assert doc["expected_current_revision"] == "0024_dataset_lifecycle"
-    assert doc["target_revision"] == "0025_dataset_ingestion"
+    assert doc["target_revision"] == "0026_dataset_ingest_role"
     assert doc["public_hostname"] == "app.nlwplatform.com"
     assert "sslip" not in json.dumps(doc)
     m = rm.parse_manifest(doc, raw_bytes=json.dumps(doc).encode())
-    info = dict(GOOD_INFO, alembic_head="0025_dataset_ingestion",
-                migrations=[f"{n:04d}_x.py" for n in range(1, 26)])  # fmt: skip
+    info = dict(GOOD_INFO, alembic_head="0026_dataset_ingest_role",
+                migrations=[f"{n:04d}_x.py" for n in range(1, 27)])  # fmt: skip
     gates.check_image_info(info, m)
     with pytest.raises(GateError, match="migration head"):
         gates.check_image_info({**info, "alembic_head": "0024_dataset_lifecycle"}, m)
@@ -111,28 +111,28 @@ def test_committed_target_env_yields_the_0024_to_0025_migration_release() -> Non
         gates.check_current_revision("0023_plan_outcome_events", m.expected_current_revision)
 
 
-def test_a_0023_target_still_yields_the_0023_to_0025_migration_release() -> None:
+def test_a_0023_target_still_yields_the_0023_to_0026_migration_release() -> None:
     # A host recorded at 0023 stays covered from an explicit 0023 copy of the
     # committed target: the image must carry migration file 0025 and head 0025,
     # and the live-revision gate accepts 0023.
     doc = _gen(target_env=_target_env_at("0023_plan_outcome_events"), target_revision=None)
     assert doc["expected_current_revision"] == "0023_plan_outcome_events"
-    assert doc["target_revision"] == "0025_dataset_ingestion"
+    assert doc["target_revision"] == "0026_dataset_ingest_role"
     m = rm.parse_manifest(doc, raw_bytes=json.dumps(doc).encode())
-    info = dict(GOOD_INFO, alembic_head="0025_dataset_ingestion",
-                migrations=[f"{n:04d}_x.py" for n in range(1, 26)])  # fmt: skip
+    info = dict(GOOD_INFO, alembic_head="0026_dataset_ingest_role",
+                migrations=[f"{n:04d}_x.py" for n in range(1, 27)])  # fmt: skip
     gates.check_image_info(info, m)
     with pytest.raises(GateError, match="lacks migration"):
         gates.check_image_info({**info, "migrations": info["migrations"][:-1]}, m)
     gates.check_current_revision("0023_plan_outcome_events", m.expected_current_revision)
 
 
-def test_a_0021_target_still_yields_the_0021_to_0025_migration_release() -> None:
+def test_a_0021_target_still_yields_the_0021_to_0026_migration_release() -> None:
     # A host three revisions behind (recorded at 0021) stays covered from an
     # explicit 0021 copy of the committed target.
     doc = _gen(target_env=_target_env_at("0021_analytics_handoff"), target_revision=None)
     assert doc["expected_current_revision"] == "0021_analytics_handoff"
-    assert doc["target_revision"] == "0025_dataset_ingestion"
+    assert doc["target_revision"] == "0026_dataset_ingest_role"
 
 
 def test_checkout_head_requires_new_migrations_from_a_0020_target(tmp_path: Path) -> None:
@@ -147,10 +147,10 @@ def test_checkout_head_requires_new_migrations_from_a_0020_target(tmp_path: Path
     )
     doc = _gen(target_env=target, target_revision=None)
     assert doc["expected_current_revision"] == "0020_schedule_authorization"
-    assert doc["target_revision"] == "0025_dataset_ingestion"
+    assert doc["target_revision"] == "0026_dataset_ingest_role"
     m = rm.parse_manifest(doc, raw_bytes=json.dumps(doc).encode())
-    info = dict(GOOD_INFO, alembic_head="0025_dataset_ingestion",
-                migrations=[f"{n:04d}_x.py" for n in range(1, 26)])  # fmt: skip
+    info = dict(GOOD_INFO, alembic_head="0026_dataset_ingest_role",
+                migrations=[f"{n:04d}_x.py" for n in range(1, 27)])  # fmt: skip
     gates.check_image_info(info, m)
     with pytest.raises(GateError):
         gates.check_image_info({**info, "migrations": info["migrations"][:-1]}, m)

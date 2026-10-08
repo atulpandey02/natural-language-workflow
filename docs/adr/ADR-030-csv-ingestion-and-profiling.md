@@ -4,7 +4,9 @@ Status: accepted for local implementation; **not deployed**. Branch
 `feat/phase2-csv-ingestion-profiling`.
 Date: 2026-10-05.
 Builds on [ADR-029](ADR-029-dataset-lifecycle-foundation.md) (lifecycle,
-`0024`). Design note: [csv-ingestion-design](../development/csv-ingestion-design.md).
+`0024`).
+**Amended by [ADR-031](ADR-031-dataset-ingest-runtime-boundary.md) (O-1):**
+processing now runs as the dedicated `nlw_ingest` runtime, not as `nlw_app`. Design note: [csv-ingestion-design](../development/csv-ingestion-design.md).
 
 ## Context
 

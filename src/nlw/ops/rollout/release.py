@@ -9,6 +9,7 @@ from pathlib import Path
 
 from nlw.ops.release_manifest import (
     KEY_CLASSES,
+    OPTIONAL_KEY_CLASSES,
     ReleaseManifest,
     ReleaseManifestError,
     load_manifest,
@@ -24,4 +25,11 @@ def load_release(path: Path, *, local: bool = False) -> ReleaseSpec:
     return load_manifest(path, local=local)
 
 
-__all__ = ["KEY_CLASSES", "ReleaseSpec", "ReleaseSpecError", "load_release", "parse_release"]
+__all__ = [
+    "KEY_CLASSES",
+    "OPTIONAL_KEY_CLASSES",
+    "ReleaseSpec",
+    "ReleaseSpecError",
+    "load_release",
+    "parse_release",
+]

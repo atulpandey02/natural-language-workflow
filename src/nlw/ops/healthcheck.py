@@ -1,4 +1,4 @@
-"""Container healthcheck for the worker/scheduler roles (M9, req 7).
+"""Container healthcheck for the worker/scheduler/ingest roles (M9, req 7; ADR-031).
 
 Beyond "is the process alive", this proves the process can actually do its job:
 PostgreSQL is reachable, Redis is reachable, and the process's own metrics port
@@ -63,6 +63,7 @@ _ROLE_PURPOSE = {
     "nlw_worker": Purpose.WORKER_EXECUTION,
     "nlw_scheduler": Purpose.SCHEDULER_RECONCILE,
     "nlw_app": Purpose.API_REQUEST,
+    "nlw_ingest": Purpose.DATASET_INGEST,
 }
 
 
@@ -80,7 +81,7 @@ def _check_signed_context(settings: Settings) -> None:
         nil = uuid.UUID(int=0)
         ids: dict[str, uuid.UUID] = (
             {"tenant_id": nil, "run_id": nil}
-            if purpose is Purpose.WORKER_EXECUTION
+            if purpose in (Purpose.WORKER_EXECUTION, Purpose.DATASET_INGEST)
             else {"user_id": nil, "tenant_id": nil}
             if purpose is Purpose.API_REQUEST
             else {}

@@ -42,9 +42,12 @@ COPY alembic.ini ./
 RUN uv sync --frozen --no-dev
 
 # Run as a non-root user (M9 hardening). Create it after the build steps (which
-# need to write /app/.venv) and hand it ownership of the app tree.
+# need to write /app/.venv) and hand it ownership of the app tree. The dataset
+# storage mount point (ADR-030/031, development only) is created owned by it: a
+# named volume mounted there inherits this owner and mode.
 RUN useradd --system --create-home --uid 10001 appuser \
-    && chown -R appuser:appuser /app
+    && chown -R appuser:appuser /app \
+    && install -d -o appuser -g appuser -m 0700 /var/lib/nlw/datasets
 USER appuser
 
 EXPOSE 8000

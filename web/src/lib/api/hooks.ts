@@ -50,6 +50,27 @@ export function useWorkspaces() {
   });
 }
 
+/**
+ * Fetch the caller's workspace list from the server *now*, guaranteed to be a
+ * request issued after this call. Use it after a server-side membership change
+ * (e.g. accepting an invitation) when the caller needs the post-change list.
+ *
+ * A plain invalidate/refetch is not enough: while the very first list fetch is
+ * still in flight (no cached data yet) TanStack dedupes onto that request, whose
+ * response may have been produced before the membership existed.
+ */
+export function useFetchFreshWorkspaces() {
+  const qc = useQueryClient();
+  return useCallback(async () => {
+    await qc.cancelQueries({ queryKey: ["workspaces"] });
+    return qc.query({
+      queryKey: ["workspaces"],
+      queryFn: () => api.get<WorkspaceOut[]>("/workspaces"),
+      staleTime: 0,
+    });
+  }, [qc]);
+}
+
 export function useCurrentWorkspace() {
   return useQuery({
     queryKey: ["workspace-current"],
