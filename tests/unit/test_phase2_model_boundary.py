@@ -153,11 +153,12 @@ FORBIDDEN_FOR_DATASETS = (
 )
 
 
-# ADR-030: ``nlw.datasets.ingestion`` is the ONE dataset module that touches
-# bytes, through the storage abstraction and the strict profiler. Every other
-# rule still applies to it, and every other dataset module stays byte-free.
+# ADR-030/031: ``nlw.datasets.ingestion`` is the ONE dataset module that touches
+# bytes, through the storage abstraction only (the profiler belongs to the
+# ingest runtime). Every other rule still applies to it, and every other
+# dataset module stays byte-free.
 BYTE_MODULES = {"datasets/ingestion.py"}
-BYTE_PACKAGES = ("nlw.ingest", "nlw.storage")
+BYTE_PACKAGES = ("nlw.storage",)
 
 
 def test_dataset_metadata_imports_no_planner_provider_storage_or_query_engine() -> None:
