@@ -208,6 +208,24 @@ No service mounts another service's key (tested on every Compose file), and
 the ingest service receives no owner, LLM, Supabase, demo-tools, worker-secret,
 backup or alerting values.
 
+### The upload API on this boundary
+
+- The content `PUT` records the content and an immutable processing request in
+  ONE transaction, then enqueues the envelope after commit
+  (commit-before-enqueue). The database row is the work item; the message is
+  transport.
+- An enqueue failure answers 503 `PROCESSING_NOT_QUEUED` with the request
+  durable. Recovery: an idempotent retry of the `PUT` (re-sends the same fresh
+  request), `POST …/process` (re-sends it, or records a new one once it is no
+  longer fresh), or the operator sweep `python -m nlw.ops.datasets
+  dispatch-pending` (owner credential; ids and counts only).
+- At-least-once delivery, idempotent processing (lease compare-and-set); a
+  duplicate or forged message changes nothing.
+- **Not provided:** an unattended dispatcher. It would need an identity that
+  may read pending requests across workspaces; the scheduler and worker have
+  no dataset access by design. That is an owner decision before uploads are
+  enabled (O-6).
+
 ### Key protocol and rollout (backward-safe)
 
 - `ingest` is an **optional** fourth key class. Release manifests, escrow

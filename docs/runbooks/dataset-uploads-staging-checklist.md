@@ -16,7 +16,8 @@ A and B is closed by an owner-approved change.
 | O-4 | Object durability, replication and restore policy (RPO/RTO for uploaded files) | A database restore brings back no bytes (`verify-objects` would report every live version missing) |
 | O-5 | Retention periods (request → purge → tombstone; tombstones, events, receipts) | The deletion statement cannot be published without them |
 | O-6 | A deliberate code change that allows `DATASETS_API_ENABLED` in staging (and how it is scoped) | The configuration refuses it today |
-| O-1 | Whether processing stays under the uploading admin's authority or moves to a dedicated `nlw_ingest` role, signed purpose and key class | Only needed if processing moves to an unattended worker; it would need a verifier change, a key class, escrow and a deployment secret |
+| O-1 | **Decided** ([ADR-031](../adr/ADR-031-dataset-ingest-runtime-boundary.md)): processing runs in the dedicated ingest runtime as `nlw_ingest`; the API records requests and enqueues | Enabling it is part of O-6: `nlw_ingest` LOGIN + password, the ingest key prepared and escrowed (four-key attestation, real recovery test), an ingest service in the deployed Compose, and a reviewed rollout path for all of it |
+| O-7 | An unattended dispatcher for lost enqueues: which identity may read pending requests across workspaces (the scheduler and worker have no dataset access by design) | Without it, a lost enqueue is recovered only by a client retry, an admin re-dispatch or the operator `dispatch-pending` sweep; uploads must not be enabled until this is decided or that manual recovery is accepted in writing |
 
 ## B. Engineering that must exist first (blocking)
 
@@ -35,31 +36,39 @@ A and B is closed by an owner-approved change.
       staging host image. The API container is 512 MB; measured peak is about
       16 MB traced for a 24 MB, 200-column file.
 - [ ] Monitoring: an alert for versions stuck in `QUARANTINED`-with-content or
-      `PROFILING` beyond the stale lease, and for purge or verification
-      failures.
+      `PROFILING` beyond the stale lease (that is, requests no consumer has
+      settled), for refused envelopes, and for purge or verification failures.
+- [ ] The ingest runtime deployable on staging (O-6): service, key, role
+      password, readiness, and the rollout's ingest-key refusal lifted by a
+      reviewed protocol change.
 - [ ] A second operator/reviewer named (owner decision, 2026-09-29).
 
 ## C. Release procedure (when A and B are done; do not run before)
 
 1. CI green on the release commit, including the seeded E2E job with the
    dataset journey (it uses the local overlay only).
-2. Release manifest: a migration release (`0024 → 0025` on staging), signed
-   policies **65**. The image head must be `0025_dataset_ingestion`.
+2. Release manifest: a migration release (`0024 → 0026` on staging today),
+   signed policies **74**. The image head must be the checkout's Alembic head
+   (`0026_dataset_ingest_role` or later).
 3. Operator preflight (existing rollout CLI). Take a verified backup **before**
    the migration (`0025` downgrade is for disposable environments only; fix
    forward).
 4. Migrate. Then verify:
-   - `alembic_version` = `0025`;
-   - forced RLS on `dataset_profiles` and `dataset_semantic_revisions`;
-   - `nlw_worker` and `nlw_scheduler` have no grants on them;
+   - `alembic_version` = the release's target revision;
+   - forced RLS on `dataset_profiles`, `dataset_semantic_revisions` and
+     `dataset_processing_requests`;
+   - `nlw_worker` and `nlw_scheduler` have no grants on them; `nlw_ingest`
+     holds exactly its ADR-031 grants;
    - the restore validator passes.
 5. Deploy the API with the dataset store configured but
    `DATASETS_API_ENABLED=false`. Confirm the upload routes are absent (404)
    and the existing flows are unchanged.
 6. Only with explicit owner authorization, enable the flag for the pilot
    workspace. Then run the synthetic journey: upload
-   `web/e2e/fixtures/synthetic-orders.csv`, profile, confirm, activate, request
-   deletion, purge, tombstone, and run `verify-objects` (all zero).
+   `web/e2e/fixtures/synthetic-orders.csv`, let the ingest runtime profile it,
+   confirm, activate, request deletion, purge, tombstone, and run
+   `verify-objects` (all zero) and `dispatch-pending --dry-run` (nothing
+   pending).
 7. Record evidence, ids and counts only, under `docs/evidence/`.
 
 ## D. Before external or customer uploads (in addition to A–C)

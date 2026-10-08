@@ -165,7 +165,8 @@ The routes are admin/owner only:
 - `POST /datasets/{id}/versions`, with a required `Idempotency-Key`;
 - `PUT …/versions/{vid}/content`, raw body streamed and capped at the declared
   size;
-- `POST …/process`;
+- `POST …/process` (since ADR-031 a re-dispatch: processing runs in the ingest
+  runtime, never in the API);
 - `GET …/profile`;
 - `GET`/`POST …/semantics`;
 - `POST …/activate`.

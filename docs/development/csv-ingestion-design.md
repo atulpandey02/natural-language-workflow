@@ -102,14 +102,26 @@ implementation from a trace of the code at `main` `9bc5f74`.
    - `PUT /datasets/{id}/versions/{vid}/content`: raw `text/csv` body, streamed
      with a route-level cap; exempted from the global buffering middleware by
      exact path shape.
-   - `POST …/process`: admin retry for a version stuck in `QUARANTINED` or in a
-     stale `PROFILING`.
+   - `POST …/process`: admin **re-dispatch** for a version stuck in
+     `QUARANTINED` or in a stale `PROFILING`: it re-enqueues the latest fresh
+     processing request (or records a new one). It never processes.
    - `GET …/profile` (admin).
    - `GET`/`POST …/semantics` (admin).
    - `POST …/activate` (admin).
 
-   Processing starts as a background task after the content commit; the client
-   polls the version status.
+   Processing (ADR-031): the content `PUT` records the content AND an immutable
+   processing request in one transaction, then enqueues the request's envelope
+   after commit. The dedicated ingest runtime (`nlw_ingest`) claims, profiles
+   and settles; the API cannot. The client polls the version status.
+
+   Lost enqueues (commit succeeded, the broker did not): the `PUT` answers 503
+   `PROCESSING_NOT_QUEUED` with the request durable. Recovery is an idempotent
+   retry of the `PUT` (it re-sends the same request), `POST …/process`, or the
+   operator sweep `python -m nlw.ops.datasets dispatch-pending`. Delivery is
+   at-least-once; the lease makes processing idempotent. An **unattended**
+   dispatcher is not provided: it needs an identity that may read pending
+   requests across workspaces, which no runtime has (owner decision, listed
+   in the staging checklist).
 7. **Deletion.** The API requests deletion (`DELETING`, unusable at once; no
    storage I/O in the request). The operator then runs:
    - `python -m nlw.ops.datasets purge`: deletes every object under the
