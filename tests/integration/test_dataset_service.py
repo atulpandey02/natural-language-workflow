@@ -1,9 +1,12 @@
-"""Dataset lifecycle service (ADR-029) against real PostgreSQL as ``nlw_app``.
+"""Dataset lifecycle service (ADR-029) against real PostgreSQL.
 
-Each operation runs in its own transaction carrying a signed ``api_request``
-context, exactly as the API does. Concurrency tests use separate connections so
-the database (row locks, the partial unique index, the deferred consistency
-trigger) is what keeps the invariants, not the test's own ordering.
+Each operation runs in its own transaction carrying a signed context, exactly as
+in production: ``api_request`` as ``nlw_app`` for user operations, and
+``dataset_ingest`` as ``nlw_ingest`` (one version, no human) for the processing
+steps, which the API role may no longer perform (ADR-031). Concurrency tests
+use separate connections so the database (row locks, the partial unique index,
+the deferred consistency trigger) is what keeps the invariants, not the test's
+own ordering.
 """
 
 import asyncio
@@ -62,6 +65,18 @@ class Harness:
         self.maker = async_sessionmaker(self.engine, expire_on_commit=False)
         self.actor = Actor.user(user)
         self.tokens: dict[uuid.UUID, uuid.UUID] = {}  # processing lease per version
+        self.ingest_engine = create_async_engine(pg.ingest_sa, pool_size=10)
+        self.ingest_maker = async_sessionmaker(self.ingest_engine, expire_on_commit=False)
+        self.service = Actor.service(None)  # the ingest runtime: no human identity
+
+    async def run_ingest(
+        self, version_id: uuid.UUID, fn: Callable[[AsyncSession], Awaitable[T]]
+    ) -> T:
+        """One transaction as the ingest runtime for exactly ``version_id``."""
+        async with self.ingest_maker() as session, session.begin():
+            ctx = self.pg.sign(Purpose.DATASET_INGEST, tenant_id=self.tenant, run_id=version_id)
+            await apply_signed_context(session, ctx)
+            return await fn(session)
 
     async def run(
         self, fn: Callable[[AsyncSession], Awaitable[T]], *, user: uuid.UUID | None = None
@@ -98,6 +113,28 @@ class Harness:
         for st in states:
             code = RejectionCode.REVIEW_REJECTED if st is VersionStatus.REJECTED else None
 
+            current = await self.run(
+                lambda s: svc.get_version(s, self.tenant, dataset_id, version_id)
+            )
+            if (
+                st is VersionStatus.PROFILING
+                and not current.has_content
+                and current.status is VersionStatus.QUARANTINED
+            ):
+                await self.run(  # content is recorded by the API (the upload)
+                    lambda s: svc.record_content(
+                        s,
+                        self.tenant,
+                        dataset_id,
+                        version_id,
+                        content_sha256=SYNTHETIC_SHA,
+                        storage_object_key=quarantine_key(self.tenant, dataset_id, version_id),
+                    )
+                )
+            processing = st in (VersionStatus.PROFILING, VersionStatus.PROFILED) or (
+                st is VersionStatus.REJECTED and current.status is VersionStatus.PROFILING
+            )
+
             async def step(
                 s: AsyncSession, st: VersionStatus = st, code: RejectionCode | None = code
             ) -> svc.VersionRecord:
@@ -106,7 +143,7 @@ class Harness:
                     return await svc.publish_profile(
                         s,
                         self.tenant,
-                        self.actor,
+                        self.service,
                         dataset_id,
                         version_id,
                         profile_json=json.dumps(SYNTHETIC_PROFILE),
@@ -119,18 +156,9 @@ class Harness:
                     )
                 if st is VersionStatus.PROFILING:
                     # PROFILING is entered only by taking the processing lease.
-                    if not current.has_content and current.status is VersionStatus.QUARANTINED:
-                        await svc.record_content(
-                            s,
-                            self.tenant,
-                            dataset_id,
-                            version_id,
-                            content_sha256=SYNTHETIC_SHA,
-                            storage_object_key=quarantine_key(self.tenant, dataset_id, version_id),
-                        )
                     token = self.tokens.setdefault(version_id, uuid.uuid4())
                     state, rec = await svc.acquire_processing_lease(
-                        s, self.tenant, self.actor, dataset_id, version_id, token=token, ttl_s=300
+                        s, self.tenant, self.service, dataset_id, version_id, token=token, ttl_s=300
                     )
                     if state not in ("acquired", "reclaimed"):
                         raise DatasetConflict(
@@ -142,7 +170,7 @@ class Harness:
                     return await svc.reject_processing(
                         s,
                         self.tenant,
-                        self.actor,
+                        self.service,
                         dataset_id,
                         version_id,
                         token=self.tokens[version_id],
@@ -152,7 +180,7 @@ class Harness:
                     s, self.tenant, self.actor, dataset_id, version_id, to=st, rejection_code=code
                 )
 
-            v = await self.run(step)
+            v = await (self.run_ingest(version_id, step) if processing else self.run(step))
         assert v is not None
         return v
 
@@ -189,9 +217,11 @@ class Harness:
 @pytest.fixture
 async def h(pg_stack: SimpleNamespace) -> AsyncIterator[Harness]:
     m = pg_stack.seed_member("owner")
+    pg_stack.enable_ingest()
     harness = Harness(pg_stack, m.user_id, m.tenant_id)
     yield harness
     await harness.engine.dispose()
+    await harness.ingest_engine.dispose()
 
 
 def _events(pg: SimpleNamespace, dataset_id: uuid.UUID) -> list[tuple[Any, ...]]:
@@ -237,7 +267,22 @@ async def test_full_lifecycle_with_one_event_per_transition(h: Harness) -> None:
         ("VERSION_PROFILED", "PROFILING", "PROFILED"),
         ("VERSION_ACTIVATED", "PROFILED", "ACTIVE"),
     ]
-    assert {e[4] for e in _events(h.pg, d.id)} == {"user"}
+    # The processing transitions are the ingest runtime's (ADR-031): a service
+    # actor with no human identity; everything else is the signed admin.
+    assert [(e[0], e[4]) for e in _events(h.pg, d.id)] == [
+        ("DATASET_CREATED", "user"),
+        ("VERSION_CREATED", "user"),
+        ("VERSION_PROFILING_STARTED", "service"),
+        ("VERSION_PROFILED", "service"),
+        ("VERSION_ACTIVATED", "user"),
+    ]
+    with psycopg.connect(h.pg.owner_libpq) as c:
+        service_users = c.execute(
+            "SELECT DISTINCT actor_user_id FROM dataset_events "
+            "WHERE dataset_id = %s AND actor_kind = 'service'",
+            (d.id,),
+        ).fetchall()
+    assert service_users == [(None,)]
 
 
 @pytest.mark.parametrize(

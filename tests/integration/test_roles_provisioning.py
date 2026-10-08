@@ -47,23 +47,35 @@ def _attrs(url: str) -> dict[str, roles.RoleModel]:
         return roles.read_roles(c)
 
 
-def test_existing_m11_cluster_gets_exactly_the_two_missing_roles(m11_cluster: str) -> None:
+def test_existing_m11_cluster_gets_exactly_the_missing_roles(m11_cluster: str) -> None:
     with psycopg.connect(m11_cluster, autocommit=True) as c:
         assert roles.verify_roles(c, require_all=False) == []
         assert any("missing" in p for p in roles.verify_roles(c, require_all=True))
         created = roles.ensure_roles(c)
-        assert created == ["nlw_membership_admin", "nlw_ctx_verifier"]
+        # The two P3A/P3B owners and the DORMANT ingest runtime role (ADR-031).
+        assert created == ["nlw_membership_admin", "nlw_ctx_verifier", "nlw_ingest"]
         assert roles.verify_roles(c, require_all=True) == []
         # Idempotent: a second run creates nothing and still verifies.
         assert roles.ensure_roles(c) == []
     attrs = _attrs(m11_cluster)
     assert attrs["nlw_membership_admin"] == roles.RoleModel(False, False, True)
     assert attrs["nlw_ctx_verifier"] == roles.RoleModel(False, False, False)
+    assert attrs["nlw_ingest"] == roles.RoleModel(False, False, False)  # NOLOGIN: dormant
+    with psycopg.connect(m11_cluster) as c:
+        # A runtime role: never granted to the owner (unlike the owner roles),
+        # NOINHERIT, member of nothing.
+        assert c.execute(
+            "SELECT rolinherit FROM pg_roles WHERE rolname = 'nlw_ingest'"
+        ).fetchone() == (False,)
+        assert c.execute(
+            "SELECT count(*) FROM pg_auth_members am JOIN pg_roles r ON r.oid IN "
+            "(am.roleid, am.member) WHERE r.rolname = 'nlw_ingest'"
+        ).fetchone() == (0,)
     # No table privileges were granted here (that belongs to migrations).
     with psycopg.connect(m11_cluster) as c:
         n = c.execute(
             "SELECT count(*) FROM information_schema.role_table_grants "
-            "WHERE grantee IN ('nlw_membership_admin','nlw_ctx_verifier')"
+            "WHERE grantee IN ('nlw_membership_admin','nlw_ctx_verifier','nlw_ingest')"
         ).fetchone()
         assert n is not None and n[0] == 0
 
@@ -94,3 +106,22 @@ def test_fresh_cluster_from_initdb_verifies_clean(pg_stack: SimpleNamespace) -> 
     with psycopg.connect(pg_stack.owner_libpq, autocommit=True) as c:
         assert roles.verify_roles(c, require_all=True) == []
         assert roles.ensure_roles(c) == []
+
+
+def test_a_widened_ingest_role_is_an_error_and_its_login_variant_is_the_only_other(
+    m11_cluster: str,
+) -> None:
+    """ADR-031: nlw_ingest is NOLOGIN (dormant) or, where enabled, LOGIN; never
+    superuser, BYPASSRLS, CREATEDB or CREATEROLE, and never anyone's member."""
+    with psycopg.connect(m11_cluster, autocommit=True) as c:
+        for attrs in ("NOLOGIN BYPASSRLS", "LOGIN CREATEROLE"):
+            c.execute(f"CREATE ROLE nlw_ingest {attrs}")
+            with pytest.raises(roles.RoleProvisioningError, match="nlw_ingest"):
+                roles.ensure_roles(c)
+            c.execute("DROP ROLE nlw_ingest")
+        c.execute("CREATE ROLE nlw_ingest LOGIN NOINHERIT")  # an enabled ingest runtime
+        assert roles.ensure_roles(c) == ["nlw_membership_admin", "nlw_ctx_verifier"]
+        assert roles.verify_roles(c, require_all=True) == []
+        c.execute("GRANT nlw_ingest TO nlw_app")  # the API assuming the ingest role
+        problems = roles.verify_roles(c, require_all=True)
+        assert any("nlw_ingest: unexpected members ['nlw_app']" in p for p in problems)

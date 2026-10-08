@@ -1,4 +1,4 @@
-"""Phase 2 migrations 0022-0025: up/down/up with the documented down-state.
+"""Phase 2 migrations 0022-0026: up/down/up with the documented down-state.
 
 ``pg_stack`` starts at head, and the older reversibility tests only re-upgrade
 to 0016, so neither Phase 2 revision was ever upgraded again after a downgrade.
@@ -14,7 +14,8 @@ This pins the behaviour the grants runbook and ADR-028 document:
 - downgrading 0022 drops the grant ledger and ``has_workspace_creation_grant``
   and restores the UNGATED bootstrap (why the runbook forbids it on a live
   environment and the restore validator reports it);
-- re-upgrading restores the gated bootstrap, the empty ledger and 65 policies.
+- downgrading 0026 (no ingest key registered) drops the ingest boundary (65 left);
+- re-upgrading restores the gated bootstrap, the empty ledger and 74 policies.
 """
 
 from types import SimpleNamespace
@@ -75,10 +76,15 @@ def test_phase2_revisions_go_up_down_up_with_the_documented_down_state(
     cfg.set_main_option("sqlalchemy.url", pg_stack.owner_sa)
 
     head = _posture(pg_stack.owner_libpq)
-    assert head["revision"] == "0025_dataset_ingestion"
+    assert head["revision"] == "0026_dataset_ingest_role"
     assert head["bootstrap_gated"] is True and head["bootstrap_overloads"] == 1
-    assert head["helper"] == 1 and head["policies"] == 65
+    assert head["helper"] == 1 and head["policies"] == 74
     assert head["dataset_tables"] == 3 and head["dataset_funcs"] == 3
+
+    # 0026 (ADR-031): the ingest boundary's 9 net policies go, 65 remain.
+    command.downgrade(cfg, "0025_dataset_ingestion")
+    ingestion = _posture(pg_stack.owner_libpq)
+    assert ingestion["revision"] == "0025_dataset_ingestion" and ingestion["policies"] == 65
 
     command.downgrade(cfg, _AFTER_0024)
     lifecycle_only = _posture(pg_stack.owner_libpq)

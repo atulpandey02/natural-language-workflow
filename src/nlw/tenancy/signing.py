@@ -93,6 +93,9 @@ class Purpose(enum.StrEnum):
     API_REQUEST = "api_request"  # verified human + selected workspace (active member)
     WORKER_EXECUTION = "worker_execution"  # workspace + run, no human
     SCHEDULER_RECONCILE = "scheduler_reconcile"  # cross-tenant scan/reconcile, no human
+    # ONE dataset version in one workspace, no human (ADR-031); the run slot
+    # carries the version id.
+    DATASET_INGEST = "dataset_ingest"
 
 
 # purpose -> the ONLY PostgreSQL login role allowed to present it (mirrored in SQL).
@@ -101,6 +104,7 @@ PURPOSE_DB_ROLE: Final[dict[Purpose, str]] = {
     Purpose.API_REQUEST: "nlw_app",
     Purpose.WORKER_EXECUTION: "nlw_worker",
     Purpose.SCHEDULER_RECONCILE: "nlw_scheduler",
+    Purpose.DATASET_INGEST: "nlw_ingest",
 }
 
 
@@ -231,6 +235,8 @@ def _require_shape(purpose: Purpose, user: object, tenant: object, run: object) 
         raise ContextSigningError("worker_execution requires tenant (+run), never a user")
     if purpose is Purpose.SCHEDULER_RECONCILE and any(has):
         raise ContextSigningError("scheduler_reconcile carries no identifiers")
+    if purpose is Purpose.DATASET_INGEST and has != (False, True, True):
+        raise ContextSigningError("dataset_ingest requires tenant + version (run), never a user")
 
 
 @dataclass

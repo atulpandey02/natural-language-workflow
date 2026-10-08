@@ -28,7 +28,7 @@ def _sentinel(signer: ContextSigner) -> dict[str, uuid.UUID | None]:
         return {"user_id": _NIL}
     if signer.purpose is Purpose.API_REQUEST:
         return {"user_id": _NIL, "tenant_id": _NIL}
-    if signer.purpose is Purpose.WORKER_EXECUTION:
+    if signer.purpose in (Purpose.WORKER_EXECUTION, Purpose.DATASET_INGEST):
         return {"tenant_id": _NIL, "run_id": _NIL}
     return {}
 
