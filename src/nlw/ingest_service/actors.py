@@ -29,6 +29,7 @@ import structlog
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.middleware import Middleware, MiddlewareError
 
+from nlw.backup.recovery_lock import RecoveryLocked, RecoveryStateUnknown
 from nlw.core.config import Settings, get_settings
 from nlw.datasets.envelope import ACTOR_NAME, QUEUE_NAME
 from nlw.db.session import create_engine, create_sessionmaker, create_sync_engine
@@ -48,6 +49,7 @@ _signer: ContextSigner | None = None
 _TIME_LIMIT_MS = (int(_settings.dataset_profile_timeout_s) + 120) * 1000
 _MAX_RETRIES = 5  # transient failures (database/Redis); refusals are not retried
 _STOPPING_REQUEUE_MS = 5_000
+_RECOVERY_REQUEUE_MS = 60_000
 
 
 class IngestBootRefused(MiddlewareError):
@@ -140,5 +142,11 @@ def process_dataset_version(envelope_json: str) -> None:
     if _stopping.is_set():
         # Shutting down: hand the message back untouched (no lease claimed).
         raise dramatiq.Retry("ingest runtime is stopping", delay=_STOPPING_REQUEUE_MS)
-    result = asyncio.run(_run(envelope_json))
+    try:
+        result = asyncio.run(_run(envelope_json))
+    except (RecoveryLocked, RecoveryStateUnknown) as exc:
+        # A restore is not operator-enabled (or its state is unreadable): touch
+        # nothing, hand the message back for later.
+        log.warning("ingest.recovery_locked", error_class=type(exc).__name__)
+        raise dramatiq.Retry("recovery lock", delay=_RECOVERY_REQUEUE_MS) from None
     log.info("ingest.message_done", result=result)

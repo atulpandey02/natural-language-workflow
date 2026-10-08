@@ -42,6 +42,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nlw.backup.recovery_lock import check_recovery_lock
 from nlw.core.config import Settings
 from nlw.datasets import envelope as envelopes
 from nlw.datasets import service
@@ -99,10 +100,17 @@ async def in_ingest_context[T](
     fn: Callable[[AsyncSession], Awaitable[T]],
 ) -> T:
     """Run ``fn`` in ONE short transaction under a freshly signed ingest context
-    for exactly the envelope's workspace and version."""
+    for exactly the envelope's workspace and version.
+
+    Every transaction (claim, renew, publish, reject) first consults the DR
+    recovery lock, not only boot: a database restored while the runtime is up
+    raises ``RecoveryLocked``/``RecoveryStateUnknown`` before anything changes,
+    so in-flight work cannot settle against an un-enabled restore (its lease then
+    expires, and processing resumes only after the operator enables runtimes)."""
     if signer.purpose is not Purpose.DATASET_INGEST:
         raise ValueError("the ingest runtime signs dataset_ingest contexts only")
     async with maker() as session, session.begin():
+        await session.run_sync(lambda s: check_recovery_lock(s.connection()))
         await set_ingest_context(session, signer, env.tenant_id, env.version_id)
         return await fn(session)
 
