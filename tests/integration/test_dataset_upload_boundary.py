@@ -327,3 +327,18 @@ async def test_an_interrupted_upload_records_nothing_and_leaves_no_bytes(
         ) == [(0,)]  # fmt: skip
     finally:
         await engine.dispose()
+
+
+def test_only_an_admin_can_redispatch(up: SimpleNamespace) -> None:
+    did = _dataset(up)
+    vid = _initiate(up, did)
+    up.rt.auto = False
+    up.c.put(f"/datasets/{did}/versions/{vid}/content", headers=up.h, content=CSV)
+    sent = len(up.rt.sent)
+    member = _hdr(up.pg.add_membership(up.tenant, "member"), up.tenant)
+    outsider_m = up.pg.seed_member("owner")
+    outsider = _hdr(outsider_m.user_id, up.tenant)  # not a member of this workspace
+    for h in (member, outsider):
+        r = up.c.post(f"/datasets/{did}/versions/{vid}/process", headers=h)
+        assert r.status_code == 403, r.text
+    assert len(up.rt.sent) == sent and len(_requests(up.pg, vid)) == 1
