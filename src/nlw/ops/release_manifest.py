@@ -40,7 +40,12 @@ from pathlib import Path
 from typing import Any
 
 FORMAT_VERSION = 2
+# Signed-context key classes. The three runtimes are always required. ``ingest``
+# (ADR-031) is OPTIONAL: a manifest names it only when the ingest runtime is
+# part of the release, and the rollout refuses such a release until owner
+# decision O-6 (enablement) makes it part of the protocol.
 KEY_CLASSES: tuple[str, ...] = ("api", "worker", "scheduler")
+OPTIONAL_KEY_CLASSES: tuple[str, ...] = ("ingest",)
 GENERATED_BY = ("ci", "local-rehearsal")
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -78,6 +83,16 @@ class ReleaseManifest:
     sha256: str  # of the manifest bytes as loaded (integrity for the state file)
     raw: str = ""  # the exact bytes (utf-8) the provenance subject digest covers
     source_path: str = ""  # where it was loaded from (gh verifies that file)
+
+    @property
+    def key_classes(self) -> tuple[str, ...]:
+        """The classes this release names: the required three, plus ``ingest``
+        when declared (in canonical order)."""
+        return tuple(c for c in (*KEY_CLASSES, *OPTIONAL_KEY_CLASSES) if c in self.key_ids)
+
+    @property
+    def declares_ingest(self) -> bool:
+        return "ingest" in self.key_ids
 
     @property
     def backend_digest(self) -> str:
@@ -164,12 +179,17 @@ def parse_manifest(
     if created.tzinfo is None:
         raise ReleaseManifestError("created_at must carry a timezone")
     key_ids = doc.get("key_ids")
-    if not isinstance(key_ids, dict) or set(key_ids) != set(KEY_CLASSES):
-        raise ReleaseManifestError("key_ids must name exactly api, worker and scheduler")
+    if not isinstance(key_ids, dict) or set(key_ids) not in (
+        set(KEY_CLASSES),
+        set(KEY_CLASSES) | set(OPTIONAL_KEY_CLASSES),
+    ):
+        raise ReleaseManifestError(
+            "key_ids must name exactly api, worker and scheduler (and optionally ingest)"
+        )
     for cls, kid in key_ids.items():
         if not isinstance(kid, str) or not _KEY_ID_RE.match(kid):
             raise ReleaseManifestError(f"key_ids.{cls}: invalid key id")
-    if len(set(key_ids.values())) != len(KEY_CLASSES):
+    if len(set(key_ids.values())) != len(key_ids):
         raise ReleaseManifestError("key_ids must be unique per runtime class")
     attestation = doc.get("attestation")
     if attestation is not None and (not isinstance(attestation, str) or len(attestation) > 512):
@@ -189,7 +209,7 @@ def parse_manifest(
         region=_req(doc, "region", _REGION_RE, "AWS region"),
         compose_project=_req(doc, "compose_project", _PROJECT_RE, "compose project"),
         public_hostname=_req(doc, "public_hostname", _HOSTNAME_RE, "public hostname"),
-        key_ids={c: str(key_ids[c]) for c in KEY_CLASSES},
+        key_ids={c: str(key_ids[c]) for c in (*KEY_CLASSES, *OPTIONAL_KEY_CLASSES) if c in key_ids},
         ci={k: str(v) for k, v in (ci or {}).items()},
         attestation=attestation,
         sha256=hashlib.sha256(raw_bytes).hexdigest() if raw_bytes else "",
@@ -282,7 +302,15 @@ def generate(
         "region": t.get("NLW_STAGING_REGION", ""),
         "compose_project": t.get("NLW_STAGING_COMPOSE_PROJECT", ""),
         "public_hostname": t.get("NLW_STAGING_PUBLIC_HOSTNAME", ""),
-        "key_ids": {c: t.get(f"NLW_STAGING_KEY_ID_{c.upper()}", "") for c in KEY_CLASSES},
+        "key_ids": {
+            **{c: t.get(f"NLW_STAGING_KEY_ID_{c.upper()}", "") for c in KEY_CLASSES},
+            # Optional classes only when the target names them (ADR-031).
+            **{
+                c: t[f"NLW_STAGING_KEY_ID_{c.upper()}"]
+                for c in OPTIONAL_KEY_CLASSES
+                if t.get(f"NLW_STAGING_KEY_ID_{c.upper()}")
+            },
+        },
         "ci": ci,
     }
     if attestation:

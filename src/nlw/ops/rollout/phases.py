@@ -59,6 +59,7 @@ from typing import Any
 import yaml
 
 from nlw.ops.release_provenance import ProvenanceReceipt
+from nlw.ops.roles import INGEST_GRANTS_SQL
 from nlw.ops.rollout import alerting, gates, keyfiles, state
 from nlw.ops.rollout.attestation import (
     AttestationError,
@@ -77,8 +78,10 @@ from nlw.ops.rollout.release import KEY_CLASSES, ReleaseSpec
 from nlw.ops.rollout.remote import OperatorAlerting, Remote, TargetConfig
 
 # 51 signed policies from 0016 + 2 on plan_outcome_events (0023, Phase 2 B02)
-# + 8 on the dataset lifecycle tables (0024, ADR-029).
-EXPECTED_SIGNED_POLICIES = 65
+# + 8 on the dataset lifecycle tables (0024, ADR-029) + 4 on profiles/semantics
+# (0025, ADR-030) + 9 for the ingest boundary (0026, ADR-031: 3 on processing
+# requests, 7 for nlw_ingest, minus the API's profile INSERT).
+EXPECTED_SIGNED_POLICIES = 74
 # Caddy serves 503 for every request while this file exists on its `caddy_maint`
 # volume (docker/caddy/Caddyfile `@maintenance`). Toggled with `exec`, no reload.
 MAINTENANCE_FLAG = "/srv/maint/MAINTENANCE"
@@ -775,7 +778,7 @@ class Rollout:
         return int(
             self._psql(
                 "SELECT count(*) FROM pg_stat_activity WHERE usename IN "
-                "('nlw_app','nlw_worker','nlw_scheduler')"
+                "('nlw_app','nlw_worker','nlw_scheduler','nlw_ingest')"
             )
         )
 
@@ -820,6 +823,7 @@ class Rollout:
         pins = self.read_pins(self.target.remote_app)
         gates.check_active_hostname(pins, self.release, self.target.public_hostname_fallback)
         primary, fallback = self.edge_hostnames()
+        gates.check_ingest_not_declared(self.release)
         rev = self.read_revision()
         roles = self.read_roles()
         gates.check_roles(roles, require_provisioned=False)
@@ -858,6 +862,7 @@ class Rollout:
         (backend) expose every command the rollout needs plus the target migration
         head. Pulling is host staging only — nothing running changes."""
         self._require_mutation_authority()
+        gates.check_ingest_not_declared(self.release)
         if self.receipt is None or self.receipt.manifest_sha256 != self.release.sha256:
             raise GateError("release provenance was not verified for this manifest — STOP")
         self.check_identity()
@@ -1277,6 +1282,7 @@ class Rollout:
         )
         total, legacy = (int(x) for x in row.split("|"))
         gates.check_policy_cutover(total, legacy, expected_policies=EXPECTED_SIGNED_POLICIES)
+        gates.check_ingest_grants(self._psql(INGEST_GRANTS_SQL))
         owner = self._psql("SELECT tableowner FROM pg_tables WHERE tablename='ctx_keys'")
         if owner != "nlw_ctx_verifier":
             raise GateError(f"ctx_keys owner is {owner!r}, want nlw_ctx_verifier")

@@ -21,6 +21,7 @@ import pytest
 
 from nlw.ops import release_manifest as rm
 from nlw.ops.release_provenance import ProvenanceReceipt
+from nlw.ops.roles import EXPECTED_INGEST_GRANTS
 from nlw.ops.rollout.gates import AUTHORIZATION_PHRASE, ESCROW_PHRASE, GateError
 from nlw.ops.rollout.phases import Operator, Rollout, RolloutStop
 from nlw.ops.rollout.remote import CommandResult, LocalRemote, OperatorAlerting, TargetConfig
@@ -89,7 +90,8 @@ ROLES_M11 = (
     "nlw_app:tff\nnlw_worker:tff\nnlw_scheduler:tff\n"
     "nlw_rls_bypass:fft\nnlw_workspace_bootstrap:fft\n"
 )
-ROLES_ALL = ROLES_M11 + "nlw_membership_admin:fft\nnlw_ctx_verifier:fff\n"
+ROLES_ALL = ROLES_M11 + "nlw_membership_admin:fft\nnlw_ctx_verifier:fff\nnlw_ingest:fff\n"
+INGEST_GRANTS_OK = "\n".join(sorted(EXPECTED_INGEST_GRANTS))
 PINS_ACTIVE = (
     "NLW_IMAGE=ghcr.io/o/r@sha256:"
     + "f" * 64
@@ -1646,7 +1648,8 @@ def test_code_only_release_migrates_as_a_verified_noop() -> None:
     same = replace(REL, expected_current_revision="0016_signed_database_context")
     table = _base_table(roles=ROLES_ALL, rev="0016_signed_database_context") + [
         (r"--profile migration run --rm --no-deps -T  migrate $", ""),
-        (r"FROM pg_policies", "65|0"),
+        (r"FROM pg_policies", "74|0"),
+        (r"aclexplode", INGEST_GRANTS_OK),
         (r"tablename=", "nlw_ctx_verifier"),
         (r"proname=.*create_workspace_for_current_user", "1|t"),
         (r"has_table_privilege", "f"),
@@ -2146,7 +2149,8 @@ def test_migrate_refuses_an_ungated_workspace_bootstrap() -> None:
     same = replace(REL, expected_current_revision="0016_signed_database_context")
     table = _base_table(roles=ROLES_ALL, rev="0016_signed_database_context") + [
         (r"--profile migration run --rm --no-deps -T  migrate $", ""),
-        (r"FROM pg_policies", "65|0"),
+        (r"FROM pg_policies", "74|0"),
+        (r"aclexplode", INGEST_GRANTS_OK),
         (r"tablename=", "nlw_ctx_verifier"),
         (r"proname=.*create_workspace_for_current_user", "1|f"),
         (r"has_table_privilege", "f"),

@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from nlw.ops.rollout.release import KEY_CLASSES, ReleaseSpec
+from nlw.ops.rollout.release import KEY_CLASSES, OPTIONAL_KEY_CLASSES, ReleaseSpec
 
 FORMAT_VERSION = 1
 _FP_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -94,21 +94,26 @@ def parse_attestation(doc: dict[str, Any]) -> EscrowAttestation:
     if not isinstance(sha, str) or not re.match(r"^[0-9a-f]{40}$", sha):
         raise AttestationError("release_sha must be a 40-hex git SHA")
     raw_keys = doc.get("keys")
-    if not isinstance(raw_keys, list) or len(raw_keys) != len(KEY_CLASSES):
-        raise AttestationError("keys must list exactly the api, worker and scheduler keys")
+    allowed = (*KEY_CLASSES, *OPTIONAL_KEY_CLASSES)
+    if not isinstance(raw_keys, list) or len(raw_keys) not in (len(KEY_CLASSES), len(allowed)):
+        raise AttestationError(
+            "keys must list exactly the api, worker and scheduler keys (and optionally ingest)"
+        )
     keys: dict[str, KeyAttestation] = {}
     for item in raw_keys:
         if not isinstance(item, dict):
             raise AttestationError("keys entries must be objects")
         cls, kid, fp = item.get("purpose_class"), item.get("key_id"), item.get("sha256_fingerprint")
-        if cls not in KEY_CLASSES or cls in keys:
-            raise AttestationError("keys must contain each of api/worker/scheduler once")
+        if cls not in allowed or cls in keys:
+            raise AttestationError("keys must contain each of api/worker/scheduler(/ingest) once")
         if not isinstance(kid, str) or not kid:
             raise AttestationError(f"keys[{cls}].key_id required")
         if not isinstance(fp, str) or not _FP_RE.match(fp):
             raise AttestationError(f"keys[{cls}].sha256_fingerprint must be 64 hex characters")
         keys[cls] = KeyAttestation(key_class=cls, key_id=kid, sha256_fingerprint=fp)
-    if len({k.sha256_fingerprint for k in keys.values()}) != len(KEY_CLASSES):
+    if not set(KEY_CLASSES) <= set(keys):
+        raise AttestationError("keys must contain each of api/worker/scheduler once")
+    if len({k.sha256_fingerprint for k in keys.values()}) != len(keys):
         raise AttestationError("fingerprints must be distinct (independent keys)")
     operator = doc.get("operator")
     if not isinstance(operator, str) or not _OPERATOR_RE.match(operator):
@@ -158,9 +163,12 @@ def verify_attestation(
         raise AttestationError("escrow_verified_at is in the future")
     if now - att.escrow_verified_at > MAX_AGE:
         raise AttestationError("escrow attestation is older than 30 days; re-verify escrow")
-    if set(host_fingerprints) != set(KEY_CLASSES):
-        raise AttestationError("host fingerprints must cover api, worker and scheduler")
-    for cls in KEY_CLASSES:
+    classes = release.key_classes
+    if set(att.keys) != set(classes):
+        raise AttestationError("attested key classes do not match the release's key classes")
+    if set(host_fingerprints) != set(classes):
+        raise AttestationError("host fingerprints must cover exactly the release's key classes")
+    for cls in classes:
         kid, fp = host_fingerprints[cls]
         if att.keys[cls].key_id != kid or att.keys[cls].key_id != release.key_ids[cls]:
             raise AttestationError(f"{cls}: key id in attestation/release/host differ")

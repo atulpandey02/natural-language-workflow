@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 
 from nlw.ops.rollout.gates import GateError
-from nlw.ops.rollout.release import KEY_CLASSES
+from nlw.ops.rollout.release import KEY_CLASSES, OPTIONAL_KEY_CLASSES
 
 CONTAINER_UID = 10001
 KEY_DIR_MODE = "700"
@@ -69,16 +69,21 @@ def check_key_file(st: StatLine, *, uid: int = CONTAINER_UID) -> None:
         raise GateError(f"key file {st.name} is too small ({st.size} bytes) to hold a 32-byte key")
 
 
-def parse_fingerprint_lines(text: str) -> dict[str, tuple[str, str]]:
-    """``<class> <key_id> <sha256>`` lines from ``nlw.ctxkeys fingerprint``."""
+def parse_fingerprint_lines(
+    text: str, classes: tuple[str, ...] = KEY_CLASSES
+) -> dict[str, tuple[str, str]]:
+    """``<class> <key_id> <sha256>`` lines from ``nlw.ctxkeys fingerprint``; must
+    cover exactly ``classes`` (the release's key classes)."""
+    if not set(KEY_CLASSES) <= set(classes) <= set(KEY_CLASSES) | set(OPTIONAL_KEY_CLASSES):
+        raise GateError(f"unsupported key classes {sorted(classes)}")
     out: dict[str, tuple[str, str]] = {}
     for line in text.splitlines():
         parts = line.split()
         if len(parts) != 3:
             continue
         cls, kid, fp = parts
-        if cls in KEY_CLASSES and re.match(r"^[0-9a-f]{64}$", fp):
+        if cls in classes and re.match(r"^[0-9a-f]{64}$", fp):
             out[cls] = (kid, fp)
-    if set(out) != set(KEY_CLASSES):
-        raise GateError(f"fingerprints missing for: {sorted(set(KEY_CLASSES) - set(out))}")
+    if set(out) != set(classes):
+        raise GateError(f"fingerprints missing for: {sorted(set(classes) - set(out))}")
     return out
