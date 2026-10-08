@@ -8,6 +8,15 @@ OWNER credential ``DATABASE_MIGRATION_URL``, exactly like ``python -m nlw.ops.gr
     python -m nlw.ops.datasets purge --dataset <uuid> [--version <uuid>] --operator <name>
     python -m nlw.ops.datasets tombstone --dataset <uuid> [--version <uuid>]
     python -m nlw.ops.datasets verify-objects
+    python -m nlw.ops.datasets dispatch-pending [--dry-run]
+
+``dispatch-pending`` is the operator recovery sweep for the ingest queue
+(ADR-031): it (re)enqueues the work envelope of every committed, still fresh
+processing request whose version is waiting (QUARANTINED, or PROFILING with an
+expired or missing lease). The database rows are the work items; re-enqueueing
+is harmless (the ingest runtime re-verifies each envelope and its lease makes
+processing idempotent). Requests too old for the consumer are counted, not
+sent: an admin re-dispatch records a fresh request. It processes nothing.
 
 ``purge`` physically deletes every stored object of the DELETING version(s)
 (both storage areas, including crash-orphaned partial uploads), VERIFIES their
@@ -370,6 +379,56 @@ def pending(conn: psycopg.Connection[Any]) -> list[tuple[Any, ...]]:
     ).fetchall()
 
 
+# --- ingest queue recovery (ADR-031) -------------------------------------------
+
+_SQL_PENDING_REQUESTS = (
+    "SELECT DISTINCT ON (r.version_id) r.id, r.tenant_id, r.dataset_id, r.version_id, "
+    "r.content_sha256, r.envelope_sha256, "
+    "(extract(epoch FROM r.requested_at) * 1000000)::bigint, "
+    "r.requested_at > now() - make_interval(secs => %s) "
+    "FROM dataset_processing_requests r JOIN dataset_versions v "
+    "ON v.id = r.version_id AND v.tenant_id = r.tenant_id "
+    "WHERE r.content_sha256 = v.content_sha256 AND (v.status = 'QUARANTINED' "
+    "OR (v.status = 'PROFILING' AND (v.processing_lease_expires_at IS NULL "
+    "OR v.processing_lease_expires_at < now()))) "
+    "ORDER BY r.version_id, r.requested_at DESC"
+)
+
+
+def pending_envelopes(conn: psycopg.Connection[Any]) -> tuple[list[Any], int]:
+    """(fresh envelopes to enqueue, count of waiting versions whose latest
+    request is too old for the consumer). Ids and digests only."""
+    from nlw.datasets.envelope import MAX_ENVELOPE_AGE_S, WorkEnvelope
+
+    rows = conn.execute(_SQL_PENDING_REQUESTS, (MAX_ENVELOPE_AGE_S - 3600,)).fetchall()
+    fresh = [
+        WorkEnvelope(
+            request_id=r[0],
+            tenant_id=r[1],
+            dataset_id=r[2],
+            version_id=r[3],
+            content_sha256=r[4],
+            envelope_sha256=r[5],
+            requested_at_us=int(r[6]),
+        )
+        for r in rows
+        if r[7]
+    ]
+    return fresh, sum(1 for r in rows if not r[7])
+
+
+def dispatch_pending(
+    conn: psycopg.Connection[Any], broker: Any, *, dry_run: bool
+) -> dict[str, int]:
+    from nlw.datasets.envelope import enqueue_envelope
+
+    fresh, stale = pending_envelopes(conn)
+    if not dry_run:
+        for env in fresh:
+            enqueue_envelope(broker, env)
+    return {"enqueued": 0 if dry_run else len(fresh), "pending": len(fresh), "stale": stale}
+
+
 # --- restore validation --------------------------------------------------------
 
 
@@ -406,6 +465,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("pending")
     sub.add_parser("verify-objects")
+    dp = sub.add_parser("dispatch-pending")
+    dp.add_argument("--dry-run", action="store_true")
     for name in ("purge", "tombstone"):
         sp = sub.add_parser(name)
         sp.add_argument("--dataset", required=True)
@@ -420,6 +481,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.cmd == "pending":
                 for row in pending(conn):
                     print("\t".join(str(v) for v in row))
+                return 0
+            if args.cmd == "dispatch-pending":
+                from dramatiq.brokers.redis import RedisBroker
+
+                broker = None if args.dry_run else RedisBroker(url=settings.redis_url)  # type: ignore[no-untyped-call]
+                result = dispatch_pending(conn, broker, dry_run=args.dry_run)
+                print(" ".join(f"{k}={v}" for k, v in result.items()))
                 return 0
             if args.cmd == "verify-objects":
                 if store is None:
