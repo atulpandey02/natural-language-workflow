@@ -1,4 +1,8 @@
-"""Pre-PR review (adversarial) scenarios for dataset ingestion (ADR-030).
+"""Pre-PR review (adversarial) scenarios for dataset ingestion (ADR-030, ADR-031).
+
+The API side stores content and records the processing request; recovery runs
+by delivering the version's envelope to the ingest runtime again (what a
+re-dispatch, a client retry or the operator sweep does).
 
 Crash windows are simulated by reproducing the exact state a process killed at
 that point leaves behind (an object without a database record, a stale
@@ -30,9 +34,12 @@ from nlw.api.app import create_app
 from nlw.datasets import ingestion
 from nlw.datasets import service as svc
 from nlw.datasets.deletion_log import LocalFakeDeletionLog
+from nlw.datasets.envelope import WorkEnvelope
 from nlw.datasets.lifecycle import VersionStatus
+from nlw.datasets.processing_requests import ensure_processing_request
 from nlw.datasets.service import Actor
 from nlw.ingest.strict import StrictLimits
+from nlw.ingest_service import processing
 from nlw.ops import datasets as ops
 from nlw.storage.blob import LocalBlobStore, TenantScopedBlobStore
 from nlw.tenancy.context import Role, TenantContext
@@ -43,7 +50,7 @@ pytestmark = pytest.mark.integration
 CSV = b"region,amount\n" + b"".join(f"r{i % 4},{i}\n".encode() for i in range(40))
 OTHER = b"region,amount\n" + b"".join(f"s{i % 4},{i}\n".encode() for i in range(40))
 assert len(CSV) == len(OTHER)
-CONFIG = ingestion.IngestionConfig(limits=StrictLimits(timeout_s=30), memory_mb=768)
+CONFIG = processing.IngestionConfig(limits=StrictLimits(timeout_s=30), memory_mb=768)
 
 
 class H:
@@ -56,6 +63,13 @@ class H:
             self.engine, expire_on_commit=False
         )
         self.signer = pg.signers[Purpose.API_REQUEST]
+        pg.enable_ingest()
+        self.ingest_engine = create_async_engine(pg.ingest_sa, pool_size=10)
+        self.ingest_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            self.ingest_engine, expire_on_commit=False
+        )
+        self.ingest_signer = pg.signers[Purpose.DATASET_INGEST]
+        self.envelopes: dict[uuid.UUID, WorkEnvelope] = {}
         self.store = LocalBlobStore(root)
         self.scoped = TenantScopedBlobStore(self.store, self.ctx.tenant_id)
 
@@ -91,15 +105,28 @@ class H:
             for i in range(0, len(data), 7):  # many small chunks
                 yield data[i : i + 7]
 
-        return await ingestion.store_content(
+        rec, env = await ingestion.store_content(
             maker=self.maker, signer=self.signer, store=self.store, ctx=self.ctx,
             dataset_id=d, version_id=v, chunks=chunks(), max_bytes=25_000_000,
         )  # fmt: skip
+        if env is not None:
+            self.envelopes[v] = env
+        return rec
 
-    async def process(self, d: uuid.UUID, v: uuid.UUID, ctx: TenantContext | None = None) -> str:
-        return await ingestion.process_version(
-            maker=self.maker, signer=self.signer, store=self.store, config=CONFIG,
-            ctx=ctx or self.ctx, dataset_id=d, version_id=v,
+    async def process(self, d: uuid.UUID, v: uuid.UUID) -> str:
+        """Deliver the version's envelope to the ingest runtime (again)."""
+        return await processing.process_envelope(
+            maker=self.ingest_maker, signer=self.ingest_signer, store=self.store,
+            config=CONFIG, message=self.envelopes[v].to_json(),
+        )  # fmt: skip
+
+    async def lease(self, d: uuid.UUID, v: uuid.UUID) -> None:
+        """Another (later crashed) ingest delivery holds the lease."""
+        await processing.in_ingest_context(
+            self.ingest_maker, self.ingest_signer, self.envelopes[v],
+            lambda s: svc.acquire_processing_lease(
+                s, self.ctx.tenant_id, processing.ACTOR, d, v, token=uuid.uuid4(), ttl_s=300
+            ),
         )  # fmt: skip
 
     async def get(self, d: uuid.UUID, v: uuid.UUID) -> svc.VersionRecord:
@@ -127,6 +154,7 @@ async def h(pg_stack: SimpleNamespace, tmp_path: Path) -> AsyncIterator[H]:
     harness = H(pg_stack, tmp_path / "store")
     yield harness
     await harness.engine.dispose()
+    await harness.ingest_engine.dispose()
 
 
 # --- crash windows -------------------------------------------------------------------------
@@ -154,10 +182,7 @@ async def test_crash_after_profiling_started_but_before_the_profile_is_stored(h:
     d = await h.dataset()
     v = await h.version(d)
     await h.put(d, v)
-    t, a = h.ctx.tenant_id, Actor.service(h.ctx.user_id)
-    await h.run(
-        lambda s: svc.acquire_processing_lease(s, t, a, d, v, token=uuid.uuid4(), ttl_s=300)
-    )
+    await h.lease(d, v)
     assert await h.process(d, v) == "skipped"  # a live lease is respected
     h.age_lease(v)
     assert await h.process(d, v) == "profiled"
@@ -167,10 +192,7 @@ async def test_crash_after_the_verified_copy_but_before_the_publish_commit(h: H)
     d = await h.dataset()
     v = await h.version(d)
     await h.put(d, v)
-    t, a = h.ctx.tenant_id, Actor.service(h.ctx.user_id)
-    await h.run(
-        lambda s: svc.acquire_processing_lease(s, t, a, d, v, token=uuid.uuid4(), ttl_s=300)
-    )
+    await h.lease(d, v)
     sha = hashlib.sha256(CSV).hexdigest()
     h.scoped.copy_verified(
         h.scoped.version_key("quarantine", d, v), h.scoped.version_key("datasets", d, v),
@@ -338,21 +360,34 @@ async def test_activation_while_deletion_is_requested_is_refused(h: H) -> None:
 # --- authority changes -------------------------------------------------------------------------
 
 
-async def test_a_changed_signed_user_fails_closed_and_another_admin_can_recover(
+async def test_only_an_admin_can_request_processing_and_another_admin_can_recover(
     h: H, pg_stack: SimpleNamespace
 ) -> None:
+    """ADR-031: a member, or someone who is not a member at all, can neither
+    record nor re-dispatch a processing request; another admin can, and the
+    ingest runtime then processes it."""
+    from sqlalchemy.exc import DBAPIError
+
     d = await h.dataset()
     v = await h.version(d)
     await h.put(d, v)
     member = h.as_user(pg_stack.add_membership(h.ctx.tenant_id, "member"), Role.MEMBER)
     outsider = pg_stack.seed_member("owner")
     foreign = TenantContext(user_id=outsider.user_id, tenant_id=h.ctx.tenant_id, role=Role.OWNER)
-    for ctx in (member, foreign):  # demoted, or not a member at all
-        with pytest.raises(svc.DatasetError):
-            await h.process(d, v, ctx=ctx)
+    for ctx in (member, foreign):  # a member, or not a member at all
+        with pytest.raises((svc.DatasetError, DBAPIError)):
+            await h.run(
+                lambda s, c=ctx: ensure_processing_request(s, c.tenant_id, c.user_id, d, v),
+                ctx=ctx,
+            )
         assert (await h.get(d, v)).status is VersionStatus.QUARANTINED
     other_admin = h.as_user(pg_stack.add_membership(h.ctx.tenant_id, "admin"), Role.ADMIN)
-    assert await h.process(d, v, ctx=other_admin) == "profiled"
+    env = await h.run(
+        lambda s: ensure_processing_request(s, h.ctx.tenant_id, other_admin.user_id, d, v),
+        ctx=other_admin,
+    )
+    assert env is not None and env.request_id == h.envelopes[v].request_id  # reused, fresh
+    assert await h.process(d, v) == "profiled"
 
 
 # --- profiler process cleanup -----------------------------------------------------------------
@@ -381,7 +416,7 @@ async def test_a_cancelled_profiling_run_kills_its_child(monkeypatch: pytest.Mon
     def opener() -> Any:
         return Slow()
 
-    task = asyncio.create_task(ingestion.run_profiler(opener, CONFIG))
+    task = asyncio.create_task(processing.run_profiler(opener, CONFIG))
     for _ in range(100):
         if procs:
             break
@@ -414,7 +449,12 @@ def _hdr(user_id: uuid.UUID, tenant_id: uuid.UUID, **extra: str) -> dict[str, st
 
 
 @pytest.fixture
-def api(pg_stack: SimpleNamespace, tmp_path: Path) -> Iterator[TestClient]:
+def api(
+    pg_stack: SimpleNamespace,
+    tmp_path: Path,
+    ingest_runtime: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
     settings = pg_stack.settings.model_copy(
         update={
             "datasets_api_enabled": True,
@@ -423,6 +463,7 @@ def api(pg_stack: SimpleNamespace, tmp_path: Path) -> Iterator[TestClient]:
         }  # fmt: skip
     )
     with TestClient(create_app(settings)) as c:
+        ingest_runtime.attach(c.app, monkeypatch)  # the queue + the ingest runtime
         yield c
 
 

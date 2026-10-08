@@ -1,10 +1,12 @@
-"""Dataset upload, profiling, semantics and activation (ADR-030) through the real
-app, auth, signed contexts, PostgreSQL, the local object store and the isolated
-profiling process.
+"""Dataset upload, profiling, semantics and activation (ADR-030, ADR-031)
+through the real app, auth, signed contexts, PostgreSQL, the local object
+store, the ingest runtime and the isolated profiling process.
 
-``TestClient`` completes background tasks before returning a response, so the
-profile is ready (or the version rejected) when the content ``PUT`` returns:
-the tests are deterministic, with no polling or sleeps.
+The API records an immutable processing request and enqueues its envelope; it
+never profiles. The ``ingest_runtime`` harness stands in for the queue and the
+dedicated ingest runtime: it processes each enqueued envelope as
+``nlw_ingest`` before the ``PUT`` returns, so the tests are deterministic, with
+no polling or sleeps.
 """
 
 import hashlib
@@ -71,7 +73,12 @@ def store_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def up(pg_stack: SimpleNamespace, store_root: Path) -> Iterator[TestClient]:
+def up(
+    pg_stack: SimpleNamespace,
+    store_root: Path,
+    ingest_runtime: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
     settings = pg_stack.settings.model_copy(
         update={
             "datasets_api_enabled": True,
@@ -80,6 +87,7 @@ def up(pg_stack: SimpleNamespace, store_root: Path) -> Iterator[TestClient]:
         }
     )
     with TestClient(create_app(settings)) as c:
+        c.ingest = ingest_runtime.attach(c.app, monkeypatch)  # type: ignore[attr-defined]
         yield c
 
 

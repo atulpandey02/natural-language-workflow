@@ -29,6 +29,7 @@ from nlw.datasets.deletion_log import (
 )
 from nlw.datasets.service import Actor
 from nlw.ingest.strict import StrictLimits
+from nlw.ingest_service import processing
 from nlw.ops import datasets as ops
 from nlw.storage.blob import LocalBlobStore
 from nlw.tenancy.context import Role, TenantContext
@@ -37,7 +38,7 @@ from nlw.tenancy.signing import Purpose
 pytestmark = pytest.mark.integration
 
 CSV = b"region,amount\n" + b"".join(f"r{i % 4},{i}\n".encode() for i in range(30))
-CONFIG = ingestion.IngestionConfig(limits=StrictLimits(timeout_s=30), memory_mb=768)
+CONFIG = processing.IngestionConfig(limits=StrictLimits(timeout_s=30), memory_mb=768)
 
 
 class H:
@@ -50,6 +51,12 @@ class H:
             self.engine, expire_on_commit=False
         )
         self.signer = pg.signers[Purpose.API_REQUEST]
+        pg.enable_ingest()
+        self.ingest_engine = create_async_engine(pg.ingest_sa, pool_size=6)
+        self.ingest_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            self.ingest_engine, expire_on_commit=False
+        )
+        self.ingest_signer = pg.signers[Purpose.DATASET_INGEST]
         self.store = LocalBlobStore(root / "store")
         self.log = LocalFakeDeletionLog(root / "receipts.jsonl")
 
@@ -79,13 +86,15 @@ class H:
             async def chunks() -> AsyncIterator[bytes]:
                 yield CSV
 
-            await ingestion.store_content(
+            _, env = await ingestion.store_content(
                 maker=self.maker, signer=self.signer, store=self.store, ctx=self.ctx,
                 dataset_id=d, version_id=v, chunks=chunks(), max_bytes=10**6,
             )  # fmt: skip
-            await ingestion.process_version(
-                maker=self.maker, signer=self.signer, store=self.store, config=CONFIG,
-                ctx=self.ctx, dataset_id=d, version_id=v,
+            assert env is not None
+            # The ingest runtime processes the request (as nlw_ingest).
+            await processing.process_envelope(
+                maker=self.ingest_maker, signer=self.ingest_signer, store=self.store,
+                config=CONFIG, message=env.to_json(),
             )  # fmt: skip
             ids.append(v)
         await self.run(lambda s: svc.request_dataset_deletion(s, t, a, d))
@@ -114,6 +123,7 @@ async def h(pg_stack: SimpleNamespace, tmp_path: Path) -> AsyncIterator[H]:
     harness = H(pg_stack, tmp_path)
     yield harness
     await harness.engine.dispose()
+    await harness.ingest_engine.dispose()
 
 
 async def test_a_purge_stores_its_receipt_with_the_evidence_and_the_tombstone_verifies_it(

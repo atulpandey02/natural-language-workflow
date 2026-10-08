@@ -55,7 +55,12 @@ def _hdr(user_id: uuid.UUID, tenant_id: uuid.UUID) -> dict[str, str]:
 
 
 @pytest.fixture
-def env(pg_stack: SimpleNamespace, tmp_path: Path) -> Iterator[SimpleNamespace]:
+def env(
+    pg_stack: SimpleNamespace,
+    tmp_path: Path,
+    ingest_runtime: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[SimpleNamespace]:
     root = tmp_path / "datasets"
     settings = pg_stack.settings.model_copy(
         update={
@@ -66,6 +71,7 @@ def env(pg_stack: SimpleNamespace, tmp_path: Path) -> Iterator[SimpleNamespace]:
     )
     m = pg_stack.seed_member("owner")
     with TestClient(create_app(settings)) as c:
+        ingest_runtime.attach(c.app, monkeypatch)  # the queue + the ingest runtime
         yield SimpleNamespace(
             c=c,
             h=_hdr(m.user_id, m.tenant_id),

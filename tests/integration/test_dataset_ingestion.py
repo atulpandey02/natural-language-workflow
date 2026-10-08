@@ -1,5 +1,7 @@
-"""Ingestion orchestration (ADR-030) against real PostgreSQL, the local store and
-the isolated profiler process: authority, races, integrity and failure modes."""
+"""Upload ingestion and processing (ADR-030, ADR-031) against real PostgreSQL,
+the local store and the isolated profiler process: authority, races, integrity
+and failure modes. The API side stores content and records the request; the
+ingest runtime (``nlw.ingest_service``, as ``nlw_ingest``) processes it."""
 
 import asyncio
 import hashlib
@@ -16,8 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from nlw.datasets import ingestion
 from nlw.datasets import service as svc
+from nlw.datasets.envelope import WorkEnvelope
+from nlw.datasets.processing_requests import ensure_processing_request
 from nlw.datasets.service import Actor
 from nlw.ingest.strict import StrictLimits
+from nlw.ingest_service import processing
 from nlw.storage.blob import LocalBlobStore, TenantScopedBlobStore
 from nlw.tenancy.context import Role, TenantContext
 from nlw.tenancy.signing import Purpose
@@ -25,7 +30,7 @@ from nlw.tenancy.signing import Purpose
 pytestmark = pytest.mark.integration
 
 CSV = b"region,amount\n" + b"".join(f"r{i % 4},{i}\n".encode() for i in range(50))
-CONFIG = ingestion.IngestionConfig(limits=StrictLimits(timeout_s=30), memory_mb=768)
+CONFIG = processing.IngestionConfig(limits=StrictLimits(timeout_s=30), memory_mb=768)
 
 
 class H:
@@ -38,6 +43,13 @@ class H:
             self.engine, expire_on_commit=False
         )
         self.signer = pg.signers[Purpose.API_REQUEST]
+        pg.enable_ingest()
+        self.ingest_engine = create_async_engine(pg.ingest_sa, pool_size=10)
+        self.ingest_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            self.ingest_engine, expire_on_commit=False
+        )
+        self.ingest_signer = pg.signers[Purpose.DATASET_INGEST]
+        self.envelopes: dict[uuid.UUID, WorkEnvelope] = {}
         self.store = LocalBlobStore(root)
         self.scoped = TenantScopedBlobStore(self.store, self.ctx.tenant_id)
 
@@ -63,15 +75,18 @@ class H:
         async def chunks() -> AsyncIterator[bytes]:
             yield data
 
-        await ingestion.store_content(
+        _, env = await ingestion.store_content(
             maker=self.maker, signer=self.signer, store=self.store, ctx=self.ctx,
             dataset_id=d, version_id=v, chunks=chunks(), max_bytes=25_000_000,
         )  # fmt: skip
+        assert env is not None  # content and its processing request commit together
+        self.envelopes[v] = env
 
-    async def process(self, d: uuid.UUID, v: uuid.UUID, ctx: TenantContext | None = None) -> str:
-        return await ingestion.process_version(
-            maker=self.maker, signer=self.signer, store=self.store, config=CONFIG,
-            ctx=ctx or self.ctx, dataset_id=d, version_id=v,
+    async def process(self, d: uuid.UUID, v: uuid.UUID) -> str:
+        """Deliver the version's envelope to the ingest runtime (as the queue would)."""
+        return await processing.process_envelope(
+            maker=self.ingest_maker, signer=self.ingest_signer, store=self.store,
+            config=CONFIG, message=self.envelopes[v].to_json(),
         )  # fmt: skip
 
     async def get(self, d: uuid.UUID, v: uuid.UUID) -> svc.VersionRecord:
@@ -85,6 +100,7 @@ async def h(pg_stack: SimpleNamespace, tmp_path: Path) -> AsyncIterator[H]:
     harness = H(pg_stack, tmp_path / "store")
     yield harness
     await harness.engine.dispose()
+    await harness.ingest_engine.dispose()
 
 
 def _profiles(pg: SimpleNamespace, v: uuid.UUID) -> int:
@@ -107,15 +123,23 @@ async def test_processing_publishes_once_under_concurrency(h: H) -> None:
     assert await h.process(d, v) == "skipped"  # nothing left to do
 
 
-async def test_a_demoted_uploader_cannot_process(h: H, pg_stack: SimpleNamespace) -> None:
+async def test_a_member_cannot_request_processing(h: H, pg_stack: SimpleNamespace) -> None:
+    """ADR-031: processing authority is the immutable request an ADMIN recorded.
+    A member (or a demoted uploader) can neither record nor re-dispatch one; a
+    request recorded while the uploader was authorized stays valid and is
+    processed by the ingest runtime with service authority."""
+    from sqlalchemy.exc import DBAPIError
+
     d, v = await h.version()
     await h.store_content(d, v)
-    demoted = pg_stack.add_membership(h.ctx.tenant_id, "member")
-    member_ctx = TenantContext(user_id=demoted, tenant_id=h.ctx.tenant_id, role=Role.MEMBER)
-    # RLS re-checks admin authority on every transaction: nothing moves.
-    with pytest.raises(svc.DatasetError):  # invisible for update: nothing to claim
-        await h.process(d, v, ctx=member_ctx)
+    member = pg_stack.add_membership(h.ctx.tenant_id, "member")
+    member_ctx = TenantContext(user_id=member, tenant_id=h.ctx.tenant_id, role=Role.MEMBER)
+    with pytest.raises(DBAPIError, match="row-level security"):
+        await h.run(
+            lambda s: ensure_processing_request(s, h.ctx.tenant_id, member, d, v), ctx=member_ctx
+        )
     assert (await h.get(d, v)).status.value == "QUARANTINED"
+    assert await h.process(d, v) == "profiled"
 
 
 async def test_tampered_bytes_are_rejected_before_profiling(h: H) -> None:
@@ -144,19 +168,19 @@ async def test_a_missing_object_is_rejected(h: H) -> None:
 async def test_profiler_crash_and_timeout_reject_without_content(
     h: H, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def crashed(*_a: Any, **_k: Any) -> ingestion.ProfilerOutcome:
-        return ingestion.ProfilerOutcome("rejected", code="PROCESSING_FAILED")
+    async def crashed(*_a: Any, **_k: Any) -> processing.ProfilerOutcome:
+        return processing.ProfilerOutcome("rejected", code="PROCESSING_FAILED")
 
     d, v = await h.version()
     await h.store_content(d, v)
-    monkeypatch.setattr(ingestion, "run_profiler", crashed)
+    monkeypatch.setattr(processing, "run_profiler", crashed)
     assert await h.process(d, v) == "rejected"
     assert (await h.get(d, v)).rejection_code.value == "PROCESSING_FAILED"  # type: ignore[union-attr]
     monkeypatch.undo()
 
     # A real wall-clock overrun: the child is killed and the version rejected.
-    slow = ingestion.IngestionConfig(limits=StrictLimits(timeout_s=0.001), memory_mb=768)
-    outcome = await ingestion.run_profiler(lambda: io.BytesIO(CSV * 2000), slow)
+    slow = processing.IngestionConfig(limits=StrictLimits(timeout_s=0.001), memory_mb=768)
+    outcome = await processing.run_profiler(lambda: io.BytesIO(CSV * 2000), slow)
     assert (outcome.status, outcome.code) in {("rejected", "PARSE_TIMEOUT")}
 
 
@@ -165,11 +189,14 @@ async def test_a_stale_profiling_lease_is_reclaimed_after_a_crash(
 ) -> None:
     d, v = await h.version()
     await h.store_content(d, v)
-    t, actor = h.ctx.tenant_id, Actor.service(h.ctx.user_id)
-
-    await h.run(
-        lambda s: svc.acquire_processing_lease(s, t, actor, d, v, token=uuid.uuid4(), ttl_s=300)
-    )
+    t = h.ctx.tenant_id
+    # Another ingest delivery holds a live lease.
+    await processing.in_ingest_context(
+        h.ingest_maker, h.ingest_signer, h.envelopes[v],
+        lambda s: svc.acquire_processing_lease(
+            s, t, processing.ACTOR, d, v, token=uuid.uuid4(), ttl_s=300
+        ),
+    )  # fmt: skip
     assert await h.process(d, v) == "skipped"  # a live lease is respected
     with psycopg.connect(pg_stack.owner_libpq, autocommit=True) as c:
         # A crashed processor's lease, expired by the DATABASE clock.
@@ -184,14 +211,14 @@ async def test_a_stale_profiling_lease_is_reclaimed_after_a_crash(
 async def test_deletion_while_profiling_wins(h: H, monkeypatch: pytest.MonkeyPatch) -> None:
     d, v = await h.version()
     await h.store_content(d, v)
-    real = ingestion.run_profiler
+    real = processing.run_profiler
     t, actor = h.ctx.tenant_id, Actor.user(h.ctx.user_id)
 
-    async def delete_then_profile(*a: Any, **k: Any) -> ingestion.ProfilerOutcome:
+    async def delete_then_profile(*a: Any, **k: Any) -> processing.ProfilerOutcome:
         await h.run(lambda s: svc.request_dataset_deletion(s, t, actor, d))
         return await real(*a, **k)
 
-    monkeypatch.setattr(ingestion, "run_profiler", delete_then_profile)
+    monkeypatch.setattr(processing, "run_profiler", delete_then_profile)
     assert await h.process(d, v) == "skipped"
     rec = await h.get(d, v)
     assert rec.status.value == "DELETING" and _profiles(h.pg, v) == 0

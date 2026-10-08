@@ -4,7 +4,7 @@ Normal exit, cancellation while the child is reading, cancellation while it is
 returning its result, the wall-clock timeout, and a child that ignores SIGTERM:
 in every case the parent ends with the child's exit status collected (no
 zombie) and no process left behind (no orphan). Misbehaving children are
-substituted through ``ingestion._runner_argv``; synchronization is by marker
+substituted through ``nlw.ingest_service.processing._runner_argv``; synchronization is by marker
 files, not by sleeping and hoping.
 """
 
@@ -20,14 +20,14 @@ from typing import Any
 
 import pytest
 
-from nlw.datasets import ingestion
 from nlw.ingest.strict import StrictLimits
+from nlw.ingest_service import processing  # the ingest runtime (ADR-031)
 
 CSV = b"region,amount\n" + b"".join(f"r{i % 3},{i}\n".encode() for i in range(30))
 
 
-def _config(timeout_s: float = 30) -> ingestion.IngestionConfig:
-    return ingestion.IngestionConfig(limits=StrictLimits(timeout_s=timeout_s), memory_mb=768)
+def _config(timeout_s: float = 30) -> processing.IngestionConfig:
+    return processing.IngestionConfig(limits=StrictLimits(timeout_s=timeout_s), memory_mb=768)
 
 
 @pytest.fixture
@@ -45,7 +45,7 @@ def spawned(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.subprocess.Process]
 
 
 def _child(monkeypatch: pytest.MonkeyPatch, code: str) -> None:
-    monkeypatch.setattr(ingestion, "_runner_argv", lambda _args: [sys.executable, "-c", code])
+    monkeypatch.setattr(processing, "_runner_argv", lambda _args: [sys.executable, "-c", code])
 
 
 def _gone(pid: int) -> bool:
@@ -70,7 +70,7 @@ async def _wait_for(path: Path) -> None:
 
 
 async def test_normal_exit_is_reaped(spawned: list[asyncio.subprocess.Process]) -> None:
-    outcome = await ingestion.run_profiler(lambda: io.BytesIO(CSV), _config())
+    outcome = await processing.run_profiler(lambda: io.BytesIO(CSV), _config())
     assert outcome.status == "profiled"
     _assert_reaped(spawned[0])
     assert spawned[0].returncode == 0
@@ -92,7 +92,7 @@ async def test_cancellation_while_the_child_is_reading_terminates_it(
     def opener() -> Any:
         return Blocking()
 
-    task = asyncio.create_task(ingestion.run_profiler(opener, _config()))
+    task = asyncio.create_task(processing.run_profiler(opener, _config()))
     for _ in range(200):
         if spawned:
             break
@@ -119,7 +119,7 @@ async def test_cancellation_while_the_child_returns_its_result_terminates_it(
         "time.sleep(60)\n"
         "print('{}')\n",
     )
-    task = asyncio.create_task(ingestion.run_profiler(lambda: io.BytesIO(CSV), _config()))
+    task = asyncio.create_task(processing.run_profiler(lambda: io.BytesIO(CSV), _config()))
     await _wait_for(marker)  # input fully consumed; the child is "computing"
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -131,12 +131,12 @@ async def test_timeout_terminates_the_child_and_reports_parse_timeout(
     spawned: list[asyncio.subprocess.Process], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _child(monkeypatch, "import sys, time\nsys.stdin.buffer.read()\ntime.sleep(60)\n")
-    monkeypatch.setattr(ingestion, "_TERM_GRACE_S", 2.0)
-    cfg = ingestion.IngestionConfig(limits=StrictLimits(timeout_s=0.001), memory_mb=768)
+    monkeypatch.setattr(processing, "_TERM_GRACE_S", 2.0)
+    cfg = processing.IngestionConfig(limits=StrictLimits(timeout_s=0.001), memory_mb=768)
     # The parent's wall clock is timeout_s + 10: keep the test fast but real.
     real_timeout = asyncio.timeout
     monkeypatch.setattr(asyncio, "timeout", lambda _s: real_timeout(0.5))
-    outcome = await ingestion.run_profiler(lambda: io.BytesIO(CSV), cfg)
+    outcome = await processing.run_profiler(lambda: io.BytesIO(CSV), cfg)
     assert (outcome.status, outcome.code) == ("rejected", "PARSE_TIMEOUT")
     _assert_reaped(spawned[0])
 
@@ -154,8 +154,8 @@ async def test_a_child_ignoring_sigterm_is_force_killed_within_the_grace(
         f"pathlib.Path({str(marker)!r}).touch()\n"
         "time.sleep(60)\n",
     )
-    monkeypatch.setattr(ingestion, "_TERM_GRACE_S", 0.3)
-    task = asyncio.create_task(ingestion.run_profiler(lambda: io.BytesIO(CSV), _config()))
+    monkeypatch.setattr(processing, "_TERM_GRACE_S", 0.3)
+    task = asyncio.create_task(processing.run_profiler(lambda: io.BytesIO(CSV), _config()))
     await _wait_for(marker)  # SIGTERM is ignored from here on
     task.cancel()
     loop = asyncio.get_running_loop()
@@ -177,7 +177,7 @@ async def test_the_child_environment_carries_no_credentials(
         monkeypatch,
         f"import json, os\njson.dump(dict(os.environ), open({str(out)!r}, 'w'))\nprint('{{}}')\n",
     )
-    await ingestion.run_profiler(lambda: io.BytesIO(CSV), _config())
+    await processing.run_profiler(lambda: io.BytesIO(CSV), _config())
     env = json.loads(out.read_text())
     assert "zz-canary-credential" not in json.dumps(env)
     assert set(env) <= {

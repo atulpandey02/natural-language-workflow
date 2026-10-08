@@ -1,12 +1,14 @@
-"""Dataset upload, profiling and review routes (Phase 2B, ADR-030).
+"""Dataset upload and review routes (Phase 2B, ADR-030; ingest boundary ADR-031).
 
 Mounted ONLY when ``DATASETS_API_ENABLED`` is true AND a dataset store is
 configured (``DATASET_STORAGE_BACKEND=local``, which staging and production
 refuse). Every route is admin/owner only:
 
 - ``POST /datasets/{id}/versions``                     initiate (``Idempotency-Key``)
-- ``PUT  /datasets/{id}/versions/{vid}/content``       raw ``text/csv`` body, streamed
-- ``POST /datasets/{id}/versions/{vid}/process``       (re)start profiling
+- ``PUT  /datasets/{id}/versions/{vid}/content``       raw ``text/csv`` body, streamed;
+                                                        records an immutable processing
+                                                        request and enqueues it
+- ``POST /datasets/{id}/versions/{vid}/process``       re-dispatch a pending request
 - ``GET  /datasets/{id}/versions/{vid}/profile``       the deterministic profile
 - ``GET  /datasets/{id}/versions/{vid}/semantics``     confirmed revisions
 - ``POST /datasets/{id}/versions/{vid}/semantics``     confirm a new revision
@@ -15,6 +17,15 @@ refuse). Every route is admin/owner only:
 Tenant, actor, ids, numbers, statuses, storage keys and digests are always
 server-derived; no client path, key or URL is accepted, and no storage key,
 path or credential is ever returned. Another workspace's ids are 404.
+
+The API NEVER profiles, takes a processing lease, inserts a profile, publishes
+or rejects a version: the database refuses all of it for ``nlw_app``
+(ADR-031). Processing belongs to the ingest runtime (``nlw_ingest``), which
+consumes the envelope enqueued here. Commit-before-enqueue: the request is
+durable before the message is sent; an enqueue failure is a 503 with the
+request intact, re-driven by an idempotent retry of the upload, by
+``POST .../process``, or by the operator sweep (``nlw.ops.datasets
+dispatch-pending``). Delivery is at-least-once, processing idempotent.
 """
 
 from __future__ import annotations
@@ -27,7 +38,6 @@ from typing import Any, NoReturn
 import structlog
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     Header,
     HTTPException,
@@ -56,12 +66,14 @@ from nlw.api.schemas import (
 )
 from nlw.core.config import Settings
 from nlw.datasets import ingestion, service
+from nlw.datasets.envelope import WorkEnvelope, enqueue_envelope
 from nlw.datasets.lifecycle import MetadataError
+from nlw.datasets.processing_requests import ensure_processing_request
 from nlw.datasets.semantics import SemanticMappingError, canonical_json, validate_mapping
 from nlw.datasets.service import Actor, DatasetError
-from nlw.ingest.strict import StrictLimits
 from nlw.storage.blob import BlobStore
 from nlw.tenancy.context import Role, TenantContext, role_at_least
+from nlw.tenancy.session import set_request_context
 from nlw.tenancy.signing import Purpose
 
 log = structlog.get_logger(__name__)
@@ -80,47 +92,45 @@ def _store(request: Request) -> BlobStore:
     return store
 
 
-def ingestion_config(settings: Settings) -> ingestion.IngestionConfig:
-    return ingestion.IngestionConfig(
-        limits=StrictLimits(
-            max_bytes=settings.dataset_max_upload_bytes,
-            max_rows=settings.dataset_max_rows,
-            max_columns=settings.dataset_max_columns,
-            max_field_chars=settings.dataset_max_field_chars,
-            timeout_s=float(settings.dataset_profile_timeout_s),
-        ),
-        memory_mb=settings.dataset_profile_memory_mb,
-    )
-
-
 def _semantic_error(exc: SemanticMappingError) -> NoReturn:
     raise HTTPException(
         status.HTTP_422_UNPROCESSABLE_ENTITY, {"code": exc.code, "message": str(exc)}
     ) from exc
 
 
-async def _process_in_background(
-    request: Request, ctx: TenantContext, d: uuid.UUID, v: uuid.UUID
-) -> None:
-    app = request.app
+def _enqueue(envelope: WorkEnvelope) -> None:
+    """Send the envelope through the API's broker (the one ``nlw.worker.actors``
+    configures for every enqueue). Never imports the ingest runtime."""
+    import dramatiq
+
+    import nlw.worker.actors  # noqa: F401  (configures the process's broker)
+
+    enqueue_envelope(dramatiq.get_broker(), envelope)
+
+
+def _dispatch(envelope: WorkEnvelope | None, dataset_id: uuid.UUID, version_id: uuid.UUID) -> None:
+    """AFTER commit: enqueue (at-least-once). The committed request is the work
+    item; a failure here loses nothing and is surfaced, never hidden."""
+    if envelope is None:
+        return
     try:
-        result = await ingestion.process_version(
-            maker=app.state.sessionmaker,
-            signer=app.state.ctx_signers[Purpose.API_REQUEST],
-            store=app.state.dataset_store,
-            config=ingestion_config(app.state.settings),
-            ctx=ctx,
-            dataset_id=d,
-            version_id=v,
-        )
-        log.info("dataset.processing_finished", dataset_id=str(d), version_id=str(v), result=result)
-    except Exception as exc:  # the version stays PROFILING for an admin retry
-        log.warning(
-            "dataset.processing_error",
-            dataset_id=str(d),
-            version_id=str(v),
+        _enqueue(envelope)
+    except Exception as exc:  # infrastructure: the request stays durable
+        log.error(
+            "dataset.enqueue_failed",
+            dataset_id=str(dataset_id),
+            version_id=str(version_id),
             error_class=type(exc).__name__,
         )
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            {
+                "code": "PROCESSING_NOT_QUEUED",
+                "message": "the upload is stored and processing is requested, but it could "
+                "not be queued; retry the request",
+            },
+        ) from None
+    log.info("dataset.processing_requested", dataset_id=str(dataset_id), version_id=str(version_id))
 
 
 @router.post(
@@ -188,13 +198,13 @@ async def upload_content(
     dataset_id: uuid.UUID,
     version_id: uuid.UUID,
     request: Request,
-    background: BackgroundTasks,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     x_workspace_id: str | None = Header(default=None),
 ) -> DatasetVersionOut:
-    """Stream the CSV bytes (exactly the declared size) into quarantine, then
-    start profiling in the background. ``Content-Type`` is NOT trusted: the
-    bytes themselves are validated by the profiler."""
+    """Stream the CSV bytes (exactly the declared size) into quarantine, record
+    them and an immutable processing request, then enqueue it for the ingest
+    runtime. ``Content-Type`` is NOT trusted: the ingest runtime's profiler
+    validates the bytes; the API never parses them."""
     ctx = await _short_admin_context(request, credentials, x_workspace_id)
     settings: Settings = request.app.state.settings
     declared = request.headers.get("content-length")
@@ -214,7 +224,7 @@ async def upload_content(
                 yield chunk
 
     try:
-        v = await ingestion.store_content(
+        v, envelope = await ingestion.store_content(
             maker=request.app.state.sessionmaker,
             signer=get_ctx_signer(request, Purpose.API_REQUEST),
             store=_store(request),
@@ -230,8 +240,7 @@ async def upload_content(
         ) from None
     except DatasetError as exc:
         _raise(exc)
-    if v.status.value == "QUARANTINED":
-        background.add_task(_process_in_background, request, ctx, dataset_id, version_id)
+    _dispatch(envelope, dataset_id, version_id)
     return _version_out(v)
 
 
@@ -245,21 +254,24 @@ async def process_upload(
     dataset_id: uuid.UUID,
     version_id: uuid.UUID,
     request: Request,
-    background: BackgroundTasks,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
 ) -> DatasetVersionOut:
-    """Recovery for a crashed process: retry profiling for a version with content
-    that is still QUARANTINED or whose PROFILING lease went stale, and remove
-    bytes a crash left behind after a settled outcome (the quarantine copy of a
-    published version, a rejected version's file). Otherwise a no-op."""
+    """Re-dispatch: (re)enqueue the version's processing request (recording a
+    new one if the latest is no longer fresh). For a lost enqueue or a crashed
+    processor whose lease expired; a no-op for anything already settled. It
+    NEVER processes: the ingest runtime claims, profiles and settles."""
     _store(request)
+    sessionmaker = request.app.state.sessionmaker
     try:
-        v = await service.get_version(session, ctx.tenant_id, dataset_id, version_id)
+        async with sessionmaker() as session, session.begin():
+            await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
+            v = await service.get_version(session, ctx.tenant_id, dataset_id, version_id)
+            envelope = await ensure_processing_request(
+                session, ctx.tenant_id, ctx.user_id, dataset_id, version_id
+            )
     except DatasetError as exc:
         _raise(exc)
-    if v.has_content and v.status.value != "DELETING":
-        background.add_task(_process_in_background, request, ctx, dataset_id, version_id)
+    _dispatch(envelope, dataset_id, version_id)  # after commit
     return _version_out(v)
 
 

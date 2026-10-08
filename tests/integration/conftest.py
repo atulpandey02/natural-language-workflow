@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import psycopg
 import pytest
@@ -344,3 +345,83 @@ def pg_stack(request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
         finally:
             clear_process_signers()
             shutil.rmtree(keys_dir, ignore_errors=True)
+
+
+class IngestRuntime:
+    """TEST HARNESS: stands in for the queue + the dedicated ingest runtime.
+
+    It replaces the API's ``_enqueue`` (never the processing): each envelope
+    the API sends is recorded and, when ``auto`` is set, processed right away
+    by ``nlw.ingest_service.processing`` as ``nlw_ingest`` with the ingest key,
+    in its own thread and event loop, exactly what the ingest container does
+    with a dequeued message. ``fail`` simulates a broker outage."""
+
+    def __init__(self, pg: SimpleNamespace) -> None:
+        from nlw.tenancy.signing import Purpose
+
+        pg.enable_ingest()
+        self.pg = pg
+        self.signer = pg.signers[Purpose.DATASET_INGEST]
+        self.sent: list[Any] = []
+        self.results: list[str] = []
+        self.auto = True
+        self.fail = False
+        self.store: Any = None
+
+    def attach(self, app: Any, monkeypatch: pytest.MonkeyPatch) -> "IngestRuntime":
+        from nlw.api.routers import dataset_uploads
+
+        self.store = app.state.dataset_store
+        monkeypatch.setattr(dataset_uploads, "_enqueue", self.enqueue)
+        return self
+
+    def enqueue(self, envelope: Any) -> None:
+        if self.fail:
+            raise ConnectionError("simulated broker outage")
+        self.sent.append(envelope)
+        if self.auto:
+            self.results.append(self.process(envelope.to_json()))
+
+    def process(self, message: str, **config: Any) -> str:
+        import asyncio
+        import threading
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from nlw.ingest.strict import StrictLimits
+        from nlw.ingest_service import processing
+
+        out: dict[str, Any] = {}
+
+        async def go() -> str:
+            engine = create_async_engine(self.pg.ingest_sa, pool_size=2)
+            try:
+                return await processing.process_envelope(
+                    maker=async_sessionmaker(engine, expire_on_commit=False),
+                    signer=self.signer,
+                    store=self.store,
+                    config=processing.IngestionConfig(
+                        limits=StrictLimits(timeout_s=30), memory_mb=768, **config
+                    ),
+                    message=message,
+                )
+            finally:
+                await engine.dispose()
+
+        def run() -> None:
+            try:
+                out["r"] = asyncio.run(go())
+            except BaseException as exc:  # surfaced to the caller below
+                out["e"] = exc
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join()
+        if "e" in out:
+            raise out["e"]
+        return str(out["r"])
+
+
+@pytest.fixture
+def ingest_runtime(pg_stack: SimpleNamespace) -> IngestRuntime:
+    return IngestRuntime(pg_stack)

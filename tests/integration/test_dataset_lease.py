@@ -1,4 +1,6 @@
-"""Processing lease (ADR-030): database time, atomic claims, provable ownership.
+"""Processing lease (ADR-030, ADR-031): database time, atomic claims, provable
+ownership. Every lease operation runs as the ingest runtime (``nlw_ingest``,
+a ``dataset_ingest`` context for exactly one version); the API role may not.
 
 Every claimant runs in its own session and transaction; races are started
 behind a gate so the database (one compare-and-set UPDATE per attempt), not
@@ -21,11 +23,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from nlw.datasets import ingestion
 from nlw.datasets import service as svc
+from nlw.datasets.envelope import WorkEnvelope
 from nlw.datasets.lifecycle import RejectionCode, VersionStatus
 from nlw.datasets.service import Actor, DatasetConflict
 from nlw.ingest.strict import StrictLimits
+from nlw.ingest_service import processing
 from nlw.storage.blob import LocalBlobStore
 from nlw.tenancy.context import Role, TenantContext
+from nlw.tenancy.session import apply_signed_context
 from nlw.tenancy.signing import Purpose
 
 pytestmark = pytest.mark.integration
@@ -39,16 +44,38 @@ class H:
         m = pg.seed_member("owner")
         self.pg = pg
         self.ctx = TenantContext(user_id=m.user_id, tenant_id=m.tenant_id, role=Role.OWNER)
-        self.t, self.actor = m.tenant_id, Actor.service(m.user_id)
+        self.t, self.actor = m.tenant_id, processing.ACTOR  # service, no human
         self.engine = create_async_engine(pg.settings.database_url, pool_size=12)
         self.maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self.engine, expire_on_commit=False
         )
         self.signer = pg.signers[Purpose.API_REQUEST]
+        pg.enable_ingest()
+        self.ingest_engine = create_async_engine(pg.ingest_sa, pool_size=12)
+        self.ingest_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            self.ingest_engine, expire_on_commit=False
+        )
+        self.ingest_signer = pg.signers[Purpose.DATASET_INGEST]
+        self.envelopes: dict[uuid.UUID, WorkEnvelope] = {}
         self.store = LocalBlobStore(root)
 
     async def run(self, fn: Any) -> Any:
+        """One API transaction (signed api_request for the admin)."""
         return await ingestion.in_context(self.maker, self.signer, self.ctx, fn)
+
+    async def ingest(self, v: uuid.UUID, fn: Any) -> Any:
+        """One ingest-runtime transaction for exactly version ``v``."""
+        async with self.ingest_maker() as s, s.begin():
+            await apply_signed_context(
+                s, self.pg.sign(Purpose.DATASET_INGEST, tenant_id=self.t, run_id=v)
+            )
+            return await fn(s)
+
+    async def deliver(self, v: uuid.UUID, config: processing.IngestionConfig) -> str:
+        return await processing.process_envelope(
+            maker=self.ingest_maker, signer=self.ingest_signer, store=self.store,
+            config=config, message=self.envelopes[v].to_json(),
+        )  # fmt: skip
 
     async def quarantined(self) -> tuple[uuid.UUID, uuid.UUID]:
         t, a = self.t, Actor.user(self.ctx.user_id)
@@ -67,17 +94,20 @@ class H:
                 declared_size_bytes=len(CSV), idempotency_key=uuid.uuid4().hex,
             )
         )  # fmt: skip
-        await ingestion.store_content(
+        _, env = await ingestion.store_content(
             maker=self.maker, signer=self.signer, store=self.store, ctx=self.ctx,
             dataset_id=d.id, version_id=v.id, chunks=chunks(), max_bytes=10**6,
         )  # fmt: skip
+        assert env is not None
+        self.envelopes[v.id] = env
         return d.id, v.id
 
     async def acquire(self, d: uuid.UUID, v: uuid.UUID, token: uuid.UUID) -> str:
-        state, _ = await self.run(
+        state, _ = await self.ingest(
+            v,
             lambda s: svc.acquire_processing_lease(
                 s, self.t, self.actor, d, v, token=token, ttl_s=300
-            )
+            ),
         )
         return str(state)
 
@@ -109,12 +139,13 @@ class H:
 
     async def publish(self, d: uuid.UUID, v: uuid.UUID, token: uuid.UUID) -> svc.VersionRecord:
         sha = (await self.run(lambda s: svc.get_version(s, self.t, d, v))).content_sha256
-        rec: svc.VersionRecord = await self.run(
+        rec: svc.VersionRecord = await self.ingest(
+            v,
             lambda s: svc.publish_profile(
                 s, self.t, self.actor, d, v, profile_json=PROFILE, contract_version="profile-2",
                 content_sha256=sha, row_count=1, column_count=1,
                 published_key=f"datasets/{self.t}/{d}/{v}", lease_token=token,
-            )
+            ),
         )  # fmt: skip
         return rec
 
@@ -124,6 +155,7 @@ async def h(pg_stack: SimpleNamespace, tmp_path: Path) -> AsyncIterator[H]:
     harness = H(pg_stack, tmp_path / "store")
     yield harness
     await harness.engine.dispose()
+    await harness.ingest_engine.dispose()
 
 
 async def _race(h: H, d: uuid.UUID, v: uuid.UUID, n: int) -> list[tuple[str, uuid.UUID]]:
@@ -137,7 +169,7 @@ async def _race(h: H, d: uuid.UUID, v: uuid.UUID, n: int) -> list[tuple[str, uui
             )
             return str(state), token
 
-        result: tuple[str, uuid.UUID] = await h.run(go)
+        result: tuple[str, uuid.UUID] = await h.ingest(v, go)
         return result
 
     tasks = [asyncio.create_task(claimant(uuid.uuid4())) for _ in range(n)]
@@ -176,10 +208,11 @@ async def test_a_former_owner_can_neither_publish_nor_reject(h: H) -> None:
     assert lost.value.code == "LEASE_LOST"
     assert h.profiles(v) == 0  # the profile insert was rolled back with it
     with pytest.raises(DatasetConflict) as lost2:
-        await h.run(
+        await h.ingest(
+            v,
             lambda s: svc.reject_processing(
                 s, h.t, h.actor, d, v, token=old, rejection_code=RejectionCode.PARSE_ERROR
-            )
+            ),
         )
     assert lost2.value.code == "LEASE_LOST"
     assert (await h.publish(d, v, new)).status is VersionStatus.PROFILED
@@ -192,8 +225,8 @@ async def test_renewal_keeps_ownership_and_only_the_owner_can_renew(h: H) -> Non
     assert await h.acquire(d, v, owner) == "acquired"
 
     async def renew(tok: uuid.UUID) -> bool:
-        ok: bool = await h.run(
-            lambda s: svc.renew_processing_lease(s, h.t, d, v, token=tok, ttl_s=300)
+        ok: bool = await h.ingest(
+            v, lambda s: svc.renew_processing_lease(s, h.t, d, v, token=tok, ttl_s=300)
         )
         return ok
 
@@ -211,23 +244,18 @@ async def test_ownership_lost_during_profiling_publishes_nothing(
     d, v = await h.quarantined()
     profiling = asyncio.Event()
     release = asyncio.Event()
-    real = ingestion.run_profiler
+    real = processing.run_profiler
 
-    async def slow(*a: Any, **k: Any) -> ingestion.ProfilerOutcome:
+    async def slow(*a: Any, **k: Any) -> processing.ProfilerOutcome:
         profiling.set()
         await release.wait()
         return await real(*a, **k)
 
-    monkeypatch.setattr(ingestion, "run_profiler", slow)
-    cfg = ingestion.IngestionConfig(
+    monkeypatch.setattr(processing, "run_profiler", slow)
+    cfg = processing.IngestionConfig(
         limits=StrictLimits(timeout_s=30), memory_mb=768, lease_ttl_s=5, lease_renew_s=0.2
     )
-    task = asyncio.create_task(
-        ingestion.process_version(
-            maker=h.maker, signer=h.signer, store=h.store, config=cfg, ctx=h.ctx,
-            dataset_id=d, version_id=v,
-        )
-    )  # fmt: skip
+    task = asyncio.create_task(h.deliver(v, cfg))
     await profiling.wait()
     h.expire(v)  # the database decides the lease is stale...
     thief = uuid.uuid4()
@@ -283,7 +311,7 @@ async def test_the_api_host_clock_never_changes_the_answer(
             real = datetime.now(tz or UTC) + skew
             return cls.fromtimestamp(real.timestamp(), tz or UTC)
 
-    for module in (svc, ingestion):
+    for module in (svc, ingestion, processing):
         monkeypatch.setattr(module, "datetime", Skewed, raising=False)
     d, v = await h.quarantined()
     assert await h.acquire(d, v, uuid.uuid4()) == "acquired"
@@ -291,8 +319,7 @@ async def test_the_api_host_clock_never_changes_the_answer(
     h.expire(v)
     assert await h.acquire(d, v, uuid.uuid4()) == "reclaimed"  # stale by the DATABASE clock
     d2, v2 = await h.quarantined()
-    result = await ingestion.process_version(
-        maker=h.maker, signer=h.signer, store=h.store, ctx=h.ctx, dataset_id=d2, version_id=v2,
-        config=ingestion.IngestionConfig(limits=StrictLimits(timeout_s=30), memory_mb=768),
-    )  # fmt: skip
+    result = await h.deliver(
+        v2, processing.IngestionConfig(limits=StrictLimits(timeout_s=30), memory_mb=768)
+    )
     assert result == "profiled"
