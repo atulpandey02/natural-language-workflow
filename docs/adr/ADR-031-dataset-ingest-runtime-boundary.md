@@ -228,7 +228,10 @@ backup or alerting values.
   actions above. Processing is idempotent (lease compare-and-set); a duplicate
   or forged message changes nothing. Nothing is exactly-once.
 
-#### O-7: unattended dispatch (decision record, open)
+#### O-7: unattended dispatch (decision record; decided, see ADR-032)
+
+> **Update 2026-10-08:** the owner decided O-7 as recommended below; it is
+> implemented, dormant, in [ADR-032](ADR-032-dataset-ingest-dispatcher.md).
 
 - **Present behavior.** Without an unattended dispatcher, a committed request
   whose enqueue failed stays pending **indefinitely** until a client retry, an
