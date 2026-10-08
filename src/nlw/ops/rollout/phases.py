@@ -59,7 +59,7 @@ from typing import Any
 import yaml
 
 from nlw.ops.release_provenance import ProvenanceReceipt
-from nlw.ops.roles import INGEST_GRANTS_SQL
+from nlw.ops.roles import DISPATCH_GRANTS_SQL, INGEST_GRANTS_SQL
 from nlw.ops.rollout import alerting, gates, keyfiles, state
 from nlw.ops.rollout.attestation import (
     AttestationError,
@@ -781,7 +781,7 @@ class Rollout:
         return int(
             self._psql(
                 "SELECT count(*) FROM pg_stat_activity WHERE usename IN "
-                "('nlw_app','nlw_worker','nlw_scheduler','nlw_ingest')"
+                "('nlw_app','nlw_worker','nlw_scheduler','nlw_ingest','nlw_ingest_dispatch')"
             )
         )
 
@@ -1286,6 +1286,7 @@ class Rollout:
         total, legacy = (int(x) for x in row.split("|"))
         gates.check_policy_cutover(total, legacy, expected_policies=EXPECTED_SIGNED_POLICIES)
         gates.check_ingest_grants(self._psql(INGEST_GRANTS_SQL))
+        gates.check_dispatch_grants(self._psql(DISPATCH_GRANTS_SQL))
         owner = self._psql("SELECT tableowner FROM pg_tables WHERE tablename='ctx_keys'")
         if owner != "nlw_ctx_verifier":
             raise GateError(f"ctx_keys owner is {owner!r}, want nlw_ctx_verifier")

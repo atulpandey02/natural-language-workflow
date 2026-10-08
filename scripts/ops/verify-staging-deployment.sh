@@ -52,6 +52,7 @@ EXPECTED_ROLES=(
   "nlw_membership_admin:fft"
   "nlw_ctx_verifier:fff"
   "nlw_ingest:fff"  # dormant ingest runtime (ADR-031) until owner decision O-6
+  "nlw_ingest_dispatch:fff"  # dormant dataset dispatcher (ADR-032) until O-6
 )
 # True iff the normalized roles block contains a line EXACTLY equal to $1.
 assert_role() { printf '%s\n' "$2" | grep -qx "$1"; }

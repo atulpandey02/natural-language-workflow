@@ -52,8 +52,11 @@ def test_existing_m11_cluster_gets_exactly_the_missing_roles(m11_cluster: str) -
         assert roles.verify_roles(c, require_all=False) == []
         assert any("missing" in p for p in roles.verify_roles(c, require_all=True))
         created = roles.ensure_roles(c)
-        # The two P3A/P3B owners and the DORMANT ingest runtime role (ADR-031).
-        assert created == ["nlw_membership_admin", "nlw_ctx_verifier", "nlw_ingest"]
+        # The two P3A/P3B owners and the DORMANT ingest runtime and dispatcher
+        # roles (ADR-031/032).
+        assert created == [
+            "nlw_membership_admin", "nlw_ctx_verifier", "nlw_ingest", "nlw_ingest_dispatch",
+        ]  # fmt: skip
         assert roles.verify_roles(c, require_all=True) == []
         # Idempotent: a second run creates nothing and still verifies.
         assert roles.ensure_roles(c) == []
@@ -61,6 +64,7 @@ def test_existing_m11_cluster_gets_exactly_the_missing_roles(m11_cluster: str) -
     assert attrs["nlw_membership_admin"] == roles.RoleModel(False, False, True)
     assert attrs["nlw_ctx_verifier"] == roles.RoleModel(False, False, False)
     assert attrs["nlw_ingest"] == roles.RoleModel(False, False, False)  # NOLOGIN: dormant
+    assert attrs["nlw_ingest_dispatch"] == roles.RoleModel(False, False, False)
     with psycopg.connect(m11_cluster) as c:
         # A runtime role: never granted to the owner (unlike the owner roles),
         # NOINHERIT, member of nothing.
@@ -75,7 +79,8 @@ def test_existing_m11_cluster_gets_exactly_the_missing_roles(m11_cluster: str) -
     with psycopg.connect(m11_cluster) as c:
         n = c.execute(
             "SELECT count(*) FROM information_schema.role_table_grants "
-            "WHERE grantee IN ('nlw_membership_admin','nlw_ctx_verifier','nlw_ingest')"
+            "WHERE grantee IN ('nlw_membership_admin','nlw_ctx_verifier','nlw_ingest',"
+            "'nlw_ingest_dispatch')"
         ).fetchone()
         assert n is not None and n[0] == 0
 
@@ -120,8 +125,29 @@ def test_a_widened_ingest_role_is_an_error_and_its_login_variant_is_the_only_oth
                 roles.ensure_roles(c)
             c.execute("DROP ROLE nlw_ingest")
         c.execute("CREATE ROLE nlw_ingest LOGIN NOINHERIT")  # an enabled ingest runtime
-        assert roles.ensure_roles(c) == ["nlw_membership_admin", "nlw_ctx_verifier"]
+        assert roles.ensure_roles(c) == [
+            "nlw_membership_admin", "nlw_ctx_verifier", "nlw_ingest_dispatch",
+        ]  # fmt: skip
         assert roles.verify_roles(c, require_all=True) == []
         c.execute("GRANT nlw_ingest TO nlw_app")  # the API assuming the ingest role
         problems = roles.verify_roles(c, require_all=True)
         assert any("nlw_ingest: unexpected members ['nlw_app']" in p for p in problems)
+
+
+def test_a_widened_dispatch_role_is_an_error_and_its_login_variant_is_the_only_other(
+    m11_cluster: str,
+) -> None:
+    """ADR-032: nlw_ingest_dispatch is NOLOGIN (dormant) or, where enabled,
+    LOGIN; never superuser, BYPASSRLS, CREATEDB or CREATEROLE, never a member."""
+    with psycopg.connect(m11_cluster, autocommit=True) as c:
+        for attrs in ("NOLOGIN BYPASSRLS", "LOGIN CREATEDB", "LOGIN SUPERUSER"):
+            c.execute(f"CREATE ROLE nlw_ingest_dispatch {attrs}")
+            with pytest.raises(roles.RoleProvisioningError, match="nlw_ingest_dispatch"):
+                roles.ensure_roles(c)
+            c.execute("DROP ROLE nlw_ingest_dispatch")
+        c.execute("CREATE ROLE nlw_ingest_dispatch LOGIN NOINHERIT")  # an enabled dispatcher
+        assert "nlw_ingest_dispatch" not in roles.ensure_roles(c)
+        assert roles.verify_roles(c, require_all=True) == []
+        c.execute("GRANT nlw_rls_bypass TO nlw_ingest_dispatch")  # assuming the definer owner
+        problems = roles.verify_roles(c, require_all=True)
+        assert any("nlw_rls_bypass: unexpected members" in p for p in problems)

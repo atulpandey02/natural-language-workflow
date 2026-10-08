@@ -76,7 +76,7 @@ def test_phase2_revisions_go_up_down_up_with_the_documented_down_state(
     cfg.set_main_option("sqlalchemy.url", pg_stack.owner_sa)
 
     head = _posture(pg_stack.owner_libpq)
-    assert head["revision"] == "0026_dataset_ingest_role"
+    assert head["revision"] == "0027_dataset_ingest_dispatch"  # 0027 adds no policy
     assert head["bootstrap_gated"] is True and head["bootstrap_overloads"] == 1
     assert head["helper"] == 1 and head["policies"] == 74
     assert head["dataset_tables"] == 3 and head["dataset_funcs"] == 3

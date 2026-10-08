@@ -18,7 +18,7 @@ DEPLOY = ROOT / "scripts" / "ops" / "deploy-staging.sh"
 VERIFY = ROOT / "scripts" / "ops" / "verify-staging-deployment.sh"
 NAMED_REV = "0024_dataset_lifecycle"
 # The repository's Alembic head (staging is still recorded at NAMED_REV).
-HEAD_REV = "0026_dataset_ingest_role"
+HEAD_REV = "0027_dataset_ingest_dispatch"
 
 
 def _sh(call: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
@@ -190,6 +190,7 @@ _ROLES_OK = "\n".join(
         "nlw_app:tff",
         "nlw_ctx_verifier:fff",
         "nlw_ingest:fff",
+        "nlw_ingest_dispatch:fff",
         "nlw_membership_admin:fft",
         "nlw_rls_bypass:fft",
         "nlw_scheduler:tff",
@@ -206,6 +207,7 @@ _EXPECTED_ROLE_LINES = [
     "nlw_membership_admin:fft",
     "nlw_ctx_verifier:fff",
     "nlw_ingest:fff",
+    "nlw_ingest_dispatch:fff",
 ]
 
 
