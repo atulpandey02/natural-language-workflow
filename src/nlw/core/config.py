@@ -234,6 +234,13 @@ class Settings(BaseSettings):
     # it is NOT the external deletion log (a launch gate, owner decision O-3).
     dataset_deletion_log: Literal["none", "local"] = "none"
     dataset_deletion_log_path: str | None = None
+    # Unattended dispatch of lost enqueues (ADR-032, O-7): every interval the
+    # dispatcher re-sends at most ``batch`` waiting requests older than
+    # ``min_age`` (oldest first), each at most once per ``resend``.
+    dataset_dispatch_interval_s: int = Field(default=60, ge=10, le=3600)
+    dataset_dispatch_min_age_s: int = Field(default=120, ge=30, le=3600)
+    dataset_dispatch_resend_s: int = Field(default=600, ge=60, le=6 * 3600)
+    dataset_dispatch_batch: int = Field(default=100, ge=1, le=1000)
     # The backup repository (read only to refuse sharing it with dataset storage).
     backup_restic_repository: str = Field(default="", validation_alias="RESTIC_REPOSITORY")
 
