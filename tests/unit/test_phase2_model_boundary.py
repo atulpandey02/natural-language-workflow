@@ -227,3 +227,19 @@ def test_the_ingest_runtime_imports_no_planner_worker_connector_provider_or_netw
         if any(m == bad or m.startswith(bad + ".") for bad in FORBIDDEN_FOR_INGEST_RUNTIME)
     ]
     assert offenders == []
+
+
+def test_the_api_and_dataset_layers_never_import_the_ingest_runtime_or_profiler() -> None:
+    """ADR-031: the API records requests and enqueues envelopes; it never
+    profiles. No API or dataset-layer module may import the ingest runtime or
+    the profiler (``nlw.ingest_service``, ``nlw.ingest``)."""
+    offenders = [
+        f"{f.relative_to(SRC)}:{m}"
+        for pkg in ("api", "datasets")
+        for f in _files(pkg)
+        for m in _imports(f)
+        if m == "nlw.ingest_service"
+        or m.startswith(("nlw.ingest_service.", "nlw.ingest."))
+        or m == "nlw.ingest"
+    ]
+    assert offenders == []
