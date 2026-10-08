@@ -1,0 +1,50 @@
+# Dataset processing alerts (ADR-032, owner decision O-7).
+#
+# Fed by the dataset dispatcher's aggregate gauges (nlw_dataset_dispatch_*):
+# counts and ages over ALL workspaces, never per workspace, dataset or version.
+#
+# NOT referenced by prometheus.yml yet, and no scrape target exists for the
+# dispatcher: uploads are disabled in staging and production. Wiring this file
+# and the `ingest-dispatch` target into the deployed monitoring is part of
+# owner decision O-6 (enablement). CI validates and unit-tests it with promtool.
+groups:
+  - name: nlw-datasets
+    rules:
+      # A committed processing request has waited more than 15 minutes: the
+      # dispatcher re-sends lost enqueues within minutes, so this means the
+      # ingest runtime is down, saturated or refusing work (e.g. the recovery
+      # lock), or the queue is unreachable.
+      - alert: NlwDatasetProcessingPendingTooLong
+        expr: nlw_dataset_dispatch_oldest_pending_age_seconds > 900
+        for: 5m
+        labels: { severity: warning, component: datasets }
+        annotations:
+          summary: "A dataset upload has waited over 15 minutes for processing"
+          description: >
+            The oldest waiting processing request is over 15 minutes old. Check
+            the ingest runtime, Redis and the recovery lock. Runbook:
+            docs/adr/ADR-032-dataset-ingest-dispatcher.md
+
+      # Requests too old for the consumer cannot be re-sent unattended; an
+      # admin must re-dispatch (POST .../process) to record a fresh request.
+      - alert: NlwDatasetProcessingRequestsExpired
+        expr: nlw_dataset_dispatch_stale > 0
+        for: 15m
+        labels: { severity: warning, component: datasets }
+        annotations:
+          summary: "Dataset processing requests are too old to be re-sent"
+          description: >
+            Waiting versions need an admin re-dispatch (POST .../process). Runbook:
+            docs/adr/ADR-032-dataset-ingest-dispatcher.md
+
+      # The dispatcher is running (its series exists) but has not completed a
+      # cycle for 10 minutes: lost enqueues are no longer being recovered.
+      - alert: NlwDatasetDispatcherStalled
+        expr: time() - nlw_dataset_dispatch_last_success_timestamp_seconds > 600
+        for: 5m
+        labels: { severity: warning, component: datasets }
+        annotations:
+          summary: "The dataset dispatcher has not completed a cycle for 10 minutes"
+          description: >
+            Database, Redis or recovery-lock trouble. Runbook:
+            docs/adr/ADR-032-dataset-ingest-dispatcher.md

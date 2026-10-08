@@ -130,3 +130,24 @@ def test_node_exporter_serves_the_backup_textfile_the_job_writes(tmp_path: Path)
         assert "node_cpu_seconds_total" not in body and "node_filesystem" not in body
     finally:
         _docker("rm", "-f", cid)
+
+
+def test_promtool_unit_tests_prove_the_dataset_processing_alerts() -> None:
+    """ADR-032: pending > 15 min, expired requests and a stalled dispatcher fire;
+    a healthy dispatcher stays silent. (Not wired into prometheus.yml until O-6.)"""
+    res = _docker(
+        "run", "--rm",
+        "-v", f"{ROOT}/docker/prometheus/alerts:/etc/prometheus/alerts:ro",
+        "-v", f"{ROOT}/docker/prometheus/tests:/etc/prometheus/tests:ro",
+        "--entrypoint", "promtool", _image("prometheus"),
+        "test", "rules", "/etc/prometheus/tests/datasets.rules.test.yml",
+    )  # fmt: skip
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "SUCCESS" in res.stdout
+    check = _docker(
+        "run", "--rm",
+        "-v", f"{ROOT}/docker/prometheus/alerts:/etc/prometheus/alerts:ro",
+        "--entrypoint", "promtool", _image("prometheus"),
+        "check", "rules", "/etc/prometheus/alerts/datasets.rules.yml",
+    )  # fmt: skip
+    assert check.returncode == 0 and "SUCCESS: 3 rules found" in check.stdout
