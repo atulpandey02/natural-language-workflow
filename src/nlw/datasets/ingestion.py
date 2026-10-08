@@ -186,8 +186,11 @@ async def store_content(
     try:
         recorded, envelope = await in_context(maker, signer, ctx, record)
     except DatasetConflict as exc:
-        # Different recorded content means our object cannot be this version's
-        # (same key, write-once): the other writer won; nothing to clean up.
+        # Nothing was recorded. CONTENT_CONFLICT: another writer's bytes are
+        # this version's (write-once key). Otherwise the dataset or version
+        # left QUARANTINED while streaming (deletion): it can never record
+        # content again, and an object we linked is removed by the operator
+        # purge of that DELETING version (``verify-objects`` lists it until then).
         raise ContentError(exc.code, 409) from None
     log.info(
         "dataset.content_stored",

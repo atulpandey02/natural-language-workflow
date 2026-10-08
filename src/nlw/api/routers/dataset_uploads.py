@@ -207,9 +207,11 @@ async def upload_content(
     validates the bytes; the API never parses them."""
     ctx = await _short_admin_context(request, credentials, x_workspace_id)
     settings: Settings = request.app.state.settings
-    declared = request.headers.get("content-length")
+    # Advisory only (an early 413): the streamed cap below is authoritative.
+    # ASCII digits only: ``str.isdigit`` also accepts e.g. superscripts.
+    declared = request.headers.get("content-length", "")
     if (
-        declared is not None
+        declared.isascii()
         and declared.isdigit()
         and int(declared) > settings.dataset_max_upload_bytes
     ):
