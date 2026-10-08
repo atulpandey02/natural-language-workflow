@@ -117,11 +117,22 @@ implementation from a trace of the code at `main` `9bc5f74`.
    Lost enqueues (commit succeeded, the broker did not): the `PUT` answers 503
    `PROCESSING_NOT_QUEUED` with the request durable. Recovery is an idempotent
    retry of the `PUT` (it re-sends the same request), `POST …/process`, or the
-   operator sweep `python -m nlw.ops.datasets dispatch-pending`. Delivery is
-   at-least-once; the lease makes processing idempotent. An **unattended**
-   dispatcher is not provided: it needs an identity that may read pending
-   requests across workspaces, which no runtime has (owner decision, listed
-   in the staging checklist).
+   operator sweep `python -m nlw.ops.datasets dispatch-pending` (bounded,
+   oldest first, one at a time). Delivery is at-least-once only once one of
+   these has sent the message. The lease makes processing idempotent.
+
+   An **unattended** dispatcher is not provided, so until then a lost enqueue
+   stays pending indefinitely. This is acceptable only while uploads are
+   disabled. It is O-7, mandatory before O-6; see the decision record in
+   ADR-031.
+
+   Object/database boundary: the object is linked before the record commits,
+   and these are not one transaction.
+   - A failure after the link leaves an unrecorded object. `verify-objects`
+     lists it. Only the identical bytes can adopt it (write-once), and the
+     purge of a `DELETING` version removes it.
+   - A deletion during the stream refuses the record (409); the bytes go with
+     the purge.
 7. **Deletion.** The API requests deletion (`DELETING`, unusable at once; no
    storage I/O in the request). The operator then runs:
    - `python -m nlw.ops.datasets purge`: deletes every object under the

@@ -218,13 +218,46 @@ backup or alerting values.
   durable. Recovery: an idempotent retry of the `PUT` (re-sends the same fresh
   request), `POST …/process` (re-sends it, or records a new one once it is no
   longer fresh), or the operator sweep `python -m nlw.ops.datasets
-  dispatch-pending` (owner credential; ids and counts only).
-- At-least-once delivery, idempotent processing (lease compare-and-set); a
-  duplicate or forged message changes nothing.
-- **Not provided:** an unattended dispatcher. It would need an identity that
-  may read pending requests across workspaces; the scheduler and worker have
-  no dataset access by design. That is an owner decision before uploads are
-  enabled (O-6).
+  dispatch-pending` (owner credential, the same convention as `purge` and
+  `tombstone`; one bounded, oldest-first batch per run, `--limit`; one sweep
+  at a time; ids and counts only).
+- The 503 is not a rollback: the object and the request are committed. The
+  client may retry the identical `PUT` at any time.
+- Delivery is at-least-once **only once a message has been sent**: by the
+  original enqueue, or after an enqueue failure by one of the three recovery
+  actions above. Processing is idempotent (lease compare-and-set); a duplicate
+  or forged message changes nothing. Nothing is exactly-once.
+
+#### O-7: unattended dispatch (decision record, open)
+
+- **Present behavior.** Without an unattended dispatcher, a committed request
+  whose enqueue failed stays pending **indefinitely** until a client retry, an
+  admin re-dispatch or the operator sweep. Redis losing a queued message has
+  the same effect.
+- **Why this is acceptable now.** Only because uploads are disabled in staging
+  and production (configuration refuses the flag and the local store). It is
+  not acceptable for any enabled environment.
+- **Gate.** O-7 must be decided and implemented **before O-6** (enablement).
+  Monitoring must alert on requests pending longer than a defined threshold
+  (proposal: the oldest waiting version's latest request is older than 15
+  minutes, and any request older than `MAX_ENVELOPE_AGE_S` − 1 h, which the
+  consumer would refuse).
+- **Recommended smallest design (not implemented; needs owner approval).** A
+  dedicated, bounded dispatcher on the ingest side of the boundary, not the
+  general scheduler:
+  - its own login role, `nlw_ingest_dispatch`, with `SELECT` on exactly the
+    columns the pending query reads (`dataset_processing_requests` and the
+    status, digest and lease columns of `dataset_versions`), through a
+    `SECURITY DEFINER` function or a narrow RLS policy;
+  - no write, profile, object, key or signing rights;
+  - a periodic loop doing what `dispatch-pending` does: an advisory lock,
+    oldest-first fixed batches, only fresh requests, enqueue only;
+  - recovery-lock aware; metrics for pending count and oldest age;
+  - deployed with the ingest service and refused wherever uploads are refused.
+
+  Giving the scheduler or worker dataset read access is explicitly **not**
+  recommended. It would widen two general-purpose identities to every
+  workspace's dataset metadata.
 
 ### Key protocol and rollout (backward-safe)
 

@@ -17,7 +17,7 @@ A and B is closed by an owner-approved change.
 | O-5 | Retention periods (request → purge → tombstone; tombstones, events, receipts) | The deletion statement cannot be published without them |
 | O-6 | A deliberate code change that allows `DATASETS_API_ENABLED` in staging (and how it is scoped) | The configuration refuses it today |
 | O-1 | **Decided** ([ADR-031](../adr/ADR-031-dataset-ingest-runtime-boundary.md)): processing runs in the dedicated ingest runtime as `nlw_ingest`; the API records requests and enqueues | Enabling it is part of O-6: `nlw_ingest` LOGIN + password, the ingest key prepared and escrowed (four-key attestation, real recovery test), an ingest service in the deployed Compose, and a reviewed rollout path for all of it |
-| O-7 | An unattended dispatcher for lost enqueues: which identity may read pending requests across workspaces (the scheduler and worker have no dataset access by design) | Without it, a lost enqueue is recovered only by a client retry, an admin re-dispatch or the operator `dispatch-pending` sweep; uploads must not be enabled until this is decided or that manual recovery is accepted in writing |
+| O-7 | An unattended dispatcher for lost enqueues. Recommended: a dedicated, bounded, read-only dispatcher identity on the ingest side, **not** the scheduler or worker (decision record in [ADR-031](../adr/ADR-031-dataset-ingest-runtime-boundary.md#o-7-unattended-dispatch-decision-record-open)) | Without it, a committed request whose enqueue failed stays pending **indefinitely** until a client retry, an admin re-dispatch or the operator `dispatch-pending` sweep. This is acceptable only while uploads are disabled. **O-7 is mandatory before O-6.** |
 
 ## B. Engineering that must exist first (blocking)
 
@@ -35,9 +35,12 @@ A and B is closed by an owner-approved change.
 - [ ] A container memory limit and a profiler `RLIMIT_AS` validated on the
       staging host image. The API container is 512 MB; measured peak is about
       16 MB traced for a 24 MB, 200-column file.
-- [ ] Monitoring: an alert for versions stuck in `QUARANTINED`-with-content or
-      `PROFILING` beyond the stale lease (that is, requests no consumer has
-      settled), for refused envelopes, and for purge or verification failures.
+- [ ] Monitoring: an alert on pending requests older than a defined threshold.
+      These are versions stuck in `QUARANTINED`-with-content, or in
+      `PROFILING` beyond the stale lease: requests no consumer has settled.
+      Proposed threshold: 15 minutes, plus any request older than
+      `MAX_ENVELOPE_AGE_S` − 1 h. Also alert on refused envelopes, and on purge
+      or verification failures.
 - [ ] The ingest runtime deployable on staging (O-6): service, key, role
       password, readiness, and the rollout's ingest-key refusal lifted by a
       reviewed protocol change.
