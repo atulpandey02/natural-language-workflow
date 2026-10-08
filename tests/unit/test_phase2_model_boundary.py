@@ -244,3 +244,26 @@ def test_the_api_and_dataset_layers_never_import_the_ingest_runtime_or_profiler(
         or m == "nlw.ingest"
     ]
     assert offenders == []
+
+
+def test_the_dataset_dispatcher_imports_no_runtime_storage_key_or_model_module() -> None:
+    """ADR-032: the dispatcher reads one function and enqueues; it never
+    processes, touches bytes, signs a context or reaches a model or connector."""
+    forbidden = (
+        *FORBIDDEN_FOR_INGEST_RUNTIME,
+        "nlw.ingest_service",
+        "nlw.ingest",
+        "nlw.storage",
+        "nlw.tenancy",
+        "nlw.datasets.service",
+        "nlw.datasets.ingestion",
+    )
+    files = _files("ingest_dispatch")
+    assert files, "the dispatcher package must exist"
+    offenders = [
+        f"{f.relative_to(SRC)}:{m}"
+        for f in files
+        for m in _imports(f)
+        if any(m == bad or m.startswith(bad + ".") for bad in forbidden)
+    ]
+    assert offenders == []
