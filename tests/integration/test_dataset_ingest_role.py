@@ -1456,3 +1456,41 @@ async def test_the_runtime_boots_only_with_its_own_role_key_and_store(
     ):  # fmt: skip
         out = _boot(pg, tmp_path, **env)
         assert "REFUSED" in out.stdout and "BOOT_OK" not in out.stdout, (env, out.stdout)
+
+
+async def test_a_populated_0025_database_upgrades_to_0026_without_rewriting_anything(
+    st: Stack,
+) -> None:
+    """Profiled, quarantined and rejected versions (and their events/profiles)
+    survive 0026 down and up byte-for-byte; 0026 adds, it never rewrites."""
+    d, v = await st.uploaded()
+    await st.process((await st.request(d, v)).to_json())
+    d2, v2 = await st.uploaded()
+    d3, v3 = await st.uploaded(BAD_CSV)
+    await st.process((await st.request(d3, v3)).to_json())
+    tables = ("datasets", "dataset_versions", "dataset_events", "dataset_profiles",
+              "dataset_semantic_revisions")  # fmt: skip
+
+    def snapshot() -> dict[str, str]:
+        with st.owner() as c:
+            return {
+                t: str(c.execute(
+                    f"SELECT md5(coalesce(string_agg(r::text, '|' ORDER BY r::text), '')) "  # noqa: S608
+                    f"FROM {t} r"
+                ).fetchone())
+                for t in tables
+            }  # fmt: skip
+
+    before = snapshot()
+    with st.owner() as c:  # disposable database: remove the ingest key to go down
+        c.execute("DELETE FROM ctx_keys WHERE key_class = 'ingest'")
+    cfg = _cfg(st.pg)
+    command.downgrade(cfg, "0025_dataset_ingestion")
+    assert snapshot() == before  # the populated 0025 state
+    command.upgrade(cfg, "head")
+    assert snapshot() == before  # 0025 -> 0026 rewrote nothing
+    with st.owner() as c:
+        assert c.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "0026_dataset_ingest_role",
+        )
+        assert c.execute("SELECT count(*) FROM pg_policies").fetchone() == (74,)
