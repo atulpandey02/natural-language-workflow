@@ -8,7 +8,7 @@ OWNER credential ``DATABASE_MIGRATION_URL``, exactly like ``python -m nlw.ops.gr
     python -m nlw.ops.datasets purge --dataset <uuid> [--version <uuid>] --operator <name>
     python -m nlw.ops.datasets tombstone --dataset <uuid> [--version <uuid>]
     python -m nlw.ops.datasets verify-objects
-    python -m nlw.ops.datasets dispatch-pending [--dry-run]
+    python -m nlw.ops.datasets dispatch-pending [--dry-run] [--limit N]
 
 ``dispatch-pending`` is the operator recovery sweep for the ingest queue
 (ADR-031): it (re)enqueues the work envelope of every committed, still fresh
@@ -381,26 +381,36 @@ def pending(conn: psycopg.Connection[Any]) -> list[tuple[Any, ...]]:
 
 # --- ingest queue recovery (ADR-031) -------------------------------------------
 
+# The latest request of each waiting version, oldest first, one bounded batch
+# (deterministic order: request time, then version id).
 _SQL_PENDING_REQUESTS = (
-    "SELECT DISTINCT ON (r.version_id) r.id, r.tenant_id, r.dataset_id, r.version_id, "
-    "r.content_sha256, r.envelope_sha256, "
-    "(extract(epoch FROM r.requested_at) * 1000000)::bigint, "
-    "r.requested_at > now() - make_interval(secs => %s) "
+    "SELECT * FROM (SELECT DISTINCT ON (r.version_id) r.id, r.tenant_id, r.dataset_id, "
+    "r.version_id, r.content_sha256, r.envelope_sha256, "
+    "(extract(epoch FROM r.requested_at) * 1000000)::bigint AS requested_at_us, "
+    "r.requested_at > now() - make_interval(secs => %s) AS fresh "
     "FROM dataset_processing_requests r JOIN dataset_versions v "
     "ON v.id = r.version_id AND v.tenant_id = r.tenant_id "
     "WHERE r.content_sha256 = v.content_sha256 AND (v.status = 'QUARANTINED' "
     "OR (v.status = 'PROFILING' AND (v.processing_lease_expires_at IS NULL "
     "OR v.processing_lease_expires_at < now()))) "
-    "ORDER BY r.version_id, r.requested_at DESC"
+    "ORDER BY r.version_id, r.requested_at DESC) latest "
+    "ORDER BY requested_at_us, version_id LIMIT %s"
 )
+SWEEP_BATCH = 500
 
 
-def pending_envelopes(conn: psycopg.Connection[Any]) -> tuple[list[Any], int]:
+def pending_envelopes(
+    conn: psycopg.Connection[Any], *, limit: int = SWEEP_BATCH
+) -> tuple[list[Any], int, bool]:
     """(fresh envelopes to enqueue, count of waiting versions whose latest
-    request is too old for the consumer). Ids and digests only."""
+    request is too old for the consumer, whether more remain beyond ``limit``)
+    for the ``limit`` oldest waiting versions. Ids and digests only."""
     from nlw.datasets.envelope import MAX_ENVELOPE_AGE_S, WorkEnvelope
 
-    rows = conn.execute(_SQL_PENDING_REQUESTS, (MAX_ENVELOPE_AGE_S - 3600,)).fetchall()
+    if not 1 <= limit <= 10_000:
+        raise ValueError("limit must be between 1 and 10000")
+    rows = conn.execute(_SQL_PENDING_REQUESTS, (MAX_ENVELOPE_AGE_S - 3600, limit + 1)).fetchall()
+    more, rows = len(rows) > limit, rows[:limit]
     fresh = [
         WorkEnvelope(
             request_id=r[0],
@@ -414,19 +424,41 @@ def pending_envelopes(conn: psycopg.Connection[Any]) -> tuple[list[Any], int]:
         for r in rows
         if r[7]
     ]
-    return fresh, sum(1 for r in rows if not r[7])
+    return fresh, sum(1 for r in rows if not r[7]), more
+
+
+# One sweep at a time (a session advisory lock): a concurrent sweep reports
+# ``busy=1`` and sends nothing. Overlapping sends would be harmless anyway (the
+# consumer re-verifies every envelope; the lease settles a version once).
+_SQL_SWEEP_LOCK = "SELECT pg_try_advisory_lock(hashtext('nlw.ops.datasets.dispatch_pending'))"
+_SQL_SWEEP_UNLOCK = "SELECT pg_advisory_unlock(hashtext('nlw.ops.datasets.dispatch_pending'))"
 
 
 def dispatch_pending(
-    conn: psycopg.Connection[Any], broker: Any, *, dry_run: bool
+    conn: psycopg.Connection[Any], broker: Any, *, dry_run: bool, limit: int = SWEEP_BATCH
 ) -> dict[str, int]:
+    """Enqueue one bounded batch (the ``limit`` oldest waiting versions);
+    ``more=1`` means run it again. An enqueue failure stops the sweep and
+    raises: nothing in the database changes, so a rerun is always safe."""
     from nlw.datasets.envelope import enqueue_envelope
 
-    fresh, stale = pending_envelopes(conn)
-    if not dry_run:
-        for env in fresh:
-            enqueue_envelope(broker, env)
-    return {"enqueued": 0 if dry_run else len(fresh), "pending": len(fresh), "stale": stale}
+    row = conn.execute(_SQL_SWEEP_LOCK).fetchone()
+    if not (row and row[0]):
+        return {"enqueued": 0, "pending": 0, "stale": 0, "more": 0, "busy": 1}
+    try:
+        fresh, stale, more = pending_envelopes(conn, limit=limit)
+        if not dry_run:
+            for env in fresh:
+                enqueue_envelope(broker, env)
+    finally:
+        conn.execute(_SQL_SWEEP_UNLOCK)
+    return {
+        "enqueued": 0 if dry_run else len(fresh),
+        "pending": len(fresh),
+        "stale": stale,
+        "more": int(more),
+        "busy": 0,
+    }
 
 
 # --- restore validation --------------------------------------------------------
@@ -467,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("verify-objects")
     dp = sub.add_parser("dispatch-pending")
     dp.add_argument("--dry-run", action="store_true")
+    dp.add_argument("--limit", type=int, default=SWEEP_BATCH)
     for name in ("purge", "tombstone"):
         sp = sub.add_parser(name)
         sp.add_argument("--dataset", required=True)
@@ -486,7 +519,7 @@ def main(argv: list[str] | None = None) -> int:
                 from dramatiq.brokers.redis import RedisBroker
 
                 broker = None if args.dry_run else RedisBroker(url=settings.redis_url)  # type: ignore[no-untyped-call]
-                result = dispatch_pending(conn, broker, dry_run=args.dry_run)
+                result = dispatch_pending(conn, broker, dry_run=args.dry_run, limit=args.limit)
                 print(" ".join(f"{k}={v}" for k, v in result.items()))
                 return 0
             if args.cmd == "verify-objects":

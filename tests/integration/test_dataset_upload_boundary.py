@@ -173,7 +173,7 @@ def test_the_operator_sweep_reenqueues_only_waiting_fresh_requests(
     broker = Broker()
     with psycopg.connect(up.pg.owner_libpq, autocommit=True) as c:
         assert ops.dispatch_pending(c, broker, dry_run=True) == {
-            "enqueued": 0, "pending": 1, "stale": 0,
+            "enqueued": 0, "pending": 1, "stale": 0, "more": 0, "busy": 0,
         }  # fmt: skip
         assert broker.sent == []
         assert ops.dispatch_pending(c, broker, dry_run=False)["enqueued"] == 1
