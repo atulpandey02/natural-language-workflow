@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useAcceptInvitation, useMe, useWorkspaces } from "@/lib/api/hooks";
+import { useAcceptInvitation, useFetchFreshWorkspaces, useMe } from "@/lib/api/hooks";
 import { roleLabel } from "@/lib/membership";
 import { hardNavigate, postWorkspaceSelection } from "@/lib/workspace-client";
 import { ApiError } from "@/lib/errors";
@@ -21,10 +21,11 @@ function AcceptInner() {
   const params = useSearchParams();
   const accept = useAcceptInvitation();
   const me = useMe();
-  const workspaces = useWorkspaces();
+  const fetchFreshWorkspaces = useFetchFreshWorkspaces();
 
   const [phase, setPhase] = useState<Phase>("accepting");
   const [result, setResult] = useState<InvitationAcceptedOut | null>(null);
+  const [joinedName, setJoinedName] = useState<string | null>(null);
   const [enterError, setEnterError] = useState(false);
   // Guard against React StrictMode / re-render double invocation: the token is
   // redeemed exactly once.
@@ -46,6 +47,17 @@ function AcceptInner() {
       }
       try {
         const out = await accept.mutateAsync(token);
+        // Resolve the joined workspace's name before showing the confirmation,
+        // from a list fetched after the membership exists. A list fetched (or
+        // still in flight) from before acceptance does not contain it.
+        let name: string | null = null;
+        try {
+          const list = await fetchFreshWorkspaces();
+          name = list.find((w) => w.id === out.workspace_id)?.name ?? null;
+        } catch {
+          // The invitation is already accepted; fall back to generic wording.
+        }
+        setJoinedName(name);
         setResult(out);
         setPhase("accepted");
       } catch (err) {
@@ -64,8 +76,9 @@ function AcceptInner() {
       }
     }
     void run();
-    // Intentionally run once on mount; `accept`/`router`/`params` are stable for
-    // this purpose and the ref prevents a second redemption.
+    // Intentionally run once on mount; `accept`/`router`/`params`/
+    // `fetchFreshWorkspaces` are stable for this purpose and the ref prevents a
+    // second redemption.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -83,8 +96,6 @@ function AcceptInner() {
     // Tenant change → full navigation resets router/RSC + TanStack + client state.
     hardNavigate("/");
   }
-
-  const joined = result ? workspaces.data?.find((w) => w.id === result.workspace_id) : undefined;
 
   return (
     <main className="container" style={{ maxWidth: 520, paddingTop: 48 }}>
@@ -122,8 +133,7 @@ function AcceptInner() {
       {result && (phase === "accepted" || phase === "entering") ? (
         <div className="card" data-testid="invitation-accepted">
           <strong>
-            You&rsquo;ve joined {joined ? joined.name : "the workspace"} as {roleLabel(result.role)}
-            .
+            You&rsquo;ve joined {joinedName ?? "the workspace"} as {roleLabel(result.role)}.
           </strong>
           <p className="muted">
             You can now see its analyses and workflows
