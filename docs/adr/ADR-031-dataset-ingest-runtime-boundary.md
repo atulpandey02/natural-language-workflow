@@ -192,6 +192,7 @@ request an admin really made (which is idempotent), never at anything else.
 | SIGTERM | consumption stops; a message started after the stop flag is re-queued without a lease; in-flight work finishes within the grace period (180 s > profile timeout) |
 | Killed mid-profile | the database-time lease expires (≤ 120 s) and a redelivery reclaims it |
 | Restore under recovery lock, key not verifiable, no dataset store | boot refused (framework-fatal); no consumer starts |
+| A restore lands while the runtime is up | every ingest transaction (claim, renew, publish, reject) consults the recovery lock first: nothing changes, the message is re-queued (60 s) until the operator enables runtimes; in-flight work cannot settle and its lease expires |
 
 ### Secret and key isolation
 
@@ -217,9 +218,10 @@ backup or alerting values.
   keys and the current escrow attestation stays valid.
 - `ctxkeys prepare/install/check/revoke` support `--class ingest`. Existing keys
   are never regenerated or replaced.
-- The rollout **refuses a release that declares an ingest key** (preflight and
-  verify-release) until O-6 makes enablement part of the protocol. This makes the
-  protocol change explicit instead of half-deploying a runtime.
+- The rollout **refuses a release that declares an ingest key** before any phase
+  can run (the `Rollout` cannot even be constructed for it; preflight and
+  verify-release re-check) until O-6 makes enablement part of the protocol. No
+  phase, `prepare-keys` included, can generate, stage or install an ingest key.
 - `prepare-roles` creates dormant `nlw_ingest`; the role gate requires it
   `NOLOGIN`. The policy-count gate expects 74. Restore validation and the
   offboarding inventory include the new table and role.
@@ -244,6 +246,16 @@ backup or alerting values.
   disposable databases only: never downgrade a live environment; fix forward.
 - Staging gains a dormant role and three more privileges-free objects to
   verify, but its runtime set, keys and manifests are unchanged.
+
+### Review notes (pre-existing, not introduced here)
+
+- Every runtime role, `nlw_ingest` included, can execute the pure pgcrypto
+  functions installed in `public` (for the verifier) and holds `CONNECT`/`TEMP`
+  on the database through PUBLIC. None of these reads or writes data.
+- PostgreSQL lets a role change its own session defaults (`ALTER ROLE ... SET`).
+  For `nlw_ingest` this can only fail closed (`row_security = off` turns a
+  filtered query into an error; superuser-only settings are refused), and the
+  rollout/restore checks do not depend on it. Tested.
 
 ### Remaining owner decisions and blockers
 

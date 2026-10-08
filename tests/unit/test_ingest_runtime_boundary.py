@@ -495,3 +495,22 @@ def test_the_ingest_grant_gate_detects_missing_and_excessive_privileges() -> Non
     ):
         with pytest.raises(GateError, match=f"extra {extra}"):
             gates.check_ingest_grants(exact + "\n" + extra)
+
+
+def test_no_rollout_phase_can_run_for_an_ingest_release() -> None:
+    """prepare-keys, stage-release, install-context-keys ... all start from a
+    Rollout; constructing one for an ingest-declaring release is refused, so no
+    phase can generate, replace, stage or install an ingest key."""
+    from nlw.ops.rollout.phases import Rollout
+
+    with pytest.raises(GateError, match="O-6"):
+        Rollout(
+            release=_manifest(**THREE, ingest="stg-ingest-1"),
+            target=None,  # type: ignore[arg-type]  # never reached
+            remote=None,  # type: ignore[arg-type]
+            operator=None,  # type: ignore[arg-type]
+            log=print,
+        )
+    src = (ROOT / "src/nlw/ops/rollout/phases.py").read_text()
+    prepare = src[src.index("def prepare_keys(") : src.index("def _stat_in_container(")]
+    assert "KEY_CLASSES" in prepare and "OPTIONAL" not in prepare and "ingest" not in prepare
