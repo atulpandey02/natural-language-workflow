@@ -521,8 +521,9 @@ def test_no_live_policy_or_helper_trusts_unsigned_gucs(pg_stack: SimpleNamespace
             "WHERE n.nspname='public'"
         ).fetchall()
     # The complete inventory survived the cutover: 51 from 0016 + 2 from 0023
-    # + 8 from 0024 (dataset metadata) + 4 from 0025 (profiles, semantics).
-    assert len(pols) == 65
+    # + 8 from 0024 (dataset metadata) + 4 from 0025 (profiles, semantics)
+    # + 9 from 0026 (ingest boundary: +3 requests, +7 nlw_ingest, -1 API profile insert).
+    assert len(pols) == 74
     offenders = [
         f"{t}.{n}" for n, t, q, w in pols if "app.user_id" in q + w or "app.tenant_id" in q + w
     ]
@@ -539,6 +540,14 @@ def test_no_live_policy_or_helper_trusts_unsigned_gucs(pg_stack: SimpleNamespace
     ]
     assert helper_offenders == []
     # Every policy references a signed accessor or a signed helper.
-    signed = ("ctx_user_id", "ctx_tenant_id", "ctx_run_id", "ctx_purpose", "is_current_user_")
+    signed = (
+        "ctx_user_id",
+        "ctx_tenant_id",
+        "ctx_run_id",
+        "ctx_purpose",
+        "is_current_user_",
+        "ctx_ingest_tenant_id",  # 0026 (ADR-031): verified dataset_ingest claims only
+        "ctx_ingest_version_id",
+    )
     unsigned = [f"{t}.{n}" for n, t, q, w in pols if not any(s in q + w for s in signed)]
     assert unsigned == []

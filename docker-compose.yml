@@ -58,6 +58,9 @@ services:
       NLW_APP_DB_PASSWORD: ${NLW_APP_DB_PASSWORD:-nlw_app}
       NLW_WORKER_DB_PASSWORD: ${NLW_WORKER_DB_PASSWORD:-nlw_worker}
       NLW_SCHEDULER_DB_PASSWORD: ${NLW_SCHEDULER_DB_PASSWORD:-nlw_scheduler}
+      # Makes nlw_ingest a LOGIN role on a fresh dev volume (ADR-031); without it
+      # initdb creates the role dormant (NOLOGIN), as staging/production keep it.
+      NLW_INGEST_DB_PASSWORD: ${NLW_INGEST_DB_PASSWORD:-nlw_ingest}
     # Published on 5433 to avoid colliding with a native Postgres on 5432.
     # In-cluster services still reach it at postgres:5432.
     ports:
@@ -168,6 +171,49 @@ services:
       retries: 5
       start_period: 15s
 
+  # Dataset ingest runtime (ADR-031). OPT-IN: `docker compose --profile ingest up`.
+  # Consumes ONLY the dataset_ingest queue as the least-privilege nlw_ingest role,
+  # signing with the ingest key only. Deliberately NOT built from x-app-env: it
+  # receives no owner/migration credential, no Supabase or LLM settings, no
+  # demo-tools flag and no worker secrets file — only its database URL, Redis,
+  # its key and the dataset storage it profiles. No published port. There is no
+  # ingest service in the staging/production Compose until owner decision O-6.
+  ingest:
+    build: .
+    <<: *app-hardening
+    profiles: ["ingest"]
+    # tini as PID 1 forwards SIGTERM: Dramatiq stops consuming, in-flight work
+    # finishes within the grace period (profile timeout + margin) or its
+    # database-time lease expires and a redelivery reclaims it.
+    init: true
+    command:
+      ["dramatiq", "nlw.ingest_service.actors", "--queues", "dataset_ingest",
+       "--processes", "1", "--threads", "1"]
+    stop_grace_period: 180s
+    environment:
+      APP_ENV: local
+      LOG_LEVEL: info
+      DATABASE_URL: postgresql+psycopg://nlw_ingest:${NLW_INGEST_DB_PASSWORD:-nlw_ingest}@postgres:5432/nlw
+      REDIS_URL: redis://redis:6379/0
+      NLW_CTX_KEY_ID: ${NLW_CTX_INGEST_KEY_ID:-dev-ingest}
+      NLW_CTX_KEY_FILE: /run/nlw/keys/ingest.key
+      DATASET_STORAGE_BACKEND: local
+      DATASET_STORAGE_ROOT: /var/lib/nlw/datasets
+    volumes:
+      - ./docker/ctx-keys/ingest.key:/run/nlw/keys/ingest.key:ro
+      - datasets:/var/lib/nlw/datasets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "nlw.ops.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   # Next.js frontend + BFF (M10). The browser talks only to this service; its
   # server-side BFF injects the bearer token + X-Workspace-Id and calls the API
   # internally. Published on 3000 for local dev.
@@ -191,3 +237,5 @@ services:
 
 volumes:
   pgdata:
+  # Dataset objects for the local ingest runtime (development only; ADR-030/031).
+  datasets:

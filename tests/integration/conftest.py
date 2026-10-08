@@ -49,6 +49,9 @@ def _bootstrap_roles(owner_libpq: str, db: str) -> None:
             "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_scheduler') THEN "
             "CREATE ROLE nlw_scheduler LOGIN PASSWORD 'nlw_scheduler' "
             "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; "
+            "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_ingest') THEN "
+            "CREATE ROLE nlw_ingest LOGIN PASSWORD 'nlw_ingest' "
+            "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; "
             "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_rls_bypass') THEN "
             "CREATE ROLE nlw_rls_bypass NOLOGIN NOSUPERUSER BYPASSRLS "
             "NOCREATEDB NOCREATEROLE; END IF; "
@@ -125,6 +128,7 @@ def pg_stack(request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
         app_sa = _sqlalchemy("nlw_app", "nlw_app", host, port, db)
         worker_sa = _sqlalchemy("nlw_worker", "nlw_worker", host, port, db)
         scheduler_sa = _sqlalchemy("nlw_scheduler", "nlw_scheduler", host, port, db)
+        ingest_sa = _sqlalchemy("nlw_ingest", "nlw_ingest", host, port, db)
 
         _bootstrap_roles(owner_libpq, db)
 
@@ -141,7 +145,7 @@ def pg_stack(request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
         # and written to 0600 files so each role's Settings points at ITS key file.
         # These keys exist only for this container's lifetime; nothing is committed.
         keys_dir = Path(tempfile.mkdtemp(prefix="nlw-ctx-keys-"))
-        key_hex = {c: generate_test_key() for c in ("api", "worker", "scheduler")}
+        key_hex = {c: generate_test_key() for c in ("api", "worker", "scheduler", "ingest")}
         key_ids = {c: f"test-{c}-{uuid.uuid4().hex[:8]}" for c in key_hex}
         key_files: dict[str, Path] = {}
         with psycopg.connect(owner_libpq, autocommit=True) as conn:
@@ -150,6 +154,8 @@ def pg_stack(request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
                 path.write_text(hx)
                 path.chmod(0o600)
                 key_files[cls] = path
+                if cls == "ingest":
+                    continue  # registered on demand: enable_ingest() (below)
                 install_key(
                     conn,
                     key_class=cls,
@@ -170,6 +176,9 @@ def pg_stack(request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
             ),
             Purpose.SCHEDULER_RECONCILE: signer_from_material(
                 Purpose.SCHEDULER_RECONCILE, key_ids["scheduler"], key_hex["scheduler"]
+            ),
+            Purpose.DATASET_INGEST: signer_from_material(
+                Purpose.DATASET_INGEST, key_ids["ingest"], key_hex["ingest"]
             ),
         }
         # Engine/scheduler code paths look up the process-wide signer (as the real
@@ -194,6 +203,21 @@ def pg_stack(request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
                 # are enabled EXPLICITLY (unset = hidden from planning, fail closed).
                 demo_tools_enabled=True,
             )
+
+        def enable_ingest() -> None:
+            """Register the ingest key (ADR-031), as the operator would when the
+            ingest runtime is enabled. Until then every dataset_ingest context
+            fails closed — which is also what lets the downgrade tests run
+            (migration 0026 refuses to downgrade with an ingest key registered)."""
+            with psycopg.connect(owner_libpq, autocommit=True) as conn:
+                install_key(
+                    conn,
+                    key_class="ingest",
+                    key_id=key_ids["ingest"],
+                    secret=SecretBytes(bytes.fromhex(key_hex["ingest"])),
+                    activate_at=None,
+                    actor="pg_stack",
+                )
 
         def sign(purpose: Purpose, **ids: uuid.UUID | None) -> SignedContext:
             """Mint a valid signed context for ``purpose`` (test helper)."""
@@ -294,15 +318,19 @@ def pg_stack(request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
                 settings=_settings(app_sa, "api"),
                 worker_settings=_settings(worker_sa, "worker"),
                 scheduler_settings=_settings(scheduler_sa, "scheduler"),
+                ingest_settings=_settings(ingest_sa, "ingest"),
+                ingest_sa=ingest_sa,
                 owner_libpq=owner_libpq,
                 owner_sa=owner_sa,
                 app_libpq=_libpq("nlw_app", "nlw_app", host, port, db),
                 worker_libpq=_libpq("nlw_worker", "nlw_worker", host, port, db),
                 scheduler_libpq=_libpq("nlw_scheduler", "nlw_scheduler", host, port, db),
+                ingest_libpq=_libpq("nlw_ingest", "nlw_ingest", host, port, db),
                 seed_user=seed_user,
                 seed_member=seed_member,
                 grant_workspace_creation=grant_workspace_creation,
                 add_membership=add_membership,
+                enable_ingest=enable_ingest,
                 # Signed-context test helpers (P3B)
                 signers=signers,
                 key_ids=key_ids,

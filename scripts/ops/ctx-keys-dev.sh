@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Provision TEST/DEV signed-context keys for the local Compose stack (M11.5 P3B).
 #
-# Generates one random 32-byte key per runtime class (api / worker / scheduler)
-# into docker/ctx-keys/<class>.key (git-ignored), then installs them into the
+# Generates one random 32-byte key per runtime class (api / worker / scheduler /
+# ingest, ADR-031) into docker/ctx-keys/<class>.key (git-ignored), then installs them into the
 # running Compose Postgres via the one-shot installer (`python -m nlw.ctxkeys
 # install`), using the OWNER credential that only the dev/migration path holds.
 # Idempotent per key id.
@@ -40,7 +40,7 @@ if [ -e "$KEYS_DIR" ] && [ ! -w "$KEYS_DIR" ]; then
 fi
 mkdir -p "$KEYS_DIR"
 
-for cls in api worker scheduler; do
+for cls in api worker scheduler ingest; do
   f="$KEYS_DIR/$cls.key"
   if [ -d "$f" ]; then
     echo "ERROR: $f is a directory (auto-created by a bind mount before the key existed)." >&2
@@ -55,10 +55,12 @@ for cls in api worker scheduler; do
 done
 [ "$GENERATE_ONLY" -eq 1 ] && { echo "ctx keys generated (not installed)"; exit 0; }
 
-# Key ids default to the Compose defaults (dev-api / dev-worker / dev-scheduler).
+# Key ids default to the Compose defaults (dev-api / dev-worker / dev-scheduler /
+# dev-ingest).
 API_ID="${NLW_CTX_API_KEY_ID:-dev-api}"
 WORKER_ID="${NLW_CTX_WORKER_KEY_ID:-dev-worker}"
 SCHED_ID="${NLW_CTX_SCHEDULER_KEY_ID:-dev-scheduler}"
+INGEST_ID="${NLW_CTX_INGEST_KEY_ID:-dev-ingest}"
 
 # Install via the api image (it has the package + owner URL in dev app-env). The
 # key files are bind-mounted read-only into a throwaway container; nothing is
@@ -74,4 +76,5 @@ install() {
 install api "$API_ID"
 install worker "$WORKER_ID"
 install scheduler "$SCHED_ID"
-echo "ctx keys installed: $API_ID / $WORKER_ID / $SCHED_ID"
+install ingest "$INGEST_ID"
+echo "ctx keys installed: $API_ID / $WORKER_ID / $SCHED_ID / $INGEST_ID"

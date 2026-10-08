@@ -170,3 +170,40 @@ def test_planner_capability_view_has_no_dataset_route_or_tool() -> None:
 
     names = [t.name for t in REGISTRY.all()]
     assert not [n for n in names if "dataset" in n.lower()]
+
+
+# ADR-031: the ingest RUNTIME (``nlw.ingest_service``) may use the database and
+# the storage abstraction (it is the processing service), but never the planner,
+# tools, connectors, the workflow engine, the worker, the API, the scheduler,
+# the secret store, a model provider, HTTP or a query engine. ``nlw.ingest``
+# itself stays the pure profiler (checked above).
+FORBIDDEN_FOR_INGEST_RUNTIME = (
+    "nlw.planner",
+    "nlw.feasibility",
+    "nlw.registry",
+    "nlw.tools",
+    "nlw.connectors",
+    "nlw.engine",
+    "nlw.worker",
+    "nlw.api",
+    "nlw.scheduler",
+    "nlw.secrets",
+    "anthropic",
+    "httpx",
+    "requests",
+    "urllib",
+    "sqlglot",
+    "duckdb",
+)
+
+
+def test_the_ingest_runtime_imports_no_planner_worker_connector_provider_or_network() -> None:
+    files = _files("ingest_service")
+    assert files, "the ingest runtime package must exist"
+    offenders = [
+        f"{f.relative_to(SRC)}:{m}"
+        for f in files
+        for m in _imports(f)
+        if any(m == bad or m.startswith(bad + ".") for bad in FORBIDDEN_FOR_INGEST_RUNTIME)
+    ]
+    assert offenders == []

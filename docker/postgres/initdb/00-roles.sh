@@ -75,3 +75,20 @@ GRANT nlw_workspace_bootstrap TO nlw;
 GRANT nlw_membership_admin TO nlw;
 GRANT nlw_ctx_verifier TO nlw;
 SQL
+
+# Dataset ingest runtime role (ADR-031). DORMANT by default: without
+# NLW_INGEST_DB_PASSWORD it is created NOLOGIN (staging/production keep it so
+# until owner decision O-6). Development, CI and E2E supply a password to run
+# the ingest service. Same rules as above: never superuser, never BYPASSRLS,
+# never a member of anything; its privileges come from migration 0026 only.
+if [ -n "${NLW_INGEST_DB_PASSWORD:-}" ]; then
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'SQL'
+\getenv ingest_pw NLW_INGEST_DB_PASSWORD
+CREATE ROLE nlw_ingest LOGIN PASSWORD :'ingest_pw'
+    NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
+SQL
+else
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'SQL'
+CREATE ROLE nlw_ingest NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
+SQL
+fi

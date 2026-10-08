@@ -217,9 +217,11 @@ def test_populated_0024_upgrades_without_rewriting_anything(
     command.upgrade(at_0024, "head")
     assert snapshot() == before
     after = _posture(pg_stack)
+    # Upgraded to head: 0025 and the ingest boundary 0026 (ADR-031), still
+    # rewriting nothing.
     assert after == {
-        "revision": "0025_dataset_ingestion",
-        "policies": 65,
+        "revision": "0026_dataset_ingest_role",
+        "policies": 74,
         "tables": 2,
         "column": 1,
         "guard_has_ingest_rules": True,
@@ -257,6 +259,14 @@ def test_0025_goes_down_and_up_with_the_documented_down_state(
 # --- grants -----------------------------------------------------------------------------
 
 
+# Since 0026 (ADR-031) the API reads profiles but only the ingest runtime records
+# them; semantic confirmation stays the admin's and the ingest role has none of it.
+_EXPECTED_GRANTS = {
+    "dataset_profiles": {"nlw_app": {"SELECT"}, "nlw_ingest": {"SELECT", "INSERT"}},
+    "dataset_semantic_revisions": {"nlw_app": {"SELECT", "INSERT"}, "nlw_ingest": set()},
+}
+
+
 @pytest.mark.parametrize("table", ["dataset_profiles", "dataset_semantic_revisions"])
 def test_grants_are_minimal_for_every_role(pg_stack: SimpleNamespace, table: str) -> None:
     with _owner(pg_stack) as c:
@@ -268,9 +278,9 @@ def test_grants_are_minimal_for_every_role(pg_stack: SimpleNamespace, table: str
             assert row is not None
             return bool(row[0])
 
-        assert can("nlw_app", "SELECT") and can("nlw_app", "INSERT")
-        for priv in ("UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"):
-            assert not can("nlw_app", priv), priv
+        privs = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
+        for role, want in _EXPECTED_GRANTS[table].items():
+            assert {p for p in privs if can(role, p)} == want, role
         for role in ("nlw_worker", "nlw_scheduler"):
             for priv in ("SELECT", "INSERT", "UPDATE", "DELETE"):
                 assert not can(role, priv), (role, priv)
@@ -282,7 +292,7 @@ def test_grants_are_minimal_for_every_role(pg_stack: SimpleNamespace, table: str
         assert public == (0,)
         assert c.execute(
             "SELECT count(*) FROM pg_policies "
-            "WHERE tablename = %s AND NOT ('nlw_app' = ANY(roles))",
+            "WHERE tablename = %s AND NOT (roles <@ ARRAY['nlw_app', 'nlw_ingest']::name[])",
             (table,),
         ).fetchone() == (0,)
 

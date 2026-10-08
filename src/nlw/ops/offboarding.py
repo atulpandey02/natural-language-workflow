@@ -99,6 +99,13 @@ TABLES: dict[str, TableClass] = {
         "tenant_id",
         "operator tombstone scrubs the mapping (revision numbers and actors kept)",
     ),
+    # ADR-031: immutable processing requests (ids, digests, requester, time only;
+    # no names, filenames, keys or content).
+    "dataset_processing_requests": TableClass(
+        "dataset_metadata",
+        "tenant_id",
+        "retain with the version (ids and digests only); period is a pilot proposal",
+    ),
     "plan_outcome_events": TableClass(
         "audit", "tenant_id", "retain (codes only); proposed 13 months, not yet approved"
     ),

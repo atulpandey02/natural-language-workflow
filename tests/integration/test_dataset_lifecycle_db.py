@@ -837,6 +837,16 @@ def test_rls_is_forced_and_no_security_definer_function_was_added(
             "SELECT tablename, policyname, roles::text, cmd FROM pg_policies "
             "WHERE tablename IN ('datasets','dataset_versions','dataset_events')"
         ).fetchall()
-        assert len(policies) == 8
-        assert {p[2] for p in policies} == {"{nlw_app}"}
+        # 8 for the API (0024) + 5 for the ingest runtime (0026, ADR-031): read its
+        # one version's dataset/version/events, update that version, write its event.
+        by_role = sorted((p[2], p[0], p[3]) for p in policies)
+        assert len([r for r in by_role if r[0] == "{nlw_app}"]) == 8
+        assert [r for r in by_role if r[0] == "{nlw_ingest}"] == [
+            ("{nlw_ingest}", "dataset_events", "INSERT"),
+            ("{nlw_ingest}", "dataset_events", "SELECT"),
+            ("{nlw_ingest}", "dataset_versions", "SELECT"),
+            ("{nlw_ingest}", "dataset_versions", "UPDATE"),
+            ("{nlw_ingest}", "datasets", "SELECT"),
+        ]
+        assert len(policies) == 13
         assert not [p for p in policies if p[3] == "DELETE"]

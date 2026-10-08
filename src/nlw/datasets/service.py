@@ -1,16 +1,19 @@
 """Deterministic dataset lifecycle operations (ADR-029), metadata only.
 
 Every function runs inside the caller's transaction, which must already carry a
-signed request context for ``tenant_id`` (RLS then confines it to that
-workspace; the explicit ``tenant_id`` predicates are defence in depth). Locks are
-always taken dataset-row first, then version rows, so concurrent operations on a
-dataset serialize without deadlock. Every state change is a compare-and-set
+signed context for ``tenant_id`` (RLS then confines it to that workspace; the
+explicit ``tenant_id`` predicates are defence in depth): an ``api_request``
+context for the API operations, a ``dataset_ingest`` context for the processing
+primitives (lease, publish, reject), which only the ingest runtime may perform
+(ADR-031). Locks are always taken dataset-row first, then version rows, so
+concurrent operations on a dataset serialize without deadlock; the processing
+primitives lock only their version row. Every state change is a compare-and-set
 ``UPDATE ... WHERE status = <expected>`` and appends exactly one
 ``dataset_events`` row in the same transaction. The database re-checks every
 rule (migration ``0024_dataset_lifecycle``).
 
 Nothing here reads or writes file bytes, storage objects or rows of customer
-data (``nlw.datasets.ingestion`` does that around these calls), and nothing here
+data (``nlw.ingest_service.processing`` does that around these calls), and nothing here
 is reachable from the planner.
 """
 
@@ -828,7 +831,10 @@ async def publish_profile(
     Only the CURRENT lease owner can publish (``LEASE_LOST`` otherwise, and the
     profile insert is rolled back). The database refuses PROFILED without this
     profile, without a live lease, and any other key move."""
-    dataset = await get_dataset(session, tenant_id, dataset_id, for_update=True)
+    # Processing runs as nlw_ingest (ADR-031), which may not lock the dataset
+    # row (no UPDATE on datasets). The version compare-and-set below is the
+    # serialization point: a concurrent deletion moves the version first.
+    dataset = await get_dataset(session, tenant_id, dataset_id, for_update=False)
     if dataset.status is not DatasetStatus.ACTIVE:
         raise DatasetConflict("the dataset is being deleted", "DATASET_NOT_ACTIVE")
     version = await get_version(session, tenant_id, dataset_id, version_id, for_update=True)
@@ -992,7 +998,10 @@ async def acquire_processing_lease(
     claimants can never both succeed."""
     if not 0 < ttl_s <= MAX_LEASE_TTL_S:
         raise ValueError("lease ttl out of range")
-    dataset = await get_dataset(session, tenant_id, dataset_id, for_update=True)
+    # Processing runs as nlw_ingest (ADR-031), which may not lock the dataset
+    # row (no UPDATE on datasets). The version compare-and-set below is the
+    # serialization point: a concurrent deletion moves the version first.
+    dataset = await get_dataset(session, tenant_id, dataset_id, for_update=False)
     if dataset.status is not DatasetStatus.ACTIVE:
         raise DatasetConflict("the dataset is being deleted", "DATASET_NOT_ACTIVE")
     params = {"tok": token, "ttl": ttl_s, "v": version_id, "d": dataset_id, "t": tenant_id}
@@ -1049,7 +1058,10 @@ async def reject_processing(
     rejection_code: RejectionCode,
 ) -> VersionRecord:
     """PROFILING -> REJECTED by the CURRENT lease owner only (one event)."""
-    dataset = await get_dataset(session, tenant_id, dataset_id, for_update=True)
+    # Processing runs as nlw_ingest (ADR-031), which may not lock the dataset
+    # row (no UPDATE on datasets). The version compare-and-set below is the
+    # serialization point: a concurrent deletion moves the version first.
+    dataset = await get_dataset(session, tenant_id, dataset_id, for_update=False)
     if dataset.status is not DatasetStatus.ACTIVE:
         raise DatasetConflict("the dataset is being deleted", "DATASET_NOT_ACTIVE")
     row = (

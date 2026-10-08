@@ -3,13 +3,16 @@
 Fresh volumes get every role from ``docker/postgres/initdb/00-roles.sh``. A
 database created before P3A/P3B lacks ``nlw_membership_admin`` and
 ``nlw_ctx_verifier``; migration 0015/0016 then fails because they own objects.
-This module creates ONLY those two NOLOGIN roles with their exact attributes,
-verifies every other nlw role still has the attributes the security model
-expects, and fails on any incompatible existing role instead of altering it.
-It grants nothing on application tables — that belongs to the migrations.
+A database created before ADR-031 lacks ``nlw_ingest``; migration 0026 grants
+to it. This module creates ONLY those roles, NOLOGIN, with their exact
+attributes (``nlw_ingest`` stays a dormant NOLOGIN runtime role until it is
+explicitly enabled, owner decision O-6), verifies every other nlw role still has
+the attributes the security model expects, and fails on any incompatible
+existing role instead of altering it. It grants nothing on application tables —
+that belongs to the migrations.
 
     python -m nlw.ops.roles verify   # read-only; exit 0 iff the model holds
-    python -m nlw.ops.roles ensure   # create the two missing roles, then verify
+    python -m nlw.ops.roles ensure   # create the missing roles, then verify
 
 Runs with the owner/migration credential (``DATABASE_MIGRATION_URL``), e.g.
 through the Compose ``migrate`` service, never with a runtime role.
@@ -47,11 +50,20 @@ EXPECTED: dict[str, RoleModel] = {
     "nlw_workspace_bootstrap": RoleModel(False, False, True),
     "nlw_membership_admin": RoleModel(False, False, True),
     "nlw_ctx_verifier": RoleModel(False, False, False),
+    # Dormant ingest runtime (ADR-031): NOLOGIN until enabled (O-6).
+    "nlw_ingest": RoleModel(False, False, False),
 }
-# Only these may be CREATED here (the P3A/P3B owners); all others must pre-exist.
-PROVISIONABLE = ("nlw_membership_admin", "nlw_ctx_verifier")
+# The ONE other model a role may have: an ENABLED ingest runtime (a LOGIN role,
+# as development/CI create it from NLW_INGEST_DB_PASSWORD). Still never
+# superuser/bypassrls/createdb/createrole. Deployed gates are stricter.
+ENABLED_VARIANTS: dict[str, RoleModel] = {"nlw_ingest": RoleModel(True, False, False)}
+# The NOLOGIN object owners this module may create (P3A/P3B) ...
+OWNER_PROVISIONABLE = ("nlw_membership_admin", "nlw_ctx_verifier")
+# ... and the dormant runtime role (ADR-031). All others must pre-exist.
+PROVISIONABLE = (*OWNER_PROVISIONABLE, "nlw_ingest")
 # The owner must be a member of each NOLOGIN owner role to (re)assign ownership.
-OWNER_MEMBER_OF = ("nlw_rls_bypass", "nlw_workspace_bootstrap", *PROVISIONABLE)
+# Never of a runtime role.
+OWNER_MEMBER_OF = ("nlw_rls_bypass", "nlw_workspace_bootstrap", *OWNER_PROVISIONABLE)
 _CREATE_SQL = {
     "nlw_membership_admin": (
         "CREATE ROLE nlw_membership_admin NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE"
@@ -59,11 +71,64 @@ _CREATE_SQL = {
     "nlw_ctx_verifier": (
         "CREATE ROLE nlw_ctx_verifier NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE"
     ),
+    "nlw_ingest": (
+        "CREATE ROLE nlw_ingest NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT"
+    ),
 }
 
 
 class RoleProvisioningError(RuntimeError):
     pass
+
+
+# The EXACT explicit privileges of the ingest runtime role (migration 0026,
+# ADR-031): "<table>:<PRIV>" for table grants, "<table>:<PRIV>:<column>" for
+# column grants. Anything missing or extra is a deployment error (rollout gate,
+# restore validation). Read with ``INGEST_GRANTS_SQL`` (catalog ACLs only, so
+# privileges implied by a table grant are not double-counted).
+EXPECTED_INGEST_GRANTS: frozenset[str] = frozenset(
+    {
+        "datasets:SELECT",
+        "dataset_versions:SELECT",
+        "dataset_profiles:SELECT",
+        "dataset_profiles:INSERT",
+        "dataset_events:SELECT",
+        "dataset_events:INSERT",
+        "dataset_processing_requests:SELECT",
+        *(
+            f"dataset_versions:UPDATE:{c}"
+            for c in (
+                "status",
+                "processing_lease_token",
+                "processing_lease_expires_at",
+                "storage_object_key",
+                "rejection_code",
+            )
+        ),
+        *(
+            f"dr_restore_events:SELECT:{c}"
+            for c in ("id", "restored_at", "validation_completed_at", "runtime_enabled_at")
+        ),
+    }
+)
+INGEST_GRANTS_SQL = (
+    "SELECT c.relname || ':' || a.privilege_type FROM pg_class c "
+    "CROSS JOIN LATERAL aclexplode(c.relacl) a JOIN pg_roles r ON r.oid = a.grantee "
+    "WHERE r.rolname = 'nlw_ingest' AND c.relnamespace = 'public'::regnamespace "
+    "UNION ALL "
+    "SELECT c.relname || ':' || a.privilege_type || ':' || att.attname FROM pg_attribute att "
+    "JOIN pg_class c ON c.oid = att.attrelid "
+    "CROSS JOIN LATERAL aclexplode(att.attacl) a JOIN pg_roles r ON r.oid = a.grantee "
+    "WHERE r.rolname = 'nlw_ingest' AND c.relnamespace = 'public'::regnamespace "
+    "ORDER BY 1"
+)
+
+
+def ingest_grant_problems(actual: set[str]) -> list[str]:
+    """Missing and excessive ingest privileges (empty == exact)."""
+    problems = [f"nlw_ingest missing {g}" for g in sorted(EXPECTED_INGEST_GRANTS - actual)]
+    problems += [f"nlw_ingest has extra {g}" for g in sorted(actual - EXPECTED_INGEST_GRANTS)]
+    return problems
 
 
 def _libpq(url: str) -> str:
@@ -109,7 +174,7 @@ def verify_roles(conn: psycopg.Connection, *, require_all: bool) -> list[str]:
                 continue
             problems.append(f"{name}: missing")
             continue
-        if got != want:
+        if got != want and got != ENABLED_VARIANTS.get(name):
             problems.append(f"{name}: attributes {got} != expected {want} (refusing to alter)")
     for name in roles:
         if name not in EXPECTED:
@@ -128,8 +193,9 @@ def verify_roles(conn: psycopg.Connection, *, require_all: bool) -> list[str]:
 
 
 def ensure_roles(conn: psycopg.Connection) -> list[str]:
-    """Create the missing provisionable roles (idempotent) and grant them to the
-    owner; then verify the whole model. Returns the names created."""
+    """Create the missing provisionable roles (idempotent), grant the owner roles
+    to the owner (never the runtime role); then verify the whole model. Returns
+    the names created."""
     pre = verify_roles(conn, require_all=False)
     if pre:
         raise RoleProvisioningError("existing role model is incompatible: " + "; ".join(pre))
@@ -141,6 +207,8 @@ def ensure_roles(conn: psycopg.Connection) -> list[str]:
             if name not in roles:
                 conn.execute(_CREATE_SQL[name])
                 created.append(name)
+            if name not in OWNER_PROVISIONABLE:
+                continue
             # GRANT is idempotent (NOTICE if already a member). Identifiers are
             # composed, never interpolated (platform SQL-injection guard).
             conn.execute(
@@ -155,7 +223,9 @@ def ensure_roles(conn: psycopg.Connection) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="nlw.ops.roles")
     p.add_argument("cmd", choices=("verify", "ensure"))
-    p.add_argument("--require-all", action="store_true", help="verify: P3A/P3B roles must exist")
+    p.add_argument(
+        "--require-all", action="store_true", help="verify: provisionable roles must exist"
+    )
     a = p.parse_args(argv)
     url = os.environ.get("DATABASE_MIGRATION_URL", "")
     if not url:
