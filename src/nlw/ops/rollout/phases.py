@@ -173,6 +173,9 @@ class Rollout:
         receipt: ProvenanceReceipt | None = None,
         resolve: Resolver = resolve_ipv4,
     ) -> None:
+        # ADR-031: a release declaring an ingest key is refused before ANY phase
+        # (prepare-keys included) can generate, stage or install anything for it.
+        gates.check_ingest_not_declared(release)
         self.release = release
         self.resolve = resolve  # injectable: tests never touch real DNS
         self.target = target
