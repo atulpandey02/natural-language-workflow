@@ -153,15 +153,36 @@ FORBIDDEN_FOR_DATASETS = (
 )
 
 
+# ADR-030/031: ``nlw.datasets.ingestion`` is the ONE dataset module that touches
+# bytes, through the storage abstraction only (the profiler belongs to the
+# ingest runtime). Every other rule still applies to it, and every other
+# dataset module stays byte-free.
+BYTE_MODULES = {"datasets/ingestion.py"}
+BYTE_PACKAGES = ("nlw.storage",)
+
+
 def test_dataset_metadata_imports_no_planner_provider_storage_or_query_engine() -> None:
-    offenders = [
-        f"{f.relative_to(SRC)}:{m}"
-        for f in _files("datasets")
-        for m in _imports(f)
-        if any(m == bad or m.startswith(bad + ".") for bad in FORBIDDEN_FOR_DATASETS)
-    ]
+    offenders = []
+    for f in _files("datasets"):
+        rel = str(f.relative_to(SRC))
+        for m in _imports(f):
+            for bad in FORBIDDEN_FOR_DATASETS:
+                if not (m == bad or m.startswith(bad + ".")):
+                    continue
+                if rel in BYTE_MODULES and bad in BYTE_PACKAGES:
+                    continue
+                offenders.append(f"{rel}:{m}")
     assert _files("datasets"), "the dataset package must exist"
     assert offenders == []
+
+
+def test_only_the_ingestion_module_reads_bytes() -> None:
+    users = sorted(
+        str(f.relative_to(SRC))
+        for f in _files("datasets")
+        if any(m.startswith(BYTE_PACKAGES) for m in _imports(f))
+    )
+    assert users == sorted(BYTE_MODULES)
 
 
 def test_planner_capability_view_has_no_dataset_route_or_tool() -> None:
@@ -205,5 +226,21 @@ def test_the_ingest_runtime_imports_no_planner_worker_connector_provider_or_netw
         for f in files
         for m in _imports(f)
         if any(m == bad or m.startswith(bad + ".") for bad in FORBIDDEN_FOR_INGEST_RUNTIME)
+    ]
+    assert offenders == []
+
+
+def test_the_api_and_dataset_layers_never_import_the_ingest_runtime_or_profiler() -> None:
+    """ADR-031: the API records requests and enqueues envelopes; it never
+    profiles. No API or dataset-layer module may import the ingest runtime or
+    the profiler (``nlw.ingest_service``, ``nlw.ingest``)."""
+    offenders = [
+        f"{f.relative_to(SRC)}:{m}"
+        for pkg in ("api", "datasets")
+        for f in _files(pkg)
+        for m in _imports(f)
+        if m == "nlw.ingest_service"
+        or m.startswith(("nlw.ingest_service.", "nlw.ingest."))
+        or m == "nlw.ingest"
     ]
     assert offenders == []

@@ -49,6 +49,17 @@ stored under `docs/ops/dr-drills/`.
 
 ## Dependencies outside this RPO/RTO
 
+- **Uploaded dataset objects** (Phase 2B, [ADR-030](../adr/ADR-030-csv-ingestion-and-profiling.md);
+  development only today) live in the dataset object store, **not** in the
+  PostgreSQL backup. A database restore brings back dataset metadata, profiles,
+  semantic confirmations and lifecycle events, but **no file bytes**. After any
+  restore, run `python -m nlw.ops.datasets verify-objects`: live versions whose
+  objects did not come back are reported as `missing_objects` (never presented
+  as restored), and stray objects as `unaccounted_objects`. Object durability,
+  replication and restore policy (and therefore an RPO/RTO for uploaded files)
+  is an open owner decision (O-4); uploads stay disabled outside development
+  until it is made.
+
 - **Supabase Auth** (identity) has its **own** backup/restore and its own RPO/RTO.
   Full-platform recovery needs both. NLW's Postgres restore alone is not
   full-platform DR.

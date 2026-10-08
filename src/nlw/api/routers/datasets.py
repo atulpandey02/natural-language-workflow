@@ -90,6 +90,9 @@ def _version_out(v: VersionRecord) -> DatasetVersionOut:
         superseded_at=v.superseded_at,
         rejected_at=v.rejected_at,
         deletion_requested_at=v.deletion_requested_at,
+        has_content=v.has_content,
+        profiling_started_at=v.profiling_started_at,
+        profiled_at=v.profiled_at,
     )
 
 

@@ -102,14 +102,37 @@ implementation from a trace of the code at `main` `9bc5f74`.
    - `PUT /datasets/{id}/versions/{vid}/content`: raw `text/csv` body, streamed
      with a route-level cap; exempted from the global buffering middleware by
      exact path shape.
-   - `POST …/process`: admin retry for a version stuck in `QUARANTINED` or in a
-     stale `PROFILING`.
+   - `POST …/process`: admin **re-dispatch** for a version stuck in
+     `QUARANTINED` or in a stale `PROFILING`: it re-enqueues the latest fresh
+     processing request (or records a new one). It never processes.
    - `GET …/profile` (admin).
    - `GET`/`POST …/semantics` (admin).
    - `POST …/activate` (admin).
 
-   Processing starts as a background task after the content commit; the client
-   polls the version status.
+   Processing (ADR-031): the content `PUT` records the content AND an immutable
+   processing request in one transaction, then enqueues the request's envelope
+   after commit. The dedicated ingest runtime (`nlw_ingest`) claims, profiles
+   and settles; the API cannot. The client polls the version status.
+
+   Lost enqueues (commit succeeded, the broker did not): the `PUT` answers 503
+   `PROCESSING_NOT_QUEUED` with the request durable. Recovery is an idempotent
+   retry of the `PUT` (it re-sends the same request), `POST …/process`, or the
+   operator sweep `python -m nlw.ops.datasets dispatch-pending` (bounded,
+   oldest first, one at a time). Delivery is at-least-once only once one of
+   these has sent the message. The lease makes processing idempotent.
+
+   An **unattended** dispatcher is not provided, so until then a lost enqueue
+   stays pending indefinitely. This is acceptable only while uploads are
+   disabled. It is O-7, mandatory before O-6; see the decision record in
+   ADR-031.
+
+   Object/database boundary: the object is linked before the record commits,
+   and these are not one transaction.
+   - A failure after the link leaves an unrecorded object. `verify-objects`
+     lists it. Only the identical bytes can adopt it (write-once), and the
+     purge of a `DELETING` version removes it.
+   - A deletion during the stream refuses the record (409); the bytes go with
+     the purge.
 7. **Deletion.** The API requests deletion (`DELETING`, unusable at once; no
    storage I/O in the request). The operator then runs:
    - `python -m nlw.ops.datasets purge`: deletes every object under the
