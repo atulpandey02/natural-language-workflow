@@ -159,7 +159,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(ObservabilityMiddleware, settings=settings)
     # Dataset object store (ADR-030): None unless a local store is configured
     # (refused in staging/production). Upload routes exist only with a store.
-    app.state.dataset_store = dataset_store(settings) if settings.datasets_api_enabled else None
+    app.state.dataset_store = (
+        dataset_store(settings, service="api") if settings.datasets_api_enabled else None
+    )
     uploads_enabled = app.state.dataset_store is not None
     app.add_middleware(
         BodySizeLimitMiddleware,

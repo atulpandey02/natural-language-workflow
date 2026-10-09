@@ -255,6 +255,14 @@ _DISPATCH_LAST_SUCCESS = Gauge(
 )
 _DISPATCH_RESULTS = frozenset({"ok", "locked", "busy", "error"})
 
+# --- Dataset S3 credentials (ADR-033 D3) ---
+# Seconds until this process's file-based AWS credentials expire (refreshed by
+# the host refresher well before). No label: one value per process.
+_S3_CREDENTIAL_EXPIRY = Gauge(
+    "nlw_dataset_s3_credentials_expiry_seconds",
+    "Seconds until this process's dataset S3 credentials expire.",
+)
+
 
 # Scrape-time providers for pool/queue gauges. These read live values at collect()
 # time so the numbers are current on every scrape. Providers are registered by the
@@ -527,3 +535,9 @@ def record_dataset_dispatch(
         _DISPATCH_ENQUEUED.inc(enqueued)
     if now is not None:
         _DISPATCH_LAST_SUCCESS.set(now)
+
+
+def set_dataset_s3_credential_expiry(seconds: float) -> None:
+    """ADR-033 D3: remaining lifetime of the pinned S3 credentials (alerted
+    on when it gets short: the refresher has stopped rotating them)."""
+    _S3_CREDENTIAL_EXPIRY.set(seconds)

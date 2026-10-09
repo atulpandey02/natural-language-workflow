@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 
 from nlw.storage.blob import (
-    BlobDigestMismatch,
     BlobExistsError,
     BlobKeyError,
+    BlobSizeMismatch,
     BlobTooLargeError,
     LocalBlobStore,
     TenantScopedBlobStore,
@@ -68,7 +68,7 @@ def test_foreign_tenant_keys_are_refused_before_the_store(tmp_path: Path) -> Non
     ds = uuid.uuid4()
     key_b = b.key("datasets", ds, "raw.csv")
     b.put_stream(key_b, io.BytesIO(b"x"), max_bytes=10)
-    for op in (a.exists, a.open, a.delete):
+    for op in (a.exists, a.open, a.attributes, a.digest):
         with pytest.raises(BlobKeyError):
             op(key_b)
     with pytest.raises(BlobKeyError):
@@ -193,35 +193,41 @@ def test_failed_stream_leaves_no_partial(tmp_path: Path) -> None:
     assert a.list_version(ds, ver) == []
 
 
-def test_copy_verified_detects_tampering_and_accepts_retries(tmp_path: Path) -> None:
+def test_the_runtime_view_can_neither_delete_nor_copy_an_object(tmp_path: Path) -> None:
+    """ADR-033 D1: an object never moves and runtime code never removes one.
+    The tenant-scoped view the API and ingest runtime hold has no such method;
+    only the operator's version-aware purge removes bytes."""
+    _, a, _ = _stores(tmp_path)
+    for name in ("delete", "copy", "copy_verified", "move", "rename"):
+        assert not hasattr(a, name), name
+    assert hasattr(a, "delete_version_and_verify")  # the operator purge path
+
+
+def test_a_wrong_size_is_refused_before_the_object_exists(tmp_path: Path) -> None:
     inner, a, _ = _stores(tmp_path)
     ds, ver = uuid.uuid4(), uuid.uuid4()
-    src, dst = a.version_key("quarantine", ds, ver), a.version_key("datasets", ds, ver)
-    data = b"a,b\n1,2\n"
-    _, sha = a.put_stream(src, io.BytesIO(data), max_bytes=100)
-    assert a.copy_verified(src, dst, expected_sha256=sha, max_bytes=100) == len(data)
-    assert a.copy_verified(src, dst, expected_sha256=sha, max_bytes=100) == len(data)  # retry
-    with pytest.raises(BlobDigestMismatch):  # an existing destination with other bytes
-        a.copy_verified(src, dst, expected_sha256="0" * 64, max_bytes=100)
-    # Tampered source: the copy is refused and nothing is left at the destination.
-    ver2 = uuid.uuid4()
-    src2, dst2 = a.version_key("quarantine", ds, ver2), a.version_key("datasets", ds, ver2)
-    a.put_stream(src2, io.BytesIO(data), max_bytes=100)
-    (inner.root / src2).write_bytes(b"a,b\n6,6\n")
-    with pytest.raises(BlobDigestMismatch):
-        a.copy_verified(src2, dst2, expected_sha256=sha, max_bytes=100)
-    assert not a.exists(dst2)
+    key = a.object_key(ds, ver)
+    assert key == f"versions/{a.tenant_id}/{ds}/{ver}/source.csv"
+    with pytest.raises(BlobSizeMismatch) as short:
+        a.put_stream(key, io.BytesIO(b"abc"), max_bytes=10, expected_size=4)
+    assert short.value.size == 3
+    assert not a.exists(key) and a.list_version(ds, ver) == []  # nothing, not even a partial
+    assert a.put_stream(key, io.BytesIO(b"abcd"), max_bytes=10, expected_size=4)[0] == 4
+    size, fingerprint = a.attributes(key)
+    assert (size, fingerprint) == (4, "sha256:" + hashlib.sha256(b"abcd").hexdigest())
 
 
-def test_missing_object_errors_and_delete_is_idempotent(tmp_path: Path) -> None:
-    _, a, _ = _stores(tmp_path)
-    key = a.version_key("datasets", uuid.uuid4(), uuid.uuid4())
-    with pytest.raises(FileNotFoundError):
-        a.digest(key)
-    with pytest.raises(FileNotFoundError):
-        a.open(key)
-    a.delete(key)
-    a.delete(key)
+def test_missing_object_errors_and_operator_purge_is_idempotent(tmp_path: Path) -> None:
+    inner, a, _ = _stores(tmp_path)
+    ds, ver = uuid.uuid4(), uuid.uuid4()
+    key = a.object_key(ds, ver)
+    for op in (a.digest, a.open, a.attributes):
+        with pytest.raises(FileNotFoundError):
+            op(key)
+    a.put_stream(key, io.BytesIO(b"x"), max_bytes=1)
+    removed, verified = a.delete_version_and_verify(ds, ver)
+    assert removed == [key] and verified
+    assert a.delete_version_and_verify(ds, ver) == ([], True)  # nothing left, still verified
     assert not a.exists(key)
 
 
@@ -286,27 +292,9 @@ def test_a_lost_link_race_reports_what_was_streamed(tmp_path: Path) -> None:
     with pytest.raises(BlobExistsError) as exc:
         a.put_stream(key, Racing(data), max_bytes=100)
     assert (exc.value.size, exc.value.sha256) == (len(data), hashlib.sha256(data).hexdigest())
+    assert exc.value.fingerprint == "sha256:" + hashlib.sha256(data).hexdigest()
     pre = a.version_key("quarantine", uuid.uuid4(), uuid.uuid4())
     a.put_stream(pre, io.BytesIO(b"x"), max_bytes=10)
     with pytest.raises(BlobExistsError) as refused:  # pre-check: nothing was read
         a.put_stream(pre, io.BytesIO(b"y"), max_bytes=10)
     assert (refused.value.size, refused.value.sha256) == (None, None)
-
-
-def test_concurrent_publication_accepts_only_identical_bytes(tmp_path: Path) -> None:
-    inner, a, _ = _stores(tmp_path)
-    ds, ver = uuid.uuid4(), uuid.uuid4()
-    src, dst = a.version_key("quarantine", ds, ver), a.version_key("datasets", ds, ver)
-    data = b"a,b\n1,2\n"
-    _, sha = a.put_stream(src, io.BytesIO(data), max_bytes=100)
-    real_exists = inner.exists
-
-    def racing_exists(key: str) -> bool:
-        if key == dst and not (inner.root / dst).exists():
-            (inner.root / dst).parent.mkdir(parents=True, exist_ok=True)
-            (inner.root / dst).write_bytes(data)  # another publisher, after our check
-            return False
-        return real_exists(key)
-
-    inner.exists = racing_exists  # type: ignore[method-assign]
-    assert a.copy_verified(src, dst, expected_sha256=sha, max_bytes=100) == len(data)
