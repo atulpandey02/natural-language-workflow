@@ -1,12 +1,18 @@
 """Upload ingestion around the lifecycle service (ADR-030, ADR-031).
 
 Responsibility (and nothing else): ``store_content`` streams the request body
-into the version's write-once quarantine object
-(``quarantine/{tenant}/{dataset}/{version_id}``), capped at the declared size,
-then, in ONE transaction, records its digest and key once and an immutable
-processing request. It returns the work envelope the caller enqueues AFTER
-commit. Profiling never happens here: the dedicated ingest runtime
-(``nlw.ingest_service``, role ``nlw_ingest``) is the only processor.
+into the version's ONE immutable object
+(``versions/{tenant}/{dataset}/{version_id}/source.csv``, ADR-033 D1), capped
+at the declared size and refused BEFORE it is finalized when the size differs
+(so this module never deletes anything), then, in ONE transaction, records its
+digest and key once and an immutable processing request. It returns the work
+envelope the caller enqueues AFTER commit. Profiling never happens here: the
+dedicated ingest runtime (``nlw.ingest_service``, role ``nlw_ingest``) is the
+only processor.
+
+The API reads object METADATA only (``attributes``: size and checksum
+fingerprint, to adopt its own object after a lost response or crash); it
+never reads object content and never deletes.
 
 Every database step is a short transaction under a FRESHLY signed
 ``api_request`` context for the uploading admin: RLS re-checks admin
@@ -32,8 +38,10 @@ from nlw.datasets.processing_requests import ensure_processing_request
 from nlw.datasets.service import DatasetConflict
 from nlw.storage.blob import (
     BlobExistsError,
+    BlobSizeMismatch,
     BlobStore,
     BlobTooLargeError,
+    BlobUnavailable,
     TenantScopedBlobStore,
 )
 from nlw.tenancy.context import TenantContext
@@ -119,7 +127,7 @@ async def store_content(
     chunks: AsyncIterator[bytes],
     max_bytes: int,
 ) -> tuple[service.VersionRecord, WorkEnvelope | None]:
-    """Stream the body into the version's write-once quarantine object, then
+    """Stream the body into the version's one immutable object, then
     record its digest AND an immutable processing request in one transaction.
     Returns the version and the envelope to enqueue after commit (None when
     there is nothing to process). Idempotent: re-sending identical bytes returns
@@ -149,30 +157,40 @@ async def store_content(
         return version, envelope
 
     scoped = TenantScopedBlobStore(store, ctx.tenant_id)
-    key = scoped.version_key("quarantine", dataset_id, version_id)
-    created = False
+    key = scoped.object_key(dataset_id, version_id)
     try:
         size, digest = await anyio.to_thread.run_sync(
-            lambda: scoped.put_stream(key, _BodyReader(chunks), max_bytes=cap)  # type: ignore[arg-type]
+            lambda: scoped.put_stream(
+                key,
+                _BodyReader(chunks),  # type: ignore[arg-type]
+                max_bytes=cap,
+                expected_size=version.declared_size_bytes,
+            )
         )
-        created = True
     except BlobTooLargeError:
         raise ContentError("CONTENT_SIZE_MISMATCH", 413) from None
+    except BlobSizeMismatch:
+        # Refused before the object was finalized: nothing was stored.
+        raise ContentError("CONTENT_SIZE_MISMATCH", 422) from None
     except BlobExistsError as exc:
-        # A concurrent or earlier attempt stored this version's object. Accept it
-        # only if these bytes are identical; never replace it. If the race was
-        # lost at the final link, the body was already streamed: use its digest.
-        if exc.size is not None and exc.sha256 is not None:
-            size, digest = exc.size, exc.sha256
+        # An earlier attempt (a lost response, a crash before the database
+        # commit) or a concurrent one stored this version's object. Adopt it
+        # only if these bytes are identical, compared through METADATA (size
+        # and checksum fingerprint), never by reading the object; never replace
+        # it. A pre-check refusal (local store) consumed nothing: hash the rest.
+        if exc.size is not None and exc.sha256 is not None and exc.fingerprint is not None:
+            size, digest, mine = exc.size, exc.sha256, exc.fingerprint
         else:
             size, digest = await _hash_only(chunks, cap)
-        existing = await anyio.to_thread.run_sync(lambda: scoped.digest(key))
-        if existing != (size, digest):
+            mine = f"sha256:{digest}"
+        try:
+            existing = await anyio.to_thread.run_sync(lambda: scoped.attributes(key))
+        except FileNotFoundError:
             raise ContentError("CONTENT_CONFLICT", 409) from None
-    if size != version.declared_size_bytes:
-        if created:
-            await anyio.to_thread.run_sync(lambda: scoped.delete(key))
-        raise ContentError("CONTENT_SIZE_MISMATCH", 422)
+        if existing != (size, mine) or size != version.declared_size_bytes:
+            raise ContentError("CONTENT_CONFLICT", 409) from None
+    except BlobUnavailable:
+        raise ContentError("STORAGE_UNAVAILABLE", 503) from None
 
     async def record(s: AsyncSession) -> tuple[service.VersionRecord, WorkEnvelope | None]:
         v = await service.record_content(
@@ -189,7 +207,7 @@ async def store_content(
         # Nothing was recorded. CONTENT_CONFLICT: another writer's bytes are
         # this version's (write-once key). Otherwise the dataset or version
         # left QUARANTINED while streaming (deletion): it can never record
-        # content again, and an object we linked is removed by the operator
+        # content again, and an object we created is removed by the operator
         # purge of that DELETING version (``verify-objects`` lists it until then).
         raise ContentError(exc.code, 409) from None
     log.info(

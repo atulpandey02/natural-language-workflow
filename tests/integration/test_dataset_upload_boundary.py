@@ -259,7 +259,9 @@ def test_malformed_identifiers_are_refused(up: SimpleNamespace) -> None:
 
 def test_filenames_are_metadata_only(up: SimpleNamespace) -> None:
     did = _dataset(up)
-    for name in ("../../etc/passwd.csv", "..\\..\\x.csv", "/abs/path.csv", "a/b.csv"):
+    checked = 0
+    for name in ("../../etc/passwd.csv", "..\\..\\x.csv", "/abs/path.csv", "a/b.csv",
+                 "Q3 report (final).csv"):  # fmt: skip
         r = up.c.post(
             f"/datasets/{did}/versions",
             headers={**up.h, "Idempotency-Key": uuid.uuid4().hex},
@@ -277,7 +279,9 @@ def test_filenames_are_metadata_only(up: SimpleNamespace) -> None:
         key = _owner_rows(
             up.pg, "SELECT storage_object_key FROM dataset_versions WHERE id = %s", vid
         )[0][0]
-        assert key == f"datasets/{up.tenant}/{did}/{vid}"  # server-derived, never the name
+        assert key == f"versions/{up.tenant}/{did}/{vid}/source.csv"  # from ids, never the name
+        checked += 1
+    assert checked >= 1  # the key derivation was actually exercised
 
 
 # --- an interrupted upload -------------------------------------------------------------------

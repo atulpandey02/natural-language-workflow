@@ -6,12 +6,17 @@ ONE version:
 
 1. verify the request row and claim the database-time lease, in one
    transaction (``QUARANTINED -> PROFILING``, or reclaim an expired lease);
-2. stream the quarantined object into the isolated profiler process
+2. stream the version's ONE immutable object
+   (``versions/<ws>/<d>/<v>/source.csv``) into the isolated profiler process
    (``python -m nlw.ingest.runner``) while a background task renews the lease;
-3. settle: publish (verified copy to ``datasets/``, profile + ``PROFILED`` in
-   one transaction, remove the quarantine copy) or reject with a closed code
-   (and delete the bytes). Settling proves lease ownership; a lost lease
-   abandons the work and publishes nothing.
+3. settle: publish (profile + ``PROFILED`` in one transaction) or reject with
+   a closed code. Settling proves lease ownership; a lost lease abandons the
+   work and publishes nothing.
+
+ADR-033 D1: the ingest runtime is READ-ONLY on object storage. It never
+uploads, overwrites, copies, moves, lists or deletes an object; "published"
+is database state, and a rejected object stays immutable until the
+operator's version-aware ``purge-rejected`` removes it (D2).
 
 Every database step is its own short transaction under a FRESHLY signed
 ``dataset_ingest`` context for exactly that workspace and version
@@ -47,10 +52,10 @@ from nlw.core.config import Settings
 from nlw.datasets import envelope as envelopes
 from nlw.datasets import service
 from nlw.datasets.envelope import EnvelopeError, WorkEnvelope
-from nlw.datasets.lifecycle import RejectionCode, VersionStatus
+from nlw.datasets.lifecycle import RejectionCode
 from nlw.datasets.service import Actor, DatasetConflict, DatasetError
 from nlw.ingest.strict import Profile2, StrictLimits
-from nlw.storage.blob import BlobDigestMismatch, BlobStore, TenantScopedBlobStore
+from nlw.storage.blob import BlobStore, TenantScopedBlobStore
 from nlw.tenancy.session import set_ingest_context
 from nlw.tenancy.signing import ContextSigner, Purpose
 
@@ -269,11 +274,6 @@ async def run_profiler(
 # "refused": the envelope was invalid, stale or forged (nothing changed).
 ProcessResult = Literal["profiled", "rejected", "skipped", "refused"]
 
-# Settled states whose bytes a crashed process may have left behind.
-_PUBLISHED_STATES = frozenset(
-    {VersionStatus.PROFILED, VersionStatus.ACTIVE, VersionStatus.SUPERSEDED}
-)
-
 
 async def process_envelope(
     *,
@@ -300,32 +300,6 @@ async def process_envelope(
         # A deletion requested meanwhile wins: the lifecycle refuses the rest.
         log.info("dataset.processing_superseded", code=exc.code, **env.ids())
         return "skipped"
-
-
-async def _remove_leftovers(
-    scoped: TenantScopedBlobStore,
-    version: service.VersionRecord,
-    dataset_id: uuid.UUID,
-    version_id: uuid.UUID,
-) -> None:
-    """Idempotent recovery for a crash AFTER a settled outcome was committed:
-    a published version must not keep its quarantine copy, and a rejected
-    version must not keep any bytes. Never touches an in-flight upload
-    (QUARANTINED/PROFILING) or a DELETING version (that is the purge's job)."""
-    try:
-        if version.status in _PUBLISHED_STATES:
-            quarantine = scoped.version_key("quarantine", dataset_id, version_id)
-            if await anyio.to_thread.run_sync(lambda: scoped.exists(quarantine)):
-                await anyio.to_thread.run_sync(lambda: scoped.delete(quarantine))
-                log.info("dataset.leftover_removed", version_id=str(version_id), area="quarantine")
-        elif version.status is VersionStatus.REJECTED:
-            keys, _ = await anyio.to_thread.run_sync(
-                lambda: scoped.delete_version_and_verify(dataset_id, version_id)
-            )
-            if keys:
-                log.info("dataset.leftover_removed", version_id=str(version_id), area="rejected")
-    except OSError as exc:  # retried on the next delivery; the purge covers it too
-        log.warning("dataset.leftover_cleanup_failed", error_class=type(exc).__name__)
 
 
 async def _process(
@@ -356,15 +330,13 @@ async def _process(
         log.info("dataset.processing_not_possible", error_class=type(exc).__name__, **env.ids())
         return "skipped"
     if state not in ("acquired", "reclaimed"):
-        if state == "not_claimable":
-            await _remove_leftovers(scoped, version, dataset_id, version_id)
         return "skipped"
     if version.content_sha256 != env.content_sha256 or key is None:
         # The request row pinned this digest; a mismatch cannot be published.
         return await _reject(maker, signer, env, scoped, token, RejectionCode.CONTENT_MISMATCH)
     # The key is server-derived and bound to the version id by the database;
-    # it must be exactly the derived quarantine key (never a caller's path).
-    if key != scoped.version_key("quarantine", dataset_id, version_id):
+    # it must be exactly the version's one object key (never a caller's path).
+    if key != scoped.object_key(dataset_id, version_id):
         return await _reject(maker, signer, env, scoped, token, RejectionCode.CONTENT_MISMATCH)
 
     lost = asyncio.Event()
@@ -433,13 +405,8 @@ async def _reject(
             rejection_code=code,
         ),
     )
-    # Rejected bytes are not kept: delete now (the purge re-verifies later).
-    try:
-        await anyio.to_thread.run_sync(
-            lambda: scoped.delete_version_and_verify(env.dataset_id, env.version_id)
-        )
-    except OSError as exc:
-        log.warning("dataset.reject_cleanup_failed", error_class=type(exc).__name__)
+    # The object stays immutable: only the operator's version-aware
+    # ``purge-rejected`` removes it (ADR-033 D2). Nothing is deleted here.
     log.info("dataset.version_rejected", rejection_code=code.value, **env.ids())
     return "rejected"
 
@@ -459,7 +426,6 @@ async def _profile_and_settle(
     proves ownership with ``token``; a lost lease surfaces as LEASE_LOST."""
     tenant, dataset_id, version_id = env.tenant_id, env.dataset_id, env.version_id
     expected_sha = env.content_sha256
-    published = scoped.version_key("datasets", dataset_id, version_id)
 
     def reject(code: str) -> Awaitable[ProcessResult]:
         return _reject(maker, signer, env, scoped, token, RejectionCode(code))
@@ -478,14 +444,7 @@ async def _profile_and_settle(
     if profile.content_sha256 != expected_sha or profile.size_bytes != version.declared_size_bytes:
         return await reject(RejectionCode.CONTENT_MISMATCH.value)
 
-    try:
-        await anyio.to_thread.run_sync(
-            lambda: scoped.copy_verified(
-                key, published, expected_sha256=expected_sha, max_bytes=config.limits.max_bytes
-            )
-        )
-    except BlobDigestMismatch:
-        return await reject(RejectionCode.CONTENT_MISMATCH.value)
+    # Publishing is a database transition only: the object stays where it is.
     await in_ingest_context(
         maker,
         signer,
@@ -501,14 +460,9 @@ async def _profile_and_settle(
             content_sha256=expected_sha,
             row_count=profile.row_count,
             column_count=profile.column_count,
-            published_key=published,
             lease_token=token,
         ),
     )
-    try:
-        await anyio.to_thread.run_sync(lambda: scoped.delete(key))
-    except OSError as exc:  # the purge lists both areas, so nothing is lost
-        log.warning("dataset.quarantine_cleanup_failed", error_class=type(exc).__name__)
     log.info(
         "dataset.version_profiled",
         rows=profile.row_count,

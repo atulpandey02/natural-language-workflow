@@ -54,8 +54,9 @@ SYNTHETIC_MAPPING = {
 }
 
 
-def quarantine_key(tenant: uuid.UUID, dataset_id: uuid.UUID, version_id: uuid.UUID) -> str:
-    return f"quarantine/{tenant}/{dataset_id}/{version_id}"
+def object_key(tenant: uuid.UUID, dataset_id: uuid.UUID, version_id: uuid.UUID) -> str:
+    """The version's one immutable object (ADR-033 D1)."""
+    return f"versions/{tenant}/{dataset_id}/{version_id}/source.csv"
 
 
 class Harness:
@@ -128,7 +129,7 @@ class Harness:
                         dataset_id,
                         version_id,
                         content_sha256=SYNTHETIC_SHA,
-                        storage_object_key=quarantine_key(self.tenant, dataset_id, version_id),
+                        storage_object_key=object_key(self.tenant, dataset_id, version_id),
                     )
                 )
             processing = st in (VersionStatus.PROFILING, VersionStatus.PROFILED) or (
@@ -151,7 +152,6 @@ class Harness:
                         content_sha256=SYNTHETIC_SHA,
                         row_count=1,
                         column_count=1,
-                        published_key=f"datasets/{self.tenant}/{dataset_id}/{version_id}",
                         lease_token=self.tokens.get(version_id, uuid.uuid4()),
                     )
                 if st is VersionStatus.PROFILING:
@@ -457,7 +457,7 @@ async def test_tombstone_refuses_a_version_that_references_a_stored_object(
 ) -> None:
     d = await h.dataset()
     v = await h.version(d.id)
-    key = f"quarantine/{h.tenant}/{d.id}/{v.id}"
+    key = object_key(h.tenant, d.id, v.id)
     with psycopg.connect(pg_stack.owner_libpq, autocommit=True) as c:
         c.execute("UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s", (key, v.id))
     await h.run(lambda s: svc.request_dataset_deletion(s, h.tenant, h.actor, d.id))

@@ -231,12 +231,12 @@ def test_upload_profile_confirm_activate(
         ("VERSION_PROFILED", "PROFILING", "PROFILED"),
         ("VERSION_ACTIVATED", "PROFILED", "ACTIVE"),
     ]
-    # Published under datasets/, quarantine copy removed; nothing else on disk.
-    assert _files(store_root / "local") == [f"datasets/{ws.tenant}/{did}/{vid}"]
+    # ADR-033 D1: one immutable object, never copied or moved; nothing else on disk.
+    assert _files(store_root / "local") == [f"versions/{ws.tenant}/{did}/{vid}/source.csv"]
     # No response ever carries a storage key, area or path.
     for body in (created, put.json(), v, p, sem.json(), act.json(), ds):
         text = json.dumps(body)
-        assert "quarantine/" not in text and "datasets/" not in text
+        assert "quarantine/" not in text and "datasets/" not in text and "versions/" not in text
         assert str(store_root) not in text and "storage_object_key" not in text
 
 
@@ -334,7 +334,7 @@ def test_content_is_write_once_and_retries_are_idempotent(
     tampered = CSV[:-2] + b"9\n"
     other = up.put(url, headers=ws.admin, content=tampered)
     assert other.status_code == 409 and other.json()["error"]["code"] == "CONTENT_CONFLICT"
-    stored = store_root / "local" / "datasets" / str(ws.tenant) / did / v["id"]
+    stored = store_root / "local" / "versions" / str(ws.tenant) / did / v["id"] / "source.csv"
     assert stored.read_bytes() == CSV  # the stored version was never altered
 
 
@@ -383,7 +383,7 @@ def test_a_declared_length_over_the_limit_is_refused_before_reading(
         ("a,b\né,1\n".encode("cp1252"), "ENCODING_UNSUPPORTED"),
     ],
 )
-def test_invalid_files_are_rejected_and_their_bytes_removed(
+def test_invalid_files_are_rejected_and_their_object_kept_for_the_operator(
     up: TestClient,
     ws: SimpleNamespace,
     pg_stack: SimpleNamespace,
@@ -395,7 +395,8 @@ def test_invalid_files_are_rejected_and_their_bytes_removed(
     v = _upload(up, ws.admin, did, data)
     assert (v["status"], v["rejection_code"]) == ("REJECTED", code)
     assert _events(pg_stack, v["id"])[-1] == ("VERSION_REJECTED", "PROFILING", "REJECTED", code)
-    assert _files(store_root / "local") == []
+    # ADR-033 D2: kept immutable until the operator's purge-rejected.
+    assert _files(store_root / "local") == [f"versions/{ws.tenant}/{did}/{v['id']}/source.csv"]
     base = f"/datasets/{did}/versions/{v['id']}"
     assert up.get(f"{base}/profile", headers=ws.admin).status_code == 404
     act = up.post(f"{base}/activate", headers=ws.admin)
@@ -501,7 +502,7 @@ def test_another_workspace_cannot_reach_a_version(
         )
     assert up.get(f"{base}/profile", headers=b).status_code == 404
     assert up.get(f"{base}/profile", headers=_hdr(other.user_id, ws.tenant)).status_code == 200
-    assert _files(store_root / "local") == [f"datasets/{ws.tenant}/{did}/{v['id']}"]
+    assert _files(store_root / "local") == [f"versions/{ws.tenant}/{did}/{v['id']}/source.csv"]
 
 
 def test_deleting_makes_a_version_unusable_at_once(up: TestClient, ws: SimpleNamespace) -> None:

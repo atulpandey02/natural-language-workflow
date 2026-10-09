@@ -372,6 +372,7 @@ def test_object_finalized_but_the_database_fails_then_the_identical_retry_adopts
     with psycopg.connect(up.pg.owner_libpq, autocommit=True) as c:
         assert ops.verify_objects(c, up.store) == {
             "missing_objects": [], "digest_mismatches": [], "unaccounted_objects": [],
+            "noncurrent_versions": [],
         }  # fmt: skip
 
 

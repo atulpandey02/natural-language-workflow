@@ -111,6 +111,9 @@ class ReasonCode(enum.StrEnum):
     DATASET_DELETION = "DATASET_DELETION"
     OPERATOR_TOMBSTONE = "OPERATOR_TOMBSTONE"
     OPERATOR_PURGE = "OPERATOR_PURGE"
+    # 0028 (ADR-033 D2): the operator's purge-rejected moves a REJECTED version
+    # to DELETING before the version-aware purge.
+    REJECTED_RETENTION = "REJECTED_RETENTION"
 
 
 class ActorKind(enum.StrEnum):

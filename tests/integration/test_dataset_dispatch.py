@@ -490,7 +490,8 @@ def test_the_batch_limit_is_clamped_to_1000(st: SimpleNamespace) -> None:
         )
         c.execute(
             "UPDATE dataset_versions SET content_sha256 = repeat('a', 64), "
-            "storage_object_key = 'quarantine/' || tenant_id || '/' || dataset_id || '/' || id "
+            "storage_object_key = 'versions/' || tenant_id || '/' || dataset_id || '/' || id "
+            "|| '/source.csv' "
             "WHERE dataset_id = %s",
             (did,),
         )
