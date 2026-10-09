@@ -44,16 +44,33 @@ below remove all three.
 - **Bucket security:**
   - all four Block Public Access settings on;
   - `BucketOwnerEnforced`, so ACLs are disabled;
-  - default SSE-KMS with a **separate customer-managed KMS key per
-    environment**, with the S3 Bucket Key on;
+  - SSE-KMS with a **separate customer-managed KMS key per environment**,
+    with the S3 Bucket Key on. **Every creation request must itself name
+    `aws:kms` and that key.** The bucket policy denies a missing algorithm
+    header, a missing key header, a wrong algorithm and a wrong key in four
+    separate statements. The bucket default encryption is defence in depth,
+    never a fallback;
   - a TLS-only bucket policy;
   - Versioning on;
   - **no Object Lock** initially, and no public endpoints.
 - **Lifecycle.** Incomplete multipart uploads are aborted, by the application
   and by a lifecycle rule. Noncurrent-version expiry waits for O-5.
-- **Audit.** CloudTrail **data events** for this bucket only, delivered to a
-  separate log bucket. Server access logs are not used. Retention is set with
-  O-3 and O-5.
+- **Audit.** A dedicated CloudTrail trail records **object-level data events
+  (read and write) for this environment's dataset bucket only**. See
+  provisioning runbook §4.
+  - **Delivery:** to a separate audit bucket, encrypted with a separate audit
+    KMS key, with log-file validation, Object Lock retention, and
+    confused-deputy protection (`aws:SourceArn`/`aws:SourceAccount`).
+  - **Protection:** the dataset API, ingest, bootstrap and operator roles are
+    explicitly denied any change to the trail, the audit bucket or the audit
+    key.
+  - **Independence:** audit records are kept independently of dataset-object
+    deletion.
+  - **Not used:** server access logs.
+  - **Retention:** set with O-3 and O-5.
+  - **Assumption:** management events (policy, KMS and IAM changes) are
+    covered by an existing account- or organization-level trail. This is
+    confirmed at the provisioning review.
 
 ### D1 — one immutable object per version
 
@@ -125,7 +142,9 @@ API role can technically read objects under `versions/`. The mitigations are:
 - the API code calls only `HeadObject` and `GetObjectAttributes`, which unit
   tests and botocore Stubber tests assert;
 - the role is limited to its own bucket and prefix;
-- CloudTrail data events record every read.
+- the CloudTrail data-event trail (runbook §4) records every `HeadObject`
+  and `GetObjectAttributes` call with the assumed role and object ARN, and
+  the D6 proof checks this.
 
 This is accepted as a **residual risk**. The alternative is to drop API reads
 entirely, so an orphan after a crash is never adopted by the API, only
@@ -251,13 +270,18 @@ The real-AWS proof must show:
 - simultaneous-write behaviour;
 - multipart completion, abort and lifecycle cleanup;
 - the whole-file SHA-256;
-- KMS enforcement;
+- KMS enforcement: a missing algorithm, a missing key, a wrong algorithm and
+  a wrong key are each denied, and a correctly headed multipart upload
+  completes;
 - cross-environment denial;
 - the API cannot delete, and ingest cannot write;
 - the operator's version-aware purge;
 - containers cannot reach IMDS;
 - no static credentials;
-- audit evidence;
+- audit evidence: API `HeadObject`/`GetObjectAttributes` and ingest
+  `GetObject` each produce a data event naming the assumed role and the object
+  ARN, denied cross-environment and unauthorized reads are recorded, and no
+  runtime role can alter the trail or the audit bucket;
 - no public access.
 
 ## Design
@@ -351,6 +375,8 @@ AWS facts this design relies on (AWS documentation, checked 2026-10-09):
 | A plain delete mistaken for deletion | Purge deletes every version and delete marker and verifies none remains; receipts list version ids; no code path calls an unversioned delete "deleted" |
 | Cross-environment access | Separate buckets, keys and roles; role policies name only their own bucket and key; startup refuses mismatched identifiers |
 | Credential theft from containers | No static keys; per-container 1 h credentials; IMDS blocked and verified; startup checks the role ARN; no fallback chain; values never logged |
+| Unencrypted, or encrypted with the wrong key | Four bucket-policy denies (missing algorithm, missing key, wrong algorithm, wrong key); no `…IfExists` operator; no fallback to the bucket default; proven case by case, including multipart, in the D6 proof (a multipart denial stops provisioning, with no exception) |
+| Hiding activity by altering the audit trail | A dedicated data-event trail; separate audit bucket and key; explicit denies on trail, audit bucket and audit key for every dataset role; Object Lock retention; log-file validation; confused-deputy conditions on CloudTrail delivery |
 | Public exposure | Block Public Access, `BucketOwnerEnforced`, a TLS-only bucket policy, and a deny for principals outside the account |
 | KMS misuse | A key per environment; the key policy allows use only through S3 in us-east-1 for this bucket's encryption context; API: `GenerateDataKey`+`Decrypt`; ingest and operator: `Decrypt` |
 | Restore inconsistency | `verify-objects` reconciles database keys and objects (O-4 designs replication and restore) |
