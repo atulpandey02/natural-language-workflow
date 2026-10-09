@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.0",
     "anthropic>=1.7.0",
+    "boto3>=1.43.110",
     "dramatiq[redis]>=2.2.1",
     "fastapi>=0.141.1",
     "httpx>=0.28.1",
