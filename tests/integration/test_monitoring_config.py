@@ -150,4 +150,4 @@ def test_promtool_unit_tests_prove_the_dataset_processing_alerts() -> None:
         "--entrypoint", "promtool", _image("prometheus"),
         "check", "rules", "/etc/prometheus/alerts/datasets.rules.yml",
     )  # fmt: skip
-    assert check.returncode == 0 and "SUCCESS: 3 rules found" in check.stdout
+    assert check.returncode == 0 and "SUCCESS: 5 rules found" in check.stdout

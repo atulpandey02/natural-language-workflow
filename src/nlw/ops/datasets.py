@@ -9,6 +9,18 @@ OWNER credential ``DATABASE_MIGRATION_URL``, exactly like ``python -m nlw.ops.gr
     python -m nlw.ops.datasets tombstone --dataset <uuid> [--version <uuid>]
     python -m nlw.ops.datasets verify-objects
     python -m nlw.ops.datasets dispatch-pending [--dry-run] [--limit N]
+    python -m nlw.ops.datasets rejected-pending [--limit N] [--metrics-file PATH]
+    python -m nlw.ops.datasets purge-rejected --operator <name> [--dry-run] [--limit N]
+
+``rejected-pending`` / ``purge-rejected`` (ADR-033 D2): a rejected object stays
+immutable (the ingest runtime deletes nothing) until the operator removes it.
+``purge-rejected`` takes a bounded, oldest-first batch of REJECTED versions
+that still reference an object, moves each to DELETING (operator event,
+reason ``REJECTED_RETENTION``) and runs the same verified, version-aware purge
+as a deletion request; it refuses while the recovery lock is active and is
+idempotent (a re-run resumes versions a crash left between the two steps).
+The 7-day alert threshold is PROVISIONAL (development/staging), not the O-5
+retention policy.
 
 ``dispatch-pending`` is the operator recovery sweep for the ingest queue
 (ADR-031): it (re)enqueues the work envelope of every committed, still fresh
@@ -18,9 +30,10 @@ is harmless (the ingest runtime re-verifies each envelope and its lease makes
 processing idempotent). Requests too old for the consumer are counted, not
 sent: an admin re-dispatch records a fresh request. It processes nothing.
 
-``purge`` physically deletes every stored object of the DELETING version(s)
-(both storage areas, including crash-orphaned partial uploads), VERIFIES their
-absence, appends one receipt per version to the configured deletion log, and
+``purge`` physically deletes every stored item of the DELETING version(s)
+(the ``versions/`` object with EVERY S3 version and delete marker, in-progress
+multipart uploads, local partial files, and legacy development copies),
+VERIFIES their absence, appends one receipt per version to the configured deletion log, and
 records ``VERSION_OBJECT_PURGED`` (operator) in the event trail. Nothing is
 recorded unless verification succeeds.
 
@@ -61,7 +74,7 @@ from nlw.datasets.deletion_log import (
     deletion_log_from_settings,
 )
 from nlw.datasets.lifecycle import ActorKind, EventType, ReasonCode
-from nlw.storage.blob import AREAS, LocalBlobStore, TenantScopedBlobStore, list_area
+from nlw.storage.blob import AREAS, BlobStore, TenantScopedBlobStore, item_key, list_area
 from nlw.storage.factory import dataset_store
 
 
@@ -116,7 +129,7 @@ def _event(
 
 def purge(
     conn: psycopg.Connection[Any],
-    store: LocalBlobStore | None,
+    store: BlobStore | None,
     log: DeletionLog,
     *,
     dataset_id: uuid.UUID,
@@ -135,6 +148,7 @@ def purge(
         raise TombstoneError(
             "no deletion log is configured (the external deletion log is a launch gate)"
         )
+    _require_runtimes_permitted(conn)
     with conn.transaction():
         ds = conn.execute(
             "SELECT tenant_id, status FROM datasets WHERE id = %s FOR UPDATE", (dataset_id,)
@@ -204,6 +218,162 @@ def purge(
         }
 
 
+def _require_runtimes_permitted(conn: psycopg.Connection[Any]) -> None:
+    """Physical deletion against a database whose restore is not enabled could
+    remove bytes a restored version still references: refuse while the DR
+    recovery lock is active or unreadable."""
+    from nlw.backup.recovery_lock import (
+        RecoveryLocked,
+        RecoveryStateUnknown,
+        check_recovery_lock_psycopg,
+    )
+
+    try:
+        check_recovery_lock_psycopg(conn)
+    except (RecoveryLocked, RecoveryStateUnknown) as exc:
+        raise TombstoneError(
+            f"refused: the recovery lock is active ({type(exc).__name__})"
+        ) from None
+
+
+# --- rejected objects (ADR-033 D2) -----------------------------------------------
+
+REJECTED_BATCH = 100
+# PROVISIONAL (development/staging, owner 2026-10-09): rejected objects must be
+# purged within 7 days. The alert fires past it. NOT the O-5 retention policy.
+REJECTED_ALERT_AFTER_S = 7 * 24 * 3600
+
+_SQL_REJECTED = (
+    "SELECT tenant_id, dataset_id, id, "
+    "floor(extract(epoch FROM now() - rejected_at))::bigint "
+    "FROM dataset_versions WHERE status = 'REJECTED' AND storage_object_key IS NOT NULL "
+    "ORDER BY rejected_at, id LIMIT %s"
+)
+_SQL_REJECTED_STATS = (
+    "SELECT count(*), coalesce(floor(extract(epoch FROM now() - min(rejected_at))), 0)::bigint "
+    "FROM dataset_versions WHERE status = 'REJECTED' AND storage_object_key IS NOT NULL"
+)
+# Versions purge-rejected moved to DELETING but a crash left un-purged.
+_SQL_REJECTED_RESUME = (
+    "SELECT v.tenant_id, v.dataset_id, v.id FROM dataset_versions v "
+    "WHERE v.status = 'DELETING' AND EXISTS (SELECT 1 FROM dataset_events e "
+    "WHERE e.version_id = v.id AND e.event_type = 'VERSION_DELETION_REQUESTED' "
+    "AND e.reason_code = 'REJECTED_RETENTION') AND NOT EXISTS (SELECT 1 FROM dataset_events p "
+    "WHERE p.version_id = v.id AND p.event_type = 'VERSION_OBJECT_PURGED' "
+    "AND p.created_at >= v.deletion_requested_at) "
+    "ORDER BY v.deletion_requested_at, v.id LIMIT %s"
+)
+
+
+def _bounded(limit: int) -> int:
+    if not 1 <= limit <= 10_000:
+        raise TombstoneError("--limit must be between 1 and 10000")
+    return limit
+
+
+def rejected_stats(conn: psycopg.Connection[Any]) -> dict[str, int]:
+    """Aggregate only: how many rejected objects are retained, the oldest's age."""
+    row = conn.execute(_SQL_REJECTED_STATS).fetchone()
+    retained, oldest = (int(row[0]), int(row[1])) if row else (0, 0)
+    return {"retained": retained, "oldest_age_s": oldest}
+
+
+def rejected_pending(
+    conn: psycopg.Connection[Any], *, limit: int = REJECTED_BATCH
+) -> list[tuple[Any, ...]]:
+    """Rejected versions still referencing an object, oldest first (ids and
+    age in seconds only)."""
+    return conn.execute(_SQL_REJECTED, (_bounded(limit),)).fetchall()
+
+
+def write_rejected_metrics(path: str, stats: dict[str, int]) -> None:
+    """Prometheus textfile (node-exporter textfile collector), written
+    atomically. Aggregates only: no workspace, dataset or version label."""
+    text = (
+        "# HELP nlw_dataset_rejected_retained Rejected dataset objects awaiting operator purge.\n"
+        "# TYPE nlw_dataset_rejected_retained gauge\n"
+        f"nlw_dataset_rejected_retained {stats['retained']}\n"
+        "# HELP nlw_dataset_rejected_oldest_age_seconds Age of the oldest retained rejected "
+        "object.\n"
+        "# TYPE nlw_dataset_rejected_oldest_age_seconds gauge\n"
+        f"nlw_dataset_rejected_oldest_age_seconds {stats['oldest_age_s']}\n"
+    )
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def _move_rejected_to_deleting(
+    conn: psycopg.Connection[Any], tenant_id: uuid.UUID, dataset_id: uuid.UUID, vid: uuid.UUID
+) -> bool:
+    with conn.transaction():
+        row = conn.execute(
+            "SELECT status FROM dataset_versions WHERE id = %s AND dataset_id = %s FOR UPDATE",
+            (vid, dataset_id),
+        ).fetchone()
+        if row is None or row[0] != "REJECTED":
+            return False  # a concurrent run or a user deletion got there first
+        conn.execute(
+            "UPDATE dataset_versions SET status = 'DELETING' WHERE id = %s AND status = 'REJECTED'",
+            (vid,),
+        )
+        _event(
+            conn,
+            tenant_id,
+            dataset_id,
+            vid,
+            EventType.VERSION_DELETION_REQUESTED,
+            "REJECTED",
+            to_status="DELETING",
+            reason=ReasonCode.REJECTED_RETENTION,
+        )
+    return True
+
+
+def purge_rejected(
+    conn: psycopg.Connection[Any],
+    store: BlobStore | None,
+    log: DeletionLog,
+    *,
+    operator: str,
+    environment: str,
+    limit: int = REJECTED_BATCH,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """Purge one bounded, oldest-first batch of retained rejected objects
+    (ADR-033 D2). Idempotent; refused while the recovery lock is active."""
+    limit = _bounded(limit)
+    _require_runtimes_permitted(conn)
+    resume = conn.execute(_SQL_REJECTED_RESUME, (limit,)).fetchall()
+    fresh = rejected_pending(conn, limit=limit + 1)
+    more = len(resume) + len(fresh) > limit
+    batch = [(r[0], r[1], r[2], True) for r in resume]
+    batch += [(r[0], r[1], r[2], False) for r in fresh[: max(0, limit - len(resume))]]
+    if dry_run:
+        return {"selected": len(batch), "moved": 0, "purged": 0, "more": int(more), "dry_run": 1}
+    if isinstance(log, UnconfiguredDeletionLog):
+        raise TombstoneError(
+            "no deletion log is configured (the external deletion log is a launch gate)"
+        )
+    moved = purged = 0
+    for tenant_id, dataset_id, vid, resumed in batch:
+        if not resumed:
+            if not _move_rejected_to_deleting(conn, tenant_id, dataset_id, vid):
+                continue
+            moved += 1
+        result = purge(
+            conn, store, log, dataset_id=dataset_id, version_id=vid,
+            operator=operator, environment=environment,
+        )  # fmt: skip
+        purged += int(result["versions_purged"])
+    return {"selected": len(batch), "moved": moved, "purged": purged, "more": int(more),
+            "dry_run": 0}  # fmt: skip
+
+
 # --- tombstone -----------------------------------------------------------------
 
 
@@ -218,7 +388,7 @@ def _has_purge_evidence(conn: psycopg.Connection[Any], version_id: uuid.UUID) ->
 
 def _require_purged(
     conn: psycopg.Connection[Any],
-    store: LocalBlobStore | None,
+    store: BlobStore | None,
     log: DeletionLog,
     tenant_id: uuid.UUID,
     dataset_id: uuid.UUID,
@@ -302,7 +472,7 @@ def tombstone(
     *,
     dataset_id: uuid.UUID,
     version_id: uuid.UUID | None = None,
-    store: LocalBlobStore | None = None,
+    store: BlobStore | None = None,
     log: DeletionLog | None = None,
 ) -> dict[str, Any]:
     """Tombstone one DELETING version, or a DELETING dataset with all its
@@ -464,8 +634,11 @@ def dispatch_pending(
 # --- restore validation --------------------------------------------------------
 
 
-def verify_objects(conn: psycopg.Connection[Any], store: LocalBlobStore) -> dict[str, list[str]]:
-    """Metadata/object consistency (ids only). Every list must be empty."""
+def verify_objects(conn: psycopg.Connection[Any], store: BlobStore) -> dict[str, list[str]]:
+    """Metadata/object consistency (ids only). Every list must be empty except
+    ``noncurrent_versions`` (expected on S3 until O-5 sets noncurrent expiry,
+    reported for visibility). REJECTED objects are retained until
+    ``purge-rejected`` (D2): their presence or absence is not an error."""
     rows = conn.execute(
         "SELECT id, status, storage_object_key, content_sha256 "
         "FROM dataset_versions WHERE storage_object_key IS NOT NULL"
@@ -482,14 +655,27 @@ def verify_objects(conn: psycopg.Connection[Any], store: LocalBlobStore) -> dict
             continue
         if store.digest(key)[1] != digest:
             mismatched.append(str(vid))
-    orphaned = sorted(
-        k.rsplit("/", 1)[-1] for area in AREAS for k in list_area(store, area) if k not in accounted
-    )
+    items = [item for area in AREAS for item in list_area(store, area)]
+    current = {item_key(i) for i in items if "#u=" not in i and "#m=" not in i}
+    orphaned = sorted({_object_id(item_key(i)) for i in items if item_key(i) not in accounted})
+    # S3: more than one version (or a delete marker) of an accounted key.
+    seen: dict[str, int] = {}
+    for i in items:
+        if "#" in i and "#u=" not in i:
+            seen[item_key(i)] = seen.get(item_key(i), 0) + 1
+    noncurrent = sorted(_object_id(k) for k, n in seen.items() if n > 1 and k in current)
     return {
         "missing_objects": sorted(missing),
         "digest_mismatches": sorted(mismatched),
         "unaccounted_objects": orphaned,
+        "noncurrent_versions": noncurrent,
     }
+
+
+def _object_id(key: str) -> str:
+    """The version id a key names (ids only in output)."""
+    parts = key.split("/")
+    return parts[3] if len(parts) > 3 else parts[-1]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -500,6 +686,13 @@ def main(argv: list[str] | None = None) -> int:
     dp = sub.add_parser("dispatch-pending")
     dp.add_argument("--dry-run", action="store_true")
     dp.add_argument("--limit", type=int, default=SWEEP_BATCH)
+    rp = sub.add_parser("rejected-pending")
+    rp.add_argument("--limit", type=int, default=REJECTED_BATCH)
+    rp.add_argument("--metrics-file", default=None)
+    pr = sub.add_parser("purge-rejected")
+    pr.add_argument("--operator", required=True)
+    pr.add_argument("--dry-run", action="store_true")
+    pr.add_argument("--limit", type=int, default=REJECTED_BATCH)
     for name in ("purge", "tombstone"):
         sp = sub.add_parser(name)
         sp.add_argument("--dataset", required=True)
@@ -508,9 +701,16 @@ def main(argv: list[str] | None = None) -> int:
             sp.add_argument("--operator", required=True)
     args = p.parse_args(argv)
     settings = Settings()
-    store = dataset_store(settings)
     try:
         with psycopg.connect(_owner_url(), autocommit=True) as conn:
+            if args.cmd == "rejected-pending":
+                stats = rejected_stats(conn)
+                for row in rejected_pending(conn, limit=args.limit):
+                    print("\t".join(str(v) for v in row))
+                print(f"retained={stats['retained']} oldest_age_s={stats['oldest_age_s']}")
+                if args.metrics_file:
+                    write_rejected_metrics(args.metrics_file, stats)
+                return 0
             if args.cmd == "pending":
                 for row in pending(conn):
                     print("\t".join(str(v) for v in row))
@@ -522,6 +722,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = dispatch_pending(conn, broker, dry_run=args.dry_run, limit=args.limit)
                 print(" ".join(f"{k}={v}" for k, v in result.items()))
                 return 0
+            store = dataset_store(settings, service="operator")
             if args.cmd == "verify-objects":
                 if store is None:
                     raise TombstoneError("no dataset store is configured")
@@ -530,11 +731,6 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"{key}={len(ids)}" + ("" if not ids else " " + ",".join(ids)))
                 return 0 if not any(report.values()) else 1
             try:
-                ds = uuid.UUID(args.dataset)
-                ver = uuid.UUID(args.version) if args.version else None
-            except ValueError as exc:
-                raise TombstoneError("--dataset and --version must be UUIDs") from exc
-            try:
                 log = deletion_log_from_settings(
                     settings.dataset_deletion_log,
                     settings.dataset_deletion_log_path,
@@ -542,6 +738,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except DeletionLogUnavailable as exc:
                 raise TombstoneError(str(exc)) from None
+            if args.cmd == "purge-rejected":
+                rej = purge_rejected(
+                    conn, store, log, operator=args.operator, environment=settings.app_env,
+                    limit=args.limit, dry_run=args.dry_run,
+                )  # fmt: skip
+                print(" ".join(f"{k}={v}" for k, v in rej.items()))
+                return 0
+            try:
+                ds = uuid.UUID(args.dataset)
+                ver = uuid.UUID(args.version) if args.version else None
+            except ValueError as exc:
+                raise TombstoneError("--dataset and --version must be UUIDs") from exc
             if args.cmd == "purge":
                 result = purge(
                     conn,
