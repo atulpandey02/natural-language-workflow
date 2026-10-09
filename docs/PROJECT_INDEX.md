@@ -7,9 +7,17 @@ this and know exactly where the project stands. Update it after each milestone.
 
 The owner decided O-2 on 2026-10-09: AWS S3 in us-east-1, separate staging
 and production buckets, IAM roles and customer-managed KMS keys, and boto3.
-[ADR-033](adr/ADR-033-s3-dataset-object-storage.md) records it, together with
-the conflicts it creates with the current ingest code and the recommended
-resolutions (D1–D6), which await review.
+[ADR-033](adr/ADR-033-s3-dataset-object-storage.md) records it, with D1–D6
+approved:
+
+- one immutable object per version under `versions/`;
+- the ingest runtime is read-only;
+- rejected files are purged by the operator within a provisional 7 days;
+- narrow assumed roles, with per-container short-lived credentials and IMDS
+  blocked;
+- the existing `DATASET_S3_*` settings;
+- the real-AWS proof only after explicit authorization.
+
 [Provisioning templates](runbooks/dataset-s3-provisioning.md) are NOT RUN.
 There is no code yet, and no AWS resource exists or is contacted.
 
