@@ -11,7 +11,7 @@ A and B is closed by an owner-approved change.
 
 | # | Decision | Why it blocks staging |
 |---|---|---|
-| O-2 | S3-compatible client dependency + ADR; a **dedicated** per-environment bucket or prefix (never the backup repository); encryption, versioning and object lock; access policy for the API role | There is no deployed object store; the local backend is refused outside development |
+| O-2 | **Decided (owner, 2026-10-09)**: AWS S3 in us-east-1, with separate buckets, roles and KMS keys per environment, and boto3 as the client ([ADR-033](../adr/ADR-033-s3-dataset-object-storage.md), resolutions D1–D6 under review). Not yet implemented, and no AWS resources exist | There is no deployed object store; the local backend is refused outside development |
 | O-3 | External deletion-log provider and record retention | `purge` refuses to run without a log; the local fake is refused outside development |
 | O-4 | Object durability, replication and restore policy (RPO/RTO for uploaded files) | A database restore brings back no bytes (`verify-objects` would report every live version missing) |
 | O-5 | Retention periods (request → purge → tombstone; tombstones, events, receipts) | The deletion statement cannot be published without them |

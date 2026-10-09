@@ -3,6 +3,16 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Phase 2B — production dataset storage, O-2 (branch `docs/o2-s3-dataset-storage`, design review)
+
+The owner decided O-2 on 2026-10-09: AWS S3 in us-east-1, separate staging
+and production buckets, IAM roles and customer-managed KMS keys, and boto3.
+[ADR-033](adr/ADR-033-s3-dataset-object-storage.md) records it, together with
+the conflicts it creates with the current ingest code and the recommended
+resolutions (D1–D6), which await review.
+[Provisioning templates](runbooks/dataset-s3-provisioning.md) are NOT RUN.
+There is no code yet, and no AWS resource exists or is contacted.
+
 ## Phase 2B — unattended dataset dispatcher, O-7 (branch `feat/o7-ingest-dispatcher`, awaiting review)
 
 Builds on the upload API (atulpandey02/natural-language-workflow#56, merged as
