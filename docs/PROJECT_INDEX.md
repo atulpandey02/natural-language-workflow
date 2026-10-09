@@ -3,7 +3,29 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
-## Phase 2B — production dataset storage, O-2 (branch `docs/o2-s3-dataset-storage`, design review)
+## Phase 2B — S3 dataset store, O-2 implementation (branch `feat/o2-s3-dataset-store`, awaiting review)
+
+ADR-033 is implemented with no AWS contact:
+
+- `nlw.storage.s3.S3BlobStore`:
+  - conditional, SSE-KMS-explicit creation;
+  - whole-file SHA-256 and a composite multipart checksum;
+  - an abort on every failure;
+  - version-aware operator purge.
+- Pinned per-service credentials with an identity check.
+- The `DATASET_S3_*` refusals.
+- One immutable `versions/` object per version: the ingest runtime is
+  read-only and the API never deletes.
+- Migration `0028_dataset_object_layout`: key layout, a key-never-moves guard,
+  `nlw_ingest` losing `UPDATE (storage_object_key)`, and reason
+  `REJECTED_RETENTION`.
+- Operator `rejected-pending` and `purge-rejected`.
+- Two dormant alerts.
+
+No AWS resource exists. The real-AWS proof awaits authorization, and uploads
+stay refused in staging and production.
+
+## Phase 2B — production dataset storage, O-2 (ADR-033 merged as `b83ae37`)
 
 The owner decided O-2 on 2026-10-09: AWS S3 in us-east-1, separate staging
 and production buckets, IAM roles and customer-managed KMS keys, and boto3.
