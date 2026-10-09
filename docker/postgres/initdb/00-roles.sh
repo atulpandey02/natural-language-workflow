@@ -92,3 +92,19 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'S
 CREATE ROLE nlw_ingest NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
 SQL
 fi
+
+# Dataset dispatcher role (ADR-032, O-7). DORMANT by default exactly like
+# nlw_ingest: LOGIN only when NLW_INGEST_DISPATCH_DB_PASSWORD is supplied
+# (development, CI, E2E). Its privileges come from migration 0027 only: one
+# read-only function and the recovery-lock columns.
+if [ -n "${NLW_INGEST_DISPATCH_DB_PASSWORD:-}" ]; then
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'SQL'
+\getenv dispatch_pw NLW_INGEST_DISPATCH_DB_PASSWORD
+CREATE ROLE nlw_ingest_dispatch LOGIN PASSWORD :'dispatch_pw'
+    NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
+SQL
+else
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'SQL'
+CREATE ROLE nlw_ingest_dispatch NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
+SQL
+fi

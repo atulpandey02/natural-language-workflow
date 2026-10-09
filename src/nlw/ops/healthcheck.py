@@ -1,4 +1,4 @@
-"""Container healthcheck for the worker/scheduler/ingest roles (M9, req 7; ADR-031).
+"""Container healthcheck for the worker/scheduler/ingest/dispatch roles (M9, req 7; ADR-031/032).
 
 Beyond "is the process alive", this proves the process can actually do its job:
 PostgreSQL is reachable, Redis is reachable, and the process's own metrics port
@@ -65,6 +65,9 @@ _ROLE_PURPOSE = {
     "nlw_app": Purpose.API_REQUEST,
     "nlw_ingest": Purpose.DATASET_INGEST,
 }
+# Roles that hold no signing key at all (ADR-032: the dataset dispatcher reads
+# one SECURITY DEFINER function and never sets a tenant context).
+_KEYLESS_ROLES = frozenset({"nlw_ingest_dispatch"})
 
 
 def _check_signed_context(settings: Settings) -> None:
@@ -76,6 +79,8 @@ def _check_signed_context(settings: Settings) -> None:
     """
     with psycopg.connect(_libpq_url(settings.database_url), connect_timeout=3) as conn:
         role = str(conn.execute("SELECT session_user").fetchone()[0])  # type: ignore[index]
+        if role in _KEYLESS_ROLES:
+            return
         purpose = _ROLE_PURPOSE[role]
         signer = build_signer(settings, purpose)
         nil = uuid.UUID(int=0)

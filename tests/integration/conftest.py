@@ -53,6 +53,9 @@ def _bootstrap_roles(owner_libpq: str, db: str) -> None:
             "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_ingest') THEN "
             "CREATE ROLE nlw_ingest LOGIN PASSWORD 'nlw_ingest' "
             "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; "
+            "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_ingest_dispatch') THEN "
+            "CREATE ROLE nlw_ingest_dispatch LOGIN PASSWORD 'nlw_ingest_dispatch' "
+            "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT; END IF; "
             "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='nlw_rls_bypass') THEN "
             "CREATE ROLE nlw_rls_bypass NOLOGIN NOSUPERUSER BYPASSRLS "
             "NOCREATEDB NOCREATEROLE; END IF; "
@@ -130,6 +133,7 @@ def pg_stack(request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
         worker_sa = _sqlalchemy("nlw_worker", "nlw_worker", host, port, db)
         scheduler_sa = _sqlalchemy("nlw_scheduler", "nlw_scheduler", host, port, db)
         ingest_sa = _sqlalchemy("nlw_ingest", "nlw_ingest", host, port, db)
+        dispatch_sa = _sqlalchemy("nlw_ingest_dispatch", "nlw_ingest_dispatch", host, port, db)
 
         _bootstrap_roles(owner_libpq, db)
 
@@ -321,6 +325,8 @@ def pg_stack(request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
                 scheduler_settings=_settings(scheduler_sa, "scheduler"),
                 ingest_settings=_settings(ingest_sa, "ingest"),
                 ingest_sa=ingest_sa,
+                dispatch_sa=dispatch_sa,
+                dispatch_libpq=_libpq("nlw_ingest_dispatch", "nlw_ingest_dispatch", host, port, db),
                 owner_libpq=owner_libpq,
                 owner_sa=owner_sa,
                 app_libpq=_libpq("nlw_app", "nlw_app", host, port, db),

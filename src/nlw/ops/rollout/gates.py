@@ -31,14 +31,18 @@ EXPECTED_ROLES: dict[str, str] = {
     # Dormant ingest runtime (ADR-031): NOLOGIN until owner decision O-6. A LOGIN
     # ingest role on a deployed target is an error, never silently accepted.
     "nlw_ingest": "fff",
+    # Dormant dataset dispatcher (ADR-032), likewise NOLOGIN until O-6.
+    "nlw_ingest_dispatch": "fff",
 }
 # Roles that must ALREADY exist before the upgrade (M11 set); the P3A/P3B owner
-# roles and the dormant ingest role are the ones prepare-roles may create.
+# roles and the dormant ingest/dispatch roles are the ones prepare-roles may create.
 PRE_UPGRADE_ROLES = frozenset(
     {"nlw_app", "nlw_worker", "nlw_scheduler", "nlw_rls_bypass", "nlw_workspace_bootstrap"}
 )
-PROVISIONABLE_ROLES = frozenset({"nlw_membership_admin", "nlw_ctx_verifier", "nlw_ingest"})
-RUNTIME_ROLES = ("nlw_app", "nlw_worker", "nlw_scheduler", "nlw_ingest")
+PROVISIONABLE_ROLES = frozenset(
+    {"nlw_membership_admin", "nlw_ctx_verifier", "nlw_ingest", "nlw_ingest_dispatch"}
+)
+RUNTIME_ROLES = ("nlw_app", "nlw_worker", "nlw_scheduler", "nlw_ingest", "nlw_ingest_dispatch")
 
 
 class GateError(RuntimeError):
@@ -370,6 +374,16 @@ def check_ingest_grants(lines: str) -> None:
     problems = ingest_grant_problems({ln.strip() for ln in lines.splitlines() if ln.strip()})
     if problems:
         raise GateError("ingest privileges differ from ADR-031: " + "; ".join(problems))
+
+
+def check_dispatch_grants(lines: str) -> None:
+    """The dormant dispatcher must hold EXACTLY its ADR-032 privileges (one
+    function and the recovery-lock columns; nothing on any dataset table)."""
+    from nlw.ops.roles import dispatch_grant_problems
+
+    problems = dispatch_grant_problems({ln.strip() for ln in lines.splitlines() if ln.strip()})
+    if problems:
+        raise GateError("dispatcher privileges differ from ADR-032: " + "; ".join(problems))
 
 
 def check_no_runtime_sessions(count: int) -> None:

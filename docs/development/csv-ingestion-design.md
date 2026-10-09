@@ -121,10 +121,12 @@ implementation from a trace of the code at `main` `9bc5f74`.
    oldest first, one at a time). Delivery is at-least-once only once one of
    these has sent the message. The lease makes processing idempotent.
 
-   An **unattended** dispatcher is not provided, so until then a lost enqueue
-   stays pending indefinitely. This is acceptable only while uploads are
-   disabled. It is O-7, mandatory before O-6; see the decision record in
-   ADR-031.
+   Unattended recovery (O-7, [ADR-032](../adr/ADR-032-dataset-ingest-dispatcher.md)):
+   the `ingest-dispatch` process, running as `nlw_ingest_dispatch` with one
+   read-only function, re-sends waiting requests older than about 2 minutes.
+   It is bounded and oldest first, and an alert fires on anything pending over
+   15 minutes. It is dormant in staging and production until O-6. Without it,
+   a lost enqueue waits for one of the manual paths above.
 
    Object/database boundary: the object is linked before the record commits,
    and these are not one transaction.

@@ -61,6 +61,8 @@ services:
       # Makes nlw_ingest a LOGIN role on a fresh dev volume (ADR-031); without it
       # initdb creates the role dormant (NOLOGIN), as staging/production keep it.
       NLW_INGEST_DB_PASSWORD: ${NLW_INGEST_DB_PASSWORD:-nlw_ingest}
+      # Likewise for the dataset dispatcher (ADR-032).
+      NLW_INGEST_DISPATCH_DB_PASSWORD: ${NLW_INGEST_DISPATCH_DB_PASSWORD:-nlw_ingest_dispatch}
     # Published on 5433 to avoid colliding with a native Postgres on 5432.
     # In-cluster services still reach it at postgres:5432.
     ports:
@@ -202,6 +204,35 @@ services:
     volumes:
       - ./docker/ctx-keys/ingest.key:/run/nlw/keys/ingest.key:ro
       - datasets:/var/lib/nlw/datasets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "nlw.ops.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Dataset dispatcher (ADR-032, O-7). OPT-IN with the ingest runtime
+  # (`--profile ingest`). Re-sends the envelopes of committed processing requests
+  # whose enqueue was lost, as nlw_ingest_dispatch: one read-only function, no
+  # table access, no key, no storage, no secrets beyond its database URL and
+  # Redis. No published port. Not in the staging/production Compose until O-6.
+  ingest-dispatch:
+    build: .
+    <<: *app-hardening
+    profiles: ["ingest"]
+    init: true
+    command: ["python", "-m", "nlw.ingest_dispatch.dispatcher"]
+    stop_grace_period: 30s
+    environment:
+      APP_ENV: local
+      LOG_LEVEL: info
+      DATABASE_URL: postgresql+psycopg://nlw_ingest_dispatch:${NLW_INGEST_DISPATCH_DB_PASSWORD:-nlw_ingest_dispatch}@postgres:5432/nlw
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy

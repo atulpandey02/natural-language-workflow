@@ -3,6 +3,21 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Phase 2B — unattended dataset dispatcher, O-7 (branch `feat/o7-ingest-dispatcher`, awaiting review)
+
+Builds on the upload API (atulpandey02/natural-language-workflow#56, merged as
+`53fe92c`). Migration `0027_dataset_ingest_dispatch`
+([ADR-032](adr/ADR-032-dataset-ingest-dispatcher.md)) adds a dormant
+`nlw_ingest_dispatch` role. It holds one read-only SECURITY DEFINER function
+and no dataset-table access. The `nlw.ingest_dispatch` process re-sends lost
+enqueues, bounded and oldest first, with pending-age alerts
+(`datasets.rules.yml`, not yet wired into the deployed Prometheus). The signed
+policy count is unchanged at 74. **Uploads remain disabled.**
+
+Open owner decisions: O-2 storage, O-3 deletion log, O-4 object
+backup/restore, O-5 retention, and O-6 enablement (which includes the
+dispatcher).
+
 ## Phase 2B — dataset ingest runtime boundary, O-1 (branch `feat/dataset-ingest-runtime-role`, awaiting review)
 
 Builds on the CSV profiling and storage foundation (atulpandey02/natural-language-workflow#52,

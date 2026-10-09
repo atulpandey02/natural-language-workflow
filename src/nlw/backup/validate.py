@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-_RUNTIME_ROLES = ("nlw_app", "nlw_worker", "nlw_scheduler", "nlw_ingest")
+_RUNTIME_ROLES = ("nlw_app", "nlw_worker", "nlw_scheduler", "nlw_ingest", "nlw_ingest_dispatch")
 _ALL_ROLES = _RUNTIME_ROLES + (
     "nlw_rls_bypass",
     "nlw_workspace_bootstrap",
@@ -527,6 +527,13 @@ def validate_restore(engine: Engine, *, expected_revision: str | None = None) ->
             {str(r[0]) for r in _q(conn, INGEST_GRANTS_SQL).all()}
         )
         add("ingest_grants_exact", not ingest_problems, f"problems={ingest_problems}")
+        # ADR-032: the dispatcher holds exactly one function and the lock columns.
+        from nlw.ops.roles import DISPATCH_GRANTS_SQL, dispatch_grant_problems
+
+        dispatch_problems = dispatch_grant_problems(
+            {str(r[0]) for r in _q(conn, DISPATCH_GRANTS_SQL).all()}
+        )
+        add("dispatch_grants_exact", not dispatch_problems, f"problems={dispatch_problems}")
         add(
             "no_policy_trusts_unsigned_context",
             not legacy and not uncond and not helper_legacy and len(pols) == 74,

@@ -1,0 +1,79 @@
+# promtool unit tests for the dataset processing alerts (ADR-032).
+# Run by tests/integration/test_monitoring_config.py:
+#   promtool test rules /etc/prometheus/tests/datasets.rules.test.yml
+rule_files:
+  - ../alerts/datasets.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Healthy: requests are picked up within minutes -> silent.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_dispatch_oldest_pending_age_seconds{role="ingest-dispatch"}'
+        values: '0 60 120 0 30 0x60'
+      - series: 'nlw_dataset_dispatch_stale{role="ingest-dispatch"}'
+        values: '0x60'
+      - series: 'nlw_dataset_dispatch_last_success_timestamp_seconds{role="ingest-dispatch"}'
+        values: '0+60x60'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: NlwDatasetProcessingPendingTooLong
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: NlwDatasetProcessingRequestsExpired
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: NlwDatasetDispatcherStalled
+        exp_alerts: []
+
+  # A request keeps waiting: over 900 s from minute 16, firing after the 5m `for`.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_dispatch_oldest_pending_age_seconds{role="ingest-dispatch"}'
+        values: '0+60x40'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: NlwDatasetProcessingPendingTooLong
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: NlwDatasetProcessingPendingTooLong
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets, role: ingest-dispatch }
+            exp_annotations:
+              summary: "A dataset upload has waited over 15 minutes for processing"
+              description: "The oldest waiting processing request is over 15 minutes old. Check the ingest runtime, Redis and the recovery lock. Runbook: docs/adr/ADR-032-dataset-ingest-dispatcher.md\n"
+
+  # Requests too old to re-send, sustained for 15 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_dispatch_stale{role="ingest-dispatch"}'
+        values: '0 2x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NlwDatasetProcessingRequestsExpired
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: NlwDatasetProcessingRequestsExpired
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets, role: ingest-dispatch }
+            exp_annotations:
+              summary: "Dataset processing requests are too old to be re-sent"
+              description: "Waiting versions need an admin re-dispatch (POST .../process). Runbook: docs/adr/ADR-032-dataset-ingest-dispatcher.md\n"
+
+  # The dispatcher stops completing cycles at minute 5 -> fires 10m + 5m later.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_dispatch_last_success_timestamp_seconds{role="ingest-dispatch"}'
+        values: '0 60 120 180 240 300 300x40'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: NlwDatasetDispatcherStalled
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: NlwDatasetDispatcherStalled
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets, role: ingest-dispatch }
+            exp_annotations:
+              summary: "The dataset dispatcher has not completed a cycle for 10 minutes"
+              description: "Database, Redis or recovery-lock trouble. Runbook: docs/adr/ADR-032-dataset-ingest-dispatcher.md\n"

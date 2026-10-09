@@ -225,6 +225,36 @@ _CTX_SIGNER_CONFIGURED = Gauge(
 )
 _CTX_REASONS = frozenset({"none", "not_verified", "db_error", "signer_unavailable"})
 
+# --- Dataset dispatcher (ADR-032, O-7) ---
+# Aggregates over ALL workspaces, never per workspace/dataset/version: the only
+# label is the cycle result from a fixed vocabulary.
+_DISPATCH_PENDING = Gauge(
+    "nlw_dataset_dispatch_pending",
+    "Versions waiting for processing (latest request committed, not settled).",
+)
+_DISPATCH_OLDEST = Gauge(
+    "nlw_dataset_dispatch_oldest_pending_age_seconds",
+    "Age of the oldest waiting version's latest processing request (0 if none).",
+)
+_DISPATCH_STALE = Gauge(
+    "nlw_dataset_dispatch_stale",
+    "Waiting versions whose latest request is too old for the consumer (needs re-dispatch).",
+)
+_DISPATCH_ENQUEUED = Counter(
+    "nlw_dataset_dispatch_enqueued_total",
+    "Work envelopes re-sent by the dispatcher.",
+)
+_DISPATCH_CYCLES = Counter(
+    "nlw_dataset_dispatch_cycles_total",
+    "Dispatcher cycles by result.",
+    labelnames=("result",),
+)
+_DISPATCH_LAST_SUCCESS = Gauge(
+    "nlw_dataset_dispatch_last_success_timestamp_seconds",
+    "Unix time of the dispatcher's last successful cycle.",
+)
+_DISPATCH_RESULTS = frozenset({"ok", "locked", "busy", "error"})
+
 
 # Scrape-time providers for pool/queue gauges. These read live values at collect()
 # time so the numbers are current on every scrape. Providers are registered by the
@@ -469,3 +499,31 @@ def record_analytics_result(status: str, chart_count: int, seconds: float) -> No
     _ANALYTICS_RESULTS.labels(status=label).inc()
     _ANALYTICS_CHARTS.observe(max(0, min(chart_count, 6)))
     _ANALYTICS_DURATION.observe(max(0.0, seconds))
+
+
+def record_dataset_dispatch(
+    result: str,
+    *,
+    pending: int | None = None,
+    oldest_age_s: float | None = None,
+    stale: int | None = None,
+    enqueued: int = 0,
+    now: float | None = None,
+) -> None:
+    """One dispatcher cycle (ADR-032). ``result`` is coerced into the fixed
+    vocabulary; gauges move only on a cycle that actually read the database."""
+    if result not in _DISPATCH_RESULTS:
+        result = "error"
+    _DISPATCH_CYCLES.labels(result=result).inc()
+    if result != "ok":
+        return
+    if pending is not None:
+        _DISPATCH_PENDING.set(pending)
+    if oldest_age_s is not None:
+        _DISPATCH_OLDEST.set(oldest_age_s)
+    if stale is not None:
+        _DISPATCH_STALE.set(stale)
+    if enqueued:
+        _DISPATCH_ENQUEUED.inc(enqueued)
+    if now is not None:
+        _DISPATCH_LAST_SUCCESS.set(now)

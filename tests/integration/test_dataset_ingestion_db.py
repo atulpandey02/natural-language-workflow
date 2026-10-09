@@ -217,10 +217,10 @@ def test_populated_0024_upgrades_without_rewriting_anything(
     command.upgrade(at_0024, "head")
     assert snapshot() == before
     after = _posture(pg_stack)
-    # Upgraded to head: 0025 and the ingest boundary 0026 (ADR-031), still
-    # rewriting nothing.
+    # Upgraded to head: 0025, the ingest boundary 0026 (ADR-031) and the
+    # dispatcher 0027 (ADR-032, no policy), still rewriting nothing.
     assert after == {
-        "revision": "0026_dataset_ingest_role",
+        "revision": "0027_dataset_ingest_dispatch",
         "policies": 74,
         "tables": 2,
         "column": 1,
