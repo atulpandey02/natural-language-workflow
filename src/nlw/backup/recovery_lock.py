@@ -72,6 +72,22 @@ def check_recovery_lock(conn: Connection) -> None:
     _evaluate(row)
 
 
+NEWEST_STATE_SQL = (
+    "SELECT id, validation_completed_at, runtime_enabled_at "
+    "FROM dr_restore_events ORDER BY restored_at DESC LIMIT 1"
+)
+
+
+def check_recovery_lock_psycopg(conn: Any) -> None:
+    """``check_recovery_lock`` for an operator's raw psycopg connection (the
+    dataset purge commands). Same evaluation, same fail-closed behavior."""
+    try:
+        row = conn.execute(NEWEST_STATE_SQL).fetchone()
+    except Exception as exc:
+        raise RecoveryStateUnknown("cannot read authoritative recovery-lock state") from exc
+    _evaluate(row)
+
+
 def read_recovery_state(conn: Connection) -> str:
     """Return the authoritative newest-generation state as a plain string for the
     live API gate: "ALLOWED" (no event, or validated+enabled) or "LOCKED" (quiesced/

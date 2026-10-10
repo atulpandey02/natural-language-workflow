@@ -78,8 +78,8 @@ def test_generator_reads_target_env_and_ci_identity_and_validates() -> None:
     assert m.backend_digest == "sha256:" + "a" * 64 and len(m.sha256) == 64
 
 
-# This checkout's Alembic head (0027: the dataset dispatcher, ADR-032).
-HEAD = "0027_dataset_ingest_dispatch"
+# This checkout's Alembic head (0028: the dataset object layout, ADR-033).
+HEAD = "0028_dataset_object_layout"
 
 
 def test_generator_derives_target_revision_from_this_checkout() -> None:
@@ -105,7 +105,7 @@ def test_committed_target_env_yields_the_0024_to_head_migration_release() -> Non
     assert "sslip" not in json.dumps(doc)
     m = rm.parse_manifest(doc, raw_bytes=json.dumps(doc).encode())
     info = dict(GOOD_INFO, alembic_head=HEAD,
-                migrations=[f"{n:04d}_x.py" for n in range(1, 28)])  # fmt: skip
+                migrations=[f"{n:04d}_x.py" for n in range(1, 29)])  # fmt: skip
     gates.check_image_info(info, m)
     with pytest.raises(GateError, match="migration head"):
         gates.check_image_info({**info, "alembic_head": "0024_dataset_lifecycle"}, m)
@@ -125,7 +125,7 @@ def test_a_0023_target_still_yields_the_0023_to_head_migration_release() -> None
     assert doc["target_revision"] == HEAD
     m = rm.parse_manifest(doc, raw_bytes=json.dumps(doc).encode())
     info = dict(GOOD_INFO, alembic_head=HEAD,
-                migrations=[f"{n:04d}_x.py" for n in range(1, 28)])  # fmt: skip
+                migrations=[f"{n:04d}_x.py" for n in range(1, 29)])  # fmt: skip
     gates.check_image_info(info, m)
     with pytest.raises(GateError, match="lacks migration"):
         gates.check_image_info({**info, "migrations": info["migrations"][:-1]}, m)
@@ -155,7 +155,7 @@ def test_checkout_head_requires_new_migrations_from_a_0020_target(tmp_path: Path
     assert doc["target_revision"] == HEAD
     m = rm.parse_manifest(doc, raw_bytes=json.dumps(doc).encode())
     info = dict(GOOD_INFO, alembic_head=HEAD,
-                migrations=[f"{n:04d}_x.py" for n in range(1, 28)])  # fmt: skip
+                migrations=[f"{n:04d}_x.py" for n in range(1, 29)])  # fmt: skip
     gates.check_image_info(info, m)
     with pytest.raises(GateError):
         gates.check_image_info({**info, "migrations": info["migrations"][:-1]}, m)

@@ -119,7 +119,7 @@ async def test_processing_publishes_once_under_concurrency(h: H) -> None:
     assert sorted(results) == ["profiled", "skipped", "skipped", "skipped"]
     rec = await h.get(d, v)
     assert rec.status.value == "PROFILED" and _profiles(h.pg, v) == 1
-    assert h.scoped.list_version(d, v) == [h.scoped.version_key("datasets", d, v)]
+    assert h.scoped.list_version(d, v) == [h.scoped.object_key(d, v)]  # one object, no copy
     assert await h.process(d, v) == "skipped"  # nothing left to do
 
 
@@ -145,7 +145,7 @@ async def test_a_member_cannot_request_processing(h: H, pg_stack: SimpleNamespac
 async def test_tampered_bytes_are_rejected_before_profiling(h: H) -> None:
     d, v = await h.version()
     await h.store_content(d, v)
-    key = h.scoped.version_key("quarantine", d, v)
+    key = h.scoped.object_key(d, v)
     (h.store.root / key).write_bytes(CSV.replace(b"r1", b"r9"))  # same size, other bytes
     assert await h.process(d, v) == "rejected"
     rec = await h.get(d, v)
@@ -153,13 +153,14 @@ async def test_tampered_bytes_are_rejected_before_profiling(h: H) -> None:
         "REJECTED",
         "CONTENT_MISMATCH",
     )
-    assert h.scoped.list_version(d, v) == []  # rejected bytes are removed
+    # ADR-033 D2: the rejected object is kept (immutable) for the operator purge.
+    assert h.scoped.list_version(d, v) == [key]
 
 
 async def test_a_missing_object_is_rejected(h: H) -> None:
     d, v = await h.version()
     await h.store_content(d, v)
-    (h.store.root / h.scoped.version_key("quarantine", d, v)).unlink()
+    (h.store.root / h.scoped.object_key(d, v)).unlink()
     assert await h.process(d, v) == "rejected"
     rec = await h.get(d, v)
     assert rec.rejection_code is not None and rec.rejection_code.value == "CONTENT_MISMATCH"
@@ -253,7 +254,7 @@ async def test_service_tenant_predicates_hold_even_without_rls(
             with pytest.raises(svc.DatasetNotFound):
                 await svc.record_content(
                     s, other, d, v, content_sha256="0" * 64,
-                    storage_object_key=f"quarantine/{other}/{d}/{v}",
+                    storage_object_key=f"versions/{other}/{d}/{v}/source.csv",
                 )  # fmt: skip
             # The right tenant still sees it through the same RLS-free session.
             assert (await svc.get_profile(s, h.ctx.tenant_id, d, v)) is not None

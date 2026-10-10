@@ -16,6 +16,7 @@ from nlw.ingest.strict import (
     CEILING_ROWS,
     StrictLimits,
 )
+from nlw.storage.blob import LocalBlobStore
 from nlw.storage.factory import dataset_store
 
 
@@ -84,7 +85,7 @@ def test_local_storage_needs_an_absolute_root(tmp_path: Path) -> None:
             _settings(dataset_storage_backend="local", dataset_storage_root=root)
     s = _settings(dataset_storage_backend="local", dataset_storage_root=str(tmp_path))
     store = dataset_store(s)
-    assert store is not None and store.root == (tmp_path / "local").resolve()
+    assert isinstance(store, LocalBlobStore) and store.root == (tmp_path / "local").resolve()
     assert (store.root.stat().st_mode & 0o777) == 0o700
 
 

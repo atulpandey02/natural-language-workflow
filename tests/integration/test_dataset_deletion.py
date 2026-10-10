@@ -134,7 +134,7 @@ def _tombstone(e: SimpleNamespace, did: str, vid: str | None = None) -> dict[str
 def test_request_purge_verify_tombstone_end_to_end(env: SimpleNamespace) -> None:
     e = env
     did, vid = _active(e)
-    assert _files(e.store) == [f"datasets/{e.tenant}/{did}/{vid}"]
+    assert _files(e.store) == [f"versions/{e.tenant}/{did}/{vid}/source.csv"]
     assert e.c.delete(f"/datasets/{did}", headers=e.h).status_code == 202
 
     with pytest.raises(ops.TombstoneError, match="not purged"):
@@ -198,7 +198,7 @@ def test_tombstone_is_refused_if_bytes_reappear_after_the_purge(env: SimpleNames
     did, vid = _active(e)
     e.c.delete(f"/datasets/{did}", headers=e.h)
     _purge(e, did)
-    stray = e.store.root / "datasets" / str(e.tenant) / did / vid
+    stray = e.store.root / "versions" / str(e.tenant) / did / vid / "source.csv"
     stray.parent.mkdir(parents=True, exist_ok=True)
     stray.write_bytes(CSV)  # e.g. restored from an old object backup
     with pytest.raises(ops.TombstoneError, match="still present"):
@@ -253,7 +253,7 @@ def test_single_version_purge_and_tombstone_on_a_live_dataset(env: SimpleNamespa
     assert e.c.delete(f"/datasets/{did}/versions/{v1}", headers=e.h).status_code == 202
     assert e.c.get(f"/datasets/{did}", headers=e.h).json()["active_version_id"] is None
     _purge(e, did, v1)
-    assert _files(e.store) == [f"datasets/{e.tenant}/{did}/{v2}"]  # v2 untouched
+    assert _files(e.store) == [f"versions/{e.tenant}/{did}/{v2}/source.csv"]  # v2 untouched
     assert _tombstone(e, did, v1)["versions_tombstoned"] == 1
     assert e.c.get(f"/datasets/{did}/versions/{v2}", headers=e.h).json()["status"] == "PROFILED"
 
@@ -284,7 +284,9 @@ def test_repeated_and_concurrent_deletion_requests_are_idempotent(env: SimpleNam
     assert _files(e.store) == []
 
 
-def test_rejected_versions_purge_without_bytes(env: SimpleNamespace) -> None:
+def test_a_rejected_versions_object_is_kept_until_the_purge(env: SimpleNamespace) -> None:
+    """ADR-033 D2: the ingest runtime deletes nothing; a rejected object stays
+    immutable until the operator's purge, which records evidence for it."""
     e = env
     did = e.c.post("/datasets", headers=e.h, json={"name": "Bad"}).json()["id"]
     bad = b"a,a\n1,2\n"
@@ -295,9 +297,11 @@ def test_rejected_versions_purge_without_bytes(env: SimpleNamespace) -> None:
     ).json()["id"]
     e.c.put(f"/datasets/{did}/versions/{vid}/content", headers=e.h, content=bad)
     assert e.c.get(f"/datasets/{did}/versions/{vid}", headers=e.h).json()["status"] == "REJECTED"
-    assert _files(e.store) == []
+    assert _files(e.store) == [f"versions/{e.tenant}/{did}/{vid}/source.csv"]
     e.c.delete(f"/datasets/{did}", headers=e.h)
-    assert _purge(e, did)["versions_purged"] == 1  # the key existed: evidence recorded
+    result = _purge(e, did)
+    assert (result["versions_purged"], result["objects_deleted"]) == (1, 1)
+    assert _files(e.store) == []
     assert _tombstone(e, did)["dataset"] == "DELETED"
 
 
@@ -305,23 +309,24 @@ def test_restore_validation_reports_metadata_object_mismatches(env: SimpleNamesp
     e = env
     d1, v1 = _active(e, "One")
     d2, v2 = _active(e, "Two")
+    clean: dict[str, list[str]] = {
+        "missing_objects": [],
+        "digest_mismatches": [],
+        "unaccounted_objects": [],
+        "noncurrent_versions": [],
+    }
     with _owner(e.pg) as c:
-        assert ops.verify_objects(c, e.store) == {
-            "missing_objects": [],
-            "digest_mismatches": [],
-            "unaccounted_objects": [],
-        }
-    (e.store.root / "datasets" / str(e.tenant) / d1 / v1).unlink()  # a DB-only restore
-    (e.store.root / "datasets" / str(e.tenant) / d2 / v2).write_bytes(CSV + b"x,1\n")
-    orphan = e.store.root / "datasets" / str(e.tenant) / d2 / str(uuid.uuid4())
-    orphan.write_bytes(b"left over")
+        assert ops.verify_objects(c, e.store) == clean
+    base = e.store.root / "versions" / str(e.tenant)
+    (base / d1 / v1 / "source.csv").unlink()  # a DB-only restore
+    (base / d2 / v2 / "source.csv").write_bytes(CSV + b"x,1\n")
+    orphan_id = str(uuid.uuid4())
+    (base / d2 / orphan_id).mkdir(parents=True)
+    (base / d2 / orphan_id / "source.csv").write_bytes(b"left over")
     with _owner(e.pg) as c:
         report = ops.verify_objects(c, e.store)
-    assert report == {
-        "missing_objects": [v1],
-        "digest_mismatches": [v2],
-        "unaccounted_objects": [orphan.name],
-    }
+    assert report == {**clean, "missing_objects": [v1], "digest_mismatches": [v2],
+                      "unaccounted_objects": [orphan_id]}  # fmt: skip
 
 
 def test_operator_cli_purges_and_tombstones_with_ids_only_output(

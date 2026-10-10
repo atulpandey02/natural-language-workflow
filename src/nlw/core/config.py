@@ -218,9 +218,20 @@ class Settings(BaseSettings):
     # Where uploaded CSV objects live. ``disabled`` (default): no upload route is
     # mounted. ``local``: a filesystem store under
     # ``{dataset_storage_root}/{app_env}``, allowed ONLY in local/dev (refused in
-    # staging and production). There is no S3 adapter yet (owner decision O-2).
-    dataset_storage_backend: Literal["disabled", "local"] = "disabled"
+    # staging and production). ``s3``: AWS S3 (ADR-033) with the DATASET_S3_*
+    # settings below; uploads themselves stay refused in staging/production.
+    dataset_storage_backend: Literal["disabled", "local", "s3"] = "disabled"
     dataset_storage_root: str | None = None
+    # S3 (ADR-033 D5). The bucket name carries the environment and the account
+    # (``nlw-<env>-datasets-<account>-us-east-1[-suffix]``); the KMS key must be
+    # that account's key in us-east-1. Endpoint override and path-style
+    # addressing exist for development only; an http endpoint is never accepted.
+    dataset_s3_bucket: str | None = None
+    dataset_s3_region: str | None = None
+    dataset_s3_kms_key_arn: str | None = None
+    dataset_s3_prefix: str = "versions"
+    dataset_s3_endpoint_url: str | None = None
+    dataset_s3_path_style: bool = False
     # Pilot limits (defaults). Each is validated against a hard ceiling in
     # nlw.ingest.strict, so configuration can never make an operation unbounded.
     dataset_max_upload_bytes: int = 25_000_000
@@ -286,6 +297,56 @@ class Settings(BaseSettings):
         self._validate_dataset_ingestion()
         return self
 
+    def _validate_dataset_s3(self, deployed: bool) -> None:
+        """ADR-033 D5: the S3 store's identifiers must belong to THIS
+        environment and account; development-only knobs stay in development;
+        static credentials are refused."""
+        bucket = self.dataset_s3_bucket or ""
+        m = re.match(
+            r"^nlw-(local|dev|staging|production)-datasets-(\d{12})-us-east-1"
+            r"(?:-[a-z0-9]{1,16})?$",
+            bucket,
+        )
+        if m is None:
+            raise ValueError(
+                "DATASET_S3_BUCKET must be nlw-<env>-datasets-<account>-us-east-1[-suffix]"
+            )
+        bucket_env, account = m.group(1), m.group(2)
+        if deployed and bucket_env != self.app_env:
+            raise ValueError(f"DATASET_S3_BUCKET belongs to {bucket_env}, not {self.app_env}")
+        if not deployed and bucket_env == "production":
+            raise ValueError("a production dataset bucket is refused outside production")
+        if self.dataset_s3_region != "us-east-1":
+            raise ValueError("DATASET_S3_REGION must be us-east-1 (ADR-033)")
+        k = re.match(
+            r"^arn:aws:kms:us-east-1:(\d{12}):key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}"
+            r"-[0-9a-f]{4}-[0-9a-f]{12}$",
+            self.dataset_s3_kms_key_arn or "",
+        )
+        if k is None:
+            raise ValueError("DATASET_S3_KMS_KEY_ARN must be a us-east-1 KMS key ARN (no alias)")
+        if k.group(1) != account:
+            raise ValueError("DATASET_S3_KMS_KEY_ARN must belong to the bucket's account")
+        if self.dataset_s3_prefix != "versions":
+            raise ValueError("DATASET_S3_PREFIX must be 'versions' (ADR-033 D4)")
+        endpoint = self.dataset_s3_endpoint_url
+        if endpoint is not None:
+            if self.app_env not in ("local", "dev"):
+                raise ValueError("DATASET_S3_ENDPOINT_URL is for development only")
+            if not endpoint.startswith("https://"):
+                raise ValueError("DATASET_S3_ENDPOINT_URL must use https")
+        if self.dataset_s3_path_style and self.app_env not in ("local", "dev"):
+            raise ValueError("DATASET_S3_PATH_STYLE is for development only")
+        if any(os.environ.get(v) for v in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")):
+            raise ValueError("static AWS credentials are refused (ADR-033 D3/D5)")
+        repo = self.backup_restic_repository.strip()
+        if repo.startswith("s3:"):
+            rest = re.sub(r"^s3:(https?://)?", "", repo)
+            parts = [p for p in rest.split("/") if p]
+            repo_bucket = parts[1] if len(parts) > 1 else ""
+            if repo_bucket == bucket:
+                raise ValueError("dataset storage must not share the backup repository")
+
     def _validate_dataset_ingestion(self) -> None:
         """Phase 2B gates: pilot limits within hard ceilings; local storage and
         the fake deletion log only outside staging/production; dataset storage
@@ -321,6 +382,8 @@ class Settings(BaseSettings):
                     or repo_path.startswith(store + os.sep)
                 ):
                     raise ValueError("dataset storage must not share the backup repository")
+        if self.dataset_storage_backend == "s3":
+            self._validate_dataset_s3(deployed)
         if self.dataset_deletion_log == "local":
             if deployed:
                 raise ValueError("the local (fake) deletion log is refused in staging/production")

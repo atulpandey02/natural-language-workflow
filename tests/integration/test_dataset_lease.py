@@ -144,7 +144,7 @@ class H:
             lambda s: svc.publish_profile(
                 s, self.t, self.actor, d, v, profile_json=PROFILE, contract_version="profile-2",
                 content_sha256=sha, row_count=1, column_count=1,
-                published_key=f"datasets/{self.t}/{d}/{v}", lease_token=token,
+                lease_token=token,
             ),
         )  # fmt: skip
         return rec
@@ -276,8 +276,7 @@ async def test_the_database_refuses_leaving_profiling_without_a_live_lease(h: H)
             "'profile-2', content_sha256, 1, 1, %s::jsonb FROM dataset_versions WHERE id = %s",
             (PROFILE, v),
         )
-        for status, extra in (("PROFILED", ", storage_object_key = replace(storage_object_key, "
-                                            "'quarantine/', 'datasets/')"),
+        for status, extra in (("PROFILED", ""),  # the key never moves (ADR-033 D1)
                               ("REJECTED", ", rejection_code = 'PARSE_ERROR'")):  # fmt: skip
             with pytest.raises(psycopg.errors.CheckViolation, match="live processing lease"):
                 c.execute(

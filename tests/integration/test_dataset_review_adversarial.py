@@ -6,9 +6,11 @@ re-dispatch, a client retry or the operator sweep does).
 
 Crash windows are simulated by reproducing the exact state a process killed at
 that point leaves behind (an object without a database record, a stale
-PROFILING lease, a published object with its quarantine copy still present, a
-REJECTED version whose bytes were not yet removed), then driving the normal
-recovery path. Concurrency uses separate sessions or requests that really race.
+PROFILING lease), then driving the normal recovery path. ADR-033 D1/D2: there
+is one immutable object per version, never copied or deleted by a runtime, so
+the former "published copy" and "bytes not yet removed" windows no longer
+exist; their tests now prove that. Concurrency uses separate sessions or
+requests that really race.
 """
 
 import asyncio
@@ -164,7 +166,7 @@ async def test_crash_after_the_object_is_written_but_before_the_db_commit(h: H) 
     d = await h.dataset()
     v = await h.version(d)
     # The killed request linked the object, but never recorded it.
-    h.scoped.put_stream(h.scoped.version_key("quarantine", d, v), io.BytesIO(CSV), max_bytes=10**6)
+    h.scoped.put_stream(h.scoped.object_key(d, v), io.BytesIO(CSV), max_bytes=10**6)
     assert (await h.get(d, v)).has_content is False
     assert h.verify()["unaccounted_objects"] == [str(v)]  # visible to the operator
     # A retry with DIFFERENT bytes can never replace it ...
@@ -175,7 +177,8 @@ async def test_crash_after_the_object_is_written_but_before_the_db_commit(h: H) 
     rec = await h.put(d, v, CSV)
     assert rec.has_content and rec.content_sha256 == hashlib.sha256(CSV).hexdigest()
     assert await h.process(d, v) == "profiled"
-    assert h.verify() == {"missing_objects": [], "digest_mismatches": [], "unaccounted_objects": []}
+    assert h.verify() == {"missing_objects": [], "digest_mismatches": [], "unaccounted_objects": [],
+                          "noncurrent_versions": []}  # fmt: skip
 
 
 async def test_crash_after_profiling_started_but_before_the_profile_is_stored(h: H) -> None:
@@ -188,64 +191,40 @@ async def test_crash_after_profiling_started_but_before_the_profile_is_stored(h:
     assert await h.process(d, v) == "profiled"
 
 
-async def test_crash_after_the_verified_copy_but_before_the_publish_commit(h: H) -> None:
+async def test_publishing_neither_copies_nor_moves_the_object(h: H) -> None:
+    """ADR-033 D1: no crash window exists between a copy and the publish commit,
+    because there is no copy: the one object is profiled in place and stays."""
     d = await h.dataset()
     v = await h.version(d)
     await h.put(d, v)
-    await h.lease(d, v)
-    sha = hashlib.sha256(CSV).hexdigest()
-    h.scoped.copy_verified(
-        h.scoped.version_key("quarantine", d, v), h.scoped.version_key("datasets", d, v),
-        expected_sha256=sha, max_bytes=10**6,
-    )  # fmt: skip
-    h.age_lease(v)
-    assert await h.process(d, v) == "profiled"  # the existing identical copy is accepted
-    assert h.scoped.list_version(d, v) == [h.scoped.version_key("datasets", d, v)]
-
-
-async def test_crash_after_publishing_but_before_quarantine_cleanup(
-    h: H, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    d = await h.dataset()
-    v = await h.version(d)
-    await h.put(d, v)
-    real_delete = TenantScopedBlobStore.delete
-
-    def killed(self: TenantScopedBlobStore, key: str) -> None:
-        raise OSError("process killed before cleanup")
-
-    monkeypatch.setattr(TenantScopedBlobStore, "delete", killed)
+    key = h.scoped.object_key(d, v)
+    before = h.scoped.digest(key)
     assert await h.process(d, v) == "profiled"
-    monkeypatch.setattr(TenantScopedBlobStore, "delete", real_delete)
-    quarantine = h.scoped.version_key("quarantine", d, v)
-    assert h.scoped.exists(quarantine)
-    assert h.verify()["unaccounted_objects"] == [str(v)]
-    # Recovery: re-running processing for the version removes the leftover copy.
-    await h.process(d, v)
-    assert not h.scoped.exists(quarantine)
-    assert h.verify()["unaccounted_objects"] == []
+    assert h.scoped.list_version(d, v) == [key] and h.scoped.digest(key) == before
     assert (await h.get(d, v)).status is VersionStatus.PROFILED
+    assert h.verify()["unaccounted_objects"] == []
 
 
-async def test_crash_after_rejection_but_before_the_bytes_are_removed(
-    h: H, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_a_rejected_object_is_kept_and_reprocessing_changes_nothing(h: H) -> None:
+    """ADR-033 D2: rejection deletes nothing (no "bytes not yet removed" window);
+    a redelivery changes nothing; only the operator purge removes the object."""
     bad = b"a,a\n1,2\n"
     d = await h.dataset()
     v = await h.version(d, size=len(bad))
     await h.put(d, v, bad)
-
-    def killed(self: TenantScopedBlobStore, *_a: Any) -> Any:
-        raise OSError("process killed before cleanup")
-
-    real = TenantScopedBlobStore.delete_version_and_verify
-    monkeypatch.setattr(TenantScopedBlobStore, "delete_version_and_verify", killed)
     assert await h.process(d, v) == "rejected"
-    monkeypatch.setattr(TenantScopedBlobStore, "delete_version_and_verify", real)
-    assert h.scoped.list_version(d, v)  # rejected bytes are still on disk
-    await h.process(d, v)
-    assert h.scoped.list_version(d, v) == []  # recovery removes them
+    key = h.scoped.object_key(d, v)
+    assert h.scoped.list_version(d, v) == [key]
+    assert await h.process(d, v) == "skipped"
+    assert h.scoped.list_version(d, v) == [key]
     assert (await h.get(d, v)).status is VersionStatus.REJECTED
+    t, a = h.ctx.tenant_id, Actor.user(h.ctx.user_id)
+    await h.run(lambda s: svc.request_version_deletion(s, t, a, d, v))
+    with psycopg.connect(h.pg.owner_libpq, autocommit=True) as c:
+        log = LocalFakeDeletionLog(Path(h.store.root).parent / "receipts.jsonl")
+        result = ops.purge(c, h.store, log, dataset_id=d, version_id=v, operator="op",
+                           environment="local")  # fmt: skip
+    assert result["objects_deleted"] == 1 and h.scoped.list_version(d, v) == []
 
 
 async def test_tombstone_refuses_orphan_bytes_of_a_version_without_a_key(h: H) -> None:
@@ -253,7 +232,7 @@ async def test_tombstone_refuses_orphan_bytes_of_a_version_without_a_key(h: H) -
     that no storage key points at. The tombstone must still see them."""
     d = await h.dataset()
     v = await h.version(d)
-    h.scoped.put_stream(h.scoped.version_key("quarantine", d, v), io.BytesIO(CSV), max_bytes=10**6)
+    h.scoped.put_stream(h.scoped.object_key(d, v), io.BytesIO(CSV), max_bytes=10**6)
     t, a = h.ctx.tenant_id, Actor.user(h.ctx.user_id)
     await h.run(lambda s: svc.request_version_deletion(s, t, a, d, v))
     with psycopg.connect(h.pg.owner_libpq, autocommit=True) as c:
@@ -286,7 +265,7 @@ async def test_simultaneous_identical_content_uploads_store_one_object(h: H) -> 
         for r in results
     ]
     assert kinds == ["ok"] * 5, kinds
-    assert h.scoped.list_version(d, v) == [h.scoped.version_key("quarantine", d, v)]
+    assert h.scoped.list_version(d, v) == [h.scoped.object_key(d, v)]
 
 
 async def test_simultaneous_different_content_uploads_keep_exactly_one(h: H) -> None:
@@ -296,7 +275,7 @@ async def test_simultaneous_different_content_uploads_keep_exactly_one(h: H) -> 
     ok = [r for r in results if isinstance(r, svc.VersionRecord)]
     errors = [r for r in results if isinstance(r, ingestion.ContentError)]
     assert len(ok) == 1 and len(errors) == 1 and errors[0].code == "CONTENT_CONFLICT"
-    stored = h.scoped.digest(h.scoped.version_key("quarantine", d, v))[1]
+    stored = h.scoped.digest(h.scoped.object_key(d, v))[1]
     assert stored == ok[0].content_sha256  # the record and the bytes agree
 
 
@@ -335,7 +314,7 @@ async def test_tampering_after_publication_is_reported_by_restore_validation(h: 
     v = await h.version(d)
     await h.put(d, v)
     assert await h.process(d, v) == "profiled"
-    (h.store.root / h.scoped.version_key("datasets", d, v)).write_bytes(OTHER)
+    (h.store.root / h.scoped.object_key(d, v)).write_bytes(OTHER)
     assert h.verify()["digest_mismatches"] == [str(v)]
 
 

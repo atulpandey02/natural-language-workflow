@@ -75,7 +75,7 @@ def _version(
 
 
 def _content(c: psycopg.Connection[Any], tenant: uuid.UUID, did: uuid.UUID, vid: uuid.UUID) -> str:
-    key = f"quarantine/{tenant}/{did}/{vid}"
+    key = f"versions/{tenant}/{did}/{vid}/source.csv"  # ADR-033 D1: the one object
     c.execute(
         "UPDATE dataset_versions SET content_sha256 = %s, storage_object_key = %s WHERE id = %s",
         (SHA, key, vid),
@@ -118,10 +118,10 @@ def _profiled(
     c: psycopg.Connection[Any], tenant: uuid.UUID, did: uuid.UUID, by: uuid.UUID
 ) -> uuid.UUID:
     vid = _version(c, tenant, did, by)
-    key = _content(c, tenant, did, vid)
+    _content(c, tenant, did, vid)
     _status(c, vid, "PROFILING")
     _profile(c, vid)
-    _status(c, vid, "PROFILED", storage_object_key=key.replace("quarantine/", "datasets/", 1))
+    _status(c, vid, "PROFILED")
     return vid
 
 
@@ -218,9 +218,10 @@ def test_populated_0024_upgrades_without_rewriting_anything(
     assert snapshot() == before
     after = _posture(pg_stack)
     # Upgraded to head: 0025, the ingest boundary 0026 (ADR-031) and the
-    # dispatcher 0027 (ADR-032, no policy), still rewriting nothing.
+    # dispatcher 0027 (ADR-032) and the object layout 0028 (ADR-033; neither adds
+    # a policy), still rewriting nothing.
     assert after == {
-        "revision": "0027_dataset_ingest_dispatch",
+        "revision": "0028_dataset_object_layout",
         "policies": 74,
         "tables": 2,
         "column": 1,
@@ -347,12 +348,12 @@ def test_profiled_requires_the_profile_and_active_requires_semantics(
     with _owner(pg_stack) as c:
         did = _dataset(c, ws.tenant, ws.user)
         vid = _version(c, ws.tenant, did, ws.user)
-        key = _content(c, ws.tenant, did, vid)
+        _content(c, ws.tenant, did, vid)
         _status(c, vid, "PROFILING")
         with pytest.raises(CHECK, match="recorded profile"):
             _status(c, vid, "PROFILED")
         _profile(c, vid)
-        _status(c, vid, "PROFILED", storage_object_key=key.replace("quarantine/", "datasets/", 1))
+        _status(c, vid, "PROFILED")
         with pytest.raises(CHECK, match="confirmed semantics"), c.transaction():
             _status(c, vid, "ACTIVE")
             c.execute("UPDATE datasets SET active_version_id = %s WHERE id = %s", (vid, did))
@@ -389,34 +390,31 @@ def test_semantic_revisions_are_append_only_and_consecutive(
 # --- storage key, idempotency key ---------------------------------------------------------
 
 
-def test_the_storage_key_moves_to_datasets_only_when_profiled(
-    pg_stack: SimpleNamespace, ws: SimpleNamespace
-) -> None:
+def test_the_storage_key_never_moves(pg_stack: SimpleNamespace, ws: SimpleNamespace) -> None:
+    """ADR-033 D1 (0028): one immutable object per version. The key is set once
+    while QUARANTINED and never changes again -- not when profiled (the 0025
+    move to datasets/ is gone), not in any later state -- until the tombstone
+    clears it."""
     with _owner(pg_stack) as c:
         did = _dataset(c, ws.tenant, ws.user)
         vid = _version(c, ws.tenant, did, ws.user)
         key = _content(c, ws.tenant, did, vid)
-        published = key.replace("quarantine/", "datasets/", 1)
+        legacy = f"datasets/{ws.tenant}/{did}/{vid}"
         with pytest.raises(CHECK, match="storage key"):  # not while QUARANTINED
-            c.execute(
-                "UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s",
-                (published, vid),
-            )
+            c.execute("UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s",
+                      (legacy, vid))  # fmt: skip
         _status(c, vid, "PROFILING")
         _profile(c, vid)
-        other = f"datasets/{ws.tenant}/{did}/{uuid.uuid4()}"
-        with pytest.raises(CHECK, match="storage key"):  # a different object name
-            _status(c, vid, "PROFILED", storage_object_key=other)
-        with pytest.raises(CHECK, match="storage key"):  # a move without the transition
-            c.execute(
-                "UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s",
-                (published, vid),
-            )
-        _status(c, vid, "PROFILED", storage_object_key=published)
-        with pytest.raises(CHECK, match="storage key"):  # never moved again
-            c.execute(
-                "UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s", (key, vid)
-            )
+        with pytest.raises(CHECK, match="storage key"):  # not with the PROFILED transition
+            _status(c, vid, "PROFILED", storage_object_key=legacy)
+        _status(c, vid, "PROFILED")
+        for moved in (legacy, f"quarantine/{ws.tenant}/{did}/{vid}"):
+            with pytest.raises(CHECK, match="storage key"):  # never moved afterwards
+                c.execute("UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s",
+                          (moved, vid))  # fmt: skip
+        row = c.execute("SELECT storage_object_key FROM dataset_versions WHERE id = %s",
+                        (vid,)).fetchone()  # fmt: skip
+        assert row == (key,)
 
 
 def test_upload_idempotency_keys_are_unique_per_dataset_and_immutable(
@@ -555,32 +553,34 @@ def test_runtime_roles_can_never_write_purge_evidence(
 def test_storage_keys_are_bound_to_the_version_id(
     pg_stack: SimpleNamespace, ws: SimpleNamespace
 ) -> None:
-    """Neither a quarantine nor a published key may name another version's
-    object, through any session (the owner bypasses RLS but not CHECKs)."""
+    """No key may name another version's object, through any session (the
+    owner bypasses RLS but not CHECKs); legacy-shaped keys are refused for a
+    new record (0028); the version's own versions/ key is accepted."""
     with _owner(pg_stack) as c:
         did = _dataset(c, ws.tenant, ws.user)
         v1 = _version(c, ws.tenant, did, ws.user)
         v2 = _version(c, ws.tenant, did, ws.user)
-        for area in ("quarantine", "datasets"):
-            with pytest.raises(psycopg.errors.CheckViolation, match="key_names_version"):
+        for bad in (
+            f"versions/{ws.tenant}/{did}/{v2}/source.csv",  # another version's object
+            f"versions/{ws.tenant}/{did}/not-the-version/source.csv",
+            f"versions/{ws.tenant}/{did}/{v1}/other.csv",  # not the source object
+            f"quarantine/{ws.tenant}/{did}/{v1}",  # a legacy shape (new records)
+            f"datasets/{ws.tenant}/{did}/{v1}",
+        ):
+            with pytest.raises(psycopg.errors.CheckViolation):
                 c.execute(
                     "UPDATE dataset_versions SET content_sha256 = %s, storage_object_key = %s "
                     "WHERE id = %s",
-                    (SHA, f"{area}/{ws.tenant}/{did}/{v2}", v1),
+                    (SHA, bad, v1),
                 )
-            with pytest.raises(psycopg.errors.CheckViolation, match="key_names_version"):
-                c.execute(
-                    "UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s",
-                    (f"{area}/{ws.tenant}/{did}/not-the-version", v1),
-                )
-        # The real quarantine key is accepted; publishing it as another
-        # version's object is refused, publishing its own is accepted.
         key = _content(c, ws.tenant, did, v1)
+        assert key == f"versions/{ws.tenant}/{did}/{v1}/source.csv"
         _status(c, v1, "PROFILING")
         _profile(c, v1)
         with pytest.raises(psycopg.errors.CheckViolation):
-            _status(c, v1, "PROFILED", storage_object_key=f"datasets/{ws.tenant}/{did}/{v2}")
-        _status(c, v1, "PROFILED", storage_object_key=key.replace("quarantine/", "datasets/", 1))
+            other = f"versions/{ws.tenant}/{did}/{v2}/source.csv"
+            _status(c, v1, "PROFILED", storage_object_key=other)
+        _status(c, v1, "PROFILED")
 
 
 def test_a_runtime_session_cannot_substitute_another_versions_key(
@@ -598,7 +598,7 @@ def test_a_runtime_session_cannot_substitute_another_versions_key(
         conn.execute(
             "UPDATE dataset_versions SET content_sha256 = %s, storage_object_key = %s "
             "WHERE id = %s",
-            (SHA, f"quarantine/{m.tenant_id}/{did}/{v2}", v1),
+            (SHA, f"versions/{m.tenant_id}/{did}/{v2}/source.csv", v1),
         )
 
 
@@ -635,7 +635,7 @@ def test_leaving_profiling_requires_a_live_database_time_lease(
     with _owner(pg_stack) as c:
         did = _dataset(c, ws.tenant, ws.user)
         vid = _version(c, ws.tenant, did, ws.user)
-        key = _content(c, ws.tenant, did, vid)
+        _content(c, ws.tenant, did, vid)
         _status(c, vid, "PROFILING")  # takes a lease (helper)
         _profile(c, vid)
         c.execute(
@@ -644,11 +644,7 @@ def test_leaving_profiling_requires_a_live_database_time_lease(
             (vid,),
         )
         with pytest.raises(CHECK, match="live processing lease"):
-            c.execute(
-                "UPDATE dataset_versions SET status = 'PROFILED', storage_object_key = %s "
-                "WHERE id = %s",
-                (key.replace("quarantine/", "datasets/", 1), vid),
-            )
+            c.execute("UPDATE dataset_versions SET status = 'PROFILED' WHERE id = %s", (vid,))
         with pytest.raises(CHECK, match="live processing lease"):
             c.execute(
                 "UPDATE dataset_versions SET status = 'REJECTED', rejection_code = 'PARSE_ERROR' "
@@ -666,7 +662,7 @@ def test_leaving_profiling_requires_a_live_database_time_lease(
             "SET processing_lease_expires_at = now() + interval '1 minute' WHERE id = %s",
             (vid,),
         )
-        _status(c, vid, "PROFILED", storage_object_key=key.replace("quarantine/", "datasets/", 1))
+        _status(c, vid, "PROFILED")
         row = c.execute(
             "SELECT processing_lease_token, processing_lease_expires_at FROM dataset_versions "
             "WHERE id = %s",

@@ -61,7 +61,11 @@ def test_dataset_alerts_are_low_cardinality_and_not_yet_deployed() -> None:
         "NlwDatasetProcessingPendingTooLong",
         "NlwDatasetProcessingRequestsExpired",
         "NlwDatasetDispatcherStalled",
+        "NlwDatasetRejectedRetainedTooLong",  # ADR-033 D2 (provisional 7 days)
+        "NlwDatasetS3CredentialsExpiring",  # ADR-033 D3
     }
+    rejected = next(r for r in rules if r["alert"] == "NlwDatasetRejectedRetainedTooLong")
+    assert rejected["expr"].strip() == "nlw_dataset_rejected_oldest_age_seconds > 604800"
     pending = next(r for r in rules if r["alert"] == "NlwDatasetProcessingPendingTooLong")
     assert pending["expr"].strip() == "nlw_dataset_dispatch_oldest_pending_age_seconds > 900"
     text = path.read_text().lower()

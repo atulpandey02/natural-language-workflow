@@ -495,6 +495,17 @@ replaced by task or pod identities.
 - **How it writes:** atomically. It writes a temp file in the same directory,
   `fsync`s it and `rename`s it, then removes the previous file. It never logs
   credential values; logs carry the role ARN, expiry and result only.
+- **File format.** The application (`nlw.storage.s3_credentials`) reads a
+  standard shared-credentials file, profile `[default]`, holding:
+  - the three standard fields of a temporary credential (access key id,
+    secret key and session token);
+  - one non-standard field, `x_nlw_expiration`, an ISO-8601 UTC expiry such as
+    `2026-10-09T15:00:00Z`.
+
+  - A file without a session token, or without `x_nlw_expiration`, is refused
+    as static.
+  - A file expiring within 5 min is refused.
+  - A file readable by group or others is refused.
 
 ### Mounts
 
@@ -531,13 +542,28 @@ At startup it logs the effective role ARN and account, never a credential.
 ### Alerts
 
 - refresh failure;
-- credentials expiring within 15 min;
+- credentials expiring within 15 min: `NlwDatasetS3CredentialsExpiring`, on
+  `nlw_dataset_s3_credentials_expiry_timestamp_seconds - time() < 900` for
+  5 m. The gauge is the absolute expiry recorded at the last file read, so the
+  alert fires even when a stopped refresher means the process never re-reads
+  the file;
 - the startup identity check failing.
 
 ## 6. Rejected-object purge (D2, provisional 7 days)
 
-**Cadence:** the operator runs `rejected-pending --dry-run`, then
-`purge-rejected --limit N`, at least weekly. Both:
+**Cadence:** at least weekly, the operator runs:
+
+1. `python -m nlw.ops.datasets rejected-pending [--limit N] [--metrics-file PATH]`
+   (ids, ages and aggregate counts; writes the node-exporter textfile with
+   `nlw_dataset_rejected_retained` and
+   `nlw_dataset_rejected_oldest_age_seconds`);
+2. `python -m nlw.ops.datasets purge-rejected --operator <name> --dry-run`;
+3. `python -m nlw.ops.datasets purge-rejected --operator <name> [--limit N]`.
+
+`purge-rejected` moves each version `REJECTED` to `DELETING` (an operator
+event with reason `REJECTED_RETENTION`), then runs the same verified,
+version-aware purge as a deletion request. The tombstone follows as usual.
+Both commands:
 
 - work in bounded, oldest-first batches;
 - refuse while the recovery lock is active or unreadable;

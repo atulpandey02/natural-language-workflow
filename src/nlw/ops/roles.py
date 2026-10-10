@@ -111,9 +111,8 @@ EXPECTED_INGEST_GRANTS: frozenset[str] = frozenset(
                 "status",
                 "processing_lease_token",
                 "processing_lease_expires_at",
-                "storage_object_key",
                 "rejection_code",
-            )
+            )  # storage_object_key revoked by 0028: the ingest runtime is read-only
         ),
         *(
             f"dr_restore_events:SELECT:{c}"

@@ -48,3 +48,31 @@ groups:
           description: >
             Database, Redis or recovery-lock trouble. Runbook:
             docs/adr/ADR-032-dataset-ingest-dispatcher.md
+
+      # ADR-033 D2 (PROVISIONAL, development/staging): a rejected object must be
+      # purged by the operator within 7 days. Fed by the operator's
+      # `rejected-pending --metrics-file` textfile. Not the O-5 retention policy.
+      - alert: NlwDatasetRejectedRetainedTooLong
+        expr: nlw_dataset_rejected_oldest_age_seconds > 604800
+        for: 1h
+        labels: { severity: warning, component: datasets }
+        annotations:
+          summary: "A rejected dataset object has been retained for over 7 days"
+          description: >
+            Run the operator's purge-rejected (bounded, dry-run first). The 7-day
+            window is provisional until O-5. Runbook:
+            docs/runbooks/dataset-s3-provisioning.md
+
+      # ADR-033 D3: the pinned S3 credentials of an API or ingest process expire
+      # within 15 minutes, so the host refresher has stopped rotating them. The
+      # gauge is the ABSOLUTE expiry time: compared with time(), it keeps
+      # counting down even when the process never re-reads the file.
+      - alert: NlwDatasetS3CredentialsExpiring
+        expr: nlw_dataset_s3_credentials_expiry_timestamp_seconds - time() < 900
+        for: 5m
+        labels: { severity: critical, component: datasets }
+        annotations:
+          summary: "Dataset S3 credentials are about to expire"
+          description: >
+            The credential refresher is not rotating the per-container files.
+            Runbook: docs/runbooks/dataset-s3-provisioning.md

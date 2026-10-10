@@ -35,6 +35,7 @@ from nlw.datasets.envelope import ACTOR_NAME, QUEUE_NAME
 from nlw.db.session import create_engine, create_sessionmaker, create_sync_engine
 from nlw.ingest_service import processing
 from nlw.observability.metrics import start_metrics_server
+from nlw.storage.blob import BlobStore
 from nlw.storage.factory import dataset_store
 from nlw.tenancy.keys import build_signer
 from nlw.tenancy.signing import ContextSigner, Purpose
@@ -44,6 +45,8 @@ log = structlog.get_logger(__name__)
 _settings = get_settings()
 _stopping = threading.Event()
 _signer: ContextSigner | None = None
+# Built once at boot (an S3 store verifies its pinned identity then).
+_store: BlobStore | None = None
 
 # Profiling is bounded by its own wall clock; the actor gets that plus margin.
 _TIME_LIMIT_MS = (int(_settings.dataset_profile_timeout_s) + 120) * 1000
@@ -57,11 +60,12 @@ class IngestBootRefused(MiddlewareError):
     for why the class matters). Messages are author-controlled, never secrets."""
 
 
-def _boot_checks(settings: Settings) -> ContextSigner:
+def _boot_checks(settings: Settings) -> tuple[ContextSigner, BlobStore]:
     from nlw.backup.recovery_lock import assert_startup_allowed_sync
     from nlw.tenancy.readiness import check_signed_context_sync
 
-    if dataset_store(settings) is None:
+    store = dataset_store(settings, service="ingest")
+    if store is None:
         raise IngestBootRefused("ingest boot refused: no dataset store is configured")
     signer = build_signer(settings, Purpose.DATASET_INGEST)
     engine = create_sync_engine(settings)
@@ -73,14 +77,14 @@ def _boot_checks(settings: Settings) -> ContextSigner:
             check_signed_context_sync(session, signer)
     finally:
         engine.dispose()
-    return signer
+    return signer, store
 
 
 class IngestBootMiddleware(Middleware):
     def before_worker_boot(self, broker: object, worker: object) -> None:
-        global _signer
+        global _signer, _store
         try:
-            _signer = _boot_checks(get_settings())
+            _signer, _store = _boot_checks(get_settings())
         except IngestBootRefused:
             raise
         except Exception as exc:  # indeterminate -> fail closed, class only
@@ -116,7 +120,7 @@ dramatiq.set_broker(make_broker(_settings))
 
 async def _run(envelope_json: str) -> processing.ProcessResult:
     settings = get_settings()
-    store = dataset_store(settings)
+    store = _store
     if store is None or _signer is None:  # boot checks make this unreachable
         raise RuntimeError("ingest runtime is not booted")
     engine = create_engine(settings)

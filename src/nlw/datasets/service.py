@@ -198,7 +198,7 @@ _SQL_GET_STORAGE_KEY = (
 # Publication proves CURRENT lease ownership: the token must still be ours (a
 # reclaimer replaces it) and the database refuses an expired lease.
 _SQL_CAS_PUBLISH = (
-    "UPDATE dataset_versions SET status = 'PROFILED', storage_object_key = :key "
+    "UPDATE dataset_versions SET status = 'PROFILED' "
     "WHERE id = :v AND dataset_id = :d AND tenant_id = :t AND status = 'PROFILING' "
     "AND processing_lease_token = :tok RETURNING " + _VERSION_COLS
 )
@@ -823,14 +823,14 @@ async def publish_profile(
     content_sha256: str,
     row_count: int,
     column_count: int,
-    published_key: str,
     lease_token: uuid.UUID,
 ) -> VersionRecord:
-    """Record the immutable profile and move ``PROFILING -> PROFILED`` with the
-    storage key moved to the ``datasets/`` area, in one transaction (one event).
+    """Record the immutable profile and move ``PROFILING -> PROFILED`` in one
+    transaction (one event). The storage key never changes (ADR-033 D1: one
+    immutable object per version; "published" is this database state).
     Only the CURRENT lease owner can publish (``LEASE_LOST`` otherwise, and the
     profile insert is rolled back). The database refuses PROFILED without this
-    profile, without a live lease, and any other key move."""
+    profile, without a live lease, and any key change (migration 0028)."""
     # Processing runs as nlw_ingest (ADR-031), which may not lock the dataset
     # row (no UPDATE on datasets). The version compare-and-set below is the
     # serialization point: a concurrent deletion moves the version first.
@@ -862,7 +862,6 @@ async def publish_profile(
         await session.execute(
             text(_SQL_CAS_PUBLISH),
             {
-                "key": published_key,
                 "v": version_id,
                 "d": dataset_id,
                 "t": tenant_id,

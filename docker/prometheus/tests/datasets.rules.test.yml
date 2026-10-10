@@ -77,3 +77,68 @@ tests:
             exp_annotations:
               summary: "The dataset dispatcher has not completed a cycle for 10 minutes"
               description: "Database, Redis or recovery-lock trouble. Runbook: docs/adr/ADR-032-dataset-ingest-dispatcher.md\n"
+
+  # Rejected objects retained: silent within 7 days, firing past it.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_rejected_oldest_age_seconds{role="backup"}'
+        values: '0+60x11000'
+    alert_rule_test:
+      - eval_time: 160h
+        alertname: NlwDatasetRejectedRetainedTooLong
+        exp_alerts: []
+      - eval_time: 171h
+        alertname: NlwDatasetRejectedRetainedTooLong
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets, role: backup }
+            exp_annotations:
+              summary: "A rejected dataset object has been retained for over 7 days"
+              description: "Run the operator's purge-rejected (bounded, dry-run first). The 7-day window is provisional until O-5. Runbook: docs/runbooks/dataset-s3-provisioning.md\n"
+
+  # Credentials: the gauge is the ABSOLUTE expiry (here t=3000 s, i.e. 50 m)
+  # and is never re-read (the refresher stopped; the process makes no S3 call).
+  # time() advances anyway: silent while > 15 m remain, pending from 35 m,
+  # firing after the 5 m `for`, and still firing once the expiry has passed.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_s3_credentials_expiry_timestamp_seconds{role="api"}'
+        values: '3000x90'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: NlwDatasetS3CredentialsExpiring
+        exp_alerts: []
+      - eval_time: 38m
+        alertname: NlwDatasetS3CredentialsExpiring
+        exp_alerts: []  # pending (35 m), not yet firing
+      - eval_time: 41m
+        alertname: NlwDatasetS3CredentialsExpiring
+        exp_alerts:
+          - exp_labels: { severity: critical, component: datasets, role: api }
+            exp_annotations:
+              summary: "Dataset S3 credentials are about to expire"
+              description: "The credential refresher is not rotating the per-container files. Runbook: docs/runbooks/dataset-s3-provisioning.md\n"
+      - eval_time: 70m
+        alertname: NlwDatasetS3CredentialsExpiring
+        exp_alerts:
+          - exp_labels: { severity: critical, component: datasets, role: api }
+            exp_annotations:
+              summary: "Dataset S3 credentials are about to expire"
+              description: "The credential refresher is not rotating the per-container files. Runbook: docs/runbooks/dataset-s3-provisioning.md\n"
+
+  # Rotation: the refresher writes a later expiry (9000 s) at 45 m; the next
+  # read records it and the alert clears.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_s3_credentials_expiry_timestamp_seconds{role="ingest"}'
+        values: '3000x44 9000x40'
+    alert_rule_test:
+      - eval_time: 42m
+        alertname: NlwDatasetS3CredentialsExpiring
+        exp_alerts:
+          - exp_labels: { severity: critical, component: datasets, role: ingest }
+            exp_annotations:
+              summary: "Dataset S3 credentials are about to expire"
+              description: "The credential refresher is not rotating the per-container files. Runbook: docs/runbooks/dataset-s3-provisioning.md\n"
+      - eval_time: 46m
+        alertname: NlwDatasetS3CredentialsExpiring
+        exp_alerts: []

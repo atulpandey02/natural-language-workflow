@@ -230,20 +230,30 @@ def test_storage_key_must_name_this_tenant_and_dataset(
     with _owner(pg_stack) as c:
         did = _mk_dataset(c, ws.tenant, ws.user)
         vid = _mk_version(c, ws.tenant, did, ws.user)
-        foreign = f"quarantine/{other.tenant_id}/{did}/{vid}"
+        foreign = f"versions/{other.tenant_id}/{did}/{vid}/source.csv"
         with pytest.raises(psycopg.errors.CheckViolation):
             c.execute(
                 "UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s", (foreign, vid)
             )
-        mine = f"quarantine/{ws.tenant}/{did}/{vid}"
-        c.execute("UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s", (mine, vid))
-        # ...and is then immutable (set once, only while QUARANTINED).
+        # A legacy-shaped key is refused for a new record (0028: versions/ only).
         _raises_check(
             lambda: c.execute(
                 "UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s",
-                (f"datasets/{ws.tenant}/{did}/{vid}", vid),
+                (f"quarantine/{ws.tenant}/{did}/{vid}", vid),
             )
         )
+        mine = f"versions/{ws.tenant}/{did}/{vid}/source.csv"
+        c.execute("UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s", (mine, vid))
+        # ...and is then immutable (set once, only while QUARANTINED; it never moves).
+        for moved in (f"datasets/{ws.tenant}/{did}/{vid}", f"versions/{ws.tenant}/{did}/{vid}/x"):
+
+            def move(moved: str = moved) -> object:
+                return c.execute(
+                    "UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s",
+                    (moved, vid),
+                )
+
+            _raises_check(move)
 
 
 def test_digest_is_set_once_while_quarantined(

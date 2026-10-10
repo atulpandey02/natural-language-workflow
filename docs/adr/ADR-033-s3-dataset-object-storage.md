@@ -1,10 +1,9 @@
 # ADR-033: Production dataset object storage on AWS S3 (owner decision O-2)
 
-Status: **accepted (design); not implemented, no AWS resources.** The owner
-approved D1–D6 on 2026-10-09. No AWS resource exists or is contacted by this
-change. Implementation follows in a separate code PR, and the real-AWS proof
-needs separate, explicit authorization (D6).
-Branch `docs/o2-s3-dataset-storage`.
+Status: **accepted; implemented without AWS contact (branch
+`feat/o2-s3-dataset-store`); not deployed, no AWS resources.** The owner
+approved D1–D6 on 2026-10-09. The real-AWS proof still needs separate, explicit
+authorization (D6). Uploads stay refused in staging and production (O-6).
 Date: 2026-10-09.
 Builds on [ADR-030](ADR-030-csv-ingestion-and-profiling.md) (storage protocol, write-once,
 verified purge), [ADR-031](ADR-031-dataset-ingest-runtime-boundary.md) (ingest boundary) and
@@ -14,6 +13,30 @@ verified purge), [ADR-031](ADR-031-dataset-ingest-runtime-boundary.md) (ingest b
 > **Principle.** S3 stores one immutable object per dataset version.
 > PostgreSQL controls its business lifecycle. The ingest runtime reads it.
 > Only an independently authorized operator can physically remove it.
+
+## Implementation status (feat/o2-s3-dataset-store)
+
+| Piece | Where |
+|---|---|
+| S3 store | `nlw.storage.s3.S3BlobStore` |
+| Pinned credentials and identity check | `nlw.storage.s3_credentials` |
+| Settings and refusals | `DATASET_STORAGE_BACKEND=s3`, `DATASET_S3_*` in `nlw.core.config` |
+| One immutable object per version | `TenantScopedBlobStore.object_key`. There is no runtime delete or copy. |
+| Read-only ingest | `nlw.ingest_service.processing` |
+| Database layout and guard | Migration `0028_dataset_object_layout`: the `versions/` key check, a key-never-moves guard, `nlw_ingest` losing `UPDATE (storage_object_key)`, and reason `REJECTED_RETENTION` |
+| D2 operator tooling | `rejected-pending` and `purge-rejected` |
+| Alerts | `NlwDatasetRejectedRetainedTooLong` and `NlwDatasetS3CredentialsExpiring`, both dormant |
+| Credential-expiry metric | `nlw_dataset_s3_credentials_expiry_timestamp_seconds`: the ABSOLUTE expiry (Unix seconds) from the last credential-file read, no labels. The alert evaluates `expiry - time() < 900` for 5 m, so it fires even if the refresher stops and the process never re-reads the file. A remaining-duration gauge would freeze in that case. |
+
+- **Credential file:** the shared-credentials file carries a non-standard
+  `x_nlw_expiration` (ISO-8601 UTC) written by the refresher. The SDK ignores
+  it; the application uses it for the expiry checks.
+- **Single or multipart:** an object up to 8 MiB is one `PutObject` with a
+  whole-file `ChecksumSHA256`; a larger one is a multipart upload with a
+  composite checksum. The choice follows the content size, so retries produce
+  the same fingerprint.
+- **Tests:** a fake S3 that enforces the bucket policy, plus botocore Stubber
+  request-shape tests. No network and no AWS.
 
 ## Context
 
@@ -188,7 +211,10 @@ single-host design; on ECS or EKS it is replaced by task or pod identity):
   - Environment and IMDS providers are disabled.
 - **Startup log.** At startup the container logs the effective identity: the
   role ARN and account only, never a credential.
-- **Alerts:** a credential refresh failure, and expiry within 15 min.
+- **Alerts:** a credential refresh failure, and expiry within 15 min
+  (`nlw_dataset_s3_credentials_expiry_timestamp_seconds - time() < 900`; the
+  gauge is the absolute expiry, so the condition keeps advancing without any
+  further read).
 
 ### D4 — key layout
 

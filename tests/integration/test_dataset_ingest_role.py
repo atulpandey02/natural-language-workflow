@@ -123,7 +123,7 @@ class Stack:
             )
         ).id  # fmt: skip
         scoped = TenantScopedBlobStore(self.store, tenant)
-        key = scoped.version_key("quarantine", d, v)
+        key = scoped.object_key(d, v)
         _, sha = scoped.put_stream(key, io.BytesIO(data), max_bytes=10**6)
         await self.api(
             lambda s: svc.record_content(
@@ -204,25 +204,29 @@ async def test_ingest_profiles_exactly_its_version_end_to_end(st: Stack) -> None
     assert env.recomputed_digest() == env.envelope_sha256  # DB and Python agree
     assert await st.process(env.to_json()) == "profiled"
     status, leased, key, code = st.version_row(v)
-    assert (status, leased, key, code) == ("PROFILED", False, f"datasets/{st.tenant}/{d}/{v}", None)
+    # ADR-033 D1: publishing is a database transition; the one object never moves.
+    object_key = f"versions/{st.tenant}/{d}/{v}/source.csv"
+    assert (status, leased, key, code) == ("PROFILED", False, object_key, None)
     assert st.events(v)[1:] == [
         ("VERSION_PROFILING_STARTED", "QUARANTINED", "PROFILING", "service", None, None),
         ("VERSION_PROFILED", "PROFILING", "PROFILED", "service", None, None),
     ]
     scoped = TenantScopedBlobStore(st.store, st.tenant)
-    assert scoped.exists(scoped.version_key("datasets", d, v))
-    assert not scoped.exists(scoped.version_key("quarantine", d, v))
+    assert scoped.list_version(d, v) == [object_key]  # no copy, no second area
     profile = await st.api(lambda s: svc.get_profile(s, st.tenant, d, v))
     assert profile is not None
 
 
-async def test_a_bad_file_is_rejected_with_a_closed_code_and_its_bytes_deleted(st: Stack) -> None:
+async def test_a_bad_file_is_rejected_with_a_closed_code_and_its_object_kept(st: Stack) -> None:
+    """ADR-033 D2: the ingest runtime deletes nothing; the immutable object waits
+    for the operator's version-aware purge-rejected."""
     d, v = await st.uploaded(BAD_CSV)
     assert await st.process((await st.request(d, v)).to_json()) == "rejected"
     status, leased, _, code = st.version_row(v)
     assert (status, leased) == ("REJECTED", False) and code in RejectionCode.__members__
     assert st.events(v)[-1][:4] == ("VERSION_REJECTED", "PROFILING", "REJECTED", "service")
-    assert TenantScopedBlobStore(st.store, st.tenant).list_version(d, v) == []
+    scoped = TenantScopedBlobStore(st.store, st.tenant)
+    assert scoped.list_version(d, v) == [scoped.object_key(d, v)]
 
 
 async def test_a_new_version_of_a_dataset_with_an_active_version_is_processed(st: Stack) -> None:
@@ -255,7 +259,7 @@ async def test_a_new_version_of_a_dataset_with_an_active_version_is_processed(st
         )
     ).id  # fmt: skip
     scoped = TenantScopedBlobStore(st.store, st.tenant)
-    key = scoped.version_key("quarantine", d, v2)
+    key = scoped.object_key(d, v2)
     _, sha = scoped.put_stream(key, io.BytesIO(CSV), max_bytes=10**6)
     await st.api(
         lambda s: svc.record_content(
@@ -582,7 +586,10 @@ async def test_the_ingest_role_cannot_choose_a_storage_key(st: Stack) -> None:
             s, st.tenant, processing.ACTOR, d, v, token=token, ttl_s=60
         ),
     )
+    # 0028: the ingest role has no UPDATE on storage_object_key at all.
     for key in (
+        f"versions/{st.tenant}/{d2}/{v2}/source.csv",
+        f"versions/{st.tenant}/{d}/{v}/source.csv",  # even its own key
         f"quarantine/{st.tenant}/{d2}/{v2}",
         f"datasets/{st.tenant}/{d2}/{v2}",
         f"datasets/{st.tenant_b}/{d}/{v}",
@@ -590,7 +597,7 @@ async def test_the_ingest_role_cannot_choose_a_storage_key(st: Stack) -> None:
     ):
         with (
             st.ingest_conn(st.tenant, v) as c,
-            pytest.raises((psycopg.errors.CheckViolation, psycopg.errors.RaiseException)),
+            pytest.raises(psycopg.errors.InsufficientPrivilege),
         ):
             c.execute("UPDATE dataset_versions SET storage_object_key = %s WHERE id = %s", (key, v))
 
@@ -631,8 +638,7 @@ async def test_the_api_role_cannot_run_the_processing_path(st: Stack) -> None:
         "WHERE id = %s",
         "UPDATE dataset_versions SET status = 'REJECTED', rejection_code = 'REVIEW_REJECTED' "
         "WHERE id = %s",
-        "UPDATE dataset_versions SET status = 'PROFILED', "
-        "storage_object_key = 'datasets/' || substr(storage_object_key, 12) WHERE id = %s",
+        "UPDATE dataset_versions SET status = 'PROFILED' WHERE id = %s",
     ):
         with (
             st.app_conn() as c,
@@ -709,7 +715,6 @@ async def test_a_lost_lease_rolls_back_publication(st: Stack) -> None:
                 contract_version="profile-2",
                 content_sha256=hashlib.sha256(CSV).hexdigest(),
                 row_count=1, column_count=1,
-                published_key=f"datasets/{st.tenant}/{d}/{v}",
                 lease_token=mine,
             ),
         )  # fmt: skip
@@ -737,9 +742,8 @@ _INGEST_COLUMN_PRIVS = {
         "status",
         "processing_lease_token",
         "processing_lease_expires_at",
-        "storage_object_key",
         "rejection_code",
-    )
+    )  # storage_object_key revoked by 0028 (ADR-033 D1)
 } | {
     ("dr_restore_events", "SELECT", c)
     for c in ("id", "restored_at", "validation_completed_at", "runtime_enabled_at")
@@ -869,8 +873,8 @@ def test_0026_refuses_a_downgrade_with_an_ingest_key_and_goes_down_and_up_otherw
     down_0025 = _shape(pg_stack)
     command.upgrade(cfg, "head")
     head = _shape(pg_stack)
-    # Head is 0027 (ADR-032), which adds no policy on top of 0026.
-    assert head["revision"] == "0027_dataset_ingest_dispatch" and head["policies"] == 74
+    # Head is 0028 (ADR-033); 0027 and 0028 add no policy on top of 0026.
+    assert head["revision"] == "0028_dataset_object_layout" and head["policies"] == 74
     assert down_0025["revision"] == "0025_dataset_ingestion"
     assert (down_0025["policies"], down_0025["requests"], down_0025["ingest_grants"]) == (65, 0, 0)
     for fn in ("verifier", "guard", "required", "consistency"):
@@ -1482,16 +1486,26 @@ async def test_a_populated_0025_database_upgrades_to_0026_without_rewriting_anyt
                 for t in tables
             }  # fmt: skip
 
-    before = snapshot()
     with st.owner() as c:  # disposable database: remove the ingest key to go down
         c.execute("DELETE FROM ctx_keys WHERE key_class = 'ingest'")
+        # A database populated BEFORE 0028 holds pre-ADR-033 key shapes (0028
+        # refuses to go down with versions/ keys); recreate that state.
+        c.execute("ALTER TABLE dataset_versions DISABLE TRIGGER USER")
+        c.execute(
+            "UPDATE dataset_versions SET storage_object_key = CASE WHEN status = 'PROFILED' "
+            "THEN 'datasets/' ELSE 'quarantine/' END "
+            "|| tenant_id || '/' || dataset_id || '/' || id "
+            "WHERE storage_object_key LIKE 'versions/%'"
+        )
+        c.execute("ALTER TABLE dataset_versions ENABLE TRIGGER USER")
+    before = snapshot()
     cfg = _cfg(st.pg)
     command.downgrade(cfg, "0025_dataset_ingestion")
     assert snapshot() == before  # the populated 0025 state
     command.upgrade(cfg, "head")
-    assert snapshot() == before  # 0025 -> 0026 -> 0027 rewrote nothing
+    assert snapshot() == before  # 0025 -> 0028 rewrote nothing (legacy keys stay valid)
     with st.owner() as c:
         assert c.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0027_dataset_ingest_dispatch",
+            "0028_dataset_object_layout",
         )
         assert c.execute("SELECT count(*) FROM pg_policies").fetchone() == (74,)
