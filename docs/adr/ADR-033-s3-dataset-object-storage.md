@@ -26,6 +26,7 @@ verified purge), [ADR-031](ADR-031-dataset-ingest-runtime-boundary.md) (ingest b
 | Database layout and guard | Migration `0028_dataset_object_layout`: the `versions/` key check, a key-never-moves guard, `nlw_ingest` losing `UPDATE (storage_object_key)`, and reason `REJECTED_RETENTION` |
 | D2 operator tooling | `rejected-pending` and `purge-rejected` |
 | Alerts | `NlwDatasetRejectedRetainedTooLong` and `NlwDatasetS3CredentialsExpiring`, both dormant |
+| Credential-expiry metric | `nlw_dataset_s3_credentials_expiry_timestamp_seconds`: the ABSOLUTE expiry (Unix seconds) from the last credential-file read, no labels. The alert evaluates `expiry - time() < 900` for 5 m, so it fires even if the refresher stops and the process never re-reads the file. A remaining-duration gauge would freeze in that case. |
 
 - **Credential file:** the shared-credentials file carries a non-standard
   `x_nlw_expiration` (ISO-8601 UTC) written by the refresher. The SDK ignores
@@ -210,7 +211,10 @@ single-host design; on ECS or EKS it is replaced by task or pod identity):
   - Environment and IMDS providers are disabled.
 - **Startup log.** At startup the container logs the effective identity: the
   role ARN and account only, never a credential.
-- **Alerts:** a credential refresh failure, and expiry within 15 min.
+- **Alerts:** a credential refresh failure, and expiry within 15 min
+  (`nlw_dataset_s3_credentials_expiry_timestamp_seconds - time() < 900`; the
+  gauge is the absolute expiry, so the condition keeps advancing without any
+  further read).
 
 ### D4 — key layout
 

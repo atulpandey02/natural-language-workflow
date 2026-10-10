@@ -256,11 +256,14 @@ _DISPATCH_LAST_SUCCESS = Gauge(
 _DISPATCH_RESULTS = frozenset({"ok", "locked", "busy", "error"})
 
 # --- Dataset S3 credentials (ADR-033 D3) ---
-# Seconds until this process's file-based AWS credentials expire (refreshed by
-# the host refresher well before). No label: one value per process.
+# The ABSOLUTE Unix time at which this process's file-based AWS credentials
+# expire, from the last credential-file read. An absolute timestamp (not a
+# remaining duration) so the alert compares it with Prometheus' own time():
+# if the host refresher stops and nothing re-reads the file, the value stays
+# put while time() advances, and the alert still fires. No label.
 _S3_CREDENTIAL_EXPIRY = Gauge(
-    "nlw_dataset_s3_credentials_expiry_seconds",
-    "Seconds until this process's dataset S3 credentials expire.",
+    "nlw_dataset_s3_credentials_expiry_timestamp_seconds",
+    "Unix time at which this process's dataset S3 credentials expire.",
 )
 
 
@@ -537,7 +540,8 @@ def record_dataset_dispatch(
         _DISPATCH_LAST_SUCCESS.set(now)
 
 
-def set_dataset_s3_credential_expiry(seconds: float) -> None:
-    """ADR-033 D3: remaining lifetime of the pinned S3 credentials (alerted
-    on when it gets short: the refresher has stopped rotating them)."""
-    _S3_CREDENTIAL_EXPIRY.set(seconds)
+def set_dataset_s3_credential_expiry(expiry_unix: float) -> None:
+    """ADR-033 D3: the absolute expiry (Unix seconds) of the pinned S3
+    credentials. The alert evaluates ``expiry - time()``, so it keeps counting
+    down even when no further credential read updates this gauge."""
+    _S3_CREDENTIAL_EXPIRY.set(expiry_unix)

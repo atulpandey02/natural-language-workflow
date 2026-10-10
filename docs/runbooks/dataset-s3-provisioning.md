@@ -542,7 +542,11 @@ At startup it logs the effective role ARN and account, never a credential.
 ### Alerts
 
 - refresh failure;
-- credentials expiring within 15 min;
+- credentials expiring within 15 min: `NlwDatasetS3CredentialsExpiring`, on
+  `nlw_dataset_s3_credentials_expiry_timestamp_seconds - time() < 900` for
+  5 m. The gauge is the absolute expiry recorded at the last file read, so the
+  alert fires even when a stopped refresher means the process never re-reads
+  the file;
 - the startup identity check failing.
 
 ## 6. Rejected-object purge (D2, provisional 7 days)

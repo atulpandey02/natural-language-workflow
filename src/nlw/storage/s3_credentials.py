@@ -130,8 +130,9 @@ def read_credentials_file(path: str | None, *, now: datetime | None = None) -> F
     if expiry.tzinfo is None:
         raise CredentialError("the AWS credential expiry must carry a timezone")
     current = now or datetime.now(UTC)
+    # Absolute expiry (never the remaining duration, which would freeze).
+    set_dataset_s3_credential_expiry(expiry.timestamp())
     remaining = (expiry - current).total_seconds()
-    set_dataset_s3_credential_expiry(remaining)
     if remaining < MIN_REMAINING_S:
         raise CredentialError("the AWS credentials are expired or about to expire")
     return FileCredentials(creds[0], creds[1], creds[2], expiry.astimezone(UTC))

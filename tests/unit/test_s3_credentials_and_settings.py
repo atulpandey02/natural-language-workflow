@@ -241,3 +241,76 @@ def test_no_application_service_receives_static_aws_keys() -> None:
             env = spec.get("environment") or {}
             names = set(env) if isinstance(env, dict) else {e.split("=", 1)[0] for e in env}
             assert not names & {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}, (name, svc)
+
+
+# --- the expiry metric (absolute timestamp) --------------------------------------------------
+
+
+def test_the_expiry_gauge_is_the_absolute_timestamp_whenever_it_was_read(tmp_path: Path) -> None:
+    """The gauge holds the credential's absolute expiry, not the time left at
+    the read: a later read of the same file (or none at all) leaves it
+    unchanged, so the alert's ``expiry - time()`` keeps counting down."""
+    from prometheus_client import REGISTRY
+
+    expiry = NOW + timedelta(hours=1)
+    path = _file(tmp_path, expiry=expiry)
+    creds.read_credentials_file(path, now=NOW)
+    name = "nlw_dataset_s3_credentials_expiry_timestamp_seconds"
+    assert REGISTRY.get_sample_value(name) == expiry.timestamp()
+    creds.read_credentials_file(path, now=NOW + timedelta(minutes=40))  # later, same file
+    assert REGISTRY.get_sample_value(name) == expiry.timestamp()
+    # Rotation: a later expiry replaces it.
+    later = NOW + timedelta(hours=2)
+    os.chmod(path, 0o600)
+    creds.read_credentials_file(_file(tmp_path, expiry=later), now=NOW + timedelta(hours=1))
+    assert REGISTRY.get_sample_value(name) == later.timestamp()
+
+
+def test_the_expiry_gauge_carries_no_labels_and_the_old_metric_is_gone(tmp_path: Path) -> None:
+    from prometheus_client import REGISTRY, generate_latest
+
+    creds.read_credentials_file(_file(tmp_path, expiry=NOW + timedelta(hours=1)), now=NOW)
+    families = {m.name: m for m in REGISTRY.collect()}
+    assert "nlw_dataset_s3_credentials_expiry_seconds" not in families  # the old design
+    family = families["nlw_dataset_s3_credentials_expiry_timestamp_seconds"]
+    assert [s.labels for s in family.samples] == [{}]
+    text = generate_latest(REGISTRY).decode()
+    line = next(x for x in text.splitlines() if x.startswith("nlw_dataset_s3_credentials_expiry"))
+    for needle in ("ASIA", "s3cr3t", "t0ken", str(tmp_path), ACCOUNT, "nlw-", "role", "tenant",
+                   "bucket"):  # fmt: skip
+        assert needle not in line, needle
+
+
+def test_the_expiry_alert_compares_the_timestamp_with_the_current_time() -> None:
+    import yaml
+
+    root = Path(__file__).resolve().parents[2]
+    doc = yaml.safe_load((root / "docker/prometheus/alerts/datasets.rules.yml").read_text())
+    rule = next(
+        r
+        for g in doc["groups"]
+        for r in g["rules"]
+        if r["alert"] == "NlwDatasetS3CredentialsExpiring"
+    )
+    assert rule["expr"].strip() == (
+        "nlw_dataset_s3_credentials_expiry_timestamp_seconds - time() < 900"
+    )
+    assert rule["for"] == "5m"
+
+
+def test_startup_still_refuses_bad_credentials_after_recording_the_expiry(tmp_path: Path) -> None:
+    for i, (kwargs, match) in enumerate(
+        (
+            ({"expiry": NOW - timedelta(seconds=1)}, "expired"),
+            ({"expiry": NOW + timedelta(seconds=creds.MIN_REMAINING_S - 1)}, "expired"),
+            ({"expiry": None}, "temporary"),
+        )
+    ):
+        sub = tmp_path / f"case{i}"
+        sub.mkdir(parents=True, exist_ok=True)
+        with pytest.raises(creds.CredentialError, match=match):
+            creds.read_credentials_file(_file(sub, **kwargs), now=NOW)  # type: ignore[arg-type]
+    with pytest.raises(creds.CredentialError, match="malformed"):
+        creds.read_credentials_file(_file(tmp_path, extra="[default]\n"), now=NOW)
+    with pytest.raises(creds.CredentialError, match="missing"):
+        creds.read_credentials_file(str(tmp_path / "absent"), now=NOW)

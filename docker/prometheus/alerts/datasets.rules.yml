@@ -64,9 +64,11 @@ groups:
             docs/runbooks/dataset-s3-provisioning.md
 
       # ADR-033 D3: the pinned S3 credentials of an API or ingest process expire
-      # within 15 minutes, so the host refresher has stopped rotating them.
+      # within 15 minutes, so the host refresher has stopped rotating them. The
+      # gauge is the ABSOLUTE expiry time: compared with time(), it keeps
+      # counting down even when the process never re-reads the file.
       - alert: NlwDatasetS3CredentialsExpiring
-        expr: nlw_dataset_s3_credentials_expiry_seconds < 900
+        expr: nlw_dataset_s3_credentials_expiry_timestamp_seconds - time() < 900
         for: 5m
         labels: { severity: critical, component: datasets }
         annotations:
