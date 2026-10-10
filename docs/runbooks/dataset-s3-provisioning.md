@@ -155,7 +155,10 @@ the evidence for an individual deletion.
         "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"]}}},
     {"Sid": "DenyBucketConfigExceptAdmin", "Effect": "Deny", "Principal": "*",
      "Action": ["s3:PutBucket*", "s3:DeleteBucket*", "s3:PutLifecycleConfiguration",
-                "s3:PutEncryptionConfiguration", "s3:PutBucketVersioning"],
+                "s3:PutEncryptionConfiguration", "s3:PutBucketVersioning",
+                "s3:PutReplicationConfiguration", "s3:PutInventoryConfiguration",
+                "s3:PutAnalyticsConfiguration", "s3:PutMetricsConfiguration",
+                "s3:PutIntelligentTieringConfiguration", "s3:PutAccelerateConfiguration"],
      "Resource": "arn:aws:s3:::<BUCKET>",
      "Condition": {"ArnNotEquals": {"aws:PrincipalArn": [
         "arn:aws:iam::<ACCOUNT>:role/<ADMIN_ROLE>"]}}}
@@ -184,6 +187,11 @@ Four separate denies, all on `s3:PutObject` for every object in the bucket:
 - **There are no exceptions.** A request that relies on the bucket default is
   denied.
 
+The configuration denies name replication, inventory, analytics, metrics,
+Intelligent-Tiering and acceleration explicitly: `s3:PutBucket*` does not
+cover them, and replication or inventory would copy objects or their keys
+elsewhere.
+
 `DenyServerSideCopy` refuses `CopyObject` and `UploadPartCopy`. The
 application never copies, and without this deny the API role could duplicate
 one stored object under another key using its own read and write grants.
@@ -200,8 +208,11 @@ one stored object under another key using its own read and write grants.
   therefore a **mandatory proof item** (§7, E-MPU).
 - **If the proof shows part or completion requests are denied**, provisioning
   **stops**. No encryption exception is added. The design is revisited
-  instead, for example single-request `PutObject` uploads with both headers,
-  which is viable because uploads are capped at 25 MB.
+  instead. The likely alternative, single-request `PutObject` uploads with
+  both headers up to the 25 MB cap, is **an application change**: the store
+  switches to multipart above 8 MiB (`PART_SIZE` in `nlw.storage.s3`). It
+  needs its own code change, tests and review before the proof is re-run; it
+  is not a documentation fallback.
 - **`DenyUnconditionalCreate`** must refuse a plain `PutObject` and a
   `CompleteMultipartUpload` without `If-None-Match`. It must still allow
   `CreateMultipartUpload` and `UploadPart`, using the documented
@@ -225,6 +236,9 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
     "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
     "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest"]},
   {"Sid": "NeverDataPlane", "Effect": "Deny", "Action": ["s3:*", "kms:*"], "Resource": "*"},
+  {"Sid": "NeverPassOrAttachDatasetRoles", "Effect": "Deny",
+   "Action": ["iam:PassRole", "ec2:AssociateIamInstanceProfile", "ec2:ReplaceIamInstanceProfileAssociation"],
+   "Resource": "*"},
   {"Sid": "NeverTouchAudit", "Effect": "Deny",
    "Action": ["cloudtrail:*", "s3:*", "kms:*"],
    "Resource": ["<TRAIL_ARN>", "arn:aws:s3:::<AUDIT_BUCKET>", "arn:aws:s3:::<AUDIT_BUCKET>/*", "<AUDIT_KEY_ARN>"]},
@@ -262,6 +276,9 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
   {"Sid": "NeverOtherEnvironmentKeys", "Effect": "Deny", "Action": "kms:*",
    "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
    "Condition": {"StringNotEquals": {"aws:ResourceTag/nlw-env": "<ENV>"}}},
+  {"Sid": "NeverPassOrAttachDatasetRoles", "Effect": "Deny",
+   "Action": ["iam:PassRole", "ec2:AssociateIamInstanceProfile", "ec2:ReplaceIamInstanceProfileAssociation"],
+   "Resource": "*"},
   {"Sid": "NeverTouchAudit", "Effect": "Deny",
    "Action": ["cloudtrail:*", "s3:*", "kms:*"],
    "Resource": ["<TRAIL_ARN>", "arn:aws:s3:::<AUDIT_BUCKET>", "arn:aws:s3:::<AUDIT_BUCKET>/*", "<AUDIT_KEY_ARN>"]},
@@ -298,6 +315,9 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
   {"Sid": "NeverOtherEnvironmentKeys", "Effect": "Deny", "Action": "kms:*",
    "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
    "Condition": {"StringNotEquals": {"aws:ResourceTag/nlw-env": "<ENV>"}}},
+  {"Sid": "NeverPassOrAttachDatasetRoles", "Effect": "Deny",
+   "Action": ["iam:PassRole", "ec2:AssociateIamInstanceProfile", "ec2:ReplaceIamInstanceProfileAssociation"],
+   "Resource": "*"},
   {"Sid": "NeverTouchAudit", "Effect": "Deny",
    "Action": ["cloudtrail:*", "s3:*", "kms:*"],
    "Resource": ["<TRAIL_ARN>", "arn:aws:s3:::<AUDIT_BUCKET>", "arn:aws:s3:::<AUDIT_BUCKET>/*", "<AUDIT_KEY_ARN>"]},
@@ -336,6 +356,9 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
   {"Sid": "NeverOtherEnvironmentKeys", "Effect": "Deny", "Action": "kms:*",
    "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
    "Condition": {"StringNotEquals": {"aws:ResourceTag/nlw-env": "<ENV>"}}},
+  {"Sid": "NeverPassOrAttachDatasetRoles", "Effect": "Deny",
+   "Action": ["iam:PassRole", "ec2:AssociateIamInstanceProfile", "ec2:ReplaceIamInstanceProfileAssociation"],
+   "Resource": "*"},
   {"Sid": "NeverTouchAudit", "Effect": "Deny",
    "Action": ["cloudtrail:*", "s3:*", "kms:*"],
    "Resource": ["<TRAIL_ARN>", "arn:aws:s3:::<AUDIT_BUCKET>", "arn:aws:s3:::<AUDIT_BUCKET>/*", "<AUDIT_KEY_ARN>"]},
@@ -385,15 +408,22 @@ dataset objects or the dataset key. Both use `trust-human-mfa` (§3.5).
               "s3:GetBucketOwnershipControls", "s3:PutBucketOwnershipControls",
               "s3:GetBucketTagging", "s3:PutBucketTagging", "s3:DeleteBucket"],
    "Resource": "arn:aws:s3:::<AUDIT_BUCKET>"},
-  {"Sid": "CreateAuditKey", "Effect": "Allow", "Action": ["kms:CreateKey", "kms:TagResource"],
+  {"Sid": "CreateAuditKey", "Effect": "Allow", "Action": "kms:CreateKey",
    "Resource": "*",
    "Condition": {"StringEquals": {"aws:RequestTag/nlw-env": "<ENV>"}}},
+  {"Sid": "TagOnlyUntaggedKeys", "Effect": "Allow", "Action": "kms:TagResource",
+   "Resource": "*",
+   "Condition": {"StringEquals": {"aws:RequestTag/nlw-env": "<ENV>"},
+                 "Null": {"aws:ResourceTag/nlw-env": "true"}}},
   {"Sid": "AdministerAuditKey", "Effect": "Allow",
    "Action": ["kms:CreateAlias", "kms:DescribeKey", "kms:GetKeyPolicy", "kms:PutKeyPolicy",
               "kms:EnableKeyRotation", "kms:GetKeyRotationStatus", "kms:ListResourceTags"],
    "Resource": ["<AUDIT_KEY_ARN>", "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit"]},
   {"Sid": "NeverTouchDatasets", "Effect": "Deny", "Action": ["s3:*", "kms:*"],
-   "Resource": ["arn:aws:s3:::<BUCKET>", "arn:aws:s3:::<BUCKET>/*", "<KEY_ARN>"]}
+   "Resource": ["arn:aws:s3:::<BUCKET>", "arn:aws:s3:::<BUCKET>/*", "<KEY_ARN>"]},
+  {"Sid": "NeverPassOrAttachDatasetRoles", "Effect": "Deny",
+   "Action": ["iam:PassRole", "ec2:AssociateIamInstanceProfile", "ec2:ReplaceIamInstanceProfileAssociation"],
+   "Resource": "*"}
 ]}
 ```
 
@@ -402,6 +432,15 @@ dataset objects or the dataset key. Both use `trust-human-mfa` (§3.5).
   `BypassGovernanceRetention` is granted. The audit bucket policy (§4.3)
   allows those actions only to this role so that retention can be corrected,
   which would need a separately reviewed policy change first.
+- `TagOnlyUntaggedKeys` lets the audit administrator tag a key only while it
+  has no `nlw-env` tag, which in practice means the key it is creating. It
+  cannot re-tag another environment's key, which would defeat the runtime
+  roles' `NeverOtherEnvironmentKeys` deny. How KMS evaluates
+  `aws:ResourceTag` while `CreateKey` applies tags is not documented
+  explicitly; P03-04 shows whether creation with tags succeeds.
+- `NeverPassOrAttachDatasetRoles` (on every dataset and audit role): none of
+  these identities may pass a role to a service or attach an instance
+  profile. Who else in the account may do so is decision E12.
 - `AdministerAuditKey` names the key ARN, which exists only after
   `CreateAuditKey`. The proof attaches this statement after the key is
   created.
@@ -419,7 +458,10 @@ dataset objects or the dataset key. Both use `trust-human-mfa` (§3.5).
    "Action": ["cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListPublicKeys"],
    "Resource": "*"},
   {"Sid": "NeverTouchDatasets", "Effect": "Deny", "Action": ["s3:*", "kms:*"],
-   "Resource": ["arn:aws:s3:::<BUCKET>", "arn:aws:s3:::<BUCKET>/*", "<KEY_ARN>"]}
+   "Resource": ["arn:aws:s3:::<BUCKET>", "arn:aws:s3:::<BUCKET>/*", "<KEY_ARN>"]},
+  {"Sid": "NeverPassOrAttachDatasetRoles", "Effect": "Deny",
+   "Action": ["iam:PassRole", "ec2:AssociateIamInstanceProfile", "ec2:ReplaceIamInstanceProfileAssociation"],
+   "Resource": "*"}
 ]}
 ```
 
@@ -517,6 +559,13 @@ including the multipart calls, `DeleteObjectVersion` and
 }]
 ```
 
+**Bucket-level reads are an open question.** `ListBucket` and
+`ListBucketVersions` act on the bucket ARN, which does not start with
+`arn:aws:s3:::<BUCKET>/`. Whether this selector records them is not stated
+clearly enough in AWS documentation to rely on, and this repository does not
+guess a different selector shape. P13 records whether the operator's listing
+appears; decision E13 decides what happens if it does not.
+
 Management events, such as bucket-policy, KMS and IAM changes, are **not** in
 this trail. **Assumption:** an account- or organization-level management-event
 trail already exists and is protected the same way. This must be confirmed in
@@ -527,9 +576,13 @@ the provisioning review.
 - Alias `alias/nlw-<ENV>-dataset-audit`, with rotation on.
 - `<AUDIT_ADMIN_ROLE>` administers the key.
 - No dataset application or operator role is in this key policy.
-- Nobody may schedule this key's deletion: `ScheduleKeyDeletion` is absent.
-  Deleting it would make every retained audit record unreadable, so the key
-  outlives the logs it protects.
+- No statement grants `ScheduleKeyDeletion`, so the key cannot be scheduled
+  for deletion **without first changing its key policy**. The account root
+  and IAM administrators delegated through the root statement keep the
+  authority to make that change (`kms:PutKeyPolicy`); the account's
+  management-event trail (decision E7) must record it. Deleting the key would
+  make every retained audit record unreadable, so it must outlive the logs it
+  protects.
 
 <!-- template: audit-kms-key-statements -->
 ```json
@@ -641,7 +694,10 @@ for `<AUDIT_RETENTION_DAYS>` days.
     {"Sid": "DenyBucketConfigExceptAuditAdmin", "Effect": "Deny", "Principal": "*",
      "Action": ["s3:PutBucket*", "s3:DeleteBucket*", "s3:PutLifecycleConfiguration",
                 "s3:PutEncryptionConfiguration", "s3:PutBucketVersioning",
-                "s3:PutBucketObjectLockConfiguration"],
+                "s3:PutBucketObjectLockConfiguration",
+                "s3:PutReplicationConfiguration", "s3:PutInventoryConfiguration",
+                "s3:PutAnalyticsConfiguration", "s3:PutMetricsConfiguration",
+                "s3:PutIntelligentTieringConfiguration", "s3:PutAccelerateConfiguration"],
      "Resource": "arn:aws:s3:::<AUDIT_BUCKET>",
      "Condition": {"ArnNotEquals": {"aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/<AUDIT_ADMIN_ROLE>"}}}
   ]
