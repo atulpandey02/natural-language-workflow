@@ -29,4 +29,7 @@ control plane) and the internal Prometheus metrics (ADR-016).
 - [action-outcome-unknown.md](action-outcome-unknown.md) — reconcile an ambiguous (UNKNOWN) external action
 - [workspace-creation-grants.md](workspace-creation-grants.md) — issue/revoke operator grants for founding a workspace (Phase 2 B01)
 - [dataset-metadata-deletion.md](dataset-metadata-deletion.md) — dataset deletion: purge stored objects (verified, with a receipt), then tombstone; `verify-objects` after a restore (ADR-029, ADR-030; development only)
+- [dataset-s3-provisioning.md](dataset-s3-provisioning.md) — **security sensitive**: AWS S3 dataset store templates: buckets, keys, roles, trust, audit trail (ADR-033; NOT RUN)
+- [dataset-s3-d6-proof.md](dataset-s3-d6-proof.md) — the ordered, staging-only D6 AWS proof: stop conditions, evidence rules, cleanup and recovery (NOT RUN)
+- [dataset-s3-d6-owner-decisions.md](dataset-s3-d6-owner-decisions.md) — owner decisions E1–E10 required before the D6 proof (OPEN)
 - [dataset-uploads-staging-checklist.md](dataset-uploads-staging-checklist.md) — owner decisions, engineering and release steps required before dataset uploads may reach staging (NOT RUN)

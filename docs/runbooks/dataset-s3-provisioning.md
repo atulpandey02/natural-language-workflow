@@ -4,7 +4,8 @@ Status: **a plan, not a record.** Nothing here has been created. These
 templates implement [ADR-033](../adr/ADR-033-s3-dataset-object-storage.md)
 (D1–D6 approved on 2026-10-09). Creating or changing any real AWS resource
 requires a separate provisioning review and **explicit owner authorization**
-(D6). The isolated proof in §7 runs only after that.
+(D6). The isolated proof in §7 runs only after that, following the ordered,
+NOT RUN procedure in [dataset-s3-d6-proof.md](dataset-s3-d6-proof.md).
 
 Every JSON block is marked `<!-- template: name -->`.
 `tests/unit/test_dataset_s3_provisioning_templates.py` parses each one and
@@ -27,6 +28,8 @@ None of these may be replaced by a real value in this repository.
 | `<ADMIN_ROLE>` | the account administration role that manages the dataset bucket and key |
 | `<AUDIT_ADMIN_ROLE>` | the role that administers the trail, audit bucket and audit key. It is not an application or operator role. |
 | `<AUDIT_READER_ROLE>` | a human, read-only role for audit review |
+| `<HUMAN_PRINCIPAL_ARNS>` | the named human principals allowed to assume one MFA role (§3.5). Each MFA role has its own list; the operator and audit-administrator lists must not overlap. |
+| `<AUDIT_EXPIRY_DAYS>` | `<AUDIT_RETENTION_DAYS>` + 1, the lifecycle expiry of audit log objects |
 | `<AUDIT_RETENTION_DAYS>` | audit-log retention. It is set with O-3 and O-5, and must outlast any deletion-evidence need. |
 
 ## 1. Dataset KMS key (one per environment)
@@ -34,32 +37,51 @@ None of these may be replaced by a real value in this repository.
 - Symmetric, customer-managed, alias `alias/nlw-<ENV>-datasets`, with
   automatic rotation on.
 - Tagged `nlw-env=<ENV>`; the role denies in §3 rely on the tag.
-- **Key policy:** `<ADMIN_ROLE>` administers the key. The API, ingest and
-  operator roles of **this** environment may use it only through S3 in
-  us-east-1, for this bucket:
+- **Key policy** (the complete policy; there is no `kms:*` statement for the
+  account root):
+  - `<ADMIN_ROLE>` and the account root may **manage** the key, never use it.
+    The root statement keeps the key recoverable if `<ADMIN_ROLE>` is lost;
+    it grants no cryptographic action, so delegated IAM administrators cannot
+    decrypt through it.
+  - Only the API role may generate data keys. The ingest and operator roles
+    may only decrypt.
+  - Every use is through S3 in us-east-1, for this bucket.
 
-<!-- template: dataset-kms-key-statement -->
+<!-- template: dataset-kms-key-statements -->
 ```json
-{
-  "Sid": "UseViaS3ForThisBucketOnly",
-  "Effect": "Allow",
-  "Principal": {"AWS": [
-    "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
-    "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
-    "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"
-  ]},
-  "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
-  "Resource": "*",
-  "Condition": {"StringEquals": {
-    "kms:ViaService": "s3.us-east-1.amazonaws.com",
-    "kms:EncryptionContext:aws:s3:arn": "arn:aws:s3:::<BUCKET>"
-  }}
-}
+[
+  {"Sid": "AdministerNeverUse", "Effect": "Allow",
+   "Principal": {"AWS": ["arn:aws:iam::<ACCOUNT>:root", "arn:aws:iam::<ACCOUNT>:role/<ADMIN_ROLE>"]},
+   "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:PutKeyPolicy", "kms:GetKeyRotationStatus",
+              "kms:EnableKeyRotation", "kms:ListResourceTags", "kms:TagResource", "kms:UntagResource",
+              "kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias", "kms:EnableKey", "kms:DisableKey",
+              "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion"],
+   "Resource": "*"},
+  {"Sid": "ApiEncryptViaS3ForThisBucketOnly", "Effect": "Allow",
+   "Principal": {"AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api"},
+   "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+   "Resource": "*",
+   "Condition": {"StringEquals": {
+     "kms:ViaService": "s3.us-east-1.amazonaws.com",
+     "kms:EncryptionContext:aws:s3:arn": "arn:aws:s3:::<BUCKET>"}}},
+  {"Sid": "ReadersDecryptViaS3ForThisBucketOnly", "Effect": "Allow",
+   "Principal": {"AWS": [
+     "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+     "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"]},
+   "Action": "kms:Decrypt",
+   "Resource": "*",
+   "Condition": {"StringEquals": {
+     "kms:ViaService": "s3.us-east-1.amazonaws.com",
+     "kms:EncryptionContext:aws:s3:arn": "arn:aws:s3:::<BUCKET>"}}}
+]
 ```
 
-The encryption context is the bucket ARN because S3 Bucket Keys are enabled.
-The role policies (§3) split `GenerateDataKey`, which only the API holds, from
-`Decrypt`. The bootstrap role is absent from the key policy.
+- **Why the split matters.** A key-policy statement that names a role is
+  sufficient on its own within the account; the role policy is not consulted
+  for that grant. The earlier single statement therefore let the ingest and
+  operator roles generate data keys even though their role policies did not.
+- The encryption context is the bucket ARN because S3 Bucket Keys are enabled.
+- The bootstrap role is absent from the key policy.
 
 ## 2. Dataset bucket
 
@@ -123,6 +145,9 @@ the evidence for an individual deletion.
     {"Sid": "DenyWrongSseKmsKey", "Effect": "Deny", "Principal": "*",
      "Action": "s3:PutObject", "Resource": "arn:aws:s3:::<BUCKET>/*",
      "Condition": {"StringNotEquals": {"s3:x-amz-server-side-encryption-aws-kms-key-id": "<KEY_ARN>"}}},
+    {"Sid": "DenyServerSideCopy", "Effect": "Deny", "Principal": "*",
+     "Action": "s3:PutObject", "Resource": "arn:aws:s3:::<BUCKET>/*",
+     "Condition": {"Null": {"s3:x-amz-copy-source": "false"}}},
     {"Sid": "DenyDeleteExceptOperator", "Effect": "Deny", "Principal": "*",
      "Action": ["s3:DeleteObject", "s3:DeleteObjectVersion"],
      "Resource": "arn:aws:s3:::<BUCKET>/*",
@@ -159,6 +184,10 @@ Four separate denies, all on `s3:PutObject` for every object in the bucket:
 - **There are no exceptions.** A request that relies on the bucket default is
   denied.
 
+`DenyServerSideCopy` refuses `CopyObject` and `UploadPartCopy`. The
+application never copies, and without this deny the API role could duplicate
+one stored object under another key using its own read and write grants.
+
 ### Multipart uploads and conditional writes
 
 - **Headers.** The application sends both encryption headers on
@@ -192,6 +221,10 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
   {"Sid": "AssumeRuntimeRolesOnly", "Effect": "Allow", "Action": "sts:AssumeRole", "Resource": [
     "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
     "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest"]},
+  {"Sid": "NeverAssumeAnyOtherRole", "Effect": "Deny", "Action": "sts:AssumeRole", "NotResource": [
+    "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+    "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest"]},
+  {"Sid": "NeverDataPlane", "Effect": "Deny", "Action": ["s3:*", "kms:*"], "Resource": "*"},
   {"Sid": "NeverTouchAudit", "Effect": "Deny",
    "Action": ["cloudtrail:*", "s3:*", "kms:*"],
    "Resource": ["<TRAIL_ARN>", "arn:aws:s3:::<AUDIT_BUCKET>", "arn:aws:s3:::<AUDIT_BUCKET>/*", "<AUDIT_KEY_ARN>"]},
@@ -202,7 +235,9 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
 ]}
 ```
 
-- **Excluded:** no S3, no KMS, and never the operator role.
+- **Excluded:** no S3, no KMS, and never the operator role. These are
+  explicit denies, so a broader policy attached by mistake cannot grant them.
+- **Trust:** `trust-bootstrap` (§3.5), the EC2 service only.
 - **Instance:** IMDSv2 required, with hop limit **1**.
 
 ### `nlw-<ENV>-dataset-api`
@@ -223,8 +258,9 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
   {"Sid": "Encrypt", "Effect": "Allow",
    "Action": ["kms:GenerateDataKey", "kms:Decrypt"], "Resource": "<KEY_ARN>"},
   {"Sid": "NeverOtherEnvironment", "Effect": "Deny", "Action": ["s3:*", "kms:*"],
-   "Resource": ["arn:aws:s3:::nlw-<OTHER_ENV>-datasets-*", "arn:aws:s3:::nlw-<OTHER_ENV>-datasets-*/*",
-                "arn:aws:kms:us-east-1:<ACCOUNT>:key/*"],
+   "Resource": ["arn:aws:s3:::nlw-<OTHER_ENV>-*", "arn:aws:s3:::nlw-<OTHER_ENV>-*/*"]},
+  {"Sid": "NeverOtherEnvironmentKeys", "Effect": "Deny", "Action": "kms:*",
+   "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
    "Condition": {"StringNotEquals": {"aws:ResourceTag/nlw-env": "<ENV>"}}},
   {"Sid": "NeverTouchAudit", "Effect": "Deny",
    "Action": ["cloudtrail:*", "s3:*", "kms:*"],
@@ -240,8 +276,10 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
   calls only those operations (ADR-033 note 1, accepted residual risk). Every
   such call is a CloudTrail data event (§4).
 - There is no delete, no list, and nothing outside `versions/`.
-- `NeverOtherEnvironment` relies on the KMS key tags (§1). A key without the
-  tag is denied, which fails closed.
+- `NeverOtherEnvironment` denies every bucket of the other environment
+  unconditionally. `NeverOtherEnvironmentKeys` relies on the KMS key tags
+  (§1): a key without the tag is denied, which fails closed.
+- **Trust:** `trust-api` (§3.5).
 
 ### `nlw-<ENV>-dataset-ingest`
 
@@ -256,7 +294,10 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
    "Resource": "arn:aws:s3:::<BUCKET>/versions/*"},
   {"Sid": "Decrypt", "Effect": "Allow", "Action": ["kms:Decrypt"], "Resource": "<KEY_ARN>"},
   {"Sid": "NeverOtherEnvironment", "Effect": "Deny", "Action": ["s3:*", "kms:*"],
-   "Resource": ["arn:aws:s3:::nlw-<OTHER_ENV>-datasets-*", "arn:aws:s3:::nlw-<OTHER_ENV>-datasets-*/*"]},
+   "Resource": ["arn:aws:s3:::nlw-<OTHER_ENV>-*", "arn:aws:s3:::nlw-<OTHER_ENV>-*/*"]},
+  {"Sid": "NeverOtherEnvironmentKeys", "Effect": "Deny", "Action": "kms:*",
+   "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+   "Condition": {"StringNotEquals": {"aws:ResourceTag/nlw-env": "<ENV>"}}},
   {"Sid": "NeverTouchAudit", "Effect": "Deny",
    "Action": ["cloudtrail:*", "s3:*", "kms:*"],
    "Resource": ["<TRAIL_ARN>", "arn:aws:s3:::<AUDIT_BUCKET>", "arn:aws:s3:::<AUDIT_BUCKET>/*", "<AUDIT_KEY_ARN>"]},
@@ -269,11 +310,12 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
 
 - IAM scope is the environment prefix. Exact-object access is enforced in the
   application (ADR-033 note 2). Every read is a CloudTrail data event (§4).
+- **Trust:** `trust-ingest` (§3.5).
 
 ### `nlw-<ENV>-dataset-operator`
 
-- **Trust:** named human operator principals only, with
-  `aws:MultiFactorAuthPresent = true`. It is **not** the bootstrap role or any
+- **Trust:** `trust-human-mfa` (§3.5) with the operator's
+  `<HUMAN_PRINCIPAL_ARNS>`. It is **not** the bootstrap role or any
   application role.
 - **Policy:**
 
@@ -289,6 +331,11 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
               "s3:DeleteObjectVersion", "s3:AbortMultipartUpload"],
    "Resource": "arn:aws:s3:::<BUCKET>/versions/*"},
   {"Sid": "Decrypt", "Effect": "Allow", "Action": ["kms:Decrypt"], "Resource": "<KEY_ARN>"},
+  {"Sid": "NeverOtherEnvironment", "Effect": "Deny", "Action": ["s3:*", "kms:*"],
+   "Resource": ["arn:aws:s3:::nlw-<OTHER_ENV>-*", "arn:aws:s3:::nlw-<OTHER_ENV>-*/*"]},
+  {"Sid": "NeverOtherEnvironmentKeys", "Effect": "Deny", "Action": "kms:*",
+   "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+   "Condition": {"StringNotEquals": {"aws:ResourceTag/nlw-env": "<ENV>"}}},
   {"Sid": "NeverTouchAudit", "Effect": "Deny",
    "Action": ["cloudtrail:*", "s3:*", "kms:*"],
    "Resource": ["<TRAIL_ARN>", "arn:aws:s3:::<AUDIT_BUCKET>", "arn:aws:s3:::<AUDIT_BUCKET>/*", "<AUDIT_KEY_ARN>"]},
@@ -299,6 +346,8 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
 ]}
 ```
 
+- `DeleteObjectVersion` is the only delete. A plain `DeleteObject` without a
+  version id, which would only add a delete marker, is not granted.
 - The operator purges dataset objects, never audit records. Audit review uses
   `<AUDIT_READER_ROLE>`.
 - It is used only through reviewed operator commands:
@@ -309,6 +358,132 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
 | `purge-rejected` | Bounded removal of rejected objects |
 | `rejected-pending` | Lists rejected objects eligible for purge |
 | `verify-objects` | Reconciles database keys with stored objects |
+
+### `nlw-<ENV>-dataset-audit-admin` and `nlw-<ENV>-dataset-audit-reader`
+
+These are the `<AUDIT_ADMIN_ROLE>` and `<AUDIT_READER_ROLE>` of this
+environment. Neither is an application or operator role, and neither may touch
+dataset objects or the dataset key. Both use `trust-human-mfa` (§3.5).
+
+<!-- template: role-audit-admin -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "AdministerThisTrail", "Effect": "Allow",
+   "Action": ["cloudtrail:CreateTrail", "cloudtrail:GetTrail", "cloudtrail:GetTrailStatus",
+              "cloudtrail:DescribeTrails", "cloudtrail:GetEventSelectors", "cloudtrail:PutEventSelectors",
+              "cloudtrail:StartLogging", "cloudtrail:StopLogging", "cloudtrail:UpdateTrail",
+              "cloudtrail:DeleteTrail", "cloudtrail:AddTags", "cloudtrail:ListTags"],
+   "Resource": "<TRAIL_ARN>"},
+  {"Sid": "AdministerAuditBucket", "Effect": "Allow",
+   "Action": ["s3:CreateBucket", "s3:ListBucket", "s3:ListBucketVersions",
+              "s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:GetBucketAcl",
+              "s3:GetBucketVersioning", "s3:PutBucketVersioning",
+              "s3:GetEncryptionConfiguration", "s3:PutEncryptionConfiguration",
+              "s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration",
+              "s3:GetBucketObjectLockConfiguration", "s3:PutBucketObjectLockConfiguration",
+              "s3:GetBucketPublicAccessBlock", "s3:PutBucketPublicAccessBlock",
+              "s3:GetBucketOwnershipControls", "s3:PutBucketOwnershipControls",
+              "s3:GetBucketTagging", "s3:PutBucketTagging", "s3:DeleteBucket"],
+   "Resource": "arn:aws:s3:::<AUDIT_BUCKET>"},
+  {"Sid": "CreateAuditKey", "Effect": "Allow", "Action": ["kms:CreateKey", "kms:TagResource"],
+   "Resource": "*",
+   "Condition": {"StringEquals": {"aws:RequestTag/nlw-env": "<ENV>"}}},
+  {"Sid": "AdministerAuditKey", "Effect": "Allow",
+   "Action": ["kms:CreateAlias", "kms:DescribeKey", "kms:GetKeyPolicy", "kms:PutKeyPolicy",
+              "kms:EnableKeyRotation", "kms:GetKeyRotationStatus", "kms:ListResourceTags"],
+   "Resource": ["<AUDIT_KEY_ARN>", "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit"]},
+  {"Sid": "NeverTouchDatasets", "Effect": "Deny", "Action": ["s3:*", "kms:*"],
+   "Resource": ["arn:aws:s3:::<BUCKET>", "arn:aws:s3:::<BUCKET>/*", "<KEY_ARN>"]}
+]}
+```
+
+- The audit administrator never deletes or rewrites log objects: no
+  `DeleteObject*`, `PutObject`, `PutObjectRetention` or
+  `BypassGovernanceRetention` is granted. The audit bucket policy (§4.3)
+  allows those actions only to this role so that retention can be corrected,
+  which would need a separately reviewed policy change first.
+- `AdministerAuditKey` names the key ARN, which exists only after
+  `CreateAuditKey`. The proof attaches this statement after the key is
+  created.
+
+<!-- template: role-audit-reader -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "ReadAuditLogs", "Effect": "Allow", "Action": ["s3:GetObject"],
+   "Resource": "arn:aws:s3:::<AUDIT_BUCKET>/dataset-data-events/*"},
+  {"Sid": "ListAuditLogs", "Effect": "Allow", "Action": ["s3:ListBucket"],
+   "Resource": "arn:aws:s3:::<AUDIT_BUCKET>",
+   "Condition": {"StringLike": {"s3:prefix": ["dataset-data-events/*"]}}},
+  {"Sid": "DecryptAuditLogs", "Effect": "Allow", "Action": ["kms:Decrypt"], "Resource": "<AUDIT_KEY_ARN>"},
+  {"Sid": "ValidateTrail", "Effect": "Allow",
+   "Action": ["cloudtrail:DescribeTrails", "cloudtrail:GetTrailStatus", "cloudtrail:ListPublicKeys"],
+   "Resource": "*"},
+  {"Sid": "NeverTouchDatasets", "Effect": "Deny", "Action": ["s3:*", "kms:*"],
+   "Resource": ["arn:aws:s3:::<BUCKET>", "arn:aws:s3:::<BUCKET>/*", "<KEY_ARN>"]}
+]}
+```
+
+### 3.5 Trust policies
+
+IAM checks that a principal named in a trust policy exists. Every deny below
+therefore names roles through a condition, never as a principal, so the deny
+is valid before or after those roles exist.
+
+<!-- template: trust-bootstrap -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "Ec2InstanceProfileOnly", "Effect": "Allow",
+   "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}
+]}
+```
+
+<!-- template: trust-api -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "BootstrapWithApiSessionName", "Effect": "Allow",
+   "Principal": {"AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap"},
+   "Action": "sts:AssumeRole",
+   "Condition": {"StringEquals": {"sts:RoleSessionName": "nlw-<ENV>-api"}}}
+]}
+```
+
+<!-- template: trust-ingest -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "BootstrapWithIngestSessionName", "Effect": "Allow",
+   "Principal": {"AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap"},
+   "Action": "sts:AssumeRole",
+   "Condition": {"StringEquals": {"sts:RoleSessionName": "nlw-<ENV>-ingest"}}}
+]}
+```
+
+<!-- template: trust-human-mfa -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "NamedHumansWithMfa", "Effect": "Allow",
+   "Principal": {"AWS": "<HUMAN_PRINCIPAL_ARNS>"},
+   "Action": "sts:AssumeRole",
+   "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "true"},
+                 "NumericLessThan": {"aws:MultiFactorAuthAge": "3600"}}},
+  {"Sid": "DenyWithoutMfaContext", "Effect": "Deny", "Principal": {"AWS": "*"},
+   "Action": "sts:AssumeRole",
+   "Condition": {"Null": {"aws:MultiFactorAuthPresent": "true"}}},
+  {"Sid": "DenyWithoutMfa", "Effect": "Deny", "Principal": {"AWS": "*"},
+   "Action": "sts:AssumeRole",
+   "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "false"}}},
+  {"Sid": "DenyMachineRoles", "Effect": "Deny", "Principal": {"AWS": "*"},
+   "Action": "sts:AssumeRole",
+   "Condition": {"ArnLike": {"aws:PrincipalArn": [
+     "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-bootstrap",
+     "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-api",
+     "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-ingest"]}}}
+]}
+```
+
+- A role-chained session never carries `aws:MultiFactorAuthPresent`, so the
+  `Null` deny also refuses any machine identity that reaches this policy.
+- `DenyMachineRoles` is a second, name-based refusal of the bootstrap and
+  runtime roles.
 
 ## 4. CloudTrail object-data audit (one trail per environment)
 
@@ -352,10 +527,19 @@ the provisioning review.
 - Alias `alias/nlw-<ENV>-dataset-audit`, with rotation on.
 - `<AUDIT_ADMIN_ROLE>` administers the key.
 - No dataset application or operator role is in this key policy.
+- Nobody may schedule this key's deletion: `ScheduleKeyDeletion` is absent.
+  Deleting it would make every retained audit record unreadable, so the key
+  outlives the logs it protects.
 
 <!-- template: audit-kms-key-statements -->
 ```json
 [
+  {"Sid": "AdministerNeverUse", "Effect": "Allow",
+   "Principal": {"AWS": ["arn:aws:iam::<ACCOUNT>:root", "arn:aws:iam::<ACCOUNT>:role/<AUDIT_ADMIN_ROLE>"]},
+   "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:PutKeyPolicy", "kms:GetKeyRotationStatus",
+              "kms:EnableKeyRotation", "kms:ListResourceTags", "kms:TagResource", "kms:UntagResource",
+              "kms:CreateAlias", "kms:UpdateAlias", "kms:EnableKey", "kms:DisableKey"],
+   "Resource": "*"},
   {"Sid": "CloudTrailEncryptThisTrailOnly", "Effect": "Allow",
    "Principal": {"Service": "cloudtrail.amazonaws.com"},
    "Action": "kms:GenerateDataKey*", "Resource": "*",
@@ -391,7 +575,22 @@ for `<AUDIT_RETENTION_DAYS>` days.
 - **COMPLIANCE mode** is stronger but irreversible. Choosing it is an owner
   decision for the provisioning review.
 - **Expiry:** a lifecycle rule expires current and noncurrent log objects only
-  after the retention period.
+  after the retention period:
+
+<!-- template: audit-bucket-lifecycle -->
+```json
+{"Rules": [{
+  "ID": "expire-after-retention",
+  "Status": "Enabled",
+  "Filter": {"Prefix": "dataset-data-events/"},
+  "Expiration": {"Days": "<AUDIT_EXPIRY_DAYS>"},
+  "NoncurrentVersionExpiration": {"NoncurrentDays": 1}
+}]}
+```
+
+  `<AUDIT_EXPIRY_DAYS>` is `<AUDIT_RETENTION_DAYS>` plus one, so no log
+  object expires while Object Lock still protects it. It is quoted only so the
+  template parses; rendering replaces the quoted placeholder with a number.
 
 **Independence from dataset deletion:**
 
@@ -579,7 +778,9 @@ Both commands:
 ## 7. Isolated real-AWS proof (D6; only after explicit authorization)
 
 This runs against the **staging** bucket from an isolated session, never
-production. Every item must pass. A failure stops provisioning, with no
+production. The ordered commands, stop conditions, evidence rules and cleanup
+are in [dataset-s3-d6-proof.md](dataset-s3-d6-proof.md); the items below are
+the pass criteria it implements. Every item must pass. A failure stops provisioning, with no
 exceptions added.
 
 1. **Role isolation:**

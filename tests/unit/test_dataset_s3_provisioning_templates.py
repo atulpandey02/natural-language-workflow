@@ -22,16 +22,23 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK = ROOT / "docs" / "runbooks" / "dataset-s3-provisioning.md"
 TEMPLATE = re.compile(r"<!-- template: ([a-z0-9-]+) -->\n```json\n(.*?)```", re.S)
 EXPECTED = {
-    "dataset-kms-key-statement",
+    "dataset-kms-key-statements",
     "dataset-bucket-lifecycle",
     "dataset-bucket-policy",
     "role-bootstrap",
     "role-api",
     "role-ingest",
     "role-operator",
+    "role-audit-admin",
+    "role-audit-reader",
+    "trust-bootstrap",
+    "trust-api",
+    "trust-ingest",
+    "trust-human-mfa",
     "trail-advanced-event-selectors",
     "audit-kms-key-statements",
     "audit-bucket-policy",
+    "audit-bucket-lifecycle",
 }
 ROLES = ("role-bootstrap", "role-api", "role-ingest", "role-operator")
 
