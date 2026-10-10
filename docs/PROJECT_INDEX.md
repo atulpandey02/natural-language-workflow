@@ -3,7 +3,23 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
-## Phase 2B — S3 dataset store, O-2 implementation (branch `feat/o2-s3-dataset-store`, awaiting review)
+## Phase 2B — O-2 D6 AWS proof package (branch `docs/o2-aws-proof-readiness`, awaiting review; NOT RUN)
+
+Prepared for independent review; nothing was run against AWS:
+
+- [D6 proof procedure](runbooks/dataset-s3-d6-proof.md): resource inventory,
+  ordered staging-only steps P00–P18 with every command labelled READ-ONLY or
+  MUTATING, stop conditions S1–S9, sanitized evidence, ledger-based cleanup and
+  recovery.
+- [Owner decisions E1–E10](runbooks/dataset-s3-d6-owner-decisions.md), all
+  open.
+- [Policy review](security/o2-aws-policy-review.md): findings F1–F7 fixed in
+  the [templates](runbooks/dataset-s3-provisioning.md), residual risks R1–R6.
+  F1: the key policy let the ingest and operator roles generate data keys.
+- Contract tests with negative controls:
+  `tests/unit/test_dataset_s3_d6_proof.py`.
+
+## Phase 2B — S3 dataset store, O-2 implementation (merged as `eb42250`)
 
 ADR-033 is implemented with no AWS contact:
 
