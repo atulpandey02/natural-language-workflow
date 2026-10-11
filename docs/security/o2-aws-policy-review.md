@@ -5,10 +5,43 @@ Scope: every IAM, trust, bucket, KMS and CloudTrail template in
 against ADR-033, the S3 store (`nlw.storage.s3`), credential handling
 (`nlw.storage.s3_credentials`), migration 0028 and the dataset alert rules.
 
-**What this review is.** A reading of the JSON as written, plus contract tests
-that parse it strictly (duplicate keys and any `Effect` other than exactly
-`Allow` or `Deny` are refused), pin every Allow and every Deny statement
-exactly, and execute the proof's shell against a stub `aws`: `test_dataset_s3_provisioning_templates.py`
+## Assurance model (round 3)
+
+**Production isolation during D6 is an AWS-side control, not a property of
+the reviewed shell.**
+
+- **The boundary.** Every principal the proof uses, and every role it
+  creates, carries the proof-principal permissions boundary
+  ([provisioning §3.6](../runbooks/dataset-s3-provisioning.md#36-proof-principal-permissions-boundary-mandatory-for-d6)).
+  It refuses anything named for production, any key tagged for production,
+  every IAM escalation path, and changes to itself.
+- **Account mode.** Decision E14 may instead put D6 in a dedicated proof
+  account; the boundary stays mandatory there.
+- **Credentials.** Human credentials are short-lived Identity Center sessions
+  only (E11). No long-term access key is created or used.
+- **Gate.** D6 is **blocked** until an independent verifier records the
+  account, the principals, the attached boundary and their effective
+  permissions (E15). P00-02 enforces that, and P01-02 re-checks it before
+  anything is created.
+
+**What the tests are.** Regression defence in depth, not proof of isolation:
+
+- **Template checks:**
+  - strict parsing: duplicate keys, and any `Effect` other than exactly
+    `Allow` or `Deny`, are refused;
+  - the six roles' Allow statements are pinned exactly, and every Allow in
+    the key, bucket and trust policies is allow-listed by principal, action
+    and condition;
+  - every Deny, every policy's Sid set, both lifecycle rules and the event
+    selectors are pinned exactly.
+- **Procedure checks:** an allow-list of the AWS changes the procedure may
+  make, plus execution of the proof's shell against a stub `aws`. **The stub
+  run does not observe every possible AWS call** (round-3 F1): it misses a
+  call on a branch the stub's generic answers never take, an `aws` binary
+  given by absolute path, and an SDK call inside a heredoc.
+
+**What this review is.** A reading of the JSON as written, plus those
+contract tests: `test_dataset_s3_provisioning_templates.py`
 and `test_dataset_s3_d6_proof.py`. **What it is not.** No policy has been sent
 to AWS, run through IAM Access Analyzer's policy validation, or evaluated by
 the IAM policy simulator. AWS can still reject a template, or evaluate a
@@ -56,6 +89,8 @@ condition differently from this reading. Those questions belong to the
 | **R7** | API and ingest containers both run as uid 10001; isolation between their credentials rests on separate read-only mounts. | Acceptable while the refresher is unbuilt; O-6 must give them separate runtime users. | none |
 | **R8** | Principals other than the six dataset and audit roles (account administrators) may pass the bootstrap role or launch an instance with it, and so obtain API and ingest credentials. | Restricting them needs an account-level control outside this repository (decision E12). | P03-11 checks the principals E12 lists |
 | **R9** | `CreateBucket` in us-east-1 succeeds for a bucket the account already owns. A same-account principal racing the proof between `HeadBucket` and `CreateBucket` with an empty, unconfigured bucket would pass the pristine checks. | The random proof suffix makes accidental collision negligible; a deliberate race needs an insider who could alter the bucket anyway, and the management trail records it. | P03-06, P03-07 |
+| **R11** | MFA for human sessions is enforced by IAM Identity Center's sign-in settings, which IAM policy cannot see. | Identity Center sessions carry no `aws:MultiFactorAuthPresent` after role chaining; the independent gate record attests MFA (E15). | P00-03 sign-in |
+| **R12** | The stub run of the procedure is not exhaustive (F1). | Production isolation rests on the AWS-side boundary, independently verified; the stub run is regression defence. | P01-02 |
 | **R10** | Whether the data-event selector records bucket-level `ListBucket`/`ListBucketVersions` is not established. | Decision E13 after P13 observes it. | P13 |
 
 ## Unresolved AWS behaviour (D6 decides; nothing is inferred)
@@ -83,7 +118,7 @@ condition differently from this reading. Those questions belong to the
 | **L1** missing configuration actions | Replication, inventory, analytics, metrics, Intelligent-Tiering and acceleration denied on both buckets | controls removing replication or inventory |
 | **L2** overclaims | Audit-key deletion and IMDS wording corrected; P14-05 added | text tests |
 | **L3** reviewed commit | P00 and `render` require HEAD = `REVIEWED_COMMIT` and a clean tree | wrong-commit and dirty-tree controls, run against a temporary repository |
-| **L4** stop ids | S10 for failed commands (an `ERR` trap) and a create with no identifier; S4 unexpected success; S8 cleanup safety | stop-enforcement test |
+| **L4** stop ids | S10 for failed commands (an `EXIT` handler since round 2; round 1 used an `ERR` trap) and a create with no identifier; S4 unexpected success; S8 cleanup safety | stop-enforcement test |
 | **L5** list events | Documented as open, observed in P13, decision E13 (R10) | decision test |
 | **L6** shallow procedure parsing | Commands are tokenised (global options, substitutions, multi-line quotes). **Round 2 (N4) found that wrappers such as `timeout`, `xargs`, `nohup`, `sudo -u` and `bash -c` hid calls;** they are now refused statically and caught by execution. | one control each |
 | **L7** PassRole and budget | Explicit `NeverPassOrAttachDatasetRoles` on six roles; P03-11 simulation; decision E12; P03-00 creates and verifies the budget alert, described as an alert, not enforcement | controls removing the deny and the budget verification |
@@ -97,22 +132,46 @@ condition differently from this reading. Those questions belong to the
 |---|---|---|
 | **N1** lowercase or duplicated `Effect`, duplicate JSON keys | Templates are parsed with a duplicate-key hook; every statement must carry a Sid, only known keys, and `Effect` exactly `Allow` or `Deny`; anything not exactly `Deny` is checked as an Allow. `render` refuses duplicate keys and a non-canonical `Effect` too | lowercase `allow` in the key and audit-bucket policies, duplicate `Effect`, duplicate `Action`, missing `Effect` |
 | **N2** Denies could be neutralised | Every policy template's Sid set and every Deny statement (principal, actions, resources, condition) is pinned exactly in `tests/fixtures/dataset_s3_policy_pins.json`; `DenyOutsideAccount` and every other Deny are mandatory | inert conditions on six Denies, a narrowed resource, `role/*` exemptions on three, `DenyOutsideAccount` removed, a Deny turned into an Allow |
-| **N3** production by indirection | Every step after P00-02, with `lib.sh`, is executed by bash against a stub `aws` that records its fully expanded arguments; PATH holds only stubs and local tools; the real AWS CLI is never reachable. Any production name in a MUTATING step or in a mutating call fails, and every statically parsed call must actually execute | command substitution, `${!T}`, `${E,,}`, a ledger value, a `lib.sh` helper, `timeout`, `xargs`, `bash -c`, `nohup`, `sudo -u`, `aws s3 cp` |
+| **N3** production by indirection | Every step after P00-02, with `lib.sh`, is executed by bash against a stub `aws` that records its fully expanded arguments; PATH holds only stubs and local tools; the real AWS CLI is never reachable. Any production name in a MUTATING step or in a mutating call fails, and every statically parsed call must actually execute **Round 3 (F1) showed the stub run can still be evaded; it is now regression defence only, and the AWS-side boundary is the control.** | command substitution, `${!T}`, `${E,,}`, a ledger value, a `lib.sh` helper, `timeout`, `xargs`, `bash -c`, `nohup`, `sudo -u`, `aws s3 cp` |
 | **N4** wrappers hid calls | An `aws` word in any position other than the command is refused, as is `aws` inside a `bash -c`/`eval` string; execution catches the rest | one static control per wrapper |
-| **N5** undefined credential source | Two IAM-user source profiles read dedicated, per-run access keys from the macOS Keychain through a reviewed `credential_process`; every role profile chains from them with MFA; no key is ever in a file; X09 deletes the keys in IAM, X08 removes the Keychain items and only this proof's cached sessions and scans `$PROOF_DIR`; §F requires X09 and X08 after any stop | key in the config, undefined source profile, a step printing the credential, age-based cache deletion, Keychain kept, §F weakened, P00-02 key check removed; X08's cache cleanup executed against a fake cache |
+| **N5** undefined credential source | **Superseded in round 3:** the Keychain model used long-term access keys, and a key could outlive the run (F6). Human credentials are now short-lived Identity Center sessions only; no access key is created; X08 removes only this run's cached tokens and sessions, matched by the run id in their names (F8). | key in the config, undefined source profile, a step printing the credential, age-based cache deletion, Keychain kept, §F weakened, P00-02 key check removed; X08's cache cleanup executed against a fake cache |
 | **N6** non-`put` changes before the pristine checks | Any mutating call between `create-bucket` and the ledger entry is refused | `delete-bucket-policy` inserted |
 | **N7** `--key=`, `aws s3 cp`, `delete-objects` | Keys are parsed from `--key`, `--key=` and `--delete`; high-level `aws s3` is refused | one control each |
 | **N8** open uploads lost | X10 also lists open uploads under the two prefixes (newer than the run) and records them; X04 aborts them by id | listing removed, age check removed, abort removed |
-| **N9** human lists unvalidated; drift unchecked | `validate_humans` (IAM users of the approved account; no wildcard, root, role, other account, duplicate or operator/audit-admin overlap) runs before any role is created; `render` validates and re-serialises the list; P03-11 compares every trust, inline, key, bucket and lifecycle policy and the selectors after normalisation | eleven validation cases executed through `lib.sh`; four `render` refusals including injection; normaliser equivalence and drift; comparison removed |
+| **N9** human lists unvalidated; drift unchecked | `validate_humans` (IAM users of the approved account; no wildcard, root, role, other account, duplicate or operator/audit-admin overlap) runs before any role is created; `render` validates and re-serialises the list; P03-11 compares every trust, inline, key, bucket and lifecycle policy and the selectors after normalisation **Round 3 (F2, F5, F7):** P03-11 also checks each role's attached policies and boundary, the keys' grants, both buckets' controls, both keys' rotation and the audit bucket's encryption; simulations fail closed; the lists are matched in full (no trailing newline, F9). | eleven validation cases executed through `lib.sh`; four `render` refusals including injection; normaliser equivalence and drift; comparison removed |
 | **N10** orphaned bucket | P03-06/07 journal the absence check; X12 recovers an unrecorded bucket only if it carries this run's suffix, the journal shows this run confirmed it absent, and it is still empty and unconfigured | suffix check removed; journal note removed |
 | **N11** trap and rotator | No `set -E` and no ERR trap; an EXIT handler runs registered cleanups and records S10 with the failing command; P14-02 registers the rotator's kill-and-wait | executed on every available bash (3.2 locally, 5 in CI): guarded substitution gives no S10, a failure in a function names its command, a background process does not outlive a stop; `set -E` and missing cleanup are detected |
 | **N12** consistency | P00-01 exports only; P00-02 verifies and extracts with a manifest; every later step runs through `run-step`, which refuses a modified file; the S2 row, A.1 suffix, E8 role-name form (checked in `lib.sh`), the 63-character name limit and E11's identity check (P00-03) are corrected | run-step refuses a tampered step; ADMIN_ROLE as an ARN is refused; five text controls |
 
 **What the stub execution does not show.** It runs the shell with fake AWS
-answers, so it proves which commands the procedure would issue and with what
-arguments, not how AWS responds. Branches that depend on real responses run
-with the stub's generic answers; every statically present AWS call is
-required to execute at least once.
+answers, so it shows which commands the procedure issues on the paths the
+stub's answers lead to. It does not show:
+
+- how AWS responds;
+- a call on a branch only real answers take (coverage is per step and per
+  service and operation, not per call site);
+- an `aws` binary given by absolute path;
+- an SDK call.
+
+It is defence in depth. The boundary is the control (round 3).
+
+## Security review of PR #60 (round 3, fresh reviewer at `77b2013`) — dispositions
+
+| Finding | Correction | Tests and negative controls |
+|---|---|---|
+| **F1** the stub run can be evaded | **Assurance model changed:** the stub run is regression defence only, and the claims are narrowed. Production isolation is the mandatory proof-principal boundary (and optionally a dedicated account, E14), verified independently before D6 (E15) and again in P01-02 | gate and boundary checks; boundary weakening controls |
+| **F2** the procedure could grant extra privileges | An allow-list of the AWS changes the procedure may make (no `attach-*-policy`, permissions-boundary change, `create-grant`, access key or hand-written inline policy; every `create-role` carries the boundary); P03-11 checks each role has exactly its inline policy, no attached policy and exactly the boundary, and both keys have no grant. The boundary refuses the same escalations in AWS | static controls for each; `verify_role_shape` and `verify_no_grants` executed against a fake `aws` that reports AdministratorAccess attached, an unexpected boundary, an extra inline policy, a grant, or a failed listing |
+| **F3** lifecycle rules unchecked | Both lifecycle rules and the event selectors are pinned whole | expiry added, scope widened, audit noncurrent expiry shortened, selectors narrowed; a drifted deployed lifecycle stops `same` |
+| **F4** flaky harness | Each stub writes one record per write | 10 of 10 consecutive runs pass |
+| **F5** E12 simulation failed open | `sim_denied`: an error or empty result is S9, any non-deny is S4; the E12 list is validated first | executed against a fake `aws`: empty, error and allowed results |
+| **F6** a key could outlive the run | No long-term key exists any more (Identity Center only) | a step creating an access key, or P00-02 accepting IAM users, is detected |
+| **F7** P03-11 checked less than claimed | Audit-bucket encryption, both keys' rotation, both buckets' public-access block and ownership controls are checked | `verify_bucket_controls` executed against missing or partial controls |
+| **F8** X08 deleted other runs' sessions | Matched by this run's id in the session and SSO-session names | X08 executed against a cache with another run's, another account's and look-alike entries |
+| **F9** trailing newline accepted | Full matches in `validate_principals` and `render` | newline cases executed for both |
+| **F10** tree and manifest gaps | P00-02 requires `RUNBOOK_DIR` to be the reviewed checkout's runbook directory; `aws-config` is in the manifest. The manifest beside its files still detects only accidental drift (documented) | P00-02 executed with a foreign runbook tree, no gate, a mismatched gate and long-term credentials |
+| **F11** "never reachable" | The claim now says what isolation the tests rely on: PATH holds only stubs and local tools, and the proxy variables point nowhere | — |
+| **F12** expected-denied writes to the audit bucket | Must target `$BUCKET` | a write to `$AUDIT_BUCKET` is detected |
+| **F13** a dataset role as `ADMIN_ROLE` | `lib.sh` refuses `nlw-*-dataset-*` | executed with two dataset role names |
 
 ## Limits of this local validation
 

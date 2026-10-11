@@ -47,7 +47,7 @@ LABEL = re.compile(
 )
 READ_OPS = re.compile(
     r"^(get-.*|list-.*|describe-.*|head-.*|lookup-.*|simulate-.*|validate-logs|wait|get"
-    r"|export-credentials|assume-role)$"
+    r"|export-credentials|assume-role|login|logout)$"
 )
 SSE_KEY_ID = "s3:x-amz-server-side-encryption-aws-kms-key-id"
 ROLES = ("role-bootstrap", "role-api", "role-ingest", "role-operator")
@@ -609,16 +609,10 @@ PRINCIPAL_ALLOWLIST: dict[str, dict[str, tuple[set[str], Callable[[Any], bool]]]
             lambda c: c == {"StringEquals": {"sts:RoleSessionName": "nlw-<ENV>-ingest"}},
         )
     },
-    "trust-human-mfa": {
+    "trust-human": {
         "<HUMAN_PRINCIPAL_ARNS>": (
             {"sts:AssumeRole"},
-            lambda c: (
-                c
-                == {
-                    "Bool": {"aws:MultiFactorAuthPresent": "true"},
-                    "NumericLessThan": {"aws:MultiFactorAuthAge": "3600"},
-                }
-            ),
+            lambda c: c == {"StringLike": {"sts:RoleSessionName": "nlw-d6-*"}},
         )
     },
 }
@@ -791,7 +785,7 @@ def instance_role_violations(t: Templates) -> list[str]:
         and sorted(as_list(never.get("NotResource", []))) == runtime
     ):
         v.append("bootstrap lacks an explicit deny on every other role")
-    trust = t["trust-human-mfa"]
+    trust = t["trust-human"]
     for s in allows(trust):
         if principals(s) != {"<HUMAN_PRINCIPAL_ARNS>"}:
             v.append(f"human trust allows {sorted(principals(s))}")
@@ -812,21 +806,28 @@ def instance_role_violations(t: Templates) -> list[str]:
     return v
 
 
-def mfa_violations(t: Templates) -> list[str]:
+def sso_trust_violations(t: Templates) -> list[str]:
+    """The human roles admit only Identity Center permission-set roles: an
+    IAM user with a long-term key, or any other principal, is refused."""
     v = []
-    trust = t["trust-human-mfa"]
-    (allow,) = allows(trust)
-    if allow.get("Condition", {}).get("Bool") != {"aws:MultiFactorAuthPresent": "true"}:
-        v.append("human trust does not require MFA")
+    trust = t["trust-human"]
     sids = by_sid(trust)
-    if sids.get("DenyWithoutMfaContext", {}).get("Condition") != {
-        "Null": {"aws:MultiFactorAuthPresent": "true"}
-    }:
-        v.append("human trust does not deny a session without MFA context")
-    if sids.get("DenyWithoutMfa", {}).get("Condition") != {
-        "Bool": {"aws:MultiFactorAuthPresent": "false"}
-    }:
-        v.append("human trust does not deny a session without MFA")
+    deny = sids.get("DenyAnythingButIdentityCenter", {})
+    if not (
+        deny.get("Effect") == "Deny"
+        and deny.get("Principal") == {"AWS": "*"}
+        and actions(deny) == {"sts:AssumeRole"}
+        and deny.get("Condition")
+        == {
+            "ArnNotLike": {
+                "aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/aws-reserved/sso.amazonaws.com/*"
+            }
+        }
+    ):
+        v.append("the human trust admits principals other than Identity Center roles")
+    (allow,) = allows(trust)
+    if allow.get("Condition") != {"StringLike": {"sts:RoleSessionName": "nlw-d6-*"}}:
+        v.append("the human trust does not require run-scoped session names")
     return v
 
 
@@ -1522,6 +1523,8 @@ NON_POLICY = {
     "audit-bucket-lifecycle",
     "trail-advanced-event-selectors",
 }
+# PINS["policies"]: each policy's Sid list and every Deny; PINS["documents"]:
+# the lifecycle rules and event selectors, pinned whole (F3).
 STATEMENT_KEYS = {
     "Sid",
     "Effect",
@@ -1556,12 +1559,14 @@ def effect_violations(t: Templates) -> list[str]:
 
 
 def deny_pin_violations(t: Templates) -> list[str]:
-    """Every policy template has exactly its reviewed Sids, and every Deny is
-    the reviewed statement: principal, actions, resources and condition."""
+    """Every policy template has exactly its reviewed Sids, every Deny is the
+    reviewed statement (principal, actions, resources, condition), and the
+    lifecycle rules and event selectors are the reviewed documents."""
     v = []
-    if set(t) - NON_POLICY != set(PINS):
-        v.append(f"policy templates {sorted(set(t) - NON_POLICY)} differ from {sorted(PINS)}")
-    for name, pin in PINS.items():
+    policies, documents = PINS["policies"], PINS["documents"]
+    if set(t) - NON_POLICY != set(policies) or set(t) & NON_POLICY != set(documents):
+        v.append(f"templates {sorted(t)} differ from the reviewed set")
+    for name, pin in policies.items():
         if name not in t:
             continue
         sids = [s.get("Sid") for s in statements(t[name])]
@@ -1581,6 +1586,9 @@ def deny_pin_violations(t: Templates) -> list[str]:
                 and sid in pin["sids"]
             ):
                 v.append(f"{name}/{sid}: became a Deny")
+    for name, expected in documents.items():
+        if t.get(name) != expected:
+            v.append(f"{name}: differs from the reviewed document")
     return v
 
 
@@ -1632,8 +1640,10 @@ REAL_TOOLS = (
     "expr",
 )
 STUB_AWS = r"""#!/bin/bash
-{ printf '%s' "${STEP:-?}"; for a in "$@"; do printf '\037%s' "$a"; done
-  printf '\036\n'; } >> "$STUB_LOG"
+# One write per record, so concurrent stubs (P05-02's parallel writes, a
+# pipeline) cannot interleave their records.
+rec="${STEP:-?}"; for a in "$@"; do rec="$rec"$'\037'"$a"; done
+printf '%s\036\n' "$rec" >> "$STUB_LOG"
 op=""; svc=""; out=""; prefix=""; i=0; args=("$@")
 while [[ $i -lt ${#args[@]} ]]; do
   a="${args[$i]}"
@@ -1694,10 +1704,6 @@ STUB_WRAPPERS = {
     "env": 'if [[ $# -eq 0 ]]; then printf "env-printed\\037\\036\\n" >> "$STUB_LOG"; exit 0; fi\n'
     'while [[ "${1:-}" == *=* || "${1:-}" == -* ]]; do shift; done; exec "$@"',
 }
-CREDENTIAL_STUB = """#!/bin/bash
-printf 'credential-process\\037%s\\036\\n' "$*" >> "$STUB_LOG"
-case "${3:-print}" in key-id) echo AKIASTUBSTUBSTUBSTUB ;; esac
-"""
 HARNESS_OVERRIDES = """
 # --- test harness: never exit on a check, so every command is reached ---
 set +e +u +o pipefail
@@ -1731,7 +1737,9 @@ def stub_toolbox(root: Path, bash: str) -> Path:
     for name, body in STUB_SIMPLE.items():
         _write_exec(stub / name, body)
     for name in STUB_LOGGED:
-        _write_exec(stub / name, f'printf \'{name}\\037%s\\036\\n\' "$*" >> "$STUB_LOG"')
+        _write_exec(
+            stub / name, f'rec="{name}"$\'\\037\'"$*"; printf \'%s\\036\\n\' "$rec" >> "$STUB_LOG"'
+        )
     for name, body in STUB_WRAPPERS.items():
         _write_exec(stub / name, body)
     return stub
@@ -1769,7 +1777,6 @@ def run_with_stub(root: Path, text: str, bash: str, lib_extra: str = "") -> Stub
     for name, body in files.items():
         (proof_dir / name).write_text(body)
     (proof_dir / "lib.sh").write_text(files["lib.sh"] + lib_extra + HARNESS_OVERRIDES)
-    _write_exec(proof_dir / "credential-process.sh", CREDENTIAL_STUB)
     (proof_dir / "started").touch()
     stub = stub_toolbox(root, bash)
     log = root / "aws.log"
@@ -1786,20 +1793,26 @@ def run_with_stub(root: Path, text: str, bash: str, lib_extra: str = "") -> Stub
         "BUCKET_SUFFIX": STUB_SUFFIX,
         "RUNBOOK_DIR": str(repo / "docs" / "runbooks"),
         "REVIEWED_COMMIT": head,
-        "ADMIN_ROLE": "nlw-test-admin",
+        "ADMIN_ROLE": ADMIN_ROLE_NAME,
         "AUDIT_RETENTION_DAYS": "90",
-        "E11_IDENTITY": "iam-user-mfa",
-        "OPERATOR_MFA_ARN": f"arn:aws:iam::{STUB_ACCOUNT}:mfa/op",
-        "AUDIT_MFA_ARN": f"arn:aws:iam::{STUB_ACCOUNT}:mfa/au",
+        "E11_IDENTITY": "identity-center",
+        "E14_ACCOUNT_MODE": "bounded",
+        "SSO_START_URL": "https://example.invalid/start",
+        "SSO_REGION": "us-east-1",
+        "PROOF_ADMIN_PERMISSION_SET": "NlwD6ProofAdmin",
+        "OPERATOR_PERMISSION_SET": "NlwD6Operator",
+        "AUDIT_PERMISSION_SET": "NlwD6Audit",
+        "OPERATOR_NAME": "operator",
+        "PROOF_BOUNDARY_ARN": f"arn:aws:iam::{STUB_ACCOUNT}:policy/nlw-staging-d6-proof-boundary",
         "BUDGET_LIMIT_USD": "25",
         "BUDGET_EMAIL": "owner@example.invalid",
         "IMAGE": "ghcr.io/example/image@sha256:" + "0" * 64,
         "OPERATOR_CIDR": "192.0.2.1/32",
         "OBJECT_LOCK_MODE": "GOVERNANCE",
         "E3_DECISION": "delete",
-        "OPERATOR_HUMANS_JSON": json.dumps([f"arn:aws:iam::{STUB_ACCOUNT}:user/op"]),
-        "AUDIT_ADMIN_HUMANS_JSON": json.dumps([f"arn:aws:iam::{STUB_ACCOUNT}:user/au"]),
-        "AUDIT_READER_HUMANS_JSON": json.dumps([f"arn:aws:iam::{STUB_ACCOUNT}:user/rd"]),
+        "OPERATOR_HUMANS_JSON": json.dumps([sso_role(STUB_ACCOUNT, "NlwD6Operator")]),
+        "AUDIT_ADMIN_HUMANS_JSON": json.dumps([sso_role(STUB_ACCOUNT, "NlwD6Audit")]),
+        "AUDIT_READER_HUMANS_JSON": json.dumps([sso_role(STUB_ACCOUNT, "NlwD6Audit")]),
         "E12_MUST_NOT_PASS_JSON": json.dumps([f"arn:aws:iam::{STUB_ACCOUNT}:user/x"]),
         "HTTPS_PROXY": "http://127.0.0.1:9",
         "HTTP_PROXY": "http://127.0.0.1:9",
@@ -1945,46 +1958,61 @@ def wrapper_violations(text: str) -> list[str]:
 
 
 def credential_source_violations(text: str) -> list[str]:
+    """Only short-lived Identity Center credentials: every profile is an SSO
+    profile or chains from one with a run-scoped session name; no key, no
+    credential_process, no access key created anywhere; X08 cleans only this
+    run's cache, and recovery always runs it."""
     v = []
     files = dict(FILE_BLOCK.findall(text))
     config = files["aws-config.workstation"]
-    if re.search(r"aws_access_key_id|aws_secret_access_key|aws_session_token", config):
-        v.append("the workstation config holds a key")
-    profiles = re.findall(r"^\[profile ([a-z0-9-]+)\]\n(.*?)(?=^\[|\Z)", config, re.M | re.S)
-    names = {name for name, _ in profiles}
-    for name, body in profiles:
-        sources = re.findall(r"^source_profile = (\S+)$", body, re.M)
-        process = re.findall(r"^credential_process = (.+)$", body, re.M)
-        if sources and sources[0] not in names:
-            v.append(f"profile {name} chains from an undefined profile {sources[0]}")
-        if not sources and not process:
-            v.append(f"profile {name} has no defined credential source")
-        for proc in process:
-            if not re.fullmatch(
-                r"/bin/bash <PROOF_DIR>/credential-process\.sh <PROOF_ID> (operator|audit)", proc
+    if re.search(
+        r"aws_access_key_id|aws_secret_access_key|aws_session_token|credential_process", config
+    ):
+        v.append("the workstation config holds a key or a credential process")
+    if "credential-process.sh" in files:
+        v.append("a long-term-key credential helper is still part of the procedure")
+    sessions = set(re.findall(r"^\[sso-session (\S+)\]$", config, re.M))
+    if sessions != {"nlw-d6-<PROOF_ID>-operator", "nlw-d6-<PROOF_ID>-audit"}:
+        v.append(f"SSO sessions are not the two run-scoped ones: {sorted(sessions)}")
+    profiles = dict(re.findall(r"^\[profile ([a-z0-9-]+)\]\n(.*?)(?=^\[|\Z)", config, re.M | re.S))
+    for name, body in profiles.items():
+        sso = re.findall(r"^sso_session = (\S+)$", body, re.M)
+        source = re.findall(r"^source_profile = (\S+)$", body, re.M)
+        if sso:
+            if sso[0] not in sessions or not re.search(
+                r"^sso_role_name = <[A-Z_]+_PERMISSION_SET>$", body, re.M
             ):
-                v.append(f"profile {name} uses an unreviewed credential_process")
+                v.append(f"profile {name} is not a reviewed Identity Center profile")
+        elif source:
+            parent = profiles.get(source[0], "")
+            if "sso_session = " not in parent:
+                v.append(f"profile {name} does not chain from an Identity Center profile")
+            if not re.search(r"^role_session_name = nlw-d6-<PROOF_ID>-[a-z-]+$", body, re.M):
+                v.append(f"profile {name} has no run-scoped session name")
+        else:
+            v.append(f"profile {name} has no Identity Center credential source")
     for where, body in all_code(text):
         for c in commands(body):
-            if c.name == "bash" and any(w.endswith("credential-process.sh") for w in c.words):
-                mode = c.words[4] if len(c.words) > 4 else "print"
-                if mode not in ("add", "remove", "key-id"):
-                    v.append(f"{where}: credential-process.sh run in mode {mode}")
-    ids = [b["label"]["id"] for b in labelled_blocks(text) if b["label"]]
-    if not ("X09" in ids and "X08" in ids and ids.index("X09") < ids.index("X08")):
-        v.append("X09 (delete the access keys) does not run before X08")
+            call = aws_call(c)
+            if call and call[1] in (
+                "create-access-key",
+                "update-access-key",
+                "create-login-profile",
+            ):
+                v.append(f"{where}: {call[1]} creates a long-term credential")
+    if '[[ "$E11_IDENTITY" == identity-center ]]' not in block(text, "P00-02"):
+        v.append("P00-02 does not require Identity Center (E11)")
     x08 = block(text, "X08")
-    if 'credential-process.sh" "$PROOF_ID" "$who" remove' not in x08:
-        v.append("X08 does not remove the Keychain items")
-    if "-delete" in x08 or "-newer" in x08:
-        v.append("X08 deletes cached sessions by age instead of by this proof's sessions")
-    if "4. **Always, whatever else happens:** run X09 and then X08" not in text:
-        v.append("recovery does not require X09 and X08 after a stop")
-    p00 = block(text, "P00-02")
-    if "aws_access_key_id|aws_secret_access_key|aws_session_token" not in p00:
+    if "nlw-d6-%s-(operator|audit-admin|audit-reader)" not in x08 or "re.escape(proof)" not in x08:
+        v.append("X08 does not scope cache deletion to this run")
+    if "-delete" in x08 or "-newer" in x08 or "sso logout" in x08:
+        v.append("X08 removes sessions beyond this run's")
+    if "4. **Always, whatever else happens:** run X08" not in text:
+        v.append("recovery does not require X08 after a stop")
+    if "aws_access_key_id|aws_secret_access_key|aws_session_token|credential_process" not in block(
+        text, "P00-02"
+    ):
         v.append("P00-02 does not refuse a key in aws-config")
-    if "paste them" in text.lower() or "paste the key into" in text.lower():
-        v.append("the procedure tells someone to paste a key into a file")
     return v
 
 
@@ -2045,6 +2073,11 @@ def denied_write_strict_violations(text: str) -> list[str]:
                 v.append(f"{sid}: high-level aws s3 {call[1]}")
             if not (c.wrapper and call[1] in WRITE_OPS | {"delete-objects"}):
                 continue
+            if "--bucket" in c.words and c.words[c.words.index("--bucket") + 1] != "$BUCKET":
+                v.append(
+                    f"{sid}: expected-denied {call[1]} targets a bucket other than the "
+                    f"dataset bucket"
+                )
             keys = _key_args(c)
             if not keys:
                 v.append(f"{sid}: expected-denied {call[1]} names no parsable key")
@@ -2078,21 +2111,26 @@ def multipart_recovery_violations(text: str) -> list[str]:
 
 
 def human_and_drift_violations(text: str) -> list[str]:
-    """N9: human lists validated before use; P03-11 compares deployed
-    documents with the rendered files."""
+    """Principal lists validated before use; P03-11 compares deployed
+    documents with the rendered files and checks each role's shape, the keys'
+    grants and the buckets' controls; simulations fail closed."""
     v = []
     p0301 = commands(block(text, "P03-01"))
     first_role = _call_index(p0301, "iam", "create-role")
-    validations = [i for i, c in enumerate(p0301) if c.name == "validate_humans"]
+    validations = [i for i, c in enumerate(p0301) if c.name == "validate_principals"]
     if len(validations) < 3 or (first_role >= 0 and max(validations) > first_role):
-        v.append("P03-01 does not validate all three human lists before creating roles")
+        v.append("P03-01 does not validate all three principal lists before creating roles")
     lib = dict(FILE_BLOCK.findall(text))["lib.sh"]
-    if "json.dumps(people)" not in lib or "invalid human principals" not in lib:
-        v.append("render does not validate and re-serialise the human principals")
+    if (
+        "json.dumps(people)" not in lib
+        or "invalid human principals" not in lib
+        or "sso.fullmatch(p)" not in lib
+    ):
+        v.append("render does not fully validate and re-serialise the human principals")
+    if "pattern.fullmatch(p)" not in lib:
+        v.append("validate_principals does not match in full")
     p0311 = commands(block(text, "P03-11"))
-    compared = {aws_call(c) for c in p0311 if c.name == "aws"} | {
-        aws_call(Cmd(c.words, c.line)) for c in p0311
-    }
+    compared = {aws_call(c) for c in p0311}
     for needed in (
         ("iam", "get-role"),
         ("iam", "get-role-policy"),
@@ -2103,8 +2141,37 @@ def human_and_drift_violations(text: str) -> list[str]:
     ):
         if needed not in compared:
             v.append(f"P03-11 does not compare {needed[1]}")
-    if block(text, "P03-11").count('same "') < 9:
+    body = block(text, "P03-11")
+    if body.count('same "') < 9:
         v.append("P03-11 compares fewer deployed documents than reviewed")
+    for snippet in (
+        'verify_role_shape "nlw-staging-dataset-$r" "nlw-dataset-$r"',
+        'verify_no_grants "$REC_KEY_ARN"',
+        'verify_no_grants "$REC_AUDIT_KEY_ARN"',
+        'verify_bucket_controls "$BUCKET"',
+        'verify_bucket_controls "$AUDIT_BUCKET"',
+        '--key-id "$REC_AUDIT_KEY_ARN" \\\n  --query KeyRotationEnabled'.replace("\\\n", " "),
+        'validate_principals iam "$E12_MUST_NOT_PASS_JSON"',
+        'sim_denied "$principal"',
+        "audit bucket encryption differs",
+    ):
+        if snippet not in body.replace("\\\n", " "):
+            v.append(f"P03-11 lacks: {snippet}")
+    if "!= allowed" in body:
+        v.append("P03-11 accepts a failed or empty simulation")
+    for snippet in (
+        '[[ -n "${out//[[:space:]]/}" ]] || stop S9',
+        'stop S4 "$who is allowed',
+        '|| stop S9 "the simulation for $who failed"',
+        "$role has attached managed policies",
+        "$role does not carry exactly the proof boundary",
+        "a KMS grant exists on $1",
+        "public access is not fully blocked on $1",
+        "ACLs are not disabled on $1",
+        '[[ -n "$got" ]] || stop S9 "the simulator returned no decision"',
+    ):
+        if snippet not in lib:
+            v.append(f"lib.sh lacks: {snippet}")
     return v
 
 
@@ -2162,8 +2229,166 @@ def consistency_violations(text: str) -> list[str]:
     if "${#AUDIT_BUCKET} <= 63" not in lib or '"$ADMIN_ROLE" != arn:*' not in lib:
         v.append("lib.sh does not check bucket-name length or the ADMIN_ROLE form")
     p0003 = block(text, "P00-03")
-    if '[[ "$arn" =~ ^arn:aws:iam::${ACCOUNT}:user/ ]]' not in p0003:
-        v.append("P00-03 does not verify that the source identity is an IAM user")
+    if '[[ "$arn" == "arn:aws:sts::${ACCOUNT}:assumed-role/AWSReservedSSO_"* ]]' not in p0003:
+        v.append("P00-03 does not verify that each identity is an Identity Center session")
+    if '[[ "${ADMIN_ROLE##*/}" != nlw-*-dataset-* ]]' not in lib:
+        v.append("lib.sh does not refuse a dataset role as ADMIN_ROLE")
+    return v
+
+
+# --- F2: the only AWS changes the procedure may make ---------------------------------------------
+
+ALLOWED_MUTATIONS: dict[str, set[str]] = {
+    "iam": {
+        "create-role",
+        "put-role-policy",
+        "create-instance-profile",
+        "add-role-to-instance-profile",
+        "remove-role-from-instance-profile",
+        "delete-instance-profile",
+        "delete-role-policy",
+        "delete-role",
+    },
+    "kms": {
+        "create-key",
+        "create-alias",
+        "enable-key-rotation",
+        "disable-key",
+        "schedule-key-deletion",
+    },
+    "s3api": {
+        "create-bucket",
+        "put-public-access-block",
+        "put-bucket-tagging",
+        "put-bucket-versioning",
+        "put-bucket-encryption",
+        "put-bucket-lifecycle-configuration",
+        "put-bucket-policy",
+        "put-object-lock-configuration",
+        "put-object",
+        "copy-object",
+        "create-multipart-upload",
+        "upload-part",
+        "complete-multipart-upload",
+        "abort-multipart-upload",
+        "delete-object",
+        "delete-bucket",
+        "delete-objects",
+    },
+    "cloudtrail": {
+        "create-trail",
+        "put-event-selectors",
+        "start-logging",
+        "stop-logging",
+        "delete-trail",
+    },
+    "ec2": {
+        "create-security-group",
+        "authorize-security-group-ingress",
+        "run-instances",
+        "terminate-instances",
+        "delete-security-group",
+    },
+    "ec2-instance-connect": {"send-ssh-public-key"},
+    "budgets": {"create-budget"},
+    "sso": set(),
+    "sts": set(),
+}
+
+
+def mutation_allowlist_violations(text: str) -> list[str]:
+    """Every mutating AWS call the procedure can make is one of the reviewed
+    operations; inline policies come only from rendered files; every created
+    role carries the proof boundary."""
+    v = []
+    for where, body in all_code(text):
+        for c in commands(body):
+            call = aws_call(c)
+            if not call or is_read(call[1]):
+                continue
+            service, op = call
+            if op not in ALLOWED_MUTATIONS.get(service, set()):
+                v.append(f"{where}: aws {service} {op} is not a reviewed change")
+            if (service, op) == ("iam", "put-role-policy"):
+                doc = (
+                    c.words[c.words.index("--policy-document") + 1]
+                    if "--policy-document" in c.words
+                    else ""
+                )
+                if not re.fullmatch(r"file://\$PROOF_DIR/policy-[a-z$-]+\.json", doc):
+                    v.append(f"{where}: put-role-policy with an unrendered document {doc!r}")
+            if (service, op) == ("iam", "create-role") and (
+                "--permissions-boundary" not in c.words
+                or c.words[c.words.index("--permissions-boundary") + 1] != "$PROOF_BOUNDARY_ARN"
+            ):
+                v.append(f"{where}: create-role without the proof boundary")
+    return v
+
+
+def gate_violations(text: str) -> list[str]:
+    """D6 is blocked: no independent verification record exists, the
+    procedure says so, and P00-02 refuses to start without a matching one."""
+    v = []
+    if (ROOT / "docs" / "evidence" / "o2-d6" / "d6-gate.json").exists():
+        v.append(
+            "a D6 gate record exists in this change; it must arrive in its own reviewed commit"
+        )
+    if "**D6 is BLOCKED.**" not in text:
+        v.append("the procedure does not say that D6 is blocked")
+    p00 = block(text, "P00-02")
+    for needed in (
+        '"verified_by": bool(gate.get("verified_by")) and gate.get("verified_by") != '
+        'env["OPERATOR_NAME"]',
+        '"boundary_attached_verified": gate.get("boundary_attached_verified") is True',
+        '"effective_permissions_verified": gate.get("effective_permissions_verified") is True',
+        '"identity_center_mfa_required": gate.get("identity_center_mfa_required") is True',
+        "STOP S9: D6 is blocked (decision E15)",
+    ):
+        if needed not in p00:
+            v.append(f"P00-02 lacks: {needed}")
+    p0102 = block(text, "P01-02")
+    for needed in (
+        'same "proof boundary"',
+        "--query 'Role.PermissionsBoundary.PermissionsBoundaryArn'",
+        "iam:AttachRolePolicy iam:CreateAccessKey",
+        "s3:PutObject s3:DeleteObject",
+    ):
+        if needed not in p0102.replace("\\\n", " "):
+            v.append(f"P01-02 lacks: {needed}")
+    return v
+
+
+def boundary_violations(t: Templates) -> list[str]:
+    """The boundary narrows only: one Allow of everything (intersected with
+    the identity policy) and the reviewed denies (pinned)."""
+    v = []
+    b = t.get("proof-principal-boundary")
+    if b is None:
+        return ["the proof-principal boundary template is missing"]
+    allow_statements = allows(b)
+    if [s.get("Sid") for s in allow_statements] != ["BoundaryAllowsWhatTheIdentityGrants"] or (
+        actions(allow_statements[0]) != {"*"}
+        or allow_statements[0].get("Resource") != "*"
+        or "Condition" in allow_statements[0]
+    ):
+        v.append("the boundary's only Allow is not the plain intersection statement")
+    sids = by_sid(b)
+    created = sids.get("CreatedRolesCarryThisBoundary", {})
+    if created.get("Condition") != {
+        "StringNotEquals": {"iam:PermissionsBoundary": "<PROOF_BOUNDARY_ARN>"}
+    }:
+        v.append("roles the proof creates need not carry the boundary")
+    escalate = actions(sids.get("NeverEscalate", {}))
+    for a in (
+        "iam:AttachRolePolicy",
+        "iam:CreateAccessKey",
+        "iam:CreatePolicyVersion",
+        "iam:PutRolePermissionsBoundary",
+        "iam:DeleteRolePermissionsBoundary",
+        "sso:*",
+    ):
+        if a not in escalate:
+            v.append(f"the boundary does not refuse {a}")
     return v
 
 
@@ -2194,8 +2419,8 @@ def test_the_instance_role_can_never_become_the_operator() -> None:
     assert instance_role_violations(load_templates()) == []
 
 
-def test_human_roles_require_mfa() -> None:
-    assert mfa_violations(load_templates()) == []
+def test_human_roles_admit_only_identity_center_sessions() -> None:
+    assert sso_trust_violations(load_templates()) == []
 
 
 def test_audit_tamper_protection_is_complete() -> None:
@@ -2295,16 +2520,20 @@ def test_the_audit_admin_can_tag_only_untagged_keys() -> None:
 def test_every_owner_decision_is_open_with_options_and_a_recommendation() -> None:
     text = DECISIONS.read_text()
     rows = re.findall(r"^\| \*\*(E\d+)\*\* \| (.+?) \| (.+?) \| (.+?) \|$", text, re.M)
-    assert [r[0] for r in rows] == [f"E{n}" for n in range(1, 14)]
+    assert [r[0] for r in rows] == [f"E{n}" for n in range(1, 16)]
     for _, _, options, recommendation in rows:
         assert options.strip() and recommendation.strip()
     assert "every decision below is open" in text
-    assert "E11, E12 and E13 are **required before D6**" in text
-    e11 = next(r for r in rows if r[0] == "E11")
-    assert "aws:MultiFactorAuthPresent" in e11[3] and "role chaining" in e11[3]
-    assert "**fails closed**" in e11[3] and "separately reviewed trust-policy design" in e11[3]
-    assert "not chosen here" in e11[3]
-    assert '[[ "$E11_IDENTITY" == iam-user-mfa ]]' in block(proof_text(), "P00-02")
+    assert "E11 to E15 are **required before D6**" in text
+    decisions = {r[0]: r for r in rows}
+    assert "**Identity Center only; required before D6.**" in decisions["E11"][3]
+    assert "No long-term access key may be created or used" in decisions["E11"][3]
+    assert "aws:MultiFactorAuthPresent" in decisions["E11"][3] and "attested" in decisions["E11"][3]
+    assert "**Required before D6; not chosen here.**" in decisions["E14"][3]
+    assert "**The boundary is mandatory in both**" in decisions["E14"][3]
+    assert "**Required; D6 is blocked until then.**" in decisions["E15"][3]
+    assert "refuses any `nlw-*-dataset-*` role" in decisions["E8"][3]
+    assert '[[ "$E11_IDENTITY" == identity-center ]]' in block(proof_text(), "P00-02")
 
 
 def test_overclaims_are_corrected() -> None:
@@ -2325,6 +2554,19 @@ def test_overclaims_are_corrected() -> None:
     ):
         assert marker in review, marker
     assert "the provisioned state equals the templates" not in proof
+    # Round 3: isolation is the AWS-side boundary; the stub run is defence in depth only.
+    assert "pin every Allow and every Deny" not in review
+    assert "**The stub\n  run does not observe every possible AWS call**" in review
+    assert "**Production isolation during D6 is an AWS-side control" in review
+    assert "**What protects production.** AWS does" in proof
+    assert "**D6 is BLOCKED.**" in proof
+    for marker in (
+        "| **F1** the stub run can be evaded |",
+        "| **F13** a dataset role as `ADMIN_ROLE` |",
+        "| **R11** |",
+        "| **R12** |",
+    ):
+        assert marker in review, marker
     assert "deployed policies and settings equal the rendered templates" in proof
 
 
@@ -2385,6 +2627,16 @@ def test_every_shell_block_is_valid_bash(tmp_path: Path) -> None:
 
 
 DUMMY_ACCOUNT = "111122223333"
+ADMIN_ROLE_NAME = "aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6ProofAdmin_0123456789abcdef"
+
+
+def sso_role(account: str, permission_set: str) -> str:
+    return (
+        f"arn:aws:iam::{account}:role/aws-reserved/sso.amazonaws.com/"
+        f"AWSReservedSSO_{permission_set}_0123456789abcdef"
+    )
+
+
 GOOD_SUFFIX = "-d6" + "a1b2c3d4e5f6"
 
 
@@ -2431,10 +2683,11 @@ def _lib_run(tmp_path: Path, script: str, **overrides: str) -> subprocess.Comple
         "BUCKET_SUFFIX": GOOD_SUFFIX,
         "RUNBOOK_DIR": str(repo / "docs" / "runbooks"),
         "REVIEWED_COMMIT": head,
-        "ADMIN_ROLE": "nlw-test-admin",
+        "ADMIN_ROLE": ADMIN_ROLE_NAME,
         "REC_KEY_ARN": f"{kms}/{'1' * 8}-1111-1111-1111-{'1' * 12}",
         "REC_AUDIT_KEY_ARN": f"{kms}/{'2' * 8}-2222-2222-2222-{'2' * 12}",
-        "HUMANS": json.dumps([f"arn:aws:iam::{DUMMY_ACCOUNT}:user/human-{x}" for x in "ab"]),
+        "HUMANS": json.dumps([sso_role(DUMMY_ACCOUNT, f"Human{x}") for x in "AB"]),
+        "PROOF_BOUNDARY_ARN": f"arn:aws:iam::{DUMMY_ACCOUNT}:policy/nlw-staging-d6-proof-boundary",
         "AUDIT_RETENTION_DAYS": "90",
         "GIT_CONFIG_NOSYSTEM": "1",
     }
@@ -2659,7 +2912,7 @@ DENY_MUTATIONS = [
     ),
     (
         "DenyMachineRoles made inert",
-        lambda t: _sid(t, "trust-human-mfa", "DenyMachineRoles").update(Condition=_FALSE),
+        lambda t: _sid(t, "trust-human", "DenyMachineRoles").update(Condition=_FALSE),
     ),
     (
         "DenyDeleteExceptOperator narrowed",
@@ -2882,47 +3135,50 @@ CREDENTIAL_MUTATIONS = [
         ),
     ),
     (
-        "a profile chaining from an undefined source",
+        "a credential_process in the workstation config",
         lambda t: t.replace(
-            "source_profile = nlw-proof-human-audit\nmfa_serial = "
-            "<AUDIT_MFA_ARN>\nduration_seconds = 3600\nregion = us-east-1\n\n"
-            "[profile nlw-proof-audit-reader]",
-            "source_profile = nlw-proof-human\nmfa_serial = <AUDIT_MFA_ARN>\nduration_seconds "
-            "= 3600\nregion = us-east-1\n\n[profile nlw-proof-audit-reader]",
+            "[profile nlw-proof-human-audit]\n",
+            "[profile nlw-proof-human-audit]\ncredential_process = /bin/cat k\n",
             1,
         ),
     ),
     (
-        "a step prints the credential",
+        "a chained profile without a run-scoped session name",
+        lambda t: t.replace(
+            "role_session_name = nlw-d6-<PROOF_ID>-audit-reader", "role_session_name = reader", 1
+        ),
+    ),
+    (
+        "a step creates an access key",
         lambda t: _after_source(
-            t, "P01-01", 'bash "$PROOF_DIR/credential-process.sh" "$PROOF_ID" operator print'
+            t, "P01-01", "aws iam create-access-key --profile nlw-proof-admin --user-name x"
+        ),
+    ),
+    (
+        "P00-02 accepts IAM users",
+        lambda t: t.replace(
+            '[[ "$E11_IDENTITY" == identity-center ]]', '[[ -n "$E11_IDENTITY" ]]', 1
         ),
     ),
     (
         "X08 deletes cached sessions by age",
         lambda t: t.replace(
-            'python3 - "$HOME/.aws/cli/cache" "$ACCOUNT" <<\'PY\'',
+            'python3 - "$HOME/.aws" "$ACCOUNT" "$PROOF_ID" <<\'PY\'',
             'find "$HOME/.aws/cli/cache" -newer "$PROOF_DIR/started" -delete\npython3 - '
-            '"$HOME/.aws/cli/cache" "$ACCOUNT" <<\'PY\'',
+            '"$HOME/.aws" "$ACCOUNT" "$PROOF_ID" <<\'PY\'',
             1,
         ),
     ),
     (
-        "X08 keeps the Keychain items",
+        "X08 logs out every SSO session",
         lambda t: t.replace(
-            'bash "$PROOF_DIR/credential-process.sh" "$PROOF_ID" "$who" remove', "true", 1
+            'rm -f "$PROOF_DIR/proof-key"', 'aws sso logout\nrm -f "$PROOF_DIR/proof-key"', 1
         ),
     ),
     (
-        "recovery no longer requires X09 and X08",
+        "recovery no longer requires X08",
         lambda t: t.replace(
-            "4. **Always, whatever else happens:** run X09 and then X08", "4. Optionally run X08", 1
-        ),
-    ),
-    (
-        "P00-02 accepts a key in aws-config",
-        lambda t: t.replace(
-            "<[A-Z_]+>|aws_access_key_id|aws_secret_access_key|aws_session_token", "<[A-Z_]+>", 1
+            "4. **Always, whatever else happens:** run X08", "4. Optionally run X08", 1
         ),
     ),
 ]
@@ -2944,35 +3200,56 @@ def _heredoc_python(body: str) -> str:
     return body.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
 
 
-def test_x08_removes_only_this_proofs_cached_sessions(tmp_path: Path) -> None:
-    cache = tmp_path / "cache"
-    cache.mkdir()
+def test_x08_removes_only_this_runs_cached_tokens_and_sessions(tmp_path: Path) -> None:
+    aws = tmp_path / "aws"
+    cli, sso = aws / "cli" / "cache", aws / "sso" / "cache"
+    cli.mkdir(parents=True)
+    sso.mkdir(parents=True)
+    run, other_run = "d6-20261011-a1b2c3", "d6-20261010-ffffff"
 
     def session(name: str, arn: str) -> None:
-        (cache / name).write_text(
+        (cli / name).write_text(
             json.dumps({"Credentials": {"SecretAccessKey": "s"}, "AssumedRoleUser": {"Arn": arn}})
         )
 
+    base = f"arn:aws:sts::{DUMMY_ACCOUNT}:assumed-role"
+    session("ours-op.json", f"{base}/nlw-staging-dataset-operator/nlw-d6-{run}-operator")
     session(
-        "ours.json",
-        f"arn:aws:sts::{DUMMY_ACCOUNT}:assumed-role/nlw-staging-dataset-api/nlw-staging-api",
+        "ours-reader.json", f"{base}/nlw-staging-dataset-audit-reader/nlw-d6-{run}-audit-reader"
     )
-    session(
-        "admin.json", f"arn:aws:sts::{DUMMY_ACCOUNT}:assumed-role/Admin/nlw-staging-proof-admin"
-    )
-    session("other-session.json", f"arn:aws:sts::{DUMMY_ACCOUNT}:assumed-role/Admin/alice")
-    session("other-account.json", "arn:aws:sts::999999999999:assumed-role/x/nlw-staging-api")
-    (cache / "junk.json").write_text("not json")
+    session("other-run.json", f"{base}/nlw-staging-dataset-operator/nlw-d6-{other_run}-operator")
+    session("other-session.json", f"{base}/Admin/alice")
+    session("other-account.json", f"arn:aws:sts::999999999999:assumed-role/x/nlw-d6-{run}-operator")
+    session("suffix-trick.json", f"{base}/nlw-staging-dataset-operator/nlw-d6-{run}-operator-extra")
+    (cli / "junk.json").write_text("not json")
+    import hashlib
+
+    for who, run_id in (("operator", run), ("audit", run), ("operator", other_run)):
+        name = hashlib.sha1(f"nlw-d6-{run_id}-{who}".encode()).hexdigest() + ".json"
+        (sso / name).write_text(json.dumps({"accessToken": "t"}))
+    (sso / "unrelated.json").write_text(json.dumps({"accessToken": "t"}))
     script = tmp_path / "x08.py"
     script.write_text(_heredoc_python(block(proof_text(), "X08")))
     subprocess.run(
-        [sys.executable, str(script), str(cache), DUMMY_ACCOUNT], check=True, capture_output=True
+        [sys.executable, str(script), str(aws), DUMMY_ACCOUNT, run], check=True, capture_output=True
     )
-    assert sorted(p.name for p in cache.iterdir()) == [
+    assert sorted(p.name for p in cli.iterdir()) == [
         "junk.json",
         "other-account.json",
+        "other-run.json",
         "other-session.json",
+        "suffix-trick.json",
     ]
+    other_token = hashlib.sha1(f"nlw-d6-{other_run}-operator".encode()).hexdigest() + ".json"
+    assert sorted(p.name for p in sso.iterdir()) == sorted([other_token, "unrelated.json"])
+
+
+def test_negative_control_cross_run_cache_deletion_is_detected(tmp_path: Path) -> None:
+    """X08 widened to every run's sessions must be caught statically and,
+    executed, would delete another run's cache."""
+    text = proof_text()
+    widened = text.replace("re.escape(proof)", "r'[^-]+-[^-]+-[^-]+'", 1)
+    assert widened != text and credential_source_violations(widened)
 
 
 # --- N6/N7/N8/N10 --------------------------------------------------------------------------------
@@ -3069,10 +3346,10 @@ STATIC_MUTATIONS = [
     (
         "N9 human lists not validated",
         lambda t: t.replace(
-            'source "$PROOF_DIR/lib.sh"\nvalidate_humans "$OPERATOR_HUMANS_JSON" '
+            'source "$PROOF_DIR/lib.sh"\nvalidate_principals sso "$OPERATOR_HUMANS_JSON" '
             '"$AUDIT_ADMIN_HUMANS_JSON"\n'
-            'validate_humans "$AUDIT_ADMIN_HUMANS_JSON" '
-            '"$OPERATOR_HUMANS_JSON"\nvalidate_humans "$AUDIT_READER_HUMANS_JSON"\nTAGS=',
+            'validate_principals sso "$AUDIT_ADMIN_HUMANS_JSON" '
+            '"$OPERATOR_HUMANS_JSON"\nvalidate_principals sso "$AUDIT_READER_HUMANS_JSON"\nTAGS=',
             'source "$PROOF_DIR/lib.sh"\nTAGS=',
             1,
         ),
@@ -3121,7 +3398,9 @@ STATIC_MUTATIONS = [
     ),
     (
         "N12 identity type not verified",
-        lambda t: t.replace('[[ "$arn" =~ ^arn:aws:iam::${ACCOUNT}:user/ ]]', "true", 1),
+        lambda t: t.replace(
+            '[[ "$arn" == "arn:aws:sts::${ACCOUNT}:assumed-role/AWSReservedSSO_"* ]]', "true", 1
+        ),
         consistency_violations,
     ),
 ]
@@ -3150,55 +3429,88 @@ def test_human_lists_and_drift_comparison_are_in_place() -> None:
 
 @needs_bash_and_git
 @pytest.mark.parametrize(
-    ("people", "excluded", "ok"),
+    ("kind", "people", "excluded", "ok"),
     [
-        ([f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice"], [], True),
-        ([f"arn:aws:iam::{DUMMY_ACCOUNT}:user/team/alice"], [], True),
-        (["*"], [], False),
-        ([f"arn:aws:iam::{DUMMY_ACCOUNT}:root"], [], False),
-        (["arn:aws:iam::999999999999:user/alice"], [], False),
-        ([f"arn:aws:iam::{DUMMY_ACCOUNT}:role/alice"], [], False),
-        ([f"arn:aws:iam::{DUMMY_ACCOUNT}:user/*"], [], False),
+        ("sso", ["SSO:Operator"], [], True),
+        ("sso", ["SSO:Operator", "SSO:Second"], [], True),
         (
+            "sso",
             [
-                f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice",
-                f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice",
+                f"arn:aws:iam::{DUMMY_ACCOUNT}:role/aws-reserved/sso.amazonaws.com/us-east-1/"
+                "AWSReservedSSO_Operator_0123456789abcdef"
+            ],
+            [],
+            True,
+        ),
+        ("sso", ["*"], [], False),
+        ("sso", [f"arn:aws:iam::{DUMMY_ACCOUNT}:root"], [], False),
+        ("sso", [f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice"], [], False),
+        (
+            "sso",
+            [
+                "arn:aws:iam::999999999999:role/aws-reserved/sso.amazonaws.com/"
+                "AWSReservedSSO_Operator_0123456789abcdef"
             ],
             [],
             False,
         ),
+        ("sso", ["SSO:Operator\n"], [], False),
         (
-            [f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice"],
-            [f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice"],
+            "sso",
+            [f"arn:aws:iam::{DUMMY_ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_*"],
+            [],
             False,
         ),
-        ([], [], False),
-        ("not-a-list", [], False),
+        ("sso", ["SSO:Operator", "SSO:Operator"], [], False),
+        ("sso", ["SSO:Operator"], ["SSO:Operator"], False),
+        ("sso", [], [], False),
+        ("sso", "not-a-list", [], False),
+        ("iam", [f"arn:aws:iam::{DUMMY_ACCOUNT}:user/team/alice"], [], True),
+        ("iam", [f"arn:aws:iam::{DUMMY_ACCOUNT}:role/Admin"], [], True),
+        ("iam", [f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice\n"], [], False),
+        ("iam", [], [], False),
+        ("iam", ["*"], [], False),
     ],
     ids=[
-        "user",
-        "user with path",
+        "sso role",
+        "two sso roles",
+        "sso role with region path",
         "wildcard",
         "root",
+        "IAM user",
         "other account",
-        "role",
-        "user wildcard",
+        "trailing newline",
+        "wildcard role",
         "duplicate",
         "shared with the operator",
         "empty",
         "not a list",
+        "iam user with path",
+        "iam role",
+        "iam trailing newline",
+        "iam empty (E12 must name principals)",
+        "iam wildcard",
     ],
 )
-def test_negative_control_human_principal_lists_are_validated(
-    tmp_path: Path, people: Any, excluded: list[str], ok: bool
+def test_negative_control_principal_lists_are_validated(
+    tmp_path: Path, kind: str, people: Any, excluded: list[str], ok: bool
 ) -> None:
-    raw = people if isinstance(people, str) else json.dumps(people)
-    result = _lib_run(
-        tmp_path, f"validate_humans {shlex.quote(raw)} {shlex.quote(json.dumps(excluded))}"
+    def expand(x: Any) -> Any:
+        if isinstance(x, list):
+            return [expand(i) for i in x]
+        if isinstance(x, str) and x.startswith("SSO:"):
+            name = x[4:].rstrip("\n")
+            return sso_role(DUMMY_ACCOUNT, name) + ("\n" if x.endswith("\n") else "")
+        return x
+
+    raw = people if isinstance(people, str) else json.dumps(expand(people))
+    script = (
+        f"validate_principals {kind} {shlex.quote(raw)} {shlex.quote(json.dumps(expand(excluded)))}"
     )
+    result = _lib_run(tmp_path, script)
     assert (result.returncode == 0) is ok, result.stderr
     if not ok:
-        assert "STOP S9: a human principal list is invalid" in result.stderr
+        assert "STOP S9: a principal list is invalid" in result.stderr
 
 
 @needs_bash_and_git
@@ -3208,14 +3520,16 @@ def test_negative_control_human_principal_lists_are_validated(
         '["*"]',
         f'["arn:aws:iam::{DUMMY_ACCOUNT}:root"]',
         f'["arn:aws:iam::{DUMMY_ACCOUNT}:user/a\\"]}}, {{\\"Sid\\": \\"x"]',
+        json.dumps([sso_role(DUMMY_ACCOUNT, "Operator") + "\n"]),
+        json.dumps([f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice"]),
         "[1]",
     ],
-    ids=["wildcard", "root", "injection", "not strings"],
+    ids=["wildcard", "root", "injection", "not strings", "trailing newline", "IAM user"],
 )
 def test_negative_control_render_refuses_unsafe_human_principals(
     tmp_path: Path, humans: str
 ) -> None:
-    result = _lib_run(tmp_path, "render trust-human-mfa", HUMANS=humans)
+    result = _lib_run(tmp_path, "render trust-human", HUMANS=humans)
     assert result.returncode != 0 and result.stdout == ""
 
 
@@ -3332,6 +3646,592 @@ def test_negative_control_run_step_refuses_a_modified_step(tmp_path: Path) -> No
 def test_trap_model_and_execution_instructions_are_consistent() -> None:
     assert trap_violations(proof_text()) == []
     assert consistency_violations(proof_text()) == []
+
+
+# --- round 3: the AWS-side boundary, the gate, and fail-closed verification -------------------
+
+
+def test_d6_is_blocked_until_an_independent_verification_record_exists() -> None:
+    assert gate_violations(proof_text()) == []
+
+
+def test_every_aws_change_is_a_reviewed_operation() -> None:
+    assert mutation_allowlist_violations(proof_text()) == []
+
+
+def test_the_proof_principal_boundary_narrows_only() -> None:
+    assert boundary_violations(load_templates()) == []
+
+
+ROUND3_PROOF_MUTATIONS = [
+    (
+        "attach AdministratorAccess",
+        lambda t: _after_source(
+            t,
+            "P03-09",
+            "aws iam attach-role-policy --profile nlw-proof-admin --role-name "
+            "nlw-staging-dataset-api --policy-arn arn:aws:iam::aws:policy/AdministratorAccess",
+        ),
+        mutation_allowlist_violations,
+    ),
+    (
+        "set an unexpected permissions boundary",
+        lambda t: _after_source(
+            t,
+            "P03-09",
+            "aws iam put-role-permissions-boundary --profile nlw-proof-admin "
+            "--role-name nlw-staging-dataset-api --permissions-boundary arn:aws:iam::aws:policy/x",
+        ),
+        mutation_allowlist_violations,
+    ),
+    (
+        "create a KMS grant",
+        lambda t: _after_source(
+            t,
+            "P03-09",
+            'aws kms create-grant --profile nlw-proof-admin --key-id "$REC_KEY_ARN" '
+            "--grantee-principal x --operations Decrypt",
+        ),
+        mutation_allowlist_violations,
+    ),
+    (
+        "create a role without the boundary",
+        lambda t: t.replace('    --permissions-boundary "$PROOF_BOUNDARY_ARN" \\\n', "", 1),
+        mutation_allowlist_violations,
+    ),
+    (
+        "an inline policy from a hand-written document",
+        lambda t: _after_source(
+            t,
+            "P03-09",
+            "aws iam put-role-policy --profile nlw-proof-admin --role-name "
+            "nlw-staging-dataset-api --policy-name x --policy-document file:///tmp/x.json",
+        ),
+        mutation_allowlist_violations,
+    ),
+    (
+        "P03-11 stops checking attached policies",
+        lambda t: t.replace(
+            '  verify_role_shape "nlw-staging-dataset-$r" "nlw-dataset-$r"\n', "", 1
+        ),
+        human_and_drift_violations,
+    ),
+    (
+        "P03-11 stops checking KMS grants",
+        lambda t: t.replace('verify_no_grants "$REC_KEY_ARN" nlw-proof-admin\n', "", 1),
+        human_and_drift_violations,
+    ),
+    (
+        "P03-11 stops checking the audit bucket's controls",
+        lambda t: t.replace(
+            'verify_bucket_controls "$AUDIT_BUCKET" nlw-proof-audit-admin\n', "", 1
+        ),
+        human_and_drift_violations,
+    ),
+    (
+        "E12 simulation accepts an empty result again",
+        lambda t: t.replace('validate_principals iam "$E12_MUST_NOT_PASS_JSON"\n', "", 1),
+        human_and_drift_violations,
+    ),
+    (
+        "an expected-denied write to the audit bucket",
+        lambda t: _after_source(
+            t,
+            "P05-01",
+            "expect_denied aws s3api put-object --profile proof-api "
+            '--bucket "$AUDIT_BUCKET" --key "versions/$REC_PROOF_WS/x" --body f',
+        ),
+        denied_write_strict_violations,
+    ),
+    (
+        "the D6-blocked notice removed",
+        lambda t: t.replace("**D6 is BLOCKED.**", "D6 may start.", 1),
+        gate_violations,
+    ),
+    (
+        "the gate accepts the operator as verifier",
+        lambda t: t.replace(' and gate.get("verified_by") != env["OPERATOR_NAME"]', "", 1),
+        gate_violations,
+    ),
+    (
+        "P01-02 stops checking the boundary document",
+        lambda t: t.replace('same "proof boundary"', 'true "proof boundary"', 1),
+        gate_violations,
+    ),
+    (
+        "lib.sh accepts a dataset role as ADMIN_ROLE",
+        lambda t: t.replace('[[ "${ADMIN_ROLE##*/}" != nlw-*-dataset-* ]]', "true", 1),
+        consistency_violations,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "check"),
+    [(m[1], m[2]) for m in ROUND3_PROOF_MUTATIONS],
+    ids=[m[0] for m in ROUND3_PROOF_MUTATIONS],
+)
+def test_negative_control_round3_procedure_weakening_is_detected(
+    mutation: Callable[[str], str], check: Callable[[str], list[str]]
+) -> None:
+    text = proof_text()
+    weakened = mutation(text)
+    assert weakened != text, "the mutation did not apply"
+    assert check(weakened)
+
+
+ROUND3_TEMPLATE_MUTATIONS = [
+    (
+        "dataset lifecycle expires versions",
+        lambda t: t["dataset-bucket-lifecycle"]["Rules"][0].update(
+            Expiration={"Days": 1}, NoncurrentVersionExpiration={"NoncurrentDays": 1}
+        ),
+        deny_pin_violations,
+    ),
+    (
+        "dataset lifecycle scope widened",
+        lambda t: t["dataset-bucket-lifecycle"]["Rules"][0].update(Filter={"Prefix": ""}),
+        deny_pin_violations,
+    ),
+    (
+        "audit lifecycle shortened",
+        lambda t: t["audit-bucket-lifecycle"]["Rules"][0].update(
+            NoncurrentVersionExpiration={"NoncurrentDays": 0}
+        ),
+        deny_pin_violations,
+    ),
+    (
+        "event selectors narrowed",
+        lambda t: t["trail-advanced-event-selectors"][0]["FieldSelectors"].append(
+            {"Field": "readOnly", "Equals": ["false"]}
+        ),
+        deny_pin_violations,
+    ),
+    (
+        "boundary allows escalation",
+        lambda t: _sid(t, "proof-principal-boundary", "NeverEscalate")["Action"].remove(
+            "iam:AttachRolePolicy"
+        ),
+        boundary_violations,
+    ),
+    (
+        "boundary no longer forced onto created roles",
+        lambda t: _drop_sid(t, "proof-principal-boundary", "CreatedRolesCarryThisBoundary"),
+        boundary_violations,
+    ),
+    (
+        "boundary production deny narrowed",
+        lambda t: _sid(t, "proof-principal-boundary", "NeverOtherEnvironmentNames").update(
+            Resource=["arn:aws:s3:::nlw-<OTHER_ENV>-*"]
+        ),
+        deny_pin_violations,
+    ),
+    (
+        "human trust admits IAM users again",
+        lambda t: _drop_sid(t, "trust-human", "DenyAnythingButIdentityCenter"),
+        sso_trust_violations,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "check"),
+    [(m[1], m[2]) for m in ROUND3_TEMPLATE_MUTATIONS],
+    ids=[m[0] for m in ROUND3_TEMPLATE_MUTATIONS],
+)
+def test_negative_control_round3_template_weakening_is_detected(
+    mutation: Callable[[Templates], None], check: Callable[[Templates], list[str]]
+) -> None:
+    weakened = copy.deepcopy(load_templates())
+    mutation(weakened)
+    assert check(weakened)
+
+
+# A fake `aws` for exercising lib.sh's verification helpers: the answer to an
+# operation comes from FAKE_<OPERATION> (and its exit code from
+# FAKE_<OPERATION>_RC), so each test states exactly what AWS "returned".
+FAKE_AWS = r"""#!/bin/bash
+op=""; svc=""
+for a in "$@"; do
+  case "$a" in --*) continue ;; esac
+  if [[ -z "$svc" ]]; then svc="$a"; elif [[ -z "$op" ]]; then op="$a"; break; fi
+done
+var="FAKE_$(printf '%s' "$op" | tr 'a-z-' 'A-Z_')"
+rc_var="${var}_RC"
+[[ -n "${!var+x}" ]] && printf '%s\n' "${!var}"
+exit "${!rc_var:-0}"
+"""
+
+
+def _fake_run(tmp_path: Path, script: str, **answers: str) -> subprocess.CompletedProcess[str]:
+    fake = tmp_path / "fake"
+    fake.mkdir(exist_ok=True)
+    (fake / "aws").write_text(FAKE_AWS)
+    (fake / "aws").chmod(0o755)
+    (tmp_path / "proof").mkdir(exist_ok=True)
+    (tmp_path / "proof" / "normalize-policy.py").write_text(
+        dict(FILE_BLOCK.findall(proof_text()))["normalize-policy.py"]
+    )
+    return _lib_run(tmp_path, script, PATH=f"{fake}:{os.environ['PATH']}", **answers)
+
+
+BOUNDARY = f"arn:aws:iam::{DUMMY_ACCOUNT}:policy/nlw-staging-d6-proof-boundary"
+GOOD_ROLE = {
+    "FAKE_LIST_ROLE_POLICIES": '["nlw-dataset-api"]',
+    "FAKE_LIST_ATTACHED_ROLE_POLICIES": "[]",
+    "FAKE_GET_ROLE": BOUNDARY,
+}
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(
+    ("answers", "expected"),
+    [
+        ({}, None),
+        (
+            {"FAKE_LIST_ATTACHED_ROLE_POLICIES": '["arn:aws:iam::aws:policy/AdministratorAccess"]'},
+            "has attached managed policies",
+        ),
+        (
+            {"FAKE_GET_ROLE": "arn:aws:iam::aws:policy/PowerUserAccess"},
+            "does not carry exactly the proof boundary",
+        ),
+        ({"FAKE_GET_ROLE": "None"}, "does not carry exactly the proof boundary"),
+        (
+            {"FAKE_LIST_ROLE_POLICIES": '["nlw-dataset-api", "extra"]'},
+            "has inline policies other than",
+        ),
+        ({"FAKE_LIST_ATTACHED_ROLE_POLICIES_RC": "254"}, "cannot list the managed policies"),
+    ],
+    ids=[
+        "clean role",
+        "AdministratorAccess attached",
+        "unexpected boundary",
+        "no boundary",
+        "extra inline policy",
+        "listing failed",
+    ],
+)
+def test_negative_control_role_shape_is_verified(
+    tmp_path: Path, answers: dict[str, str], expected: str | None
+) -> None:
+    result = _fake_run(
+        tmp_path,
+        "verify_role_shape nlw-staging-dataset-api nlw-dataset-api",
+        **{**GOOD_ROLE, **answers},
+        PROOF_BOUNDARY_ARN=BOUNDARY,
+    )
+    if expected is None:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert (
+            result.returncode != 0
+            and f"STOP S9: nlw-staging-dataset-api {expected}" in result.stderr
+            or ("STOP S9: cannot list" in result.stderr and expected.startswith("cannot list"))
+        ), result.stderr
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(
+    ("answers", "ok"),
+    [
+        ({"FAKE_LIST_GRANTS": "0"}, True),
+        ({"FAKE_LIST_GRANTS": "1"}, False),
+        ({"FAKE_LIST_GRANTS_RC": "255"}, False),
+    ],
+    ids=["no grant", "an unexpected grant", "listing failed"],
+)
+def test_negative_control_kms_grants_are_verified(
+    tmp_path: Path, answers: dict[str, str], ok: bool
+) -> None:
+    result = _fake_run(
+        tmp_path,
+        "verify_no_grants arn:aws:kms:us-east-1:111122223333:key/x nlw-proof-admin",
+        **answers,
+    )
+    assert (result.returncode == 0) is ok, result.stderr
+    if not ok:
+        assert "STOP S9:" in result.stderr
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(
+    ("answers", "ok"),
+    [
+        (
+            {
+                "FAKE_GET_PUBLIC_ACCESS_BLOCK": "True\tTrue\tTrue\tTrue",
+                "FAKE_GET_BUCKET_OWNERSHIP_CONTROLS": "BucketOwnerEnforced",
+            },
+            True,
+        ),
+        (
+            {
+                "FAKE_GET_PUBLIC_ACCESS_BLOCK": "True\tTrue\tFalse\tTrue",
+                "FAKE_GET_BUCKET_OWNERSHIP_CONTROLS": "BucketOwnerEnforced",
+            },
+            False,
+        ),
+        (
+            {
+                "FAKE_GET_PUBLIC_ACCESS_BLOCK_RC": "254",
+                "FAKE_GET_BUCKET_OWNERSHIP_CONTROLS": "BucketOwnerEnforced",
+            },
+            False,
+        ),
+        (
+            {
+                "FAKE_GET_PUBLIC_ACCESS_BLOCK": "True\tTrue\tTrue\tTrue",
+                "FAKE_GET_BUCKET_OWNERSHIP_CONTROLS": "ObjectWriter",
+            },
+            False,
+        ),
+        (
+            {
+                "FAKE_GET_PUBLIC_ACCESS_BLOCK": "True\tTrue\tTrue\tTrue",
+                "FAKE_GET_BUCKET_OWNERSHIP_CONTROLS_RC": "254",
+            },
+            False,
+        ),
+    ],
+    ids=[
+        "controls in place",
+        "one public-access block off",
+        "public-access block missing",
+        "ACLs enabled",
+        "ownership controls missing",
+    ],
+)
+def test_negative_control_bucket_controls_are_verified(
+    tmp_path: Path, answers: dict[str, str], ok: bool
+) -> None:
+    result = _fake_run(
+        tmp_path, "verify_bucket_controls nlw-staging-datasets-x nlw-proof-admin", **answers
+    )
+    assert (result.returncode == 0) is ok, result.stderr
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(
+    ("answers", "expected"),
+    [
+        ({"FAKE_SIMULATE_PRINCIPAL_POLICY": "implicitDeny\texplicitDeny"}, None),
+        ({"FAKE_SIMULATE_PRINCIPAL_POLICY": ""}, "STOP S9:"),
+        ({"FAKE_SIMULATE_PRINCIPAL_POLICY_RC": "255"}, "STOP S9:"),
+        ({"FAKE_SIMULATE_PRINCIPAL_POLICY": "implicitDeny\tallowed"}, "STOP S4:"),
+    ],
+    ids=["all denied", "empty result", "simulation error", "one allowed"],
+)
+def test_negative_control_simulations_fail_closed(
+    tmp_path: Path, answers: dict[str, str], expected: str | None
+) -> None:
+    result = _fake_run(
+        tmp_path,
+        "sim_denied arn:aws:iam::111122223333:user/x arn:aws:iam::111122223333:role/r iam:PassRole",
+        **answers,
+    )
+    if expected is None:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0 and expected in result.stderr, result.stderr
+
+
+@needs_bash_and_git
+def test_negative_control_an_empty_expected_simulation_is_refused(tmp_path: Path) -> None:
+    result = _lib_run(tmp_path, "expect_simulated explicitDeny ''")
+    assert result.returncode != 0 and "STOP S9: the simulator returned no decision" in result.stderr
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize("template", ["dataset-bucket-lifecycle", "audit-bucket-lifecycle"])
+def test_negative_control_a_drifted_lifecycle_rule_stops_the_proof(
+    tmp_path: Path, template: str
+) -> None:
+    render = _lib_run(tmp_path / "a", f'render {template} > "$PROOF_DIR/rendered.json"')
+    assert render.returncode == 0, render.stderr
+    rendered = json.loads((tmp_path / "a" / "proof" / "rendered.json").read_text())
+    drifted = copy.deepcopy(rendered)
+    drifted["Rules"][0]["Expiration"] = {"Days": 1}
+    normalizer = dict(FILE_BLOCK.findall(proof_text()))["normalize-policy.py"]
+    results = {}
+    for sub, deployed in (("b", rendered), ("c", drifted)):
+        (tmp_path / sub / "proof").mkdir(parents=True)
+        (tmp_path / sub / "proof" / "normalize-policy.py").write_text(normalizer)
+        (tmp_path / sub / "proof" / "rendered.json").write_text(json.dumps(rendered))
+        results[sub] = _lib_run(
+            tmp_path / sub,
+            f'same lifecycle {shlex.quote(json.dumps(deployed))} "$PROOF_DIR/rendered.json"',
+        )
+    assert results["b"].returncode == 0, results["b"].stderr
+    assert results["c"].returncode != 0
+    assert "STOP S9: lifecycle differs from the rendered template" in results["c"].stderr
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(
+    "role", ["nlw-staging-dataset-operator", "team/nlw-production-dataset-api"]
+)
+def test_negative_control_a_dataset_role_cannot_be_admin_role(tmp_path: Path, role: str) -> None:
+    result = _lib_run(tmp_path, "true", ADMIN_ROLE=role)
+    assert (
+        result.returncode != 0 and "STOP S1: ADMIN_ROLE must not be a dataset role" in result.stderr
+    )
+
+
+# --- P00-02 executed: reviewed-tree binding and the D6 gate --------------------------------------
+
+
+def _p00_02(
+    tmp_path: Path,
+    *,
+    gate: dict[str, Any] | None,
+    runbook_dir: Path | None = None,
+    overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    repo = tmp_path / "repo"
+    (repo / "docs" / "runbooks").mkdir(parents=True)
+    for doc in (PROVISIONING, PROOF):
+        shutil.copy(doc, repo / "docs" / "runbooks" / doc.name)
+    if gate is not None:
+        (repo / "docs" / "evidence" / "o2-d6").mkdir(parents=True)
+        (repo / "docs" / "evidence" / "o2-d6" / "d6-gate.json").write_text(json.dumps(gate))
+    git_env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    }
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-gpg-sign", "-m", "r"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=git_env)
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=git_env,
+    ).stdout.strip()
+    humans = {
+        "OPERATOR_HUMANS_JSON": json.dumps([sso_role(DUMMY_ACCOUNT, "NlwD6Operator")]),
+        "AUDIT_ADMIN_HUMANS_JSON": json.dumps([sso_role(DUMMY_ACCOUNT, "NlwD6Audit")]),
+        "AUDIT_READER_HUMANS_JSON": json.dumps([sso_role(DUMMY_ACCOUNT, "NlwD6Audit")]),
+    }
+    env = {
+        **git_env,
+        "REVIEWED_COMMIT": head,
+        "PROOF_ID": "d6-20261011-a1b2c3",
+        "BUCKET_SUFFIX": GOOD_SUFFIX,
+        "PROOF_DIR": str(tmp_path / "proof"),
+        "RUNBOOK_DIR": str(runbook_dir or repo / "docs" / "runbooks"),
+        "APPROVED_ACCOUNT": DUMMY_ACCOUNT,
+        "E11_IDENTITY": "identity-center",
+        "E14_ACCOUNT_MODE": "bounded",
+        "ADMIN_ROLE": ADMIN_ROLE_NAME,
+        "PROOF_BOUNDARY_ARN": BOUNDARY,
+        "OPERATOR_NAME": "operator",
+        "SSO_START_URL": "https://example.invalid",
+        "SSO_REGION": "us-east-1",
+        "PROOF_ADMIN_PERMISSION_SET": "NlwD6ProofAdmin",
+        "OPERATOR_PERMISSION_SET": "NlwD6Operator",
+        "AUDIT_PERMISSION_SET": "NlwD6Audit",
+        **humans,
+    }
+    env.update(overrides or {})
+    script = tmp_path / "p00-02.sh"
+    script.write_text(
+        block(proof_text(), "P00-02").replace("\\\n", " ")
+        if False
+        else [
+            b["raw"]
+            for b in labelled_blocks(proof_text())
+            if b["label"] and b["label"]["id"] == "P00-02"
+        ][0]
+    )
+    return subprocess.run(
+        ["bash", str(script)], cwd=repo, env=env, capture_output=True, text=True, timeout=60
+    )
+
+
+def _good_gate() -> dict[str, Any]:
+    return {
+        "account": DUMMY_ACCOUNT,
+        "account_mode": "bounded",
+        "proof_boundary_arn": BOUNDARY,
+        "proof_admin_role_arn": f"arn:aws:iam::{DUMMY_ACCOUNT}:role/aws-reserved/sso.amazonaws.com/"
+        "AWSReservedSSO_NlwD6ProofAdmin_0123456789abcdef",
+        "operator_role_arns": [sso_role(DUMMY_ACCOUNT, "NlwD6Operator")],
+        "audit_admin_role_arns": [sso_role(DUMMY_ACCOUNT, "NlwD6Audit")],
+        "audit_reader_role_arns": [sso_role(DUMMY_ACCOUNT, "NlwD6Audit")],
+        "boundary_attached_verified": True,
+        "effective_permissions_verified": True,
+        "identity_center_mfa_required": True,
+        "verified_by": "independent verifier",
+        "verified_at": "2026-10-12",
+    }
+
+
+@needs_bash_and_git
+def test_p00_02_extracts_only_with_a_matching_gate_record(tmp_path: Path) -> None:
+    result = _p00_02(tmp_path, gate=_good_gate())
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((tmp_path / "proof" / "manifest.json").read_text())
+    assert "aws-config" in manifest and "steps/P03-11.sh" in manifest and "lib.sh" in manifest
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(
+    ("gate_change", "overrides", "expected"),
+    [
+        (None, {}, "STOP S9: D6 is blocked"),
+        ({"verified_by": "operator"}, {}, "STOP S9: D6 is blocked"),
+        ({"effective_permissions_verified": False}, {}, "STOP S9: D6 is blocked"),
+        ({"identity_center_mfa_required": False}, {}, "STOP S9: D6 is blocked"),
+        (
+            {"proof_boundary_arn": "arn:aws:iam::111122223333:policy/other"},
+            {},
+            "STOP S9: D6 is blocked",
+        ),
+        ({"account": "999999999999"}, {}, "STOP S9: D6 is blocked"),
+        (
+            {},
+            {"E11_IDENTITY": "iam-user-mfa"},
+            "STOP S9: only short-lived Identity Center credentials",
+        ),
+        ({}, {"REVIEWED_COMMIT": "0" * 40}, "STOP S9: not the reviewed commit"),
+    ],
+    ids=[
+        "no gate record",
+        "operator verified their own run",
+        "effective permissions unverified",
+        "MFA not attested",
+        "different boundary",
+        "different account",
+        "long-term credentials",
+        "unreviewed commit",
+    ],
+)
+def test_negative_control_p00_02_refuses_to_start(
+    tmp_path: Path, gate_change: dict[str, Any] | None, overrides: dict[str, str], expected: str
+) -> None:
+    gate = None if gate_change is None else {**_good_gate(), **gate_change}
+    result = _p00_02(tmp_path, gate=gate, overrides=overrides)
+    assert result.returncode != 0 and expected in result.stderr, result.stderr
+    assert not (tmp_path / "proof" / "manifest.json").exists()
+
+
+@needs_bash_and_git
+def test_negative_control_p00_02_refuses_a_runbook_tree_outside_the_reviewed_checkout(
+    tmp_path: Path,
+) -> None:
+    other = tmp_path / "other" / "docs" / "runbooks"
+    other.mkdir(parents=True)
+    for doc in (PROVISIONING, PROOF):
+        shutil.copy(doc, other / doc.name)
+    result = _p00_02(tmp_path, gate=_good_gate(), runbook_dir=other)
+    assert result.returncode != 0
+    assert "STOP S9: RUNBOOK_DIR is not this reviewed checkout's runbook directory" in result.stderr
 
 
 # --- the probe's offline refusals (no network: each refuses before any AWS call) -------------
@@ -3537,14 +4437,14 @@ TEMPLATE_MUTATIONS: list[TemplateMutation] = [
     ),
     (
         "human trust admits the bootstrap role",
-        lambda t: _sid(t, "trust-human-mfa", "NamedHumansWithMfa").update(
+        lambda t: _sid(t, "trust-human", "NamedSsoPermissionSetRolesOnly").update(
             Principal={"AWS": ["<HUMAN_PRINCIPAL_ARNS>", role("bootstrap")]}
         ),
         instance_role_violations,
     ),
     (
         "human trust stops denying machine roles",
-        lambda t: _drop_sid(t, "trust-human-mfa", "DenyMachineRoles"),
+        lambda t: _drop_sid(t, "trust-human", "DenyMachineRoles"),
         instance_role_violations,
     ),
     (
@@ -3553,14 +4453,14 @@ TEMPLATE_MUTATIONS: list[TemplateMutation] = [
         instance_role_violations,
     ),
     (
-        "operator trust without MFA",
-        lambda t: _sid(t, "trust-human-mfa", "NamedHumansWithMfa").pop("Condition"),
-        mfa_violations,
+        "human trust without run-scoped session names",
+        lambda t: _sid(t, "trust-human", "NamedSsoPermissionSetRolesOnly").pop("Condition"),
+        sso_trust_violations,
     ),
     (
-        "operator trust without the missing-MFA deny",
-        lambda t: _drop_sid(t, "trust-human-mfa", "DenyWithoutMfaContext"),
-        mfa_violations,
+        "human trust admits non-Identity-Center principals",
+        lambda t: _drop_sid(t, "trust-human", "DenyAnythingButIdentityCenter"),
+        sso_trust_violations,
     ),
     # audit tamper protection removed
     (

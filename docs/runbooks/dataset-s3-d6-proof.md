@@ -5,6 +5,26 @@ No AWS account has been contacted, and nothing here has been validated by AWS.
 It implements ADR-033 D6: the isolated, staging-only proof that must pass
 before any dataset object reaches S3.
 
+**D6 is BLOCKED.** It may not start until an independent verifier, not the
+operator, has confirmed four things, recorded in
+`docs/evidence/o2-d6/d6-gate.json` in a separately reviewed commit:
+
+- the approved account (decision E14);
+- the Identity Center principals the proof will use;
+- that the proof-principal permissions boundary is attached to each of them;
+- their effective permissions.
+
+P00-02 refuses to start without that record; it does not exist yet.
+
+**What protects production.** AWS does: the mandatory proof-principal
+permissions boundary
+([provisioning §3.6](dataset-s3-provisioning.md#36-proof-principal-permissions-boundary-mandatory-for-d6)),
+or a dedicated proof account (E14). Review of the shell and its contract
+tests is defence in depth only. The tests execute the steps against a stub
+`aws` as a regression check. They cannot observe every possible AWS call:
+a call on a branch the stub never takes, an `aws` binary given by absolute
+path, or an SDK call inside a heredoc is not seen.
+
 - **Templates:** every policy comes from
   [dataset-s3-provisioning.md](dataset-s3-provisioning.md), rendered from the
   reviewed commit. Nothing is typed by hand.
@@ -57,8 +77,9 @@ P03, reached over SSH).
 - If a block fails in a way the step does not predict, stop (S9) and follow
   [§F Recovery](#f-recovery-from-a-partial-proof).
 - Never add `--debug`, `set -x` or `--output json` to a command that issues
-  credentials. Never `cat` a credential file. Never put an access key in a
-  file: the human credentials live only in the macOS Keychain (P00-03).
+  credentials. Never `cat` a credential file. No long-term access key is used
+  or created: humans sign in through IAM Identity Center (P00-03), whose
+  credentials are short-lived.
 - Never edit a policy during the session. A wrong template is fixed in a
   reviewed pull request, and the proof restarts.
 
@@ -155,113 +176,89 @@ enforces it.
   passed `python -m nlw.ops.release_provenance verify`. It must contain
   `nlw.storage.s3_credentials` (`eb42250` or later).
 
-**Where credentials come from.** Nothing in `$PROOF_DIR` holds an access key.
+**Where credentials come from.** Only short-lived IAM Identity Center
+credentials (decision E11). No access key is created, stored or typed at any
+point.
 
-- **Source identities.** Two humans, the operator and the audit
-  administrator (E9), each use an IAM user (E11 = `iam-user-mfa`) with a
-  dedicated access key created only for this proof run.
-- **Storage.** Each key is stored only in that person's macOS login Keychain,
-  under the service `nlw-d6-<PROOF_ID>-<operator|audit>` (P00-03).
-- **Use.** The AWS CLI reads a key through `credential_process`, which runs
-  `credential-process.sh`. The script prints the key to the CLI's pipe, never
-  to a file or a terminal.
-- **Roles.** Every role profile below chains from one of those two source
-  profiles, with that person's MFA device.
-- **Removal.** X09 deletes the two access keys in IAM. X08 removes the
-  Keychain items, deletes only this proof's cached CLI sessions, and scans
-  `$PROOF_DIR` for anything that looks like a credential.
-- **Lifetime.** The keys exist only between P00-03 and X09. §F requires X09
-  and X08 after any stop, whatever else is abandoned.
+- **Sign-in.** The operator and the audit administrator (two different
+  people, E9) each run `aws sso login` for their own SSO session in P00-03.
+  Identity Center enforces MFA at that sign-in; IAM policy cannot see it, so
+  the independent gate record attests it (E15).
+- **Session names.** The sessions are named per run,
+  `nlw-d6-<PROOF_ID>-operator` and `nlw-d6-<PROOF_ID>-audit`, and every
+  chained role session is named `nlw-d6-<PROOF_ID>-<role>`.
+- **Permission sets.** Each person reaches AWS only through their Identity
+  Center permission set: the proof administrator and operator sets for the
+  operator, and the audit set for the audit administrator. Each set carries
+  the proof-principal boundary.
+- **Chained roles.** The dataset operator, audit-admin and audit-reader roles
+  trust only those permission-set roles (`trust-human`).
+- **Cleanup.** X08 deletes only this run's cached SSO tokens and cached role
+  sessions, found by those per-run names. The tokens and sessions also expire
+  on their own (the Identity Center session duration, E11, and one hour for
+  chained roles).
 
 <!-- file: aws-config.workstation -->
 ```ini
 # Workstation profiles. <...> values are filled by P00-02 from the session
-# variables; none is committed and none is a secret. No profile holds a key.
+# variables; none is a secret. No profile holds a key.
+[sso-session nlw-d6-<PROOF_ID>-operator]
+sso_start_url = <SSO_START_URL>
+sso_region = <SSO_REGION>
+sso_registration_scopes = sso:account:access
+
+[sso-session nlw-d6-<PROOF_ID>-audit]
+sso_start_url = <SSO_START_URL>
+sso_region = <SSO_REGION>
+sso_registration_scopes = sso:account:access
+
+[profile nlw-proof-admin]
+# The proof administrator permission set (its role is ADMIN_ROLE, decision E8).
+sso_session = nlw-d6-<PROOF_ID>-operator
+sso_account_id = <ACCOUNT>
+sso_role_name = <PROOF_ADMIN_PERMISSION_SET>
+region = us-east-1
+
 [profile nlw-proof-human-operator]
-credential_process = /bin/bash <PROOF_DIR>/credential-process.sh <PROOF_ID> operator
+sso_session = nlw-d6-<PROOF_ID>-operator
+sso_account_id = <ACCOUNT>
+sso_role_name = <OPERATOR_PERMISSION_SET>
 region = us-east-1
 
 [profile nlw-proof-human-audit]
-credential_process = /bin/bash <PROOF_DIR>/credential-process.sh <PROOF_ID> audit
-region = us-east-1
-
-[profile nlw-proof-admin]
-# <ADMIN_ROLE> (decision E8), assumed by the operator with MFA.
-role_arn = arn:aws:iam::<ACCOUNT>:role/<ADMIN_ROLE>
-role_session_name = nlw-staging-proof-admin
-source_profile = nlw-proof-human-operator
-mfa_serial = <OPERATOR_MFA_ARN>
-duration_seconds = 3600
+sso_session = nlw-d6-<PROOF_ID>-audit
+sso_account_id = <ACCOUNT>
+sso_role_name = <AUDIT_PERMISSION_SET>
 region = us-east-1
 
 [profile nlw-proof-audit-admin]
 role_arn = arn:aws:iam::<ACCOUNT>:role/nlw-staging-dataset-audit-admin
-role_session_name = nlw-staging-audit-admin
+role_session_name = nlw-d6-<PROOF_ID>-audit-admin
 source_profile = nlw-proof-human-audit
-mfa_serial = <AUDIT_MFA_ARN>
 duration_seconds = 3600
 region = us-east-1
 
 [profile nlw-proof-audit-reader]
 role_arn = arn:aws:iam::<ACCOUNT>:role/nlw-staging-dataset-audit-reader
-role_session_name = nlw-staging-audit-reader
+role_session_name = nlw-d6-<PROOF_ID>-audit-reader
 source_profile = nlw-proof-human-audit
-mfa_serial = <AUDIT_MFA_ARN>
 duration_seconds = 3600
 region = us-east-1
 
 [profile nlw-proof-operator]
 role_arn = arn:aws:iam::<ACCOUNT>:role/nlw-staging-dataset-operator
-role_session_name = nlw-staging-operator
+role_session_name = nlw-d6-<PROOF_ID>-operator
 source_profile = nlw-proof-human-operator
-mfa_serial = <OPERATOR_MFA_ARN>
 duration_seconds = 3600
 region = us-east-1
 
-[profile nlw-proof-operator-nomfa]
-# Negative control: the same role without MFA. It must be refused.
+[profile nlw-proof-operator-from-audit]
+# Negative control: the operator role from the audit permission set, which is
+# not in the operator's trust list. It must be refused.
 role_arn = arn:aws:iam::<ACCOUNT>:role/nlw-staging-dataset-operator
-role_session_name = nlw-staging-operator
-source_profile = nlw-proof-human-operator
+role_session_name = nlw-d6-<PROOF_ID>-operator
+source_profile = nlw-proof-human-audit
 region = us-east-1
-```
-
-<!-- file: credential-process.sh -->
-```sh
-#!/bin/bash
-# credential-process.sh PROOF_ID WHO [MODE]: one human source identity, held
-# only in the macOS login Keychain. MODE print (the default) is for the AWS
-# CLI's credential_process: the key goes to the CLI's pipe, never to a file or
-# a terminal. add prompts (hidden) for a new key; key-id prints only the
-# access key id; remove deletes both items and fails if any remains.
-set -euo pipefail
-umask 077
-proof="${1:-}"; who="${2:-}"; mode="${3:-print}"
-[[ "$proof" =~ ^d6-[0-9]{8}-[0-9a-f]{6}$ && "$who" =~ ^(operator|audit)$ ]] \
-  || { echo "credential-process.sh: bad arguments" >&2; exit 2; }
-svc="nlw-d6-$proof-$who"
-kc=/usr/bin/security
-case "$mode" in
-  add)
-    echo "Keychain prompts follow: enter the $who access key id, then its secret." >&2
-    "$kc" add-generic-password -U -s "$svc" -a access-key-id -w
-    "$kc" add-generic-password -U -s "$svc" -a secret-access-key -w ;;
-  key-id)
-    "$kc" find-generic-password -s "$svc" -a access-key-id -w ;;
-  remove)
-    "$kc" delete-generic-password -s "$svc" -a access-key-id > /dev/null 2>&1 || true
-    "$kc" delete-generic-password -s "$svc" -a secret-access-key > /dev/null 2>&1 || true
-    if "$kc" find-generic-password -s "$svc" > /dev/null 2>&1; then
-      echo "STOP S7: Keychain items remain for $svc" >&2; exit 1
-    fi ;;
-  print)
-    { "$kc" find-generic-password -s "$svc" -a access-key-id -w
-      "$kc" find-generic-password -s "$svc" -a secret-access-key -w; } \
-      | /usr/bin/python3 -c 'import json, sys
-k, s = sys.stdin.read().split("\n")[:2]
-print(json.dumps({"Version": 1, "AccessKeyId": k, "SecretAccessKey": s}))' ;;
-  *) echo "credential-process.sh: bad mode" >&2; exit 2 ;;
-esac
 ```
 
 <!-- file: run-step -->
@@ -370,6 +367,8 @@ AUDIT_KEY_ALIAS=alias/nlw-staging-dataset-audit
 if [[ -n "${ADMIN_ROLE:-}" ]]; then
   [[ "$ADMIN_ROLE" =~ ^[A-Za-z0-9+=,.@_/-]+$ && "$ADMIN_ROLE" != arn:* && "$ADMIN_ROLE" != */ ]] \
     || { echo "STOP S1: ADMIN_ROLE must be the role name with any path, not an ARN (E8)" >&2; exit 1; }
+  [[ "${ADMIN_ROLE##*/}" != nlw-*-dataset-* ]] \
+    || { echo "STOP S1: ADMIN_ROLE must not be a dataset role (E8)" >&2; exit 1; }
 fi
 OTHER_BUCKET="nlw-production-datasets-${ACCOUNT}-us-east-1${SUFFIX}"
 CONTAINER_UID=10001
@@ -426,13 +425,15 @@ verify_reviewed_commit() {
 
 note() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$PROOF_DIR/journal.log"; }
 
-# validate_humans JSON [EXCLUDED_JSON]: a non-empty list of IAM users of the
-# approved account (E11), no wildcard, no root, no other account, no
-# duplicates, and nothing shared with EXCLUDED_JSON (E9).
-validate_humans() {
-  python3 - "$ACCOUNT" "$1" "${2:-[]}" <<'PY' || stop S9 "a human principal list is invalid (decisions E9 and E11)"
+# validate_principals KIND JSON [EXCLUDED_JSON]: a non-empty list of
+# principals of the approved account, matched in full (no trailing newline,
+# no wildcard, no root, no other account, no duplicate) and sharing nothing
+# with EXCLUDED_JSON (E9). KIND sso: Identity Center permission-set roles
+# (E11). KIND iam: IAM users or roles (E12).
+validate_principals() {
+  python3 - "$ACCOUNT" "$1" "$2" "${3:-[]}" <<'PY' || stop S9 "a principal list is invalid (decisions E9, E11, E12)"
 import json, re, sys
-account, raw, excluded = sys.argv[1], sys.argv[2], sys.argv[3]
+account, kind, raw, excluded = sys.argv[1:5]
 def strict(pairs):
     keys = [k for k, _ in pairs]
     if len(keys) != len(set(keys)):
@@ -442,11 +443,84 @@ try:
     people, others = json.loads(raw, object_pairs_hook=strict), json.loads(excluded)
 except ValueError:
     sys.exit(1)
-user = re.compile(r"^arn:aws:iam::%s:user/(?:[A-Za-z0-9+=,.@_-]+/)*[A-Za-z0-9+=,.@_-]+$" % account)
-ok = (isinstance(people, list) and people and all(isinstance(p, str) and user.match(p) for p in people)
+patterns = {
+    "sso": r"arn:aws:iam::%s:role/aws-reserved/sso\.amazonaws\.com/(?:[a-z0-9-]+/)?"
+           r"AWSReservedSSO_[A-Za-z0-9+=,.@_-]+_[0-9a-f]{16}" % account,
+    "iam": r"arn:aws:iam::%s:(?:user|role)/(?:[A-Za-z0-9+=,.@_-]+/)*[A-Za-z0-9+=,.@_-]+" % account,
+}
+if kind not in patterns:
+    sys.exit(1)
+pattern = re.compile(patterns[kind])
+ok = (isinstance(people, list) and people and all(isinstance(p, str) and pattern.fullmatch(p) for p in people)
       and len(set(people)) == len(people) and isinstance(others, list) and not set(people) & set(others))
 sys.exit(0 if ok else 1)
 PY
+}
+
+# same LABEL DEPLOYED_JSON RENDERED_FILE: equal after normalization, or S9.
+same() {
+  diff -q <(python3 "$PROOF_DIR/normalize-policy.py" <<< "$2") \
+    <(python3 "$PROOF_DIR/normalize-policy.py" < "$3") > /dev/null || stop S9 "$1 differs from the rendered template"
+}
+
+# sim_denied PRINCIPAL_ARN RESOURCE ACTION... [-- CONTEXT_ENTRY...]: every
+# simulated decision must be a deny. An error or an empty result is S9 (a
+# simulation that did not run proves nothing); an allow is S4.
+sim_denied() {
+  local who="$1" res="$2" out d; shift 2
+  local actions=() context=()
+  while [[ $# -gt 0 && "$1" != -- ]]; do actions+=("$1"); shift; done
+  [[ "${1:-}" == -- ]] && { shift; context=("$@"); }
+  if [[ ${#context[@]} -gt 0 ]]; then
+    out="$(aws iam simulate-principal-policy --profile nlw-proof-admin --policy-source-arn "$who" \
+      --action-names "${actions[@]}" --resource-arns "$res" --context-entries "${context[@]}" \
+      --query 'EvaluationResults[].EvalDecision' --output text)" || stop S9 "the simulation for $who failed"
+  else
+    out="$(aws iam simulate-principal-policy --profile nlw-proof-admin --policy-source-arn "$who" \
+      --action-names "${actions[@]}" --resource-arns "$res" \
+      --query 'EvaluationResults[].EvalDecision' --output text)" || stop S9 "the simulation for $who failed"
+  fi
+  [[ -n "${out//[[:space:]]/}" ]] || stop S9 "the simulation for $who returned no decision"
+  for d in $out; do
+    [[ "$d" == implicitDeny || "$d" == explicitDeny ]] || stop S4 "$who is allowed ${actions[*]} on $res ($d)"
+  done
+}
+
+# verify_role_shape ROLE INLINE_POLICY_NAME: exactly that one inline policy,
+# no attached managed policy, and exactly the proof boundary.
+verify_role_shape() {
+  local role="$1" inline="$2" out
+  out="$(aws iam list-role-policies --profile nlw-proof-admin --role-name "$role" \
+    --query PolicyNames --output json)" || stop S9 "cannot list the inline policies of $role"
+  [[ "$(jq -c 'sort' <<< "$out")" == "$(jq -cn --arg p "$inline" '[$p]')" ]] \
+    || stop S9 "$role has inline policies other than $inline"
+  out="$(aws iam list-attached-role-policies --profile nlw-proof-admin --role-name "$role" \
+    --query 'AttachedPolicies[].PolicyArn' --output json)" || stop S9 "cannot list the managed policies of $role"
+  [[ "$(jq -c '. // []' <<< "$out")" == "[]" ]] || stop S9 "$role has attached managed policies"
+  out="$(aws iam get-role --profile nlw-proof-admin --role-name "$role" \
+    --query 'Role.PermissionsBoundary.PermissionsBoundaryArn' --output text)" || stop S9 "cannot read $role"
+  [[ "$out" == "$PROOF_BOUNDARY_ARN" ]] || stop S9 "$role does not carry exactly the proof boundary"
+}
+
+# verify_no_grants KEY_ARN PROFILE: the key has no grant at all.
+verify_no_grants() {
+  local out
+  out="$(aws kms list-grants --profile "$2" --key-id "$1" --query 'length(Grants)' --output text)" \
+    || stop S9 "cannot list the grants of $1"
+  [[ "$out" == 0 ]] || stop S9 "a KMS grant exists on $1"
+}
+
+# verify_bucket_controls BUCKET PROFILE: all four public-access blocks on and
+# ACLs disabled (BucketOwnerEnforced).
+verify_bucket_controls() {
+  local out
+  out="$(aws s3api get-public-access-block --profile "$2" --bucket "$1" \
+    --query 'PublicAccessBlockConfiguration.[BlockPublicAcls,IgnorePublicAcls,BlockPublicPolicy,RestrictPublicBuckets]' \
+    --output text)" || stop S9 "no public access block on $1"
+  [[ "$(tr -s '\t ' '\n\n' <<< "$out" | grep -c '^True$')" == 4 ]] || stop S9 "public access is not fully blocked on $1"
+  out="$(aws s3api get-bucket-ownership-controls --profile "$2" --bucket "$1" \
+    --query 'OwnershipControls.Rules[].ObjectOwnership' --output text)" || stop S9 "no ownership controls on $1"
+  [[ "$out" == BucketOwnerEnforced ]] || stop S9 "ACLs are not disabled on $1"
 }
 
 # record NAME VALUE: append-only ledger, written immediately after a create
@@ -484,7 +558,8 @@ expect_event() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:--}" >> "$PROOF_D
 
 # expect_simulated DECISION output: every decision in a simulator result.
 expect_simulated() {
-  local want="$1" got; got="$(tr '\t' '\n' <<< "$2" | sort -u | tr '\n' ' ')"
+  local want="$1" got; got="$(tr '\t' '\n' <<< "$2" | sed '/^[[:space:]]*$/d' | sort -u | tr '\n' ' ')"
+  [[ -n "$got" ]] || stop S9 "the simulator returned no decision"
   [[ "$got" == "$want " ]] || stop S4 "simulator returned '$got', expected '$want'"
   note "simulated: $want"
 }
@@ -508,13 +583,16 @@ values = {
     "<AUDIT_ADMIN_ROLE>": "nlw-staging-dataset-audit-admin",
     "<AUDIT_READER_ROLE>": "nlw-staging-dataset-audit-reader",
 }
+if env.get("PROOF_BOUNDARY_ARN"):
+    values["<PROOF_BOUNDARY_ARN>"] = env["PROOF_BOUNDARY_ARN"]
 for key, var in (("<KEY_ARN>", "REC_KEY_ARN"), ("<AUDIT_KEY_ARN>", "REC_AUDIT_KEY_ARN")):
     if env.get(var):
         values[key] = env[var]
 if env.get("HUMANS"):
     people = json.loads(env["HUMANS"])
-    user = re.compile(r"^arn:aws:iam::%s:user/(?:[A-Za-z0-9+=,.@_-]+/)*[A-Za-z0-9+=,.@_-]+$" % env["ACCOUNT"])
-    if not (isinstance(people, list) and people and all(isinstance(p, str) and user.match(p) for p in people)):
+    sso = re.compile(r"arn:aws:iam::%s:role/aws-reserved/sso\.amazonaws\.com/(?:[a-z0-9-]+/)?"
+                     r"AWSReservedSSO_[A-Za-z0-9+=,.@_-]+_[0-9a-f]{16}" % env["ACCOUNT"])
+    if not (isinstance(people, list) and people and all(isinstance(p, str) and sso.fullmatch(p) for p in people)):
         sys.exit("invalid human principals")
     body = body.replace('"<HUMAN_PRINCIPAL_ARNS>"', json.dumps(people))
 if env.get("AUDIT_RETENTION_DAYS"):
@@ -654,14 +732,18 @@ export BUCKET_SUFFIX="-d6$(openssl rand -hex 6)"
 export PROOF_DIR="$HOME/nlw-d6/$PROOF_ID" RUNBOOK_DIR="$PWD/docs/runbooks"
 export APPROVED_ACCOUNT="<from decision E5>" ADMIN_ROLE="<role name with any path, decision E8>"
 export AUDIT_RETENTION_DAYS="<from decision E1>"
-export E11_IDENTITY="<iam-user-mfa or identity-center, decision E11>"
-export OPERATOR_MFA_ARN="<the operator's MFA device ARN>" AUDIT_MFA_ARN="<the audit administrator's MFA device ARN>"
+export E11_IDENTITY="<identity-center, decision E11>" E14_ACCOUNT_MODE="<dedicated or bounded, decision E14>"
+export SSO_START_URL="<Identity Center start URL>" SSO_REGION="<Identity Center region>"
+export PROOF_ADMIN_PERMISSION_SET="<permission set name>" OPERATOR_PERMISSION_SET="<permission set name>"
+export AUDIT_PERMISSION_SET="<permission set name>" OPERATOR_NAME="<the person running this proof>"
+export PROOF_BOUNDARY_ARN="arn:aws:iam::<account>:policy/nlw-staging-d6-proof-boundary"
 export BUDGET_LIMIT_USD="<decision E4>" BUDGET_EMAIL="<decision E4 recipient>"
 export IMAGE="ghcr.io/atulpandey02/natural-language-workflow@sha256:<verified backend digest>"
 export OPERATOR_CIDR="<the workstation's public IPv4>/32"
 export OBJECT_LOCK_MODE="<GOVERNANCE or COMPLIANCE, decision E2>" E3_DECISION="<delete or retain, decision E3>"
-export OPERATOR_HUMANS_JSON='["<decision E9>"]' AUDIT_ADMIN_HUMANS_JSON='["<decision E9>"]'
-export AUDIT_READER_HUMANS_JSON='["<decision E9>"]'
+export OPERATOR_HUMANS_JSON='["<operator permission-set role ARN, E9>"]'
+export AUDIT_ADMIN_HUMANS_JSON='["<audit permission-set role ARN, E9>"]'
+export AUDIT_READER_HUMANS_JSON='["<audit permission-set role ARN, E9>"]'
 export E12_MUST_NOT_PASS_JSON='["<decision E12: principals that must not pass the bootstrap role>"]'
 ```
 
@@ -672,11 +754,38 @@ reviewed steps and files (paste into `bash -s`)
 set -euo pipefail
 [[ "$(git rev-parse HEAD)" == "$REVIEWED_COMMIT" ]] || { echo "STOP S9: not the reviewed commit" >&2; exit 1; }
 [[ -z "$(git status --porcelain)" ]] || { echo "STOP S9: the checkout has local changes" >&2; exit 1; }
-[[ "$E11_IDENTITY" == iam-user-mfa ]] \
-  || { echo "STOP S9: this procedure supports only E11 = iam-user-mfa; Identity Center needs a reviewed trust design" >&2; exit 1; }
-[[ "$(uname -s)" == Darwin && -x /usr/bin/security ]] \
-  || { echo "STOP S9: the credential source is the macOS Keychain; another workstation needs a reviewed design" >&2; exit 1; }
+top="$(cd "$(git rev-parse --show-toplevel)/docs/runbooks" && pwd -P)"
+[[ "$(cd "$RUNBOOK_DIR" && pwd -P)" == "$top" ]] \
+  || { echo "STOP S9: RUNBOOK_DIR is not this reviewed checkout's runbook directory" >&2; exit 1; }
+[[ "$E11_IDENTITY" == identity-center ]] \
+  || { echo "STOP S9: only short-lived Identity Center credentials are allowed (E11)" >&2; exit 1; }
 [[ "$PROOF_DIR" != *[[:space:]]* ]] || { echo "STOP S9: PROOF_DIR must not contain spaces" >&2; exit 1; }
+python3 - "$RUNBOOK_DIR/../evidence/o2-d6/d6-gate.json" <<'PY' || { echo "STOP S9: D6 is blocked (decision E15)" >&2; exit 1; }
+import json, os, sys
+path = sys.argv[1]
+if not os.path.isfile(path):
+    sys.exit("no independent verification record in the reviewed commit")
+gate, env = json.load(open(path)), os.environ
+admin = "arn:aws:iam::%s:role/%s" % (env["APPROVED_ACCOUNT"], env["ADMIN_ROLE"])
+checks = {
+    "account": gate.get("account") == env["APPROVED_ACCOUNT"],
+    "account_mode": gate.get("account_mode") in ("dedicated", "bounded")
+                    and gate.get("account_mode") == env["E14_ACCOUNT_MODE"],
+    "proof_boundary_arn": gate.get("proof_boundary_arn") == env["PROOF_BOUNDARY_ARN"],
+    "proof_admin_role_arn": gate.get("proof_admin_role_arn") == admin,
+    "operator_role_arns": gate.get("operator_role_arns") == json.loads(env["OPERATOR_HUMANS_JSON"]),
+    "audit_admin_role_arns": gate.get("audit_admin_role_arns") == json.loads(env["AUDIT_ADMIN_HUMANS_JSON"]),
+    "audit_reader_role_arns": gate.get("audit_reader_role_arns") == json.loads(env["AUDIT_READER_HUMANS_JSON"]),
+    "boundary_attached_verified": gate.get("boundary_attached_verified") is True,
+    "effective_permissions_verified": gate.get("effective_permissions_verified") is True,
+    "identity_center_mfa_required": gate.get("identity_center_mfa_required") is True,
+    "verified_by": bool(gate.get("verified_by")) and gate.get("verified_by") != env["OPERATOR_NAME"],
+    "verified_at": bool(gate.get("verified_at")),
+}
+failed = [k for k, ok in checks.items() if not ok]
+if failed:
+    sys.exit("the verification record does not match this run: " + ", ".join(failed))
+PY
 mkdir -m 0700 -p "$PROOF_DIR" "$PROOF_DIR/evidence" "$PROOF_DIR/steps"
 python3 - "$RUNBOOK_DIR/dataset-s3-d6-proof.md" "$PROOF_DIR" <<'PY'
 import hashlib, json, os, re, sys
@@ -699,42 +808,47 @@ for rel, body in files.items():
 with open(os.path.join(out, "manifest.json"), "w") as f:
     json.dump(manifest, f, indent=1, sort_keys=True)
 PY
-chmod 0700 "$PROOF_DIR/credential-process.sh" "$PROOF_DIR/run-step"
-sed -e "s#<ACCOUNT>#$APPROVED_ACCOUNT#g" -e "s#<PROOF_DIR>#$PROOF_DIR#g" -e "s#<PROOF_ID>#$PROOF_ID#g" \
-  -e "s#<ADMIN_ROLE>#$ADMIN_ROLE#g" -e "s#<OPERATOR_MFA_ARN>#$OPERATOR_MFA_ARN#g" \
-  -e "s#<AUDIT_MFA_ARN>#$AUDIT_MFA_ARN#g" "$PROOF_DIR/aws-config.workstation" > "$PROOF_DIR/aws-config"
-if grep -qE '<[A-Z_]+>|aws_access_key_id|aws_secret_access_key|aws_session_token' "$PROOF_DIR/aws-config"; then
-  echo "STOP S7: aws-config is incomplete or holds a key" >&2; exit 1
+chmod 0700 "$PROOF_DIR/run-step"
+sed -e "s#<ACCOUNT>#$APPROVED_ACCOUNT#g" -e "s#<PROOF_ID>#$PROOF_ID#g" \
+  -e "s#<SSO_START_URL>#$SSO_START_URL#g" -e "s#<SSO_REGION>#$SSO_REGION#g" \
+  -e "s#<PROOF_ADMIN_PERMISSION_SET>#$PROOF_ADMIN_PERMISSION_SET#g" \
+  -e "s#<OPERATOR_PERMISSION_SET>#$OPERATOR_PERMISSION_SET#g" \
+  -e "s#<AUDIT_PERMISSION_SET>#$AUDIT_PERMISSION_SET#g" "$PROOF_DIR/aws-config.workstation" > "$PROOF_DIR/aws-config"
+if grep -qE '<[A-Z_]+>|aws_access_key_id|aws_secret_access_key|aws_session_token|credential_process' "$PROOF_DIR/aws-config"; then
+  echo "STOP S7: aws-config is incomplete or holds a credential source other than Identity Center" >&2; exit 1
 fi
+python3 - "$PROOF_DIR" <<'PY'
+import hashlib, json, os, sys
+d = sys.argv[1]
+manifest = json.load(open(os.path.join(d, "manifest.json")))
+manifest["aws-config"] = hashlib.sha256(open(os.path.join(d, "aws-config"), "rb").read()).hexdigest()
+json.dump(manifest, open(os.path.join(d, "manifest.json"), "w"), indent=1, sort_keys=True)
+PY
 git rev-parse HEAD > "$PROOF_DIR/proof-commit"
 touch "$PROOF_DIR/started"
 echo "extracted $(ls "$PROOF_DIR/steps" | wc -l | xargs) steps; continue with: bash \"\$PROOF_DIR/run-step\" P00-03"
 ```
 
-**P00-03 · READ-ONLY · workstation** — human credentials into the Keychain
-(each person enters their own key at the hidden Keychain prompt)
-
-Each person first creates a **new** access key for their IAM user (E11)
-only for this run. It is deleted in X09. Nobody writes it into a file, a
-shell variable, a chat or a ticket; it is typed or pasted only into the
-Keychain prompt below.
+**P00-03 · READ-ONLY · workstation** — Identity Center sign-in (each person
+signs in to their own session; Identity Center enforces MFA)
 
 ```bash
 source "$PROOF_DIR/lib.sh"
+validate_principals sso "$OPERATOR_HUMANS_JSON" "$AUDIT_ADMIN_HUMANS_JSON"
+validate_principals sso "$AUDIT_ADMIN_HUMANS_JSON" "$OPERATOR_HUMANS_JSON"
+validate_principals sso "$AUDIT_READER_HUMANS_JSON"
+aws sso login --sso-session "nlw-d6-$PROOF_ID-operator"
+aws sso login --sso-session "nlw-d6-$PROOF_ID-audit"
 for who in operator audit; do
-  bash "$PROOF_DIR/credential-process.sh" "$PROOF_ID" "$who" add
   arn="$(aws sts get-caller-identity --profile "nlw-proof-human-$who" --query Arn --output text)"
-  [[ "$arn" =~ ^arn:aws:iam::${ACCOUNT}:user/ ]] || stop S1 "the $who source identity is not an IAM user of the approved account (E11)"
+  [[ "$arn" == "arn:aws:sts::${ACCOUNT}:assumed-role/AWSReservedSSO_"* ]] \
+    || stop S1 "the $who identity is not an Identity Center session in the approved account (E11)"
+  role="${arn#*:assumed-role/}"; role="${role%%/*}"
   list="$OPERATOR_HUMANS_JSON"; [[ "$who" == operator ]] || list="$AUDIT_ADMIN_HUMANS_JSON"
-  jq -e --arg a "$arn" 'index($a) != null' <<< "$list" > /dev/null \
-    || stop S1 "the $who source identity is not in its decision E9 list"
-  record "REC_HUMAN_$(tr a-z A-Z <<< "$who")_USER" "${arn##*/}"
-  record "REC_HUMAN_$(tr a-z A-Z <<< "$who")_KEY_ID" "$(bash "$PROOF_DIR/credential-process.sh" "$PROOF_ID" "$who" key-id)"
+  jq -e --arg r "$role" 'map(split("/") | last) | index($r) != null' <<< "$list" > /dev/null \
+    || stop S1 "the $who permission set is not in its decision E9 list"
 done
-validate_humans "$OPERATOR_HUMANS_JSON" "$AUDIT_ADMIN_HUMANS_JSON"
-validate_humans "$AUDIT_ADMIN_HUMANS_JSON" "$OPERATOR_HUMANS_JSON"
-validate_humans "$AUDIT_READER_HUMANS_JSON"
-note "P00-03 two human source identities verified; keys held only in the Keychain"
+note "P00-03 two Identity Center sessions verified; no long-term key in use"
 ```
 
 ### P01. Caller identity, account, region and tools (stop S1)
@@ -752,6 +866,34 @@ aws sts get-caller-identity --profile nlw-proof-admin --query Arn --output text 
 aws ec2 describe-availability-zones --profile nlw-proof-admin \
   --query 'AvailabilityZones[0].RegionName' --output text | grep -qx us-east-1 || stop S1 "region mismatch"
 note "P01 identity: account and region match the approved target"
+```
+
+**P01-02 · READ-ONLY · workstation** — the proof boundary is attached and
+effective (stop S1 or S4)
+
+The independent verifier did this before the gate record was written (E15);
+the proof repeats it with its own sessions before creating anything.
+
+```bash
+source "$PROOF_DIR/lib.sh"
+render proof-principal-boundary > "$PROOF_DIR/proof-boundary.json"
+version="$(aws iam get-policy --profile nlw-proof-admin --policy-arn "$PROOF_BOUNDARY_ARN" \
+  --query Policy.DefaultVersionId --output text)" || stop S1 "the proof boundary policy does not exist"
+same "proof boundary" "$(aws iam get-policy-version --profile nlw-proof-admin --policy-arn "$PROOF_BOUNDARY_ARN" \
+  --version-id "$version" --query PolicyVersion.Document --output json)" "$PROOF_DIR/proof-boundary.json"
+ADMIN_ARN="$ROLE_PREFIX/$ADMIN_ROLE"
+for arn in "$ADMIN_ARN" $(jq -r '.[]' <<< "$OPERATOR_HUMANS_JSON $AUDIT_ADMIN_HUMANS_JSON $AUDIT_READER_HUMANS_JSON" | sort -u); do
+  [[ "$(aws iam get-role --profile nlw-proof-admin --role-name "${arn##*/}" \
+    --query 'Role.PermissionsBoundary.PermissionsBoundaryArn' --output text)" == "$PROOF_BOUNDARY_ARN" ]] \
+    || stop S1 "${arn##*/} does not carry the proof boundary"
+  sim_denied "$arn" "arn:aws:s3:::$OTHER_BUCKET/versions/x" s3:PutObject s3:DeleteObject s3:GetObject
+  sim_denied "$arn" "$ROLE_PREFIX/nlw-production-dataset-api" iam:PutRolePolicy iam:CreateRole iam:PassRole
+  sim_denied "$arn" "*" iam:AttachRolePolicy iam:CreateAccessKey iam:CreatePolicyVersion \
+    iam:PutRolePermissionsBoundary iam:DeleteRolePermissionsBoundary
+  sim_denied "$arn" "arn:aws:kms:us-east-1:${ACCOUNT}:key/00000000-0000-0000-0000-000000000000" kms:Decrypt \
+    kms:CreateGrant -- "ContextKeyName=aws:ResourceTag/nlw-env,ContextKeyValues=production,ContextKeyType=string"
+done
+note "P01-02 the proof boundary is attached to every proof principal and denies production and escalation"
 ```
 
 ### P02. Baseline inventory: nothing may exist yet (stop S2)
@@ -827,14 +969,15 @@ and never enters evidence.
 
 ```bash
 source "$PROOF_DIR/lib.sh"
-validate_humans "$OPERATOR_HUMANS_JSON" "$AUDIT_ADMIN_HUMANS_JSON"
-validate_humans "$AUDIT_ADMIN_HUMANS_JSON" "$OPERATOR_HUMANS_JSON"
-validate_humans "$AUDIT_READER_HUMANS_JSON"
+validate_principals sso "$OPERATOR_HUMANS_JSON" "$AUDIT_ADMIN_HUMANS_JSON"
+validate_principals sso "$AUDIT_ADMIN_HUMANS_JSON" "$OPERATOR_HUMANS_JSON"
+validate_principals sso "$AUDIT_READER_HUMANS_JSON"
 TAGS=(Key=nlw-env,Value=staging "Key=nlw-proof,Value=$PROOF_ID")
 mkrole() { # mkrole NAME TRUST_TEMPLATE LEDGER [HUMANS_JSON]
   HUMANS="${4:-}" render "$2" > "$PROOF_DIR/trust-$1.json"
   record "$3" "$(aws iam create-role --profile nlw-proof-admin --role-name "nlw-staging-dataset-$1" \
     --assume-role-policy-document "file://$PROOF_DIR/trust-$1.json" --max-session-duration 3600 \
+    --permissions-boundary "$PROOF_BOUNDARY_ARN" \
     --tags "${TAGS[@]}" --query Role.Arn --output text)"
   aws iam wait role-exists --profile nlw-proof-admin --role-name "nlw-staging-dataset-$1"
 }
@@ -851,11 +994,13 @@ aws iam add-role-to-instance-profile --profile nlw-proof-admin \
   --instance-profile-name nlw-staging-dataset-bootstrap --role-name nlw-staging-dataset-bootstrap
 ```
 
-`*_HUMANS_JSON` are JSON lists of IAM user ARNs from decision E9, exported in
-the session shell, never committed. `validate_humans` refuses a wildcard,
-the account root, another account, a role, a malformed ARN, a duplicate, and
-any principal shared by the operator and audit-admin lists; `render` refuses
-the same and writes the list itself, so nothing else can be injected.
+`*_HUMANS_JSON` are JSON lists of Identity Center permission-set role ARNs
+from decision E9, exported in the session shell, never committed.
+`validate_principals sso` refuses anything else: a wildcard, the account
+root, another account, an IAM user, a malformed ARN, a trailing newline, a
+duplicate, or a principal shared by the operator and audit-admin lists.
+`render` applies the same full match and writes the list itself, so nothing
+else can be injected. Every role created here carries the proof boundary.
 
 **P03-02 · MUTATING · workstation** — dataset key
 
@@ -1062,12 +1207,22 @@ aws ec2 wait instance-status-ok --profile nlw-proof-admin --instance-ids "$REC_I
 
 **P03-11 · READ-ONLY · workstation** — deployed policies and settings equal the rendered templates
 
-Compared after `normalize-policy.py`: every role's trust policy and inline
-policy, both key policies, both bucket policies, both lifecycle rules, the
-trail's event selectors, both buckets' encryption, the dataset bucket's
-versioning, the audit bucket's Object Lock, key rotation, and the instance
-metadata options. Any difference stops the run (S9); the template is never
-edited to match.
+Checked:
+
+- **Compared after `normalize-policy.py`:** every role's trust policy and
+  inline policy, both key policies, both bucket policies, both lifecycle
+  rules and the trail's event selectors.
+- **Each role's shape:** exactly its one inline policy, no attached managed
+  policy, and exactly the proof boundary.
+- **Keys:** neither proof key has a KMS grant; rotation is on for both.
+- **Buckets:** all four public-access blocks are on and ACLs are disabled on
+  both; both buckets' encryption, the dataset bucket's versioning and the
+  audit bucket's Object Lock match.
+- **Simulations:** a `PassRole` simulation for every role and every E12
+  principal, where an error or an empty result is S9.
+- **Instance:** the metadata options.
+
+Any difference stops the run (S9); the template is never edited to match.
 
 ```bash
 source "$PROOF_DIR/lib.sh"
@@ -1076,11 +1231,8 @@ aws s3api get-bucket-encryption --profile nlw-proof-admin --bucket "$BUCKET" \
   --output text | grep -qx "$REC_KEY_ARN	True" || stop S9 "dataset bucket encryption differs"
 aws s3api get-bucket-versioning --profile nlw-proof-admin --bucket "$BUCKET" --query Status --output text \
   | grep -qx Enabled || stop S9 "dataset bucket versioning off"
-same() { # same LABEL DEPLOYED_JSON RENDERED_FILE: equal after normalization, or S9
-  diff -q <(python3 "$PROOF_DIR/normalize-policy.py" <<< "$2") \
-    <(python3 "$PROOF_DIR/normalize-policy.py" < "$3") > /dev/null || stop S9 "$1 differs from the rendered template"
-}
 for r in bootstrap api ingest operator audit-admin audit-reader; do
+  verify_role_shape "nlw-staging-dataset-$r" "nlw-dataset-$r"
   same "trust policy of $r" "$(aws iam get-role --profile nlw-proof-admin --role-name "nlw-staging-dataset-$r" \
     --query Role.AssumeRolePolicyDocument --output json)" "$PROOF_DIR/trust-$r.json"
   same "inline policy of $r" "$(aws iam get-role-policy --profile nlw-proof-admin --role-name "nlw-staging-dataset-$r" \
@@ -1105,10 +1257,17 @@ aws cloudtrail get-trail-status --profile nlw-proof-audit-admin --name "$TRAIL_A
   --query IsLogging --output text | grep -qx True || stop S6 "trail is not logging"
 same "event selectors" "$(aws cloudtrail get-event-selectors --profile nlw-proof-audit-admin \
   --trail-name "$TRAIL_ARN" --query AdvancedEventSelectors --output json)" "$PROOF_DIR/selectors.json"
-for k in "$REC_KEY_ARN"; do
-  aws kms get-key-rotation-status --profile nlw-proof-admin --key-id "$k" \
-    --query KeyRotationEnabled --output text | grep -qx True || stop S9 "key rotation off"
-done
+aws kms get-key-rotation-status --profile nlw-proof-admin --key-id "$REC_KEY_ARN" \
+  --query KeyRotationEnabled --output text | grep -qx True || stop S9 "dataset key rotation off"
+aws kms get-key-rotation-status --profile nlw-proof-audit-admin --key-id "$REC_AUDIT_KEY_ARN" \
+  --query KeyRotationEnabled --output text | grep -qx True || stop S9 "audit key rotation off"
+verify_no_grants "$REC_KEY_ARN" nlw-proof-admin
+verify_no_grants "$REC_AUDIT_KEY_ARN" nlw-proof-audit-admin
+verify_bucket_controls "$BUCKET" nlw-proof-admin
+verify_bucket_controls "$AUDIT_BUCKET" nlw-proof-audit-admin
+aws s3api get-bucket-encryption --profile nlw-proof-audit-admin --bucket "$AUDIT_BUCKET" \
+  --query 'ServerSideEncryptionConfiguration.Rules[0].[ApplyServerSideEncryptionByDefault.KMSMasterKeyID,BucketKeyEnabled]' \
+  --output text | grep -qx "$REC_AUDIT_KEY_ARN	False" || stop S9 "audit bucket encryption differs"
 aws ec2 describe-instances --profile nlw-proof-admin --instance-ids "$REC_INSTANCE_ID" \
   --query 'Reservations[0].Instances[0].MetadataOptions.[HttpTokens,HttpPutResponseHopLimit]' \
   --output text | grep -qx "required	1" || stop S5 "instance metadata options differ"
@@ -1120,11 +1279,9 @@ for r in bootstrap api ingest operator audit-admin audit-reader; do
     --query 'EvaluationResults[].EvalDecision' --output text | tr '\t' '\n' | sort -u)" == explicitDeny ]] \
     || stop S4 "nlw-staging-dataset-$r is not explicitly denied passing the bootstrap role"
 done
-for principal in $(jq -r '.[]' <<< "${E12_MUST_NOT_PASS_JSON:-[]}"); do
-  [[ "$(aws iam simulate-principal-policy --profile nlw-proof-admin --policy-source-arn "$principal" \
-    --action-names iam:PassRole --resource-arns "$ROLE_PREFIX/nlw-staging-dataset-bootstrap" \
-    --query 'EvaluationResults[0].EvalDecision' --output text)" != allowed ]] \
-    || stop S4 "a principal decision E12 excludes can pass the bootstrap role"
+validate_principals iam "$E12_MUST_NOT_PASS_JSON"
+for principal in $(jq -r '.[]' <<< "$E12_MUST_NOT_PASS_JSON"); do
+  sim_denied "$principal" "$ROLE_PREFIX/nlw-staging-dataset-bootstrap" iam:PassRole
 done
 note "P03 provisioned state matches the templates"
 ```
@@ -1141,7 +1298,7 @@ aws ec2-instance-connect send-ssh-public-key --profile nlw-proof-admin --instanc
 B="$PROOF_DIR/instance-bundle"
 mkdir -m 0700 -p "$B"
 cp -R "$PROOF_DIR/steps" "$PROOF_DIR/lib.sh" "$PROOF_DIR/probe.py" "$PROOF_DIR/run-step" \
-  "$PROOF_DIR/manifest.json" "$PROOF_DIR/credential-process.sh" "$PROOF_DIR/normalize-policy.py" \
+  "$PROOF_DIR/manifest.json" "$PROOF_DIR/normalize-policy.py" \
   "$PROOF_DIR/user-data.sh" "$PROOF_DIR/aws-config.workstation" "$PROOF_DIR/aws-config.instance" \
   "$PROOF_DIR/created.env" "$B/"
 printf 'export PROOF_ID=%q APPROVED_ACCOUNT=%q BUCKET_SUFFIX=%q IMAGE=%q\n' \
@@ -1576,11 +1733,11 @@ done
 
 ### P12. Operator MFA assumption and version-aware deletion
 
-**P12-01 · READ-ONLY · workstation · EXPECT-DENIED** — no MFA, no operator
+**P12-01 · READ-ONLY · workstation · EXPECT-DENIED** — the operator role refuses the audit permission set
 
 ```bash
 source "$PROOF_DIR/lib.sh"
-expect_denied aws sts get-caller-identity --profile nlw-proof-operator-nomfa
+expect_denied aws sts get-caller-identity --profile nlw-proof-operator-from-audit
 ```
 
 **P12-02 · READ-ONLY · proof instance · EXPECT-DENIED** — the instance role
@@ -2040,66 +2197,58 @@ two audit roles. The audit bucket cannot be emptied before Object Lock
 retention ends, and the audit key must outlive every log it encrypts. Their
 removal after retention is a separate, reviewed change.
 
-**X09 · MUTATING · workstation** — always, after X01–X07 (or after a stop):
-delete the two proof access keys
+**X08 · LOCAL · workstation** — always, last: this run's cached sessions, local
+keys and a final scan
 
 ```bash
 source "$PROOF_DIR/lib.sh"
-if [[ -n "${REC_HUMAN_OPERATOR_KEY_ID:-}" ]]; then
-  aws iam delete-access-key --profile nlw-proof-human-operator \
-    --user-name "${REC_HUMAN_OPERATOR_USER}" --access-key-id "${REC_HUMAN_OPERATOR_KEY_ID}"
-fi
-if [[ -n "${REC_HUMAN_AUDIT_KEY_ID:-}" ]]; then
-  aws iam delete-access-key --profile nlw-proof-human-audit \
-    --user-name "${REC_HUMAN_AUDIT_USER}" --access-key-id "${REC_HUMAN_AUDIT_KEY_ID}"
-fi
-note "X09 proof access keys deleted"
-```
-
-Each person deletes their own key with that key, so the IAM user needs
-`iam:DeleteAccessKey` on itself. If a key cannot be deleted this way, its
-owner deletes it in the console at once; X08 still runs.
-
-**X08 · LOCAL · workstation** — always, last: Keychain items, cached sessions,
-local keys and a final scan
-
-```bash
-source "$PROOF_DIR/lib.sh"
-for who in operator audit; do
-  bash "$PROOF_DIR/credential-process.sh" "$PROOF_ID" "$who" remove || stop S7 "Keychain items for $who remain"
-done
-python3 - "$HOME/.aws/cli/cache" "$ACCOUNT" <<'PY'
-import json, os, re, sys
-cache, account = sys.argv[1], sys.argv[2]
-ours = re.compile(r"^arn:aws:sts::%s:assumed-role/[^/]+/nlw-staging-"
-                  r"(api|ingest|operator|audit-admin|audit-reader|proof-admin)$" % account)
+python3 - "$HOME/.aws" "$ACCOUNT" "$PROOF_ID" <<'PY'
+import hashlib, json, os, re, sys
+aws, account, proof = sys.argv[1], sys.argv[2], sys.argv[3]
+# Chained role sessions of this run only: their session names carry the run id.
+ours = re.compile(r"arn:aws:sts::%s:assumed-role/[^/]+/nlw-d6-%s-(operator|audit-admin|audit-reader)"
+                  % (re.escape(account), re.escape(proof)))
 removed = 0
-for name in (os.listdir(cache) if os.path.isdir(cache) else []):
-    path = os.path.join(cache, name)
+cli = os.path.join(aws, "cli", "cache")
+for name in (os.listdir(cli) if os.path.isdir(cli) else []):
+    path = os.path.join(cli, name)
     try:
         arn = json.load(open(path)).get("AssumedRoleUser", {}).get("Arn", "")
     except (OSError, ValueError, AttributeError):
         continue
-    if ours.match(arn):
+    if ours.fullmatch(arn):
         os.remove(path)
         removed += 1
-print(f"removed {removed} cached sessions of this proof's roles; others untouched")
+# This run's SSO tokens: the CLI names each token file after the SHA-1 of its
+# sso-session name, which carries the run id.
+for who in ("operator", "audit"):
+    token = os.path.join(aws, "sso", "cache",
+                         hashlib.sha1(f"nlw-d6-{proof}-{who}".encode()).hexdigest() + ".json")
+    if os.path.isfile(token):
+        os.remove(token)
+        removed += 1
+print(f"removed {removed} cached tokens and sessions of this run; other runs and sessions untouched")
 PY
 rm -f "$PROOF_DIR/proof-key" "$PROOF_DIR/proof-key.pub" "$PROOF_DIR"/*.bin
 rm -rf "$PROOF_DIR/trail" "$PROOF_DIR/instance-bundle"
 shopt -s nullglob
-if grep -lE 'aws_access_key_id|aws_secret_access_key|aws_session_token|SecretAccessKey|SessionToken|ASIA[0-9A-Z]{16}' \
+if grep -lE 'aws_access_key_id|aws_secret_access_key|aws_session_token|SecretAccessKey|SessionToken|ASIA[0-9A-Z]{16}|accessToken' \
   "$PROOF_DIR/aws-config" "$PROOF_DIR/journal.log" "$PROOF_DIR"/evidence/* "$PROOF_DIR"/*.json \
   "$PROOF_DIR"/*.tsv "$PROOF_DIR"/*.out "$PROOF_DIR"/*.err; then
   stop S7 "a credential-like value remains in $PROOF_DIR"
 fi
-note "X08 Keychain items, this proof's cached sessions and local keys removed; scan clean"
+note "X08 this run's cached tokens and sessions and the local keys removed; scan clean"
 ```
 
-X08 deletes only CLI cache files whose assumed-role session is one of this
-proof's session names in the approved account; other sessions are left
-alone. The raw CloudTrail downloads are removed because they carry session
-key ids; the audit bucket keeps the originals.
+- **What X08 deletes.** Only CLI cache files whose assumed-role session name
+  carries this run's id, and the two SSO token files named after this run's
+  sessions. Another run's sessions, and the person's other sessions, are left
+  alone.
+- **What expires on its own.** The SSO role credentials the CLI caches for
+  the permission sets cannot be attributed to a run by their contents. They
+  expire with the Identity Center session (E11).
+- **CloudTrail downloads.** The raw downloads are removed because they carry
+  session key ids; the audit bucket keeps the originals.
 
 ### F. Recovery from a partial proof
 
@@ -2121,8 +2270,8 @@ its name alone.
    its name, so a step may be resumed only after re-running P02 for the
    resources that step creates. Otherwise run X01–X07 in order, with X10–X12
    where they apply.
-4. **Always, whatever else happens:** run X09 and then X08, so the proof's
-   access keys, Keychain items and cached sessions do not outlive the run.
+4. **Always, whatever else happens:** run X08, so this run's cached tokens
+   and sessions do not outlive it.
 
 **R-OBJ: an EXPECT-DENIED write unexpectedly succeeded.** The stop (S4)
 happened after the write, so an object version exists that the ledger does

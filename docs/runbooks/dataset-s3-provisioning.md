@@ -28,7 +28,8 @@ None of these may be replaced by a real value in this repository.
 | `<ADMIN_ROLE>` | the account administration role that manages the dataset bucket and key |
 | `<AUDIT_ADMIN_ROLE>` | the role that administers the trail, audit bucket and audit key. It is not an application or operator role. |
 | `<AUDIT_READER_ROLE>` | a human, read-only role for audit review |
-| `<HUMAN_PRINCIPAL_ARNS>` | the named human principals allowed to assume one MFA role (§3.5). Each MFA role has its own list; the operator and audit-administrator lists must not overlap. |
+| `<HUMAN_PRINCIPAL_ARNS>` | the IAM Identity Center permission-set role ARNs allowed to assume one human role (§3.5). Each human role has its own list; the operator and audit-administrator lists must not overlap. |
+| `<PROOF_BOUNDARY_ARN>` | the customer-managed policy `nlw-<ENV>-d6-proof-boundary` (§3.6), attached as the permissions boundary of every principal the D6 proof uses and every role it creates |
 | `<AUDIT_EXPIRY_DAYS>` | `<AUDIT_RETENTION_DAYS>` + 1, the lifecycle expiry of audit log objects |
 | `<AUDIT_RETENTION_DAYS>` | audit-log retention. It is set with O-3 and O-5, and must outlast any deletion-evidence need. |
 
@@ -334,7 +335,7 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
 
 ### `nlw-<ENV>-dataset-operator`
 
-- **Trust:** `trust-human-mfa` (§3.5) with the operator's
+- **Trust:** `trust-human` (§3.5) with the operator's
   `<HUMAN_PRINCIPAL_ARNS>`. It is **not** the bootstrap role or any
   application role.
 - **Policy:**
@@ -386,7 +387,7 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
 
 These are the `<AUDIT_ADMIN_ROLE>` and `<AUDIT_READER_ROLE>` of this
 environment. Neither is an application or operator role, and neither may touch
-dataset objects or the dataset key. Both use `trust-human-mfa` (§3.5).
+dataset objects or the dataset key. Both use `trust-human` (§3.5).
 
 <!-- template: role-audit-admin -->
 ```json
@@ -499,20 +500,16 @@ is valid before or after those roles exist.
 ]}
 ```
 
-<!-- template: trust-human-mfa -->
+<!-- template: trust-human -->
 ```json
 {"Version": "2012-10-17", "Statement": [
-  {"Sid": "NamedHumansWithMfa", "Effect": "Allow",
+  {"Sid": "NamedSsoPermissionSetRolesOnly", "Effect": "Allow",
    "Principal": {"AWS": "<HUMAN_PRINCIPAL_ARNS>"},
    "Action": "sts:AssumeRole",
-   "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "true"},
-                 "NumericLessThan": {"aws:MultiFactorAuthAge": "3600"}}},
-  {"Sid": "DenyWithoutMfaContext", "Effect": "Deny", "Principal": {"AWS": "*"},
+   "Condition": {"StringLike": {"sts:RoleSessionName": "nlw-d6-*"}}},
+  {"Sid": "DenyAnythingButIdentityCenter", "Effect": "Deny", "Principal": {"AWS": "*"},
    "Action": "sts:AssumeRole",
-   "Condition": {"Null": {"aws:MultiFactorAuthPresent": "true"}}},
-  {"Sid": "DenyWithoutMfa", "Effect": "Deny", "Principal": {"AWS": "*"},
-   "Action": "sts:AssumeRole",
-   "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "false"}}},
+   "Condition": {"ArnNotLike": {"aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/aws-reserved/sso.amazonaws.com/*"}}},
   {"Sid": "DenyMachineRoles", "Effect": "Deny", "Principal": {"AWS": "*"},
    "Action": "sts:AssumeRole",
    "Condition": {"ArnLike": {"aws:PrincipalArn": [
@@ -522,10 +519,86 @@ is valid before or after those roles exist.
 ]}
 ```
 
-- A role-chained session never carries `aws:MultiFactorAuthPresent`, so the
-  `Null` deny also refuses any machine identity that reaches this policy.
+- **Short-lived humans only.** The human roles (operator, audit
+  administrator, audit reader) trust only named IAM Identity Center
+  permission-set roles. `DenyAnythingButIdentityCenter` refuses every other
+  principal, including an IAM user with a long-term access key.
+- **MFA.** Identity Center sessions reach these roles by role chaining, where
+  `aws:MultiFactorAuthPresent` is generally absent, so this template does not
+  test it. MFA is enforced by Identity Center's sign-in settings instead. That
+  is not visible to IAM policy; it is attested in the independent D6 gate
+  record (decision E15). It is a documented residual risk.
 - `DenyMachineRoles` is a second, name-based refusal of the bootstrap and
   runtime roles.
+- `sts:RoleSessionName` must start with `nlw-d6-`, so every cached session
+  carries the proof run's id (`nlw-d6-<PROOF_ID>-<role>`) and cleanup can
+  remove exactly that run's sessions.
+
+### 3.6 Proof-principal permissions boundary (mandatory for D6)
+
+The D6 proof's **production isolation does not rest on reviewing its shell
+commands.** It rests on this AWS-side boundary:
+
+- It is the permissions boundary of every Identity Center permission set the
+  proof uses (proof administrator, operator, audit).
+- Every role the proof creates must carry it too (`CreatedRolesCarryThisBoundary`).
+- A boundary can only narrow what an identity policy grants. Whatever a proof
+  command does, an action on a resource named for the other
+  environment (production, for the staging proof), a key tagged for it, an IAM escalation path, or this boundary itself is
+  refused by AWS.
+
+Decision E14 chooses whether D6 runs in a dedicated proof account (where no
+production resource exists at all) or with this boundary in the staging
+account. The boundary is required in both cases. D6 stays blocked until an
+independent verifier has confirmed the account, the principals, the attached
+boundary and their effective permissions (decision E15).
+
+<!-- template: proof-principal-boundary -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "BoundaryAllowsWhatTheIdentityGrants", "Effect": "Allow", "Action": "*", "Resource": "*"},
+  {"Sid": "NeverOtherEnvironmentNames", "Effect": "Deny", "Action": "*",
+   "Resource": ["arn:aws:s3:::nlw-<OTHER_ENV>-*", "arn:aws:s3:::nlw-<OTHER_ENV>-*/*",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<OTHER_ENV>-*",
+                "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<OTHER_ENV>-*",
+                "arn:aws:cloudtrail:*:<ACCOUNT>:trail/nlw-<OTHER_ENV>-*",
+                "arn:aws:kms:*:<ACCOUNT>:alias/nlw-<OTHER_ENV>-*"]},
+  {"Sid": "NeverOtherEnvironmentKeys", "Effect": "Deny", "Action": "kms:*", "Resource": "*",
+   "Condition": {"StringEquals": {"aws:ResourceTag/nlw-env": "<OTHER_ENV>"}}},
+  {"Sid": "NeverEscalate", "Effect": "Deny",
+   "Action": ["iam:AttachRolePolicy", "iam:AttachUserPolicy", "iam:AttachGroupPolicy",
+              "iam:PutUserPolicy", "iam:PutGroupPolicy", "iam:CreatePolicy", "iam:CreatePolicyVersion",
+              "iam:SetDefaultPolicyVersion", "iam:DeletePolicy", "iam:DeletePolicyVersion",
+              "iam:CreateUser", "iam:CreateAccessKey", "iam:CreateLoginProfile", "iam:UpdateLoginProfile",
+              "iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary",
+              "iam:PutUserPermissionsBoundary", "iam:DeleteUserPermissionsBoundary",
+              "organizations:*", "sso:*", "identitystore:*", "account:*"],
+   "Resource": "*"},
+  {"Sid": "NeverDirectKmsGrants", "Effect": "Deny", "Action": ["kms:CreateGrant", "kms:RetireGrant", "kms:RevokeGrant"],
+   "Resource": "*",
+   "Condition": {"Null": {"kms:ViaService": "true"}}},
+  {"Sid": "IamOnlyOnDatasetRoles", "Effect": "Deny",
+   "Action": ["iam:CreateRole", "iam:DeleteRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy",
+              "iam:UpdateAssumeRolePolicy", "iam:UpdateRole", "iam:TagRole", "iam:UntagRole",
+              "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile", "iam:AddRoleToInstanceProfile",
+              "iam:RemoveRoleFromInstanceProfile", "iam:PassRole"],
+   "NotResource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-*",
+                   "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-*"]},
+  {"Sid": "CreatedRolesCarryThisBoundary", "Effect": "Deny", "Action": "iam:CreateRole", "Resource": "*",
+   "Condition": {"StringNotEquals": {"iam:PermissionsBoundary": "<PROOF_BOUNDARY_ARN>"}}}
+]}
+```
+
+- `NeverDirectKmsGrants` still allows grants that a service creates on the
+  caller's behalf (for example EC2 for an encrypted volume). It refuses grants
+  made directly, which would bypass the key policy. P03-11 checks that both
+  proof keys have no grant.
+- What the boundary does **not** do: it cannot stop an action that an
+  identity policy grants on a staging-named resource. That is the templates'
+  job, checked in P03-11.
+- `iam:CreatePolicyVersion`, `iam:SetDefaultPolicyVersion` and
+  `iam:DeletePolicy` are refused for every policy, so no proof principal can
+  edit this boundary.
 
 ## 4. CloudTrail object-data audit (one trail per environment)
 
