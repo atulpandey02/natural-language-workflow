@@ -3053,9 +3053,12 @@ instance, each for its own files
 ```bash
 source "$PROOF_DIR/lib.sh"
 shopt -s nullglob  # a machine may hold no evidence file of its own
+# Each machine holds only some of these ids; an absent one is replaced by a
+# value that never occurs.
+key_id="${REC_KEY_ARN:-key/none}"; audit_key_id="${REC_AUDIT_KEY_ARN:-key/none}"
 for f in "$PROOF_DIR"/evidence/* "$PROOF_DIR/journal.log"; do
-  sed -i.bak -e "s/$ACCOUNT/<ACCOUNT>/g" -e "s#${REC_KEY_ARN##*/}#<KEY_ID>#g" \
-    -e "s#${REC_AUDIT_KEY_ARN##*/}#<AUDIT_KEY_ID>#g" -e "s/${REC_INSTANCE_ID:-i-none}/<INSTANCE_ID>/g" "$f"
+  sed -i.bak -e "s/$ACCOUNT/<ACCOUNT>/g" -e "s#${key_id##*/}#<KEY_ID>#g" \
+    -e "s#${audit_key_id##*/}#<AUDIT_KEY_ID>#g" -e "s/${REC_INSTANCE_ID:-i-none}/<INSTANCE_ID>/g" "$f"
   rm -f "$f.bak"
 done
 if grep -RIlE '[0-9]{12}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{12,}|aws_secret_access_key|aws_session_token|SecretAccessKey|SessionToken|x-amz-security-token' \
@@ -3154,7 +3157,7 @@ while IFS='=' read -r name value; do
     REC_PROFILE_BOOTSTRAP) [[ "$value" == "arn:aws:iam::${ACCOUNT}:instance-profile/nlw-staging-dataset-bootstrap" ]] ;;
     REC_BUDGET_NAME) [[ "$value" == "nlw-staging-dataset-proof-$PROOF_ID" ]] ;;
     REC_OBJ_K[0-9]|REC_MPU_K[0-9]|REC_RECOVERED_[0-9]*_KEY|REC_RECOVERED_MPU_[0-9]*_KEY)
-      [[ "$value" == "versions/$REC_PROOF_WS/"* || "$value" == "versions/$REC_PROOF_WS2/"* ]] ;;
+      [[ "$value" == "versions/${REC_PROOF_WS:-none}/"* || "$value" == "versions/${REC_PROOF_WS2:-none}/"* ]] ;;
     *) true ;;
   esac || stop S8 "$name does not name this proof run's staging resource"
 done < "$PROOF_DIR/created.env"

@@ -8351,3 +8351,27 @@ def test_render_reads_the_reviewed_commit_not_the_working_tree(tmp_path: Path) -
     assert result.returncode == 0, result.stderr
     rendered = json.loads((tmp_path / "proof" / "out.json").read_text())
     assert "CreateOnce" in {s["Sid"] for s in rendered["Statement"]}
+
+
+def test_steps_on_several_machines_never_expand_an_absent_ledger_value() -> None:
+    """A step run on more than one machine sees each machine's own ledger, so
+    a ledger value may be absent there. Under `set -u` (bash 5 aborts on it;
+    bash 3.2 does not, for `${X##...}`) every such reference needs a default."""
+    shared = {"every workstation", "each machine"}
+    for b in labelled_blocks(proof_text()):
+        if not b["label"] or b["label"]["where"] not in shared:
+            continue
+        for m in re.finditer(r"\$\{(REC_[A-Z0-9_]+)([^}]*)\}|\$(REC_[A-Z0-9_]+)()", b["body"]):
+            assert m.group(1) and m.group(2).startswith(":-"), (b["label"]["id"], m.group(0))
+
+
+def test_negative_control_an_absent_ledger_value_in_a_shared_step_is_detected() -> None:
+    text = proof_text().replace('key_id="${REC_KEY_ARN:-key/none}"', 'key_id="${REC_KEY_ARN}"', 1)
+    assert text != proof_text()
+    with pytest.raises(AssertionError):
+        for b in labelled_blocks(text):
+            if b["label"] and b["label"]["where"] in {"every workstation", "each machine"}:
+                for m in re.finditer(
+                    r"\$\{(REC_[A-Z0-9_]+)([^}]*)\}|\$(REC_[A-Z0-9_]+)()", b["body"]
+                ):
+                    assert m.group(1) and m.group(2).startswith(":-"), m.group(0)
