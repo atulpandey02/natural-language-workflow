@@ -38,16 +38,27 @@ P03, reached over SSH).
 
 **Rules for the whole session:**
 
-- Run every block exactly as written, in order, from a checkout of the
-  reviewed commit.
-- Run each block in its own `bash` process started from the session shell,
-  for example by pasting it into `bash -s`. The exported session variables
-  carry over, and `stop` ends that process, not the session. Values that
-  later blocks need travel only through the ledger, `created.env`.
+- **Shells.** Workstation steps run under macOS `/bin/bash` 3.2 or later;
+  proof-instance steps under Amazon Linux 2023's bash 5. `lib.sh` uses
+  nothing newer than bash 3.2 on the workstation path.
+- **How each block runs.**
+  - **P00-01** contains only `export` lines. Type or paste it into the
+    session shell itself, so the variables persist. It makes no check and
+    cannot exit the shell.
+  - **P00-02** is pasted into `bash -s`. It verifies that the checkout is the
+    reviewed commit and is clean before it does anything else, then extracts
+    every step and helper file into `$PROOF_DIR` with a SHA-256 manifest.
+  - **Every later step** is run as `bash "$PROOF_DIR/run-step" <step id>`,
+    never pasted. `run-step` re-checks every extracted file against the
+    manifest first, so a step cannot drift from the reviewed text.
+  - Each step is its own `bash` process: `stop` ends that process, not the
+    session. Values that later steps need travel only through the ledger,
+    `created.env`.
 - If a block fails in a way the step does not predict, stop (S9) and follow
   [§F Recovery](#f-recovery-from-a-partial-proof).
 - Never add `--debug`, `set -x` or `--output json` to a command that issues
-  credentials. Never `cat` a credential file.
+  credentials. Never `cat` a credential file. Never put an access key in a
+  file: the human credentials live only in the macOS Keychain (P00-03).
 - Never edit a policy during the session. A wrong template is fixed in a
   reviewed pull request, and the proof restarts.
 
@@ -56,7 +67,8 @@ P03, reached over SSH).
 ### A.1 Staging proof resources (created by this procedure)
 
 Names use only placeholders. `<ACCOUNT>` is the approved account (decision
-E5) and `<SUFFIX>` is empty or `-<1–16 lowercase alphanumerics>` (decision E6).
+E5) and `<SUFFIX>` is `-d6` followed by 12 random hex digits, generated for
+each proof run in P00-01 (decision E6).
 Every resource is tagged `nlw-env=staging` and `nlw-proof=<PROOF_ID>`, where
 IAM and the service allow tags.
 
@@ -143,36 +155,66 @@ enforces it.
   passed `python -m nlw.ops.release_provenance verify`. It must contain
   `nlw.storage.s3_credentials` (`eb42250` or later).
 
+**Where credentials come from.** Nothing in `$PROOF_DIR` holds an access key.
+
+- **Source identities.** Two humans, the operator and the audit
+  administrator (E9), each use an IAM user (E11 = `iam-user-mfa`) with a
+  dedicated access key created only for this proof run.
+- **Storage.** Each key is stored only in that person's macOS login Keychain,
+  under the service `nlw-d6-<PROOF_ID>-<operator|audit>` (P00-03).
+- **Use.** The AWS CLI reads a key through `credential_process`, which runs
+  `credential-process.sh`. The script prints the key to the CLI's pipe, never
+  to a file or a terminal.
+- **Roles.** Every role profile below chains from one of those two source
+  profiles, with that person's MFA device.
+- **Removal.** X09 deletes the two access keys in IAM. X08 removes the
+  Keychain items, deletes only this proof's cached CLI sessions, and scans
+  `$PROOF_DIR` for anything that looks like a credential.
+- **Lifetime.** The keys exist only between P00-03 and X09. §F requires X09
+  and X08 after any stop, whatever else is abandoned.
+
 <!-- file: aws-config.workstation -->
 ```ini
-# Workstation profiles. <...> values come from the decision sheet; none is
-# committed. nlw-proof-human is the owner's existing human identity (for
-# example IAM Identity Center); it is configured outside this file.
+# Workstation profiles. <...> values are filled by P00-02 from the session
+# variables; none is committed and none is a secret. No profile holds a key.
+[profile nlw-proof-human-operator]
+credential_process = /bin/bash <PROOF_DIR>/credential-process.sh <PROOF_ID> operator
+region = us-east-1
+
+[profile nlw-proof-human-audit]
+credential_process = /bin/bash <PROOF_DIR>/credential-process.sh <PROOF_ID> audit
+region = us-east-1
+
 [profile nlw-proof-admin]
-# The owner's existing access to <ADMIN_ROLE> (decision E8).
+# <ADMIN_ROLE> (decision E8), assumed by the operator with MFA.
+role_arn = arn:aws:iam::<ACCOUNT>:role/<ADMIN_ROLE>
+role_session_name = nlw-staging-proof-admin
+source_profile = nlw-proof-human-operator
+mfa_serial = <OPERATOR_MFA_ARN>
+duration_seconds = 3600
 region = us-east-1
 
 [profile nlw-proof-audit-admin]
 role_arn = arn:aws:iam::<ACCOUNT>:role/nlw-staging-dataset-audit-admin
 role_session_name = nlw-staging-audit-admin
-source_profile = nlw-proof-human
-mfa_serial = <AUDIT_ADMIN_MFA_DEVICE_ARN>
+source_profile = nlw-proof-human-audit
+mfa_serial = <AUDIT_MFA_ARN>
 duration_seconds = 3600
 region = us-east-1
 
 [profile nlw-proof-audit-reader]
 role_arn = arn:aws:iam::<ACCOUNT>:role/nlw-staging-dataset-audit-reader
 role_session_name = nlw-staging-audit-reader
-source_profile = nlw-proof-human
-mfa_serial = <AUDIT_READER_MFA_DEVICE_ARN>
+source_profile = nlw-proof-human-audit
+mfa_serial = <AUDIT_MFA_ARN>
 duration_seconds = 3600
 region = us-east-1
 
 [profile nlw-proof-operator]
 role_arn = arn:aws:iam::<ACCOUNT>:role/nlw-staging-dataset-operator
 role_session_name = nlw-staging-operator
-source_profile = nlw-proof-human
-mfa_serial = <OPERATOR_MFA_DEVICE_ARN>
+source_profile = nlw-proof-human-operator
+mfa_serial = <OPERATOR_MFA_ARN>
 duration_seconds = 3600
 region = us-east-1
 
@@ -180,8 +222,95 @@ region = us-east-1
 # Negative control: the same role without MFA. It must be refused.
 role_arn = arn:aws:iam::<ACCOUNT>:role/nlw-staging-dataset-operator
 role_session_name = nlw-staging-operator
-source_profile = nlw-proof-human
+source_profile = nlw-proof-human-operator
 region = us-east-1
+```
+
+<!-- file: credential-process.sh -->
+```sh
+#!/bin/bash
+# credential-process.sh PROOF_ID WHO [MODE]: one human source identity, held
+# only in the macOS login Keychain. MODE print (the default) is for the AWS
+# CLI's credential_process: the key goes to the CLI's pipe, never to a file or
+# a terminal. add prompts (hidden) for a new key; key-id prints only the
+# access key id; remove deletes both items and fails if any remains.
+set -euo pipefail
+umask 077
+proof="${1:-}"; who="${2:-}"; mode="${3:-print}"
+[[ "$proof" =~ ^d6-[0-9]{8}-[0-9a-f]{6}$ && "$who" =~ ^(operator|audit)$ ]] \
+  || { echo "credential-process.sh: bad arguments" >&2; exit 2; }
+svc="nlw-d6-$proof-$who"
+kc=/usr/bin/security
+case "$mode" in
+  add)
+    echo "Keychain prompts follow: enter the $who access key id, then its secret." >&2
+    "$kc" add-generic-password -U -s "$svc" -a access-key-id -w
+    "$kc" add-generic-password -U -s "$svc" -a secret-access-key -w ;;
+  key-id)
+    "$kc" find-generic-password -s "$svc" -a access-key-id -w ;;
+  remove)
+    "$kc" delete-generic-password -s "$svc" -a access-key-id > /dev/null 2>&1 || true
+    "$kc" delete-generic-password -s "$svc" -a secret-access-key > /dev/null 2>&1 || true
+    if "$kc" find-generic-password -s "$svc" > /dev/null 2>&1; then
+      echo "STOP S7: Keychain items remain for $svc" >&2; exit 1
+    fi ;;
+  print)
+    { "$kc" find-generic-password -s "$svc" -a access-key-id -w
+      "$kc" find-generic-password -s "$svc" -a secret-access-key -w; } \
+      | /usr/bin/python3 -c 'import json, sys
+k, s = sys.stdin.read().split("\n")[:2]
+print(json.dumps({"Version": 1, "AccessKeyId": k, "SecretAccessKey": s}))' ;;
+  *) echo "credential-process.sh: bad mode" >&2; exit 2 ;;
+esac
+```
+
+<!-- file: run-step -->
+```sh
+#!/bin/bash
+# run-step STEP: run one extracted step after checking every extracted file
+# against the manifest P00-02 wrote from the reviewed commit.
+set -euo pipefail
+: "${PROOF_DIR:?}"
+step="${1:-}"
+[[ "$step" =~ ^(P[0-9][0-9]-[0-9][0-9]|X[0-9][0-9])$ ]] || { echo "STOP S9: bad step id" >&2; exit 1; }
+python3 - "$PROOF_DIR" <<'PY' || { echo "STOP S9: an extracted file differs from the reviewed commit" >&2; exit 1; }
+import hashlib, json, os, sys
+d = sys.argv[1]
+manifest = json.load(open(os.path.join(d, "manifest.json")))
+for rel, digest in manifest.items():
+    if hashlib.sha256(open(os.path.join(d, rel), "rb").read()).hexdigest() != digest:
+        sys.exit(1)
+PY
+[[ -f "$PROOF_DIR/steps/$step.sh" ]] || { echo "STOP S9: no such step" >&2; exit 1; }
+exec bash "$PROOF_DIR/steps/$step.sh"
+```
+
+<!-- file: normalize-policy.py -->
+```python
+"""Print a policy document in a canonical form, so a deployed policy can be
+compared with the rendered template. Keys are sorted; lists are sorted; a
+one-element list and its single value compare equal (IAM, KMS and S3 return
+either). Input is the document, or a JSON string holding it (KMS)."""
+
+import json
+import sys
+import urllib.parse
+
+
+def canon(x):
+    if isinstance(x, dict):
+        return {k: canon(v) for k, v in sorted(x.items())}
+    if isinstance(x, list):
+        items = sorted((canon(v) for v in x), key=lambda v: json.dumps(v, sort_keys=True))
+        return items[0] if len(items) == 1 else items
+    return x
+
+
+raw = sys.stdin.read().strip()
+doc = json.loads(raw)
+while isinstance(doc, str):
+    doc = json.loads(urllib.parse.unquote(doc))
+print(json.dumps(canon(doc), sort_keys=True, indent=1))
 ```
 
 <!-- file: aws-config.instance -->
@@ -219,7 +348,10 @@ that keep command output off the terminal.
 <!-- file: lib.sh -->
 ```sh
 # shellcheck shell=bash
-set -Eeuo pipefail
+# No `set -E` and no ERR trap: an ERR trap inherited into command
+# substitutions fires inside guarded checks such as
+# `[[ "$(...)" == x ]] || stop ...` (seen on bash 3.2).
+set -euo pipefail
 umask 077
 : "${PROOF_DIR:?}" "${PROOF_ID:?}" "${APPROVED_ACCOUNT:?}" "${RUNBOOK_DIR:?}" "${BUCKET_SUFFIX:?}"
 ACCOUNT="$APPROVED_ACCOUNT"
@@ -234,6 +366,11 @@ TRAIL_ARN="arn:aws:cloudtrail:us-east-1:${ACCOUNT}:trail/${TRAIL}"
 ROLE_PREFIX="arn:aws:iam::${ACCOUNT}:role"
 KEY_ALIAS=alias/nlw-staging-datasets
 AUDIT_KEY_ALIAS=alias/nlw-staging-dataset-audit
+(( ${#BUCKET} <= 63 && ${#AUDIT_BUCKET} <= 63 )) || { echo "STOP S1: a bucket name exceeds 63 characters" >&2; exit 1; }
+if [[ -n "${ADMIN_ROLE:-}" ]]; then
+  [[ "$ADMIN_ROLE" =~ ^[A-Za-z0-9+=,.@_/-]+$ && "$ADMIN_ROLE" != arn:* && "$ADMIN_ROLE" != */ ]] \
+    || { echo "STOP S1: ADMIN_ROLE must be the role name with any path, not an ARN (E8)" >&2; exit 1; }
+fi
 OTHER_BUCKET="nlw-production-datasets-${ACCOUNT}-us-east-1${SUFFIX}"
 CONTAINER_UID=10001
 CONTAINER_GID=999
@@ -243,16 +380,31 @@ export AWS_SHARED_CREDENTIALS_FILE=/dev/null
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
 touch "$PROOF_DIR/created.env" "$PROOF_DIR/expected-events.tsv" "$PROOF_DIR/journal.log"
 
+STOPPED=""
+ON_EXIT=""
 stop() {
-  trap - ERR
+  STOPPED=1
   printf '%s STOP %s %s\n' "$(date -u +%FT%TZ)" "$1" "$2" >> "$PROOF_DIR/journal.log"
   echo "STOP $1: $2" >&2
   exit 1
 }
-# Any command that fails outside an expectation helper (a create, a
-# configuration change or a read) is S10. Only the command's first words are
-# logged, never its output.
-trap 'stop S10 "command failed: ${BASH_COMMAND:0:80}"' ERR
+# on_exit CMD: run CMD when this step's process ends, however it ends (a
+# finished step, a stop, or a failure). Used to stop background processes.
+on_exit() { ON_EXIT="${ON_EXIT}${1}"$'\n'; }
+# The EXIT handler runs the cleanups and, if the step failed without a stop,
+# records S10 with the failing command (BASH_COMMAND still names it here,
+# including inside functions, on bash 3.2 and 5). There is no ERR trap. Only
+# the command's first words are logged, never its output.
+_on_exit() {
+  local rc=$? failed="${BASH_COMMAND:0:80}"
+  set +e
+  [[ -z "$ON_EXIT" ]] || eval "$ON_EXIT"
+  if [[ $rc -ne 0 && -z "$STOPPED" ]]; then
+    printf '%s STOP S10 command failed: %s\n' "$(date -u +%FT%TZ)" "$failed" >> "$PROOF_DIR/journal.log"
+    echo "STOP S10: command failed: $failed" >&2
+  fi
+}
+trap _on_exit EXIT
 
 # The ledger belongs to exactly one proof run.
 if [[ ! -s "$PROOF_DIR/created.env" ]]; then
@@ -273,6 +425,29 @@ verify_reviewed_commit() {
 }
 
 note() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$PROOF_DIR/journal.log"; }
+
+# validate_humans JSON [EXCLUDED_JSON]: a non-empty list of IAM users of the
+# approved account (E11), no wildcard, no root, no other account, no
+# duplicates, and nothing shared with EXCLUDED_JSON (E9).
+validate_humans() {
+  python3 - "$ACCOUNT" "$1" "${2:-[]}" <<'PY' || stop S9 "a human principal list is invalid (decisions E9 and E11)"
+import json, re, sys
+account, raw, excluded = sys.argv[1], sys.argv[2], sys.argv[3]
+def strict(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+try:
+    people, others = json.loads(raw, object_pairs_hook=strict), json.loads(excluded)
+except ValueError:
+    sys.exit(1)
+user = re.compile(r"^arn:aws:iam::%s:user/(?:[A-Za-z0-9+=,.@_-]+/)*[A-Za-z0-9+=,.@_-]+$" % account)
+ok = (isinstance(people, list) and people and all(isinstance(p, str) and user.match(p) for p in people)
+      and len(set(people)) == len(people) and isinstance(others, list) and not set(people) & set(others))
+sys.exit(0 if ok else 1)
+PY
+}
 
 # record NAME VALUE: append-only ledger, written immediately after a create
 # succeeds. Cleanup acts only on names in this ledger.
@@ -337,20 +512,32 @@ for key, var in (("<KEY_ARN>", "REC_KEY_ARN"), ("<AUDIT_KEY_ARN>", "REC_AUDIT_KE
     if env.get(var):
         values[key] = env[var]
 if env.get("HUMANS"):
-    body = body.replace('"<HUMAN_PRINCIPAL_ARNS>"', env["HUMANS"])
+    people = json.loads(env["HUMANS"])
+    user = re.compile(r"^arn:aws:iam::%s:user/(?:[A-Za-z0-9+=,.@_-]+/)*[A-Za-z0-9+=,.@_-]+$" % env["ACCOUNT"])
+    if not (isinstance(people, list) and people and all(isinstance(p, str) and user.match(p) for p in people)):
+        sys.exit("invalid human principals")
+    body = body.replace('"<HUMAN_PRINCIPAL_ARNS>"', json.dumps(people))
 if env.get("AUDIT_RETENTION_DAYS"):
     body = body.replace('"<AUDIT_EXPIRY_DAYS>"', str(int(env["AUDIT_RETENTION_DAYS"]) + 1))
 for k, v in values.items():
     body = body.replace(k, v)
 if re.search(r"<[A-Z_]+>", body):
     sys.exit(f"unfilled placeholder in {name}")
-doc = json.loads(body)
+def strict(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        sys.exit(f"duplicate key in {name}")
+    return dict(pairs)
+doc = json.loads(body, object_pairs_hook=strict)
+for s in (doc if isinstance(doc, list) else doc.get("Statement", [])):
+    if isinstance(s, dict) and "Effect" in s and s["Effect"] not in ("Allow", "Deny"):
+        sys.exit(f"non-canonical Effect in {name}")
 if isinstance(doc, list) and name.endswith("-statements"):
     doc = {"Version": "2012-10-17", "Statement": doc}
 json.dump(doc, sys.stdout)
 PY
 }
-export ACCOUNT BUCKET AUDIT_BUCKET TRAIL_ARN REC_KEY_ARN REC_AUDIT_KEY_ARN 2>/dev/null || true
+export ACCOUNT BUCKET AUDIT_BUCKET TRAIL_ARN REC_KEY_ARN REC_AUDIT_KEY_ARN
 
 # write_credentials SERVICE PROFILE: the refresher stand-in (P14). The session
 # goes straight from the CLI into a private file by atomic rename; only the
@@ -457,20 +644,18 @@ systemctl enable --now docker
 
 ### P00. Session files
 
-**P00-01 · LOCAL · workstation**
+**P00-01 · LOCAL · workstation** — session variables (type into the session
+shell itself; exports only)
 
 ```bash
 export REVIEWED_COMMIT="<the full commit id the owner approved for this run>"
-[[ "$(git rev-parse HEAD)" == "$REVIEWED_COMMIT" ]] || { echo "STOP S9: not the reviewed commit" >&2; exit 1; }
-[[ -z "$(git status --porcelain)" ]] || { echo "STOP S9: the checkout has local changes" >&2; exit 1; }
 export PROOF_ID="d6-$(date -u +%Y%m%d)-$(openssl rand -hex 3)"
 export BUCKET_SUFFIX="-d6$(openssl rand -hex 6)"
 export PROOF_DIR="$HOME/nlw-d6/$PROOF_ID" RUNBOOK_DIR="$PWD/docs/runbooks"
-export APPROVED_ACCOUNT="<from decision E5>" ADMIN_ROLE="<from decision E8>"
+export APPROVED_ACCOUNT="<from decision E5>" ADMIN_ROLE="<role name with any path, decision E8>"
 export AUDIT_RETENTION_DAYS="<from decision E1>"
 export E11_IDENTITY="<iam-user-mfa or identity-center, decision E11>"
-[[ "$E11_IDENTITY" == iam-user-mfa ]] \
-  || { echo "STOP S9: this procedure supports only E11 = iam-user-mfa; Identity Center needs a reviewed trust design" >&2; exit 1; }
+export OPERATOR_MFA_ARN="<the operator's MFA device ARN>" AUDIT_MFA_ARN="<the audit administrator's MFA device ARN>"
 export BUDGET_LIMIT_USD="<decision E4>" BUDGET_EMAIL="<decision E4 recipient>"
 export IMAGE="ghcr.io/atulpandey02/natural-language-workflow@sha256:<verified backend digest>"
 export OPERATOR_CIDR="<the workstation's public IPv4>/32"
@@ -478,18 +663,78 @@ export OBJECT_LOCK_MODE="<GOVERNANCE or COMPLIANCE, decision E2>" E3_DECISION="<
 export OPERATOR_HUMANS_JSON='["<decision E9>"]' AUDIT_ADMIN_HUMANS_JSON='["<decision E9>"]'
 export AUDIT_READER_HUMANS_JSON='["<decision E9>"]'
 export E12_MUST_NOT_PASS_JSON='["<decision E12: principals that must not pass the bootstrap role>"]'
-mkdir -m 0700 -p "$PROOF_DIR" "$PROOF_DIR/evidence"
-git rev-parse HEAD > "$PROOF_DIR/proof-commit"
+```
+
+**P00-02 · LOCAL · workstation** — verify the checkout, then extract the
+reviewed steps and files (paste into `bash -s`)
+
+```bash
+set -euo pipefail
+[[ "$(git rev-parse HEAD)" == "$REVIEWED_COMMIT" ]] || { echo "STOP S9: not the reviewed commit" >&2; exit 1; }
+[[ -z "$(git status --porcelain)" ]] || { echo "STOP S9: the checkout has local changes" >&2; exit 1; }
+[[ "$E11_IDENTITY" == iam-user-mfa ]] \
+  || { echo "STOP S9: this procedure supports only E11 = iam-user-mfa; Identity Center needs a reviewed trust design" >&2; exit 1; }
+[[ "$(uname -s)" == Darwin && -x /usr/bin/security ]] \
+  || { echo "STOP S9: the credential source is the macOS Keychain; another workstation needs a reviewed design" >&2; exit 1; }
+[[ "$PROOF_DIR" != *[[:space:]]* ]] || { echo "STOP S9: PROOF_DIR must not contain spaces" >&2; exit 1; }
+mkdir -m 0700 -p "$PROOF_DIR" "$PROOF_DIR/evidence" "$PROOF_DIR/steps"
 python3 - "$RUNBOOK_DIR/dataset-s3-d6-proof.md" "$PROOF_DIR" <<'PY'
-import os, re, sys
+import hashlib, json, os, re, sys
 text, out = open(sys.argv[1]).read(), sys.argv[2]
+files = {}
 for name, body in re.findall(r"<!-- file: ([a-z0-9.-]+) -->\n`{3}[a-z]+\n(.*?)`{3}", text, re.S):
-    with open(os.path.join(out, name), "w") as f:
+    files[name] = body
+label = re.compile(r"\*\*(P\d\d-\d\d|X\d\d) · ")
+pos = 0
+for block in re.finditer(r"`{3}bash\n(.*?)`{3}", text, re.S):
+    ids = label.findall(text, pos, block.start())
+    if ids:
+        files[f"steps/{ids[-1]}.sh"] = block.group(1)
+    pos = block.end()
+manifest = {}
+for rel, body in files.items():
+    with open(os.path.join(out, rel), "w") as f:
         f.write(body)
+    manifest[rel] = hashlib.sha256(body.encode()).hexdigest()
+with open(os.path.join(out, "manifest.json"), "w") as f:
+    json.dump(manifest, f, indent=1, sort_keys=True)
 PY
-sed -e "s/<ACCOUNT>/$APPROVED_ACCOUNT/g" "$PROOF_DIR/aws-config.workstation" > "$PROOF_DIR/aws-config"
+chmod 0700 "$PROOF_DIR/credential-process.sh" "$PROOF_DIR/run-step"
+sed -e "s#<ACCOUNT>#$APPROVED_ACCOUNT#g" -e "s#<PROOF_DIR>#$PROOF_DIR#g" -e "s#<PROOF_ID>#$PROOF_ID#g" \
+  -e "s#<ADMIN_ROLE>#$ADMIN_ROLE#g" -e "s#<OPERATOR_MFA_ARN>#$OPERATOR_MFA_ARN#g" \
+  -e "s#<AUDIT_MFA_ARN>#$AUDIT_MFA_ARN#g" "$PROOF_DIR/aws-config.workstation" > "$PROOF_DIR/aws-config"
+if grep -qE '<[A-Z_]+>|aws_access_key_id|aws_secret_access_key|aws_session_token' "$PROOF_DIR/aws-config"; then
+  echo "STOP S7: aws-config is incomplete or holds a key" >&2; exit 1
+fi
+git rev-parse HEAD > "$PROOF_DIR/proof-commit"
 touch "$PROOF_DIR/started"
-echo "edit $PROOF_DIR/aws-config: fill the three MFA device ARNs, then continue"
+echo "extracted $(ls "$PROOF_DIR/steps" | wc -l | xargs) steps; continue with: bash \"\$PROOF_DIR/run-step\" P00-03"
+```
+
+**P00-03 · READ-ONLY · workstation** — human credentials into the Keychain
+(each person enters their own key at the hidden Keychain prompt)
+
+Each person first creates a **new** access key for their IAM user (E11)
+only for this run. It is deleted in X09. Nobody writes it into a file, a
+shell variable, a chat or a ticket; it is typed or pasted only into the
+Keychain prompt below.
+
+```bash
+source "$PROOF_DIR/lib.sh"
+for who in operator audit; do
+  bash "$PROOF_DIR/credential-process.sh" "$PROOF_ID" "$who" add
+  arn="$(aws sts get-caller-identity --profile "nlw-proof-human-$who" --query Arn --output text)"
+  [[ "$arn" =~ ^arn:aws:iam::${ACCOUNT}:user/ ]] || stop S1 "the $who source identity is not an IAM user of the approved account (E11)"
+  list="$OPERATOR_HUMANS_JSON"; [[ "$who" == operator ]] || list="$AUDIT_ADMIN_HUMANS_JSON"
+  jq -e --arg a "$arn" 'index($a) != null' <<< "$list" > /dev/null \
+    || stop S1 "the $who source identity is not in its decision E9 list"
+  record "REC_HUMAN_$(tr a-z A-Z <<< "$who")_USER" "${arn##*/}"
+  record "REC_HUMAN_$(tr a-z A-Z <<< "$who")_KEY_ID" "$(bash "$PROOF_DIR/credential-process.sh" "$PROOF_ID" "$who" key-id)"
+done
+validate_humans "$OPERATOR_HUMANS_JSON" "$AUDIT_ADMIN_HUMANS_JSON"
+validate_humans "$AUDIT_ADMIN_HUMANS_JSON" "$OPERATOR_HUMANS_JSON"
+validate_humans "$AUDIT_READER_HUMANS_JSON"
+note "P00-03 two human source identities verified; keys held only in the Keychain"
 ```
 
 ### P01. Caller identity, account, region and tools (stop S1)
@@ -582,6 +827,9 @@ and never enters evidence.
 
 ```bash
 source "$PROOF_DIR/lib.sh"
+validate_humans "$OPERATOR_HUMANS_JSON" "$AUDIT_ADMIN_HUMANS_JSON"
+validate_humans "$AUDIT_ADMIN_HUMANS_JSON" "$OPERATOR_HUMANS_JSON"
+validate_humans "$AUDIT_READER_HUMANS_JSON"
 TAGS=(Key=nlw-env,Value=staging "Key=nlw-proof,Value=$PROOF_ID")
 mkrole() { # mkrole NAME TRUST_TEMPLATE LEDGER [HUMANS_JSON]
   HUMANS="${4:-}" render "$2" > "$PROOF_DIR/trust-$1.json"
@@ -603,9 +851,11 @@ aws iam add-role-to-instance-profile --profile nlw-proof-admin \
   --instance-profile-name nlw-staging-dataset-bootstrap --role-name nlw-staging-dataset-bootstrap
 ```
 
-`*_HUMANS_JSON` are JSON lists of principal ARNs from decision E9, exported
-in the shell, never committed. The operator and audit-admin lists must not
-share a principal.
+`*_HUMANS_JSON` are JSON lists of IAM user ARNs from decision E9, exported in
+the session shell, never committed. `validate_humans` refuses a wildcard,
+the account root, another account, a role, a malformed ARN, a duplicate, and
+any principal shared by the operator and audit-admin lists; `render` refuses
+the same and writes the list itself, so nothing else can be injected.
 
 **P03-02 · MUTATING · workstation** — dataset key
 
@@ -673,6 +923,7 @@ export REC_KEY_ARN
 # owns. Absence is checked in this same block, and the new bucket must be
 # pristine before anything is configured.
 absent 404 aws s3api head-bucket --profile nlw-proof-admin --bucket "$BUCKET"
+note "absence confirmed: $BUCKET"
 aws s3api create-bucket --profile nlw-proof-admin --bucket "$BUCKET" --object-ownership BucketOwnerEnforced
 absent NoSuchTagSet aws s3api get-bucket-tagging --profile nlw-proof-admin --bucket "$BUCKET"
 absent NoSuchBucketPolicy aws s3api get-bucket-policy --profile nlw-proof-admin --bucket "$BUCKET"
@@ -705,6 +956,7 @@ aws s3api put-bucket-policy --profile nlw-proof-admin --bucket "$BUCKET" \
 source "$PROOF_DIR/lib.sh"
 export REC_KEY_ARN REC_AUDIT_KEY_ARN
 absent 404 aws s3api head-bucket --profile nlw-proof-audit-admin --bucket "$AUDIT_BUCKET"
+note "absence confirmed: $AUDIT_BUCKET"
 aws s3api create-bucket --profile nlw-proof-audit-admin --bucket "$AUDIT_BUCKET" \
   --object-ownership BucketOwnerEnforced --object-lock-enabled-for-bucket
 absent NoSuchTagSet aws s3api get-bucket-tagging --profile nlw-proof-audit-admin --bucket "$AUDIT_BUCKET"
@@ -737,6 +989,11 @@ aws s3api put-bucket-policy --profile nlw-proof-audit-admin --bucket "$AUDIT_BUC
 `OBJECT_LOCK_MODE` is `GOVERNANCE` or `COMPLIANCE` (decision E2). COMPLIANCE
 cannot be shortened or removed by anyone, including the account root, and the
 bucket cannot be deleted until every object's retention ends.
+
+`create-bucket`'s own `--object-ownership` and `--object-lock-enabled-for-bucket`
+flags take effect in the same request. What us-east-1 does with them when it
+returns success for a bucket the account already owns is not documented; it
+stays an open question for D6 (the pristine checks still stop the run).
 
 **Remaining name race (documented, not closable).** Between `HeadBucket`
 and `CreateBucket`, a principal in the same account could create the same
@@ -803,7 +1060,14 @@ record REC_INSTANCE_ID "$(aws ec2 run-instances --profile nlw-proof-admin --imag
 aws ec2 wait instance-status-ok --profile nlw-proof-admin --instance-ids "$REC_INSTANCE_ID"
 ```
 
-**P03-11 · READ-ONLY · workstation** — the provisioned state equals the templates
+**P03-11 · READ-ONLY · workstation** — deployed policies and settings equal the rendered templates
+
+Compared after `normalize-policy.py`: every role's trust policy and inline
+policy, both key policies, both bucket policies, both lifecycle rules, the
+trail's event selectors, both buckets' encryption, the dataset bucket's
+versioning, the audit bucket's Object Lock, key rotation, and the instance
+metadata options. Any difference stops the run (S9); the template is never
+edited to match.
 
 ```bash
 source "$PROOF_DIR/lib.sh"
@@ -812,16 +1076,35 @@ aws s3api get-bucket-encryption --profile nlw-proof-admin --bucket "$BUCKET" \
   --output text | grep -qx "$REC_KEY_ARN	True" || stop S9 "dataset bucket encryption differs"
 aws s3api get-bucket-versioning --profile nlw-proof-admin --bucket "$BUCKET" --query Status --output text \
   | grep -qx Enabled || stop S9 "dataset bucket versioning off"
-aws s3api get-bucket-policy --profile nlw-proof-admin --bucket "$BUCKET" --query Policy --output text \
-  | jq -S . | diff -q - <(jq -S . "$PROOF_DIR/bucket-policy.json") || stop S9 "bucket policy differs"
+same() { # same LABEL DEPLOYED_JSON RENDERED_FILE: equal after normalization, or S9
+  diff -q <(python3 "$PROOF_DIR/normalize-policy.py" <<< "$2") \
+    <(python3 "$PROOF_DIR/normalize-policy.py" < "$3") > /dev/null || stop S9 "$1 differs from the rendered template"
+}
+for r in bootstrap api ingest operator audit-admin audit-reader; do
+  same "trust policy of $r" "$(aws iam get-role --profile nlw-proof-admin --role-name "nlw-staging-dataset-$r" \
+    --query Role.AssumeRolePolicyDocument --output json)" "$PROOF_DIR/trust-$r.json"
+  same "inline policy of $r" "$(aws iam get-role-policy --profile nlw-proof-admin --role-name "nlw-staging-dataset-$r" \
+    --policy-name "nlw-dataset-$r" --query PolicyDocument --output json)" "$PROOF_DIR/policy-$r.json"
+done
+same "dataset key policy" "$(aws kms get-key-policy --profile nlw-proof-admin --key-id "$REC_KEY_ARN" \
+  --policy-name default --query Policy --output json)" "$PROOF_DIR/key-policy.json"
+same "audit key policy" "$(aws kms get-key-policy --profile nlw-proof-audit-admin --key-id "$REC_AUDIT_KEY_ARN" \
+  --policy-name default --query Policy --output json)" "$PROOF_DIR/audit-key-policy.json"
+same "dataset bucket policy" "$(aws s3api get-bucket-policy --profile nlw-proof-admin --bucket "$BUCKET" \
+  --query Policy --output json)" "$PROOF_DIR/bucket-policy.json"
+same "audit bucket policy" "$(aws s3api get-bucket-policy --profile nlw-proof-audit-admin --bucket "$AUDIT_BUCKET" \
+  --query Policy --output json)" "$PROOF_DIR/audit-bucket-policy.json"
+same "dataset lifecycle" "$(aws s3api get-bucket-lifecycle-configuration --profile nlw-proof-admin \
+  --bucket "$BUCKET" --output json)" "$PROOF_DIR/lifecycle.json"
+same "audit lifecycle" "$(aws s3api get-bucket-lifecycle-configuration --profile nlw-proof-audit-admin \
+  --bucket "$AUDIT_BUCKET" --output json)" "$PROOF_DIR/audit-lifecycle.json"
 aws s3api get-object-lock-configuration --profile nlw-proof-audit-admin --bucket "$AUDIT_BUCKET" \
   --query 'ObjectLockConfiguration.Rule.DefaultRetention.[Mode,Days]' --output text \
   | grep -qx "${OBJECT_LOCK_MODE}	${AUDIT_RETENTION_DAYS}" || stop S9 "audit Object Lock differs"
 aws cloudtrail get-trail-status --profile nlw-proof-audit-admin --name "$TRAIL_ARN" \
   --query IsLogging --output text | grep -qx True || stop S6 "trail is not logging"
-aws cloudtrail get-event-selectors --profile nlw-proof-audit-admin --trail-name "$TRAIL_ARN" \
-  --query AdvancedEventSelectors | jq -S . | diff -q - <(jq -S . "$PROOF_DIR/selectors.json") \
-  || stop S6 "event selectors differ"
+same "event selectors" "$(aws cloudtrail get-event-selectors --profile nlw-proof-audit-admin \
+  --trail-name "$TRAIL_ARN" --query AdvancedEventSelectors --output json)" "$PROOF_DIR/selectors.json"
 for k in "$REC_KEY_ARN"; do
   aws kms get-key-rotation-status --profile nlw-proof-admin --key-id "$k" \
     --query KeyRotationEnabled --output text | grep -qx True || stop S9 "key rotation off"
@@ -855,24 +1138,30 @@ HOST="$(aws ec2 describe-instances --profile nlw-proof-admin --instance-ids "$RE
   --query 'Reservations[0].Instances[0].PublicDnsName' --output text)"
 aws ec2-instance-connect send-ssh-public-key --profile nlw-proof-admin --instance-id "$REC_INSTANCE_ID" \
   --instance-os-user ec2-user --ssh-public-key "file://$PROOF_DIR/proof-key.pub" --query Success --output text
-scp -i "$PROOF_DIR/proof-key" -o StrictHostKeyChecking=accept-new \
-  "$PROOF_DIR/lib.sh" "$PROOF_DIR/probe.py" "$PROOF_DIR/aws-config.instance" "$PROOF_DIR/created.env" \
-  "ec2-user@$HOST:"
+B="$PROOF_DIR/instance-bundle"
+mkdir -m 0700 -p "$B"
+cp -R "$PROOF_DIR/steps" "$PROOF_DIR/lib.sh" "$PROOF_DIR/probe.py" "$PROOF_DIR/run-step" \
+  "$PROOF_DIR/manifest.json" "$PROOF_DIR/credential-process.sh" "$PROOF_DIR/normalize-policy.py" \
+  "$PROOF_DIR/user-data.sh" "$PROOF_DIR/aws-config.workstation" "$PROOF_DIR/aws-config.instance" \
+  "$PROOF_DIR/created.env" "$B/"
+printf 'export PROOF_ID=%q APPROVED_ACCOUNT=%q BUCKET_SUFFIX=%q IMAGE=%q\n' \
+  "$PROOF_ID" "$APPROVED_ACCOUNT" "$BUCKET_SUFFIX" "$IMAGE" > "$B/instance-env.sh"
+printf 'export PROOF_DIR="$HOME/proof" RUNBOOK_DIR=/nonexistent\n' >> "$B/instance-env.sh"
+scp -r -i "$PROOF_DIR/proof-key" -o StrictHostKeyChecking=accept-new "$B" "ec2-user@$HOST:proof"
 ```
 
 The pushed key is valid for 60 seconds; repeat the last two commands, then
-`ssh -i "$PROOF_DIR/proof-key" "ec2-user@$HOST"` to open the session. Every
-`proof instance` block runs in that session.
+`ssh -i "$PROOF_DIR/proof-key" "ec2-user@$HOST"` to open the session. In that
+session, run `source ~/proof/instance-env.sh` once; every `proof instance`
+step then runs as `bash ~/proof/run-step <step id>`. The bundle holds no
+credential: the instance uses its instance profile.
 
 **P03-13 · HOST · proof instance** — session setup and the IMDS block
 
 ```bash
-export PROOF_ID="<same as P00>" APPROVED_ACCOUNT="<same>" BUCKET_SUFFIX="<same as P00>"
-export PROOF_DIR="$HOME/proof" RUNBOOK_DIR=/nonexistent
-export IMAGE="<same digest as P00>"
-mkdir -m 0700 -p "$PROOF_DIR" && mv ~/lib.sh ~/probe.py ~/created.env "$PROOF_DIR/"
-sed -e "s/<ACCOUNT>/$APPROVED_ACCOUNT/g" ~/aws-config.instance > "$PROOF_DIR/aws-config"
 source "$PROOF_DIR/lib.sh"
+chmod 0700 "$PROOF_DIR"
+sed -e "s/<ACCOUNT>/$APPROVED_ACCOUNT/g" "$PROOF_DIR/aws-config.instance" > "$PROOF_DIR/aws-config"
 sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP
 sudo iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP || stop S5 "IMDS drop rule missing"
 sudo docker pull -q "$IMAGE" >/dev/null || stop S9 "anonymous image pull failed; no registry token is brought to the host"
@@ -1433,6 +1722,9 @@ source "$PROOF_DIR/lib.sh"
 write_credentials api proof-api
 ( for _ in $(seq 1 7); do sleep 300; write_credentials api proof-api; done ) > "$PROOF_DIR/rotate.log" 2>&1 &
 ROTATOR=$!
+# However this step ends, the rotator is stopped and reaped before the
+# process exits, so it can never rewrite the file under P14-03.
+on_exit "kill $ROTATOR 2> /dev/null; wait $ROTATOR 2> /dev/null"
 probe api /run/nlw/aws/api --network bridge -e AWS_EC2_METADATA_DISABLED=true -- --loop "$REC_OBJ_K5" 35 \
   | tee "$PROOF_DIR/evidence/p14-rotation.txt"
 wait "$ROTATOR"
@@ -1531,6 +1823,11 @@ if grep -RIlE '[0-9]{12}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{12,}|aws_secret_access_ke
   "$PROOF_DIR/evidence" "$PROOF_DIR/journal.log"; then
   stop S7 "a sensitive value is in the evidence; do not share it"
 fi
+shopt -s nullglob
+if grep -lE 'aws_access_key_id|aws_secret_access_key|aws_session_token|SecretAccessKey|SessionToken|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}' \
+  "$PROOF_DIR/aws-config" "$PROOF_DIR"/*.json "$PROOF_DIR"/*.tsv "$PROOF_DIR"/*.out "$PROOF_DIR"/*.err; then
+  stop S7 "a credential-like value is in a proof data file"
+fi
 note "P16 evidence scan clean"
 ```
 
@@ -1585,7 +1882,7 @@ follow [§F Recovery](#f-recovery-from-a-partial-proof).
 | Id | Stop immediately when | Checked in |
 |---|---|---|
 | **S1** | the AWS account or region differs from the approved target | `lib.sh`, P01, P03-14 |
-| **S2** | an expected bucket, role, key, trail or instance already exists | P02 |
+| **S2** | an expected bucket, role, key, trail or instance already exists, or a just-created bucket is not new | P02, P03-06, P03-07 |
 | **S3** | multipart uploads conflict with the encryption policy | P07 |
 | **S4** | any runtime role, the bootstrap role or the operator gets broader permissions than designed: an EXPECT-DENIED call succeeds, a simulation is not a deny, or a credential is accepted that should be refused. A write that succeeded may have left an object: run R-OBJ | `expect_error`, `expect_simulated`, P03-11, P05, P11, P14, P15 |
 | **S5** | IMDS is reachable from an application container on the bridge network, or the instance metadata options differ | P03-11, P03-13, P03-14 |
@@ -1593,7 +1890,7 @@ follow [§F Recovery](#f-recovery-from-a-partial-proof).
 | **S7** | a secret or credential would be printed or kept in evidence | P16, and the rules in "How to read the commands" |
 | **S8** | cleanup would affect a resource that this proof did not create | `record`, X01–X02 |
 | **S9** | a check returned an unexpected value, error code or state, or a precondition failed | everywhere |
-| **S10** | a command failed: a create, a configuration change or a read (the `ERR` trap in `lib.sh`, and `record` given no identifier) | `lib.sh` |
+| **S10** | a command failed: a create, a configuration change or a read (the `EXIT` handler in `lib.sh` for any failure without a stop, and `record` given no identifier) | `lib.sh` |
 
 ## F. Cleanup
 
@@ -1611,12 +1908,15 @@ while IFS='=' read -r name value; do
   case "$name" in
     REC_ROLE_*) [[ "$value" =~ ^arn:aws:iam::${ACCOUNT}:role/nlw-staging-dataset-[a-z-]+$ ]] ;;
     REC_PROOF_ID) [[ "$value" == "$PROOF_ID" ]] ;;
+    REC_ORPHAN_BUCKET) [[ "$value" == "$BUCKET" ]] ;;
+    REC_ORPHAN_AUDIT_BUCKET) [[ "$value" == "$AUDIT_BUCKET" ]] ;;
+    REC_HUMAN_*_KEY_ID) [[ "$value" =~ ^AKIA[0-9A-Z]{16}$ ]] ;;
     REC_BUCKET) [[ "$value" == "$BUCKET" && "$value" == *"$SUFFIX" ]] ;;
     REC_AUDIT_BUCKET) [[ "$value" == "$AUDIT_BUCKET" && "$value" == *"$SUFFIX" ]] ;;
     REC_TRAIL_ARN) [[ "$value" == "$TRAIL_ARN" ]] ;;
     REC_PROFILE_BOOTSTRAP) [[ "$value" == "arn:aws:iam::${ACCOUNT}:instance-profile/nlw-staging-dataset-bootstrap" ]] ;;
     REC_BUDGET_NAME) [[ "$value" == "nlw-staging-dataset-proof-$PROOF_ID" ]] ;;
-    REC_OBJ_K[0-9]|REC_MPU_K[0-9]|REC_RECOVERED_[0-9]*_KEY)
+    REC_OBJ_K[0-9]|REC_MPU_K[0-9]|REC_RECOVERED_[0-9]*_KEY|REC_RECOVERED_MPU_[0-9]*_KEY)
       [[ "$value" == "versions/$REC_PROOF_WS/"* || "$value" == "versions/$REC_PROOF_WS2/"* ]] ;;
     *) true ;;
   esac || stop S8 "$name does not name this proof run's staging resource"
@@ -1680,6 +1980,11 @@ for v in $(compgen -v | grep -E '^REC_RECOVERED_[0-9]+_KEY$' || true); do
   aws s3api delete-object --profile nlw-proof-operator --bucket "${REC_BUCKET}" \
     --key "${!v}" --version-id "${!ver}" --query VersionId --output text
 done
+for v in $(compgen -v | grep -E '^REC_RECOVERED_MPU_[0-9]+_KEY$' || true); do
+  up="${v%_KEY}_UPLOAD"
+  aws s3api abort-multipart-upload --profile nlw-proof-operator --bucket "${REC_BUCKET}" \
+    --key "${!v}" --upload-id "${!up}" 2> /dev/null || note "upload ${!up} already closed"
+done
 for u in REC_MPU_K3_UPLOAD REC_MPU_K3_UPLOAD2; do
   [[ -n "${!u:-}" ]] || continue
   aws s3api abort-multipart-upload --profile nlw-proof-operator --bucket "${REC_BUCKET}" \
@@ -1735,14 +2040,66 @@ two audit roles. The audit bucket cannot be emptied before Object Lock
 retention ends, and the audit key must outlive every log it encrypts. Their
 removal after retention is a separate, reviewed change.
 
-**X08 · LOCAL · workstation** — local session material
+**X09 · MUTATING · workstation** — always, after X01–X07 (or after a stop):
+delete the two proof access keys
 
 ```bash
 source "$PROOF_DIR/lib.sh"
-find "$HOME/.aws/cli/cache" -type f -newer "$PROOF_DIR/started" -name '*.json' -delete 2>/dev/null || true
-rm -f "$PROOF_DIR/proof-key" "$PROOF_DIR/proof-key.pub" "$PROOF_DIR"/*.bin
-note "X08 cached sessions and proof key removed; ledger, journal and evidence kept"
+if [[ -n "${REC_HUMAN_OPERATOR_KEY_ID:-}" ]]; then
+  aws iam delete-access-key --profile nlw-proof-human-operator \
+    --user-name "${REC_HUMAN_OPERATOR_USER}" --access-key-id "${REC_HUMAN_OPERATOR_KEY_ID}"
+fi
+if [[ -n "${REC_HUMAN_AUDIT_KEY_ID:-}" ]]; then
+  aws iam delete-access-key --profile nlw-proof-human-audit \
+    --user-name "${REC_HUMAN_AUDIT_USER}" --access-key-id "${REC_HUMAN_AUDIT_KEY_ID}"
+fi
+note "X09 proof access keys deleted"
 ```
+
+Each person deletes their own key with that key, so the IAM user needs
+`iam:DeleteAccessKey` on itself. If a key cannot be deleted this way, its
+owner deletes it in the console at once; X08 still runs.
+
+**X08 · LOCAL · workstation** — always, last: Keychain items, cached sessions,
+local keys and a final scan
+
+```bash
+source "$PROOF_DIR/lib.sh"
+for who in operator audit; do
+  bash "$PROOF_DIR/credential-process.sh" "$PROOF_ID" "$who" remove || stop S7 "Keychain items for $who remain"
+done
+python3 - "$HOME/.aws/cli/cache" "$ACCOUNT" <<'PY'
+import json, os, re, sys
+cache, account = sys.argv[1], sys.argv[2]
+ours = re.compile(r"^arn:aws:sts::%s:assumed-role/[^/]+/nlw-staging-"
+                  r"(api|ingest|operator|audit-admin|audit-reader|proof-admin)$" % account)
+removed = 0
+for name in (os.listdir(cache) if os.path.isdir(cache) else []):
+    path = os.path.join(cache, name)
+    try:
+        arn = json.load(open(path)).get("AssumedRoleUser", {}).get("Arn", "")
+    except (OSError, ValueError, AttributeError):
+        continue
+    if ours.match(arn):
+        os.remove(path)
+        removed += 1
+print(f"removed {removed} cached sessions of this proof's roles; others untouched")
+PY
+rm -f "$PROOF_DIR/proof-key" "$PROOF_DIR/proof-key.pub" "$PROOF_DIR"/*.bin
+rm -rf "$PROOF_DIR/trail" "$PROOF_DIR/instance-bundle"
+shopt -s nullglob
+if grep -lE 'aws_access_key_id|aws_secret_access_key|aws_session_token|SecretAccessKey|SessionToken|ASIA[0-9A-Z]{16}' \
+  "$PROOF_DIR/aws-config" "$PROOF_DIR/journal.log" "$PROOF_DIR"/evidence/* "$PROOF_DIR"/*.json \
+  "$PROOF_DIR"/*.tsv "$PROOF_DIR"/*.out "$PROOF_DIR"/*.err; then
+  stop S7 "a credential-like value remains in $PROOF_DIR"
+fi
+note "X08 Keychain items, this proof's cached sessions and local keys removed; scan clean"
+```
+
+X08 deletes only CLI cache files whose assumed-role session is one of this
+proof's session names in the approved account; other sessions are left
+alone. The raw CloudTrail downloads are removed because they carry session
+key ids; the audit bucket keeps the originals.
 
 ### F. Recovery from a partial proof
 
@@ -1762,7 +2119,10 @@ its name alone.
    - In AWS **without** this proof's tag: not ours. Never touch it (S8).
 3. **Resume or abandon.** Every create is preceded by P02's absence check for
    its name, so a step may be resumed only after re-running P02 for the
-   resources that step creates. Otherwise run X01–X08 in order.
+   resources that step creates. Otherwise run X01–X07 in order, with X10–X12
+   where they apply.
+4. **Always, whatever else happens:** run X09 and then X08, so the proof's
+   access keys, Keychain items and cached sessions do not outlive the run.
 
 **R-OBJ: an EXPECT-DENIED write unexpectedly succeeded.** The stop (S4)
 happened after the write, so an object version exists that the ledger does
@@ -1794,7 +2154,22 @@ for ws in "$REC_PROOF_WS" "$REC_PROOF_WS2"; do
     record "REC_RECOVERED_${n}_VERSION" "$version"
   done < "$PROOF_DIR/recover-$ws.tsv"
 done
-note "X10 recovered $n unledgered versions under the proof prefixes"
+m="$(compgen -v | grep -cE '^REC_RECOVERED_MPU_[0-9]+_KEY$' || true)"
+for ws in "$REC_PROOF_WS" "$REC_PROOF_WS2"; do
+  aws s3api list-multipart-uploads --profile nlw-proof-operator --bucket "${REC_BUCKET}" \
+    --prefix "versions/$ws/" --query 'Uploads[].[Key,UploadId,Initiated]' \
+    --output text > "$PROOF_DIR/recover-mpu-$ws.tsv"
+  while IFS=$'\t' read -r key upload initiated; do
+    [[ -n "$key" && "$key" != None ]] || continue
+    [[ "$key" == "versions/$ws/"* ]] || stop S8 "listing returned an upload outside the proof prefix"
+    [[ "$initiated" > "$started" ]] || stop S8 "an upload predates this proof run: $key"
+    grep -qF "$upload" "$PROOF_DIR/created.env" && continue
+    m=$((m + 1))
+    record "REC_RECOVERED_MPU_${m}_KEY" "$key"
+    record "REC_RECOVERED_MPU_${m}_UPLOAD" "$upload"
+  done < "$PROOF_DIR/recover-mpu-$ws.tsv"
+done
+note "X10 recovered $n unledgered versions and $m open uploads under the proof prefixes"
 ```
 
 **X11 · READ-ONLY · workstation** — the one write outside `versions/`
@@ -1818,8 +2193,49 @@ temporary bucket-policy change, because `DenyDeleteExceptOperator` refuses
 every principal but the operator and the operator's IAM scope is
 `versions/*`. X06 cannot run until that is done; the bucket is kept.
 
-After X10, run X01–X05 again: X04 purges the recovered versions by their
-recorded ids, and X05 must then find nothing.
+After X10, run X01–X05 again: X04 purges the recovered versions and aborts
+the recovered uploads by their recorded ids, and X05 must then find nothing.
+An upload that an unexpected `CreateMultipartUpload` opened is found by X10
+even though `expect_error` discarded its id; the lifecycle rule would also
+abort it after one day.
+
+**R-BUCKET: a bucket was created but never recorded.** If a pristine check in
+P03-06 or P03-07 fails after `create-bucket` succeeded (for example a
+transient error), the bucket exists, untagged and unrecorded. It is this
+run's only if its name carries this run's random suffix **and** the journal
+shows that this run confirmed the name absent just before creating it. X12
+proves both, checks that the bucket is still empty and unconfigured, records
+it and deletes it. Anything else is not ours (S8).
+
+**X12 · MUTATING · workstation** — an unrecorded bucket created by this run
+
+```bash
+source "$PROOF_DIR/lib.sh"
+orphan() { # orphan NAME PROFILE LEDGER_NAME
+  local name="$1" profile="$2" ledger="$3"
+  [[ -z "${!ledger:-}" ]] || return 0
+  [[ "$name" == *"$SUFFIX" ]] || stop S8 "$name does not carry this run's suffix"
+  grep -qF "absence confirmed: $name" "$PROOF_DIR/journal.log" || { note "no creation attempt for $name"; return 0; }
+  if ! aws s3api head-bucket --profile "$profile" --bucket "$name" > /dev/null 2>&1; then
+    note "$name does not exist"; return 0
+  fi
+  ON_ALLOWED=S8 expect_error NoSuchTagSet aws s3api get-bucket-tagging --profile "$profile" --bucket "$name"
+  ON_ALLOWED=S8 expect_error NoSuchBucketPolicy aws s3api get-bucket-policy --profile "$profile" --bucket "$name"
+  [[ "$(aws s3api list-object-versions --profile "$profile" --bucket "$name" --max-items 1 \
+    --query 'sum([length(Versions || `[]`), length(DeleteMarkers || `[]`)])' --output text)" == 0 ]] \
+    || stop S8 "$name holds objects; it is not an untouched orphan"
+  record "REC_ORPHAN_${ledger#REC_}" "$name"
+}
+orphan "$BUCKET" nlw-proof-admin REC_BUCKET
+orphan "$AUDIT_BUCKET" nlw-proof-audit-admin REC_AUDIT_BUCKET
+if [[ -n "${REC_ORPHAN_BUCKET:-}" ]]; then
+  aws s3api delete-bucket --profile nlw-proof-admin --bucket "${REC_ORPHAN_BUCKET}"
+fi
+if [[ -n "${REC_ORPHAN_AUDIT_BUCKET:-}" ]]; then
+  aws s3api delete-bucket --profile nlw-proof-audit-admin --bucket "${REC_ORPHAN_AUDIT_BUCKET}"
+fi
+note "X12 orphan buckets handled"
+```
 
 **Special cases:**
 

@@ -71,9 +71,21 @@ Templates = dict[str, Any]
 # --- parsing --------------------------------------------------------------------------------
 
 
+def strict_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """json object hook: a duplicate key is an error, never last-one-wins."""
+    keys = [k for k, _ in pairs]
+    duplicates = sorted({k for k in keys if keys.count(k) > 1})
+    if duplicates:
+        raise ValueError(f"duplicate JSON keys {duplicates}")
+    return dict(pairs)
+
+
 def load_templates(text: str | None = None) -> Templates:
     body = PROVISIONING.read_text() if text is None else text
-    return {name: json.loads(raw) for name, raw in TEMPLATE.findall(body)}
+    return {
+        name: json.loads(raw, object_pairs_hook=strict_pairs)
+        for name, raw in TEMPLATE.findall(body)
+    }
 
 
 def proof_text() -> str:
@@ -99,7 +111,9 @@ def actions(s: dict[str, Any]) -> set[str]:
 
 
 def allows(doc: Any) -> list[dict[str, Any]]:
-    return [s for s in statements(doc) if s["Effect"] == "Allow"]
+    """Every statement that is not exactly a Deny is treated as an Allow, so
+    a lowercase, misspelt or missing Effect is checked as the broader case."""
+    return [s for s in statements(doc) if s.get("Effect") != "Deny"]
 
 
 def allowed_actions(doc: Any) -> set[str]:
@@ -124,7 +138,7 @@ def labelled_blocks(text: str) -> list[dict[str, Any]]:
         labels = list(LABEL.finditer(text, previous_end, block.start()))
         label = labels[-1].groupdict() if labels else None
         body = block.group(1).replace("\\\n", " ")
-        out.append({"label": label, "body": body, "start": block.start()})
+        out.append({"label": label, "body": body, "raw": block.group(1), "start": block.start()})
         previous_end = block.end()
     return out
 
@@ -623,7 +637,7 @@ def principal_violations(t: Templates) -> list[str]:
     for name, allowed in PRINCIPAL_ALLOWLIST.items():
         for s in statements(t[name]):
             sid = f"{name}/{s.get('Sid')}"
-            if s["Effect"] != "Allow":
+            if s.get("Effect") == "Deny":
                 continue
             if "NotPrincipal" in s or "NotAction" in s or "NotResource" in s:
                 v.append(f"{sid}: NotPrincipal, NotAction or NotResource in an Allow")
@@ -1324,7 +1338,7 @@ def recovery_violations(text: str) -> list[str]:
 
 def commit_binding_violations(text: str) -> list[str]:
     v = []
-    p00 = [c for c in commands(block(text, "P00-01"))]
+    p00 = [c for c in commands(block(text, "P00-02"))]
     first_effect = next(i for i, c in enumerate(p00) if c.name in ("mkdir", "python3"))
     guards = [
         i
@@ -1497,6 +1511,662 @@ def imds_violations(text: str) -> list[str]:
     return v
 
 
+# --- N1/N2: canonical statements and every Deny pinned exactly -------------------------------
+
+PINS: dict[str, Any] = json.loads(
+    (ROOT / "tests" / "fixtures" / "dataset_s3_policy_pins.json").read_text(),
+    object_pairs_hook=strict_pairs,
+)
+NON_POLICY = {
+    "dataset-bucket-lifecycle",
+    "audit-bucket-lifecycle",
+    "trail-advanced-event-selectors",
+}
+STATEMENT_KEYS = {
+    "Sid",
+    "Effect",
+    "Principal",
+    "NotPrincipal",
+    "Action",
+    "NotAction",
+    "Resource",
+    "NotResource",
+    "Condition",
+}
+
+
+def effect_violations(t: Templates) -> list[str]:
+    """Every statement of every policy template is a dict with a Sid, only
+    known keys, and an Effect that is exactly Allow or Deny."""
+    v = []
+    for name, doc in t.items():
+        if name in NON_POLICY:
+            continue
+        for s in statements(doc):
+            if not isinstance(s, dict):
+                v.append(f"{name}: a statement is not an object")
+                continue
+            if s.get("Effect") not in ("Allow", "Deny"):
+                v.append(f"{name}/{s.get('Sid')}: Effect {s.get('Effect')!r} is not Allow or Deny")
+            if not s.get("Sid"):
+                v.append(f"{name}: a statement has no Sid")
+            if set(s) - STATEMENT_KEYS:
+                v.append(f"{name}/{s.get('Sid')}: unknown keys {sorted(set(s) - STATEMENT_KEYS)}")
+    return v
+
+
+def deny_pin_violations(t: Templates) -> list[str]:
+    """Every policy template has exactly its reviewed Sids, and every Deny is
+    the reviewed statement: principal, actions, resources and condition."""
+    v = []
+    if set(t) - NON_POLICY != set(PINS):
+        v.append(f"policy templates {sorted(set(t) - NON_POLICY)} differ from {sorted(PINS)}")
+    for name, pin in PINS.items():
+        if name not in t:
+            continue
+        sids = [s.get("Sid") for s in statements(t[name])]
+        if len(sids) != len(set(sids)) or set(sids) != set(pin["sids"]):
+            v.append(f"{name}: Sids {sids} differ from the reviewed {pin['sids']}")
+        got = {s.get("Sid"): s for s in statements(t[name])}
+        for sid, expected in pin["denies"].items():
+            actual = got.get(sid)
+            if actual is None:
+                v.append(f"{name}/{sid}: a mandatory Deny is missing")
+            elif {k: x for k, x in actual.items() if k != "Sid"} != expected:
+                v.append(f"{name}/{sid}: the Deny differs from the reviewed statement")
+        for sid, statement in got.items():
+            if (
+                sid not in pin["denies"]
+                and statement.get("Effect") == "Deny"
+                and sid in pin["sids"]
+            ):
+                v.append(f"{name}/{sid}: became a Deny")
+    return v
+
+
+# --- N3/N4: run the procedure itself with a stub `aws` ------------------------------------------
+#
+# Every step (lib.sh included) is executed by bash with PATH holding only stubs
+# and a fixed set of local tools. The stub `aws` records its fully expanded
+# argv and never touches a network or the real AWS CLI, which is not on PATH.
+# What the shell actually runs is checked, so indirection (helper functions,
+# substitutions, indirect or case-converted variables, ledger values, and
+# wrappers such as timeout, xargs, nohup, sudo or bash -c) cannot hide a call.
+
+STUB_ACCOUNT = "111122223333"
+STUB_SUFFIX = "-d6a1b2c3d4e5f6"
+STUB_PROOF_ID = "d6-20261011-a1b2c3"
+STUB_OTHER_BUCKET = f"nlw-production-datasets-{STUB_ACCOUNT}-us-east-1{STUB_SUFFIX}"
+REAL_TOOLS = (
+    "base64",
+    "basename",
+    "cat",
+    "chmod",
+    "cmp",
+    "cp",
+    "cut",
+    "date",
+    "diff",
+    "dirname",
+    "git",
+    "grep",
+    "head",
+    "jq",
+    "ls",
+    "mkdir",
+    "mv",
+    "rm",
+    "sed",
+    "seq",
+    "sort",
+    "tail",
+    "tee",
+    "touch",
+    "tr",
+    "uniq",
+    "wc",
+    "xargs",
+    "awk",
+    "true",
+    "false",
+    "expr",
+)
+STUB_AWS = r"""#!/bin/bash
+{ printf '%s' "${STEP:-?}"; for a in "$@"; do printf '\037%s' "$a"; done
+  printf '\036\n'; } >> "$STUB_LOG"
+op=""; svc=""; out=""; prefix=""; i=0; args=("$@")
+while [[ $i -lt ${#args[@]} ]]; do
+  a="${args[$i]}"
+  case "$a" in
+    --output) out="${args[$((i + 1))]}"; i=$((i + 2)); continue ;;
+    --prefix) prefix="${args[$((i + 1))]}"; i=$((i + 2)); continue ;;
+    --profile|--region|--query|--endpoint-url) i=$((i + 2)); continue ;;
+    --*) i=$((i + 1)); continue ;;
+  esac
+  if [[ -z "$svc" ]]; then svc="$a"; elif [[ -z "$op" ]]; then op="$a"; fi
+  i=$((i + 1))
+done
+case "$op" in
+  export-credentials)
+    printf '%s\n' '{"Version": 1, "AccessKeyId": "stub", "SecretAccessKey": "stub",' \
+      '"SessionToken": "stub", "Expiration": "2999-01-01T00:00:00+00:00"}' ;;
+  list-object-versions|list-multipart-uploads)
+    if [[ "$out" == text ]]; then
+      printf '%sstub-object\tstub-%s\t2999-01-01T00:00:00+00:00\n' "$prefix" "$RANDOM$RANDOM"
+    else echo '{}'; fi ;;
+  *)
+    if [[ "$out" == text ]]; then echo "arn:aws:stub:::$op/$RANDOM"; else echo '{}'; fi ;;
+esac
+exit 0
+"""
+STUB_SIMPLE = {
+    "uuidgen": "printf '%08x-0000-4000-8000-%012x\\n' $RANDOM $RANDOM$RANDOM",
+    "openssl": 'if [[ "${1:-}" == rand ]]; then echo a1b2c3d4e5f6; else echo c3R1Yg==; fi',
+    "uname": "echo Darwin",
+}
+STUB_LOGGED = (
+    "docker",
+    "ssh",
+    "scp",
+    "ssh-keygen",
+    "iptables",
+    "install",
+    "find",
+    "gunzip",
+    "curl",
+    "wget",
+    "nc",
+    "security",
+    "dnf",
+    "systemctl",
+    "sleep",
+    "shasum",
+    "sha256sum",
+)
+STUB_WRAPPERS = {
+    "sudo": 'while [[ $# -gt 0 && "$1" == -* ]]; do\n'
+    'case "$1" in -u|-g|-C) shift 2 ;; *) shift ;; esac; done\n'
+    'if [[ -f "$STUB_DIR/$1" && ! -L "$STUB_DIR/$1" ]]; then exec "$@"; fi\n'
+    'printf \'sudo-skipped\\037%s\\036\\n\' "$*" >> "$STUB_LOG"',
+    "timeout": 'while [[ "${1:-}" == -* ]]; do shift; done; shift; exec "$@"',
+    "nohup": 'exec "$@"',
+    "nice": 'while [[ "${1:-}" == -* ]]; do shift; done; exec "$@"',
+    "env": 'if [[ $# -eq 0 ]]; then printf "env-printed\\037\\036\\n" >> "$STUB_LOG"; exit 0; fi\n'
+    'while [[ "${1:-}" == *=* || "${1:-}" == -* ]]; do shift; done; exec "$@"',
+}
+CREDENTIAL_STUB = """#!/bin/bash
+printf 'credential-process\\037%s\\036\\n' "$*" >> "$STUB_LOG"
+case "${3:-print}" in key-id) echo AKIASTUBSTUBSTUBSTUB ;; esac
+"""
+HARNESS_OVERRIDES = """
+# --- test harness: never exit on a check, so every command is reached ---
+set +e +u +o pipefail
+trap - EXIT
+stop() { printf '%s\\n' "STOP ${1:-} ${2:-}" >> "$PROOF_DIR/harness-stops.log"; return 0; }
+"""
+
+
+@dataclass
+class StubRun:
+    calls: list[tuple[str, list[str]]]
+    other: list[tuple[str, str]]
+    classes: dict[str, str]
+
+
+def _write_exec(path: Path, body: str) -> None:
+    path.write_text(body if body.startswith("#!") else f"#!/bin/bash\n{body}\n")
+    path.chmod(0o755)
+
+
+def stub_toolbox(root: Path, bash: str) -> Path:
+    stub = root / "stub"
+    stub.mkdir()
+    for tool in REAL_TOOLS:
+        found = shutil.which(tool)
+        if found:
+            (stub / tool).symlink_to(found)
+    (stub / "bash").symlink_to(bash)
+    (stub / "python3").symlink_to(sys.executable)
+    _write_exec(stub / "aws", STUB_AWS)
+    for name, body in STUB_SIMPLE.items():
+        _write_exec(stub / name, body)
+    for name in STUB_LOGGED:
+        _write_exec(stub / name, f'printf \'{name}\\037%s\\036\\n\' "$*" >> "$STUB_LOG"')
+    for name, body in STUB_WRAPPERS.items():
+        _write_exec(stub / name, body)
+    return stub
+
+
+def run_with_stub(root: Path, text: str, bash: str, lib_extra: str = "") -> StubRun:
+    """Execute every step of ``text`` (except P00-01's exports and P00-02's
+    extraction, which this does itself) in order against the stub toolbox."""
+    home, repo = root / "home", root / "repo"
+    (repo / "docs" / "runbooks").mkdir(parents=True)
+    shutil.copy(PROVISIONING, repo / "docs" / "runbooks" / PROVISIONING.name)
+    (repo / "docs" / "runbooks" / PROOF.name).write_text(text)
+    git_env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(root),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    }
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-gpg-sign", "-m", "r"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=git_env)
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=git_env,
+    ).stdout.strip()
+    proof_dir = home / "nlw-d6" / STUB_PROOF_ID
+    (proof_dir / "steps").mkdir(parents=True)
+    (proof_dir / "evidence").mkdir()
+    files = dict(FILE_BLOCK.findall(text))
+    for name, body in files.items():
+        (proof_dir / name).write_text(body)
+    (proof_dir / "lib.sh").write_text(files["lib.sh"] + lib_extra + HARNESS_OVERRIDES)
+    _write_exec(proof_dir / "credential-process.sh", CREDENTIAL_STUB)
+    (proof_dir / "started").touch()
+    stub = stub_toolbox(root, bash)
+    log = root / "aws.log"
+    log.touch()
+    env = {
+        "PATH": str(stub),
+        "HOME": str(home),
+        "LANG": "C",
+        "STUB_LOG": str(log),
+        "STUB_DIR": str(stub),
+        "PROOF_DIR": str(proof_dir),
+        "PROOF_ID": STUB_PROOF_ID,
+        "APPROVED_ACCOUNT": STUB_ACCOUNT,
+        "BUCKET_SUFFIX": STUB_SUFFIX,
+        "RUNBOOK_DIR": str(repo / "docs" / "runbooks"),
+        "REVIEWED_COMMIT": head,
+        "ADMIN_ROLE": "nlw-test-admin",
+        "AUDIT_RETENTION_DAYS": "90",
+        "E11_IDENTITY": "iam-user-mfa",
+        "OPERATOR_MFA_ARN": f"arn:aws:iam::{STUB_ACCOUNT}:mfa/op",
+        "AUDIT_MFA_ARN": f"arn:aws:iam::{STUB_ACCOUNT}:mfa/au",
+        "BUDGET_LIMIT_USD": "25",
+        "BUDGET_EMAIL": "owner@example.invalid",
+        "IMAGE": "ghcr.io/example/image@sha256:" + "0" * 64,
+        "OPERATOR_CIDR": "192.0.2.1/32",
+        "OBJECT_LOCK_MODE": "GOVERNANCE",
+        "E3_DECISION": "delete",
+        "OPERATOR_HUMANS_JSON": json.dumps([f"arn:aws:iam::{STUB_ACCOUNT}:user/op"]),
+        "AUDIT_ADMIN_HUMANS_JSON": json.dumps([f"arn:aws:iam::{STUB_ACCOUNT}:user/au"]),
+        "AUDIT_READER_HUMANS_JSON": json.dumps([f"arn:aws:iam::{STUB_ACCOUNT}:user/rd"]),
+        "E12_MUST_NOT_PASS_JSON": json.dumps([f"arn:aws:iam::{STUB_ACCOUNT}:user/x"]),
+        "HTTPS_PROXY": "http://127.0.0.1:9",
+        "HTTP_PROXY": "http://127.0.0.1:9",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    classes: dict[str, str] = {}
+    for b in labelled_blocks(text):
+        if not b["label"]:
+            continue
+        step = b["label"]["id"]
+        classes[step] = b["label"]["cls"]
+        if step in ("P00-01", "P00-02"):
+            continue
+        if step == "X12":  # the orphan case: the buckets were created but never recorded
+            ledger = proof_dir / "created.env"
+            ledger.write_text(
+                "".join(
+                    line
+                    for line in ledger.read_text().splitlines(True)
+                    if not line.startswith(("REC_BUCKET=", "REC_AUDIT_BUCKET="))
+                )
+            )
+        script = proof_dir / "steps" / f"{step}.sh"
+        script.write_text(b["raw"])
+        subprocess.run(
+            [bash, str(script)],
+            cwd=repo,
+            env={**env, "STEP": step},
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    calls, other = [], []
+    for record in log.read_text().split("\x1e\n"):
+        if not record:
+            continue
+        head_field, *argv = record.split("\x1f")
+        if head_field in classes or head_field == "?":
+            calls.append((head_field, argv))
+        else:
+            other.append((head_field, " ".join(argv)))
+    return StubRun(calls, other, classes)
+
+
+def stub_violations(run: StubRun, text: str) -> list[str]:
+    v = []
+    executed: dict[str, set[tuple[str, str]]] = {}
+    for step, argv in run.calls:
+        call = aws_call(Cmd(["aws", *argv], ""))
+        if call is None:
+            continue
+        executed.setdefault(step, set()).add(call)
+        cls = run.classes.get(step, "?")
+        joined = " ".join(argv)
+        production = "production" in joined.lower() or STUB_OTHER_BUCKET in joined
+        if production and (cls == "MUTATING" or not is_read(call[1])):
+            v.append(f"{step}: ran aws {call[0]} {call[1]} against production")
+        if call[0] == "s3":
+            v.append(f"{step}: ran the high-level aws s3 {call[1]}")
+        if cls == "READ-ONLY" and not is_read(call[1]):
+            v.append(f"{step}: READ-ONLY step ran aws {call[0]} {call[1]}")
+        if cls in ("HOST", "LOCAL"):
+            v.append(f"{step}: {cls} step ran aws {call[0]} {call[1]}")
+    for kind, _detail in run.other:
+        if kind == "env-printed":
+            v.append("a step printed the environment")
+    for b in labelled_blocks(text):
+        if not b["label"] or b["label"]["id"] in ("P00-01", "P00-02"):
+            continue
+        static = {(svc, op) for svc, op, _ in aws_ops(b["body"])}
+        missing = static - executed.get(b["label"]["id"], set())
+        if missing:
+            v.append(f"{b['label']['id']}: calls never executed: {sorted(missing)}")
+    return v
+
+
+AVAILABLE_BASHES = sorted(
+    {
+        b
+        for b in (
+            shutil.which("bash"),
+            "/bin/bash",
+            "/usr/bin/bash",
+            "/opt/homebrew/bin/bash",
+            "/usr/local/bin/bash",
+        )
+        if b and Path(b).exists()
+    }
+)
+needs_harness = pytest.mark.skipif(
+    shutil.which("jq") is None or shutil.which("git") is None or not AVAILABLE_BASHES,
+    reason="jq, git and bash are required",
+)
+
+
+def _bash_version(bash: str) -> tuple[int, int]:
+    out = subprocess.run(
+        [bash, "-c", "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"], capture_output=True, text=True
+    ).stdout.split()
+    return int(out[0]), int(out[1])
+
+
+# --- N4/N6/N7/N8/N9/N10/N11/N12 static checks ---------------------------------------------------
+
+WRAPPER_NAMES = {
+    "timeout",
+    "xargs",
+    "nohup",
+    "env",
+    "nice",
+    "stdbuf",
+    "time",
+    "watch",
+    "parallel",
+    "bash",
+    "sh",
+    "zsh",
+    "eval",
+    "-u",
+    "-E",
+    "exec",
+    "command",
+}
+
+
+def wrapper_violations(text: str) -> list[str]:
+    """An AWS call must be the command itself (or inside an expectation
+    helper), never an argument of another program or a string for a shell."""
+    v = []
+    for where, body in all_code(text):
+        for c in commands(body):
+            if c.name == "aws":
+                continue
+            if "aws" in c.words[1:] and c.name in WRAPPER_NAMES | {"sudo"}:
+                v.append(f"{where}: aws runs behind {c.name}")
+            elif "aws" in c.words[1:] and c.name not in ("grep", "note", "echo", "printf", "stop"):
+                v.append(f"{where}: aws appears as an argument of {c.name}")
+            if c.name in ("bash", "sh", "zsh", "eval") and any(
+                re.search(r"(^|[\s;&|(])aws\s+[a-z]", w) for w in c.words[1:]
+            ):
+                v.append(f"{where}: aws runs inside a {c.name} string")
+    return v
+
+
+def credential_source_violations(text: str) -> list[str]:
+    v = []
+    files = dict(FILE_BLOCK.findall(text))
+    config = files["aws-config.workstation"]
+    if re.search(r"aws_access_key_id|aws_secret_access_key|aws_session_token", config):
+        v.append("the workstation config holds a key")
+    profiles = re.findall(r"^\[profile ([a-z0-9-]+)\]\n(.*?)(?=^\[|\Z)", config, re.M | re.S)
+    names = {name for name, _ in profiles}
+    for name, body in profiles:
+        sources = re.findall(r"^source_profile = (\S+)$", body, re.M)
+        process = re.findall(r"^credential_process = (.+)$", body, re.M)
+        if sources and sources[0] not in names:
+            v.append(f"profile {name} chains from an undefined profile {sources[0]}")
+        if not sources and not process:
+            v.append(f"profile {name} has no defined credential source")
+        for proc in process:
+            if not re.fullmatch(
+                r"/bin/bash <PROOF_DIR>/credential-process\.sh <PROOF_ID> (operator|audit)", proc
+            ):
+                v.append(f"profile {name} uses an unreviewed credential_process")
+    for where, body in all_code(text):
+        for c in commands(body):
+            if c.name == "bash" and any(w.endswith("credential-process.sh") for w in c.words):
+                mode = c.words[4] if len(c.words) > 4 else "print"
+                if mode not in ("add", "remove", "key-id"):
+                    v.append(f"{where}: credential-process.sh run in mode {mode}")
+    ids = [b["label"]["id"] for b in labelled_blocks(text) if b["label"]]
+    if not ("X09" in ids and "X08" in ids and ids.index("X09") < ids.index("X08")):
+        v.append("X09 (delete the access keys) does not run before X08")
+    x08 = block(text, "X08")
+    if 'credential-process.sh" "$PROOF_ID" "$who" remove' not in x08:
+        v.append("X08 does not remove the Keychain items")
+    if "-delete" in x08 or "-newer" in x08:
+        v.append("X08 deletes cached sessions by age instead of by this proof's sessions")
+    if "4. **Always, whatever else happens:** run X09 and then X08" not in text:
+        v.append("recovery does not require X09 and X08 after a stop")
+    p00 = block(text, "P00-02")
+    if "aws_access_key_id|aws_secret_access_key|aws_session_token" not in p00:
+        v.append("P00-02 does not refuse a key in aws-config")
+    if "paste them" in text.lower() or "paste the key into" in text.lower():
+        v.append("the procedure tells someone to paste a key into a file")
+    return v
+
+
+def bucket_creation_strict_violations(text: str) -> list[str]:
+    """N6: between create-bucket and the ledger entry, nothing but the
+    pristine checks may touch the bucket."""
+    v = []
+    for step, ledger in (("P03-06", "REC_BUCKET"), ("P03-07", "REC_AUDIT_BUCKET")):
+        cmds = commands(block(text, step))
+        create = _call_index(cmds, "s3api", "create-bucket")
+        recorded = [
+            i for i, c in enumerate(cmds) if c.name == "record" and c.words[1:2] == [ledger]
+        ]
+        if create < 0 or not recorded:
+            v.append(f"{step}: no create-bucket or no ledger entry")
+            continue
+        for c in cmds[create + 1 : recorded[0]]:
+            call = aws_call(c)
+            if call and not is_read(call[1]):
+                v.append(f"{step}: {call[1]} runs on the new bucket before it is proven new")
+        if not any(c.name == "note" and "absence confirmed:" in c.text for c in cmds[:create]):
+            v.append(f"{step}: the absence check is not journalled for orphan recovery")
+    return v
+
+
+def _key_args(c: Cmd) -> list[str]:
+    keys = []
+    for i, w in enumerate(c.words):
+        if w == "--key" and i + 1 < len(c.words):
+            keys.append(c.words[i + 1])
+        elif w.startswith("--key="):
+            keys.append(w.split("=", 1)[1])
+        elif w == "--delete" and i + 1 < len(c.words):
+            keys += re.findall(r"Key\s*[=:]\s*\"?([^,}\" ]+)", c.words[i + 1])
+        elif w == "--copy-source" and i + 1 < len(c.words):
+            pass
+    return keys
+
+
+def denied_write_strict_violations(text: str) -> list[str]:
+    """N7: every expected-denied write names its keys in a parsed form inside
+    the proof prefixes; the high-level ``aws s3`` commands are not used."""
+    v = []
+    for b in labelled_blocks(text):
+        if not b["label"]:
+            continue
+        sid = b["label"]["id"]
+        env = dict(PROOF_KEY_ENV)
+        env.update({f"REC_OBJ_K{n}": f"versions/<WS1>/k{n}" for n in range(1, 10)})
+        env.update({f"REC_MPU_K{n}": f"versions/<WS1>/k{n}" for n in range(1, 10)})
+        for name, value in assignments(b["body"]):
+            env[name] = expand(value, env)
+        for c in commands(b["body"]):
+            call = aws_call(c)
+            if not call:
+                continue
+            if call[0] == "s3":
+                v.append(f"{sid}: high-level aws s3 {call[1]}")
+            if not (c.wrapper and call[1] in WRITE_OPS | {"delete-objects"}):
+                continue
+            keys = _key_args(c)
+            if not keys:
+                v.append(f"{sid}: expected-denied {call[1]} names no parsable key")
+            for key in (expand(k, env) for k in keys):
+                if not (
+                    key.startswith(("versions/<WS1>/", "versions/<WS2>/"))
+                    or key == "outside/<WS1>/x"
+                ):
+                    v.append(f"{sid}: expected-denied {call[1]} on {key}")
+    return v
+
+
+def multipart_recovery_violations(text: str) -> list[str]:
+    v = []
+    x10 = commands(block(text, "X10"))
+    mpu = [c for c in x10 if aws_call(c) == ("s3api", "list-multipart-uploads")]
+    if not mpu or any(c.words[c.words.index("--prefix") + 1] != "versions/$ws/" for c in mpu):
+        v.append("X10 does not list open uploads under exactly the proof prefixes")
+    if not any(c.name == "record" and c.words[1].startswith("REC_RECOVERED_MPU_") for c in x10):
+        v.append("X10 does not record open uploads")
+    body = block(text, "X10")
+    if '[[ "$initiated" > "$started" ]] || stop S8' not in body:
+        v.append("X10 does not refuse uploads older than the run")
+    x04 = block(text, "X04")
+    if "REC_RECOVERED_MPU_" not in x04 or not any(
+        aws_call(c) == ("s3api", "abort-multipart-upload") and "${!v}" in c.words
+        for c in commands(x04)
+    ):
+        v.append("X04 does not abort recovered uploads by their recorded ids")
+    return v
+
+
+def human_and_drift_violations(text: str) -> list[str]:
+    """N9: human lists validated before use; P03-11 compares deployed
+    documents with the rendered files."""
+    v = []
+    p0301 = commands(block(text, "P03-01"))
+    first_role = _call_index(p0301, "iam", "create-role")
+    validations = [i for i, c in enumerate(p0301) if c.name == "validate_humans"]
+    if len(validations) < 3 or (first_role >= 0 and max(validations) > first_role):
+        v.append("P03-01 does not validate all three human lists before creating roles")
+    lib = dict(FILE_BLOCK.findall(text))["lib.sh"]
+    if "json.dumps(people)" not in lib or "invalid human principals" not in lib:
+        v.append("render does not validate and re-serialise the human principals")
+    p0311 = commands(block(text, "P03-11"))
+    compared = {aws_call(c) for c in p0311 if c.name == "aws"} | {
+        aws_call(Cmd(c.words, c.line)) for c in p0311
+    }
+    for needed in (
+        ("iam", "get-role"),
+        ("iam", "get-role-policy"),
+        ("kms", "get-key-policy"),
+        ("s3api", "get-bucket-policy"),
+        ("s3api", "get-bucket-lifecycle-configuration"),
+        ("cloudtrail", "get-event-selectors"),
+    ):
+        if needed not in compared:
+            v.append(f"P03-11 does not compare {needed[1]}")
+    if block(text, "P03-11").count('same "') < 9:
+        v.append("P03-11 compares fewer deployed documents than reviewed")
+    return v
+
+
+def orphan_bucket_violations(text: str) -> list[str]:
+    v = []
+    x12 = block(text, "X12")
+    for needed in (
+        '[[ "$name" == *"$SUFFIX" ]] || stop S8',
+        'grep -qF "absence confirmed: $name" "$PROOF_DIR/journal.log"',
+        "ON_ALLOWED=S8 expect_error NoSuchTagSet",
+        "ON_ALLOWED=S8 expect_error NoSuchBucketPolicy",
+        '|| stop S8 "$name holds objects',
+    ):
+        if needed not in x12:
+            v.append(f"X12 lacks: {needed}")
+    cmds = commands(x12)
+    rec = [i for i, c in enumerate(cmds) if c.name == "record"]
+    dele = [i for i, c in enumerate(cmds) if aws_call(c) == ("s3api", "delete-bucket")]
+    if not rec or not dele or min(dele) < min(rec):
+        v.append("X12 deletes before recording")
+    return v
+
+
+def trap_violations(text: str) -> list[str]:
+    v = []
+    lib = dict(FILE_BLOCK.findall(text))["lib.sh"]
+    code = "\n".join(line for line in lib.splitlines() if not line.lstrip().startswith("#"))
+    if re.search(r"^set -[a-zA-Z]*E", code, re.M) or re.search(r"trap .* ERR\b", code):
+        v.append("lib.sh inherits an ERR trap into substitutions")
+    if "trap _on_exit EXIT" not in code or 'eval "$ON_EXIT"' not in code:
+        v.append("lib.sh does not run cleanups on every exit")
+    if 'on_exit "kill $ROTATOR 2> /dev/null; wait $ROTATOR 2> /dev/null"' not in block(
+        text, "P14-02"
+    ):
+        v.append("P14-02 does not stop the rotator on every exit")
+    return v
+
+
+def consistency_violations(text: str) -> list[str]:
+    """N12: one way to run steps, exports only in P00-01, and the docs agree
+    with what the procedure does."""
+    v = []
+    if any(c.name != "export" for c in commands(block(text, "P00-01")) if not c.nested):
+        v.append("P00-01 does more than export variables")
+    if "paste it into `bash -s`" in text:
+        v.append("the procedure still tells the operator to paste steps into bash -s")
+    if (
+        "| **S2** | an expected bucket, role, key, trail or instance already exists, or a "
+        "just-created bucket is not new | P02, P03-06, P03-07 |" not in text
+    ):
+        v.append("the stop table does not list where S2 is enforced")
+    if "`<SUFFIX>` is empty" in text:
+        v.append("A.1 still describes an optional suffix")
+    lib = dict(FILE_BLOCK.findall(text))["lib.sh"]
+    if "${#AUDIT_BUCKET} <= 63" not in lib or '"$ADMIN_ROLE" != arn:*' not in lib:
+        v.append("lib.sh does not check bucket-name length or the ADMIN_ROLE form")
+    p0003 = block(text, "P00-03")
+    if '[[ "$arn" =~ ^arn:aws:iam::${ACCOUNT}:user/ ]]' not in p0003:
+        v.append("P00-03 does not verify that the source identity is an IAM user")
+    return v
+
+
 # --- the committed documents pass every check -------------------------------------------------
 
 
@@ -1634,7 +2304,7 @@ def test_every_owner_decision_is_open_with_options_and_a_recommendation() -> Non
     assert "aws:MultiFactorAuthPresent" in e11[3] and "role chaining" in e11[3]
     assert "**fails closed**" in e11[3] and "separately reviewed trust-policy design" in e11[3]
     assert "not chosen here" in e11[3]
-    assert '[[ "$E11_IDENTITY" == iam-user-mfa ]]' in block(proof_text(), "P00-01")
+    assert '[[ "$E11_IDENTITY" == iam-user-mfa ]]' in block(proof_text(), "P00-02")
 
 
 def test_overclaims_are_corrected() -> None:
@@ -1645,6 +2315,17 @@ def test_overclaims_are_corrected() -> None:
     assert "no IMDS fallback even when IMDS is reachable" not in proof
     assert "it does **not** show what happens when a running" in proof
     assert "mid-run expiry with IMDS reachable is untested until P14-05 runs" in review
+    # Round-2 overclaims: the round-1 rows now say what round 2 found and fixed.
+    for marker in (
+        "Round 2 (N1, N2) found",
+        "Round 2 (N3) found",
+        "Round 2 (N4) found",
+        "**What the stub execution does not show.**",
+        "**No AWS command was run.**",
+    ):
+        assert marker in review, marker
+    assert "the provisioned state equals the templates" not in proof
+    assert "deployed policies and settings equal the rendered templates" in proof
 
 
 def test_the_multipart_fallback_is_stated_as_an_application_change() -> None:
@@ -1753,15 +2434,16 @@ def _lib_run(tmp_path: Path, script: str, **overrides: str) -> subprocess.Comple
         "ADMIN_ROLE": "nlw-test-admin",
         "REC_KEY_ARN": f"{kms}/{'1' * 8}-1111-1111-1111-{'1' * 12}",
         "REC_AUDIT_KEY_ARN": f"{kms}/{'2' * 8}-2222-2222-2222-{'2' * 12}",
-        "HUMANS": json.dumps([f"arn:aws:iam::{DUMMY_ACCOUNT}:role/human-{x}" for x in "ab"]),
+        "HUMANS": json.dumps([f"arn:aws:iam::{DUMMY_ACCOUNT}:user/human-{x}" for x in "ab"]),
         "AUDIT_RETENTION_DAYS": "90",
         "GIT_CONFIG_NOSYSTEM": "1",
     }
     env.update(overrides)
     if overrides.get("DIRTY"):
         (repo / "docs" / "runbooks" / PROVISIONING.name).write_text("tampered")
+    bash = overrides.pop("BASH_BIN", "bash")
     return subprocess.run(
-        ["bash", "-c", f'source "{lib}" && {script}'],
+        [bash, "-c", f'source "{lib}" && {script}'],
         capture_output=True,
         text=True,
         env=env,
@@ -1872,6 +2554,784 @@ def test_negative_control_a_ledger_from_another_run_is_refused(tmp_path: Path) -
     result = _lib_run(tmp_path, "true")
     assert result.returncode != 0
     assert "STOP S8: the ledger belongs to another proof run" in result.stderr
+
+
+# --- N1/N2 --------------------------------------------------------------------------------------
+
+
+def test_every_statement_has_a_canonical_effect_and_known_keys() -> None:
+    assert effect_violations(load_templates()) == []
+
+
+def test_every_deny_and_every_sid_is_pinned() -> None:
+    assert deny_pin_violations(load_templates()) == []
+
+
+def _insert_statement(text: str, template: str, statement: str) -> str:
+    start = text.index(f"<!-- template: {template} -->")
+    body = text.index("```json\n", start) + len("```json\n")
+    anchor = text.index('{"Sid"', body)
+    return text[:anchor] + statement + ",\n  " + text[anchor:]
+
+
+TEXT_TEMPLATE_MUTATIONS = [
+    (
+        "lowercase allow grants kms:Decrypt to everyone",
+        lambda t: _insert_statement(
+            t,
+            "dataset-kms-key-statements",
+            '{"Sid": "X", "Effect": "allow", "Principal": {"AWS": "*"}, "Action": '
+            '"kms:Decrypt", "Resource": "*"}',
+        ),
+    ),
+    (
+        "lowercase allow grants audit-bucket GetObject to everyone",
+        lambda t: _insert_statement(
+            t,
+            "audit-bucket-policy",
+            '{"Sid": "X", "Effect": "allow", "Principal": "*", "Action": "s3:GetObject", '
+            '"Resource": "arn:aws:s3:::<AUDIT_BUCKET>/*"}',
+        ),
+    ),
+    (
+        "duplicate Effect keys hide an Allow",
+        lambda t: _insert_statement(
+            t,
+            "dataset-kms-key-statements",
+            '{"Sid": "X", "Effect": "Allow", "Principal": {"AWS": "*"}, "Action": "kms:Decrypt", '
+            '"Resource": "*", "Effect": "Deny"}',
+        ),
+    ),
+    (
+        "duplicate Action key widens the API role",
+        lambda t: t.replace(
+            '{"Sid": "Encrypt", "Effect": "Allow",\n',
+            '{"Sid": "Encrypt", "Effect": "Allow", "Action": "*", "Resource": "*",\n',
+            1,
+        ),
+    ),
+    (
+        "missing Effect",
+        lambda t: _insert_statement(
+            t, "role-api", '{"Sid": "X", "Action": "s3:*", "Resource": "*"}'
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("mutation",),
+    [(m[1],) for m in TEXT_TEMPLATE_MUTATIONS],
+    ids=[m[0] for m in TEXT_TEMPLATE_MUTATIONS],
+)
+def test_negative_control_noncanonical_statements_are_refused(
+    mutation: Callable[[str], str],
+) -> None:
+    original = PROVISIONING.read_text()
+    weakened = mutation(original)
+    assert weakened != original
+    try:
+        t = load_templates(weakened)
+    except ValueError:
+        return  # refused while parsing
+    found = (
+        effect_violations(t)
+        + deny_pin_violations(t)
+        + principal_violations(t)
+        + role_statement_violations(t)
+    )
+    assert found, "a non-canonical statement passed every check"
+
+
+_FALSE = {"Bool": {"aws:SecureTransport": "maybe"}}
+DENY_MUTATIONS = [
+    (
+        "NeverTouchAudit made inert",
+        lambda t: _sid(t, "role-api", "NeverTouchAudit").update(Condition=_FALSE),
+    ),
+    (
+        "NeverAssumeAnyOtherRole made inert",
+        lambda t: _sid(t, "role-bootstrap", "NeverAssumeAnyOtherRole").update(Condition=_FALSE),
+    ),
+    (
+        "NeverAlterAnyTrail made inert",
+        lambda t: _sid(t, "role-operator", "NeverAlterAnyTrail").update(Condition=_FALSE),
+    ),
+    (
+        "DenyMachineRoles made inert",
+        lambda t: _sid(t, "trust-human-mfa", "DenyMachineRoles").update(Condition=_FALSE),
+    ),
+    (
+        "DenyDeleteExceptOperator narrowed",
+        lambda t: _sid(t, "dataset-bucket-policy", "DenyDeleteExceptOperator").update(
+            Resource="arn:aws:s3:::<BUCKET>/nothing/*"
+        ),
+    ),
+    (
+        "DenyDeleteExceptOperator made inert",
+        lambda t: _sid(t, "dataset-bucket-policy", "DenyDeleteExceptOperator").update(
+            Condition=_FALSE
+        ),
+    ),
+    (
+        "DenyDatasetRoles made inert",
+        lambda t: _sid(t, "audit-bucket-policy", "DenyDatasetRoles").update(Condition=_FALSE),
+    ),
+    (
+        "DenyRecordDeletionExceptAuditAdmin exempts every role",
+        lambda t: _sid(t, "audit-bucket-policy", "DenyRecordDeletionExceptAuditAdmin").update(
+            Condition={"ArnNotEquals": {"aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/*"}}
+        ),
+    ),
+    (
+        "DenyBucketConfigExceptAuditAdmin exempts every role",
+        lambda t: _sid(t, "audit-bucket-policy", "DenyBucketConfigExceptAuditAdmin").update(
+            Condition={"ArnNotEquals": {"aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/*"}}
+        ),
+    ),
+    (
+        "DenyBucketConfigExceptAdmin exempts every role",
+        lambda t: _sid(t, "dataset-bucket-policy", "DenyBucketConfigExceptAdmin").update(
+            Condition={"ArnNotEquals": {"aws:PrincipalArn": ["arn:aws:iam::<ACCOUNT>:role/*"]}}
+        ),
+    ),
+    (
+        "DenyOutsideAccount removed",
+        lambda t: _drop_sid(t, "dataset-bucket-policy", "DenyOutsideAccount"),
+    ),
+    (
+        "NeverDataPlane principal changed",
+        lambda t: _sid(t, "role-bootstrap", "NeverDataPlane").update(Resource="arn:aws:s3:::none"),
+    ),
+    (
+        "a Deny turned into an Allow",
+        lambda t: _sid(t, "role-ingest", "NeverOtherEnvironment").update(Effect="Allow"),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("mutation",), [(m[1],) for m in DENY_MUTATIONS], ids=[m[0] for m in DENY_MUTATIONS]
+)
+def test_negative_control_a_weakened_deny_is_detected(
+    mutation: Callable[[Templates], None],
+) -> None:
+    weakened = copy.deepcopy(load_templates())
+    mutation(weakened)
+    assert deny_pin_violations(weakened)
+
+
+# --- N3/N4: executing the procedure against the stub `aws` --------------------------------------
+
+
+@needs_harness
+@pytest.mark.parametrize("bash", AVAILABLE_BASHES)
+def test_executing_every_step_reaches_only_staging_and_every_call(
+    tmp_path: Path, bash: str
+) -> None:
+    run = run_with_stub(tmp_path, proof_text(), bash)
+    assert len(run.calls) > 250
+    assert stub_violations(run, proof_text()) == []
+    assert not any(
+        kind == "sudo-skipped" and not detail.startswith("python3") for kind, detail in run.other
+    )
+
+
+def _after_source(text: str, step: str, line: str) -> str:
+    start, _ = _block_containing(text, step)
+    first = text.index("\n", start) + 1
+    return text[:first] + line + "\n" + text[first:]
+
+
+HARNESS_MUTATIONS = [
+    (
+        "command substitution",
+        lambda t: _after_source(
+            t,
+            "P03-06",
+            "aws s3api put-object --profile nlw-proof-admin "
+            '--bucket "nlw-$(echo prod)uction-datasets-x" --key k --body f',
+        ),
+    ),
+    (
+        "indirect variable",
+        lambda t: _after_source(
+            t,
+            "P03-06",
+            "T=OTHER_BUCKET; aws s3api put-object --profile nlw-proof-admin "
+            '--bucket "${!T}" --key k --body f',
+        ),
+    ),
+    (
+        "case conversion",
+        lambda t: _after_source(
+            t,
+            "P03-06",
+            "E=PRODUCTION; aws s3api put-object --profile nlw-proof-admin "
+            '--bucket "nlw-${E,,}-datasets-x" --key k --body f',
+        ),
+    ),
+    (
+        "ledger value",
+        lambda t: _after_source(
+            _after_source(t, "P02-01", 'record REC_TARGET "nlw-production-datasets-x"'),
+            "P03-06",
+            'aws s3api delete-bucket --profile nlw-proof-admin --bucket "$REC_TARGET"',
+        ),
+    ),
+    (
+        "helper function",
+        lambda t: _after_source(
+            t.replace(
+                "note() { printf",
+                'tidy() { aws s3api delete-bucket --bucket "$OTHER_BUCKET"; }\nnote() { printf',
+                1,
+            ),
+            "P03-06",
+            "tidy",
+        ),
+    ),
+    (
+        "timeout wrapper",
+        lambda t: _after_source(
+            t, "P02-01", 'timeout 60 aws s3api delete-bucket --bucket "$OTHER_BUCKET"'
+        ),
+    ),
+    (
+        "xargs wrapper",
+        lambda t: _after_source(
+            t, "P02-01", 'echo "$OTHER_BUCKET" | xargs -I{} aws s3api delete-bucket --bucket {}'
+        ),
+    ),
+    (
+        "bash -c string",
+        lambda t: _after_source(
+            t, "P02-01", "bash -c 'aws s3api delete-bucket --bucket nlw-production-x'"
+        ),
+    ),
+    (
+        "nohup wrapper",
+        lambda t: _after_source(
+            t, "P02-01", 'nohup aws s3api delete-bucket --bucket "$OTHER_BUCKET"'
+        ),
+    ),
+    (
+        "sudo -u wrapper",
+        lambda t: _after_source(
+            t, "P02-01", 'sudo -u nobody aws s3api delete-bucket --bucket "$OTHER_BUCKET"'
+        ),
+    ),
+    (
+        "high-level aws s3 cp",
+        lambda t: _after_source(
+            t, "P05-01", 'expect_denied aws s3 cp f "s3://$BUCKET/elsewhere/x"'
+        ),
+    ),
+]
+
+
+@needs_harness
+@pytest.mark.parametrize(
+    ("mutation",), [(m[1],) for m in HARNESS_MUTATIONS], ids=[m[0] for m in HARNESS_MUTATIONS]
+)
+def test_negative_control_executed_production_or_wrapped_calls_are_detected(
+    tmp_path: Path, mutation: Callable[[str], str]
+) -> None:
+    text = proof_text()
+    weakened = mutation(text)
+    assert weakened != text
+    run = run_with_stub(tmp_path, weakened, AVAILABLE_BASHES[0])
+    assert stub_violations(run, weakened), "the executed procedure reached production unnoticed"
+
+
+def test_no_aws_call_hides_behind_a_wrapper() -> None:
+    assert wrapper_violations(proof_text()) == []
+
+
+WRAPPER_TEXT_MUTATIONS = [
+    ("timeout", "timeout 60 aws s3api delete-bucket --bucket b"),
+    ("xargs", "echo b | xargs aws s3api delete-bucket --bucket"),
+    ("nohup", "nohup aws s3api delete-bucket --bucket b"),
+    ("sudo -u", "sudo -u nobody aws s3api delete-bucket --bucket b"),
+    ("bash -c", "bash -c 'aws s3api delete-bucket --bucket b'"),
+    ("env", "env X=1 aws s3api delete-bucket --bucket b"),
+]
+
+
+@pytest.mark.parametrize(
+    ("line",), [(m[1],) for m in WRAPPER_TEXT_MUTATIONS], ids=[m[0] for m in WRAPPER_TEXT_MUTATIONS]
+)
+def test_negative_control_wrapped_aws_is_detected_statically(line: str) -> None:
+    assert wrapper_violations(_after_source(proof_text(), "P02-01", line))
+
+
+# --- N5 ------------------------------------------------------------------------------------------
+
+
+def test_human_credentials_have_a_defined_source_lifecycle_and_cleanup() -> None:
+    assert credential_source_violations(proof_text()) == []
+
+
+CREDENTIAL_MUTATIONS = [
+    (
+        "a key in the workstation config",
+        lambda t: t.replace(
+            "[profile nlw-proof-human-audit]\n",
+            "[profile nlw-proof-human-audit]\naws_secret_access_key = x\n",
+            1,
+        ),
+    ),
+    (
+        "a profile chaining from an undefined source",
+        lambda t: t.replace(
+            "source_profile = nlw-proof-human-audit\nmfa_serial = "
+            "<AUDIT_MFA_ARN>\nduration_seconds = 3600\nregion = us-east-1\n\n"
+            "[profile nlw-proof-audit-reader]",
+            "source_profile = nlw-proof-human\nmfa_serial = <AUDIT_MFA_ARN>\nduration_seconds "
+            "= 3600\nregion = us-east-1\n\n[profile nlw-proof-audit-reader]",
+            1,
+        ),
+    ),
+    (
+        "a step prints the credential",
+        lambda t: _after_source(
+            t, "P01-01", 'bash "$PROOF_DIR/credential-process.sh" "$PROOF_ID" operator print'
+        ),
+    ),
+    (
+        "X08 deletes cached sessions by age",
+        lambda t: t.replace(
+            'python3 - "$HOME/.aws/cli/cache" "$ACCOUNT" <<\'PY\'',
+            'find "$HOME/.aws/cli/cache" -newer "$PROOF_DIR/started" -delete\npython3 - '
+            '"$HOME/.aws/cli/cache" "$ACCOUNT" <<\'PY\'',
+            1,
+        ),
+    ),
+    (
+        "X08 keeps the Keychain items",
+        lambda t: t.replace(
+            'bash "$PROOF_DIR/credential-process.sh" "$PROOF_ID" "$who" remove', "true", 1
+        ),
+    ),
+    (
+        "recovery no longer requires X09 and X08",
+        lambda t: t.replace(
+            "4. **Always, whatever else happens:** run X09 and then X08", "4. Optionally run X08", 1
+        ),
+    ),
+    (
+        "P00-02 accepts a key in aws-config",
+        lambda t: t.replace(
+            "<[A-Z_]+>|aws_access_key_id|aws_secret_access_key|aws_session_token", "<[A-Z_]+>", 1
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("mutation",), [(m[1],) for m in CREDENTIAL_MUTATIONS], ids=[m[0] for m in CREDENTIAL_MUTATIONS]
+)
+def test_negative_control_credential_handling_weakening_is_detected(
+    mutation: Callable[[str], str],
+) -> None:
+    text = proof_text()
+    weakened = mutation(text)
+    assert weakened != text
+    assert credential_source_violations(weakened)
+
+
+def _heredoc_python(body: str) -> str:
+    return body.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+
+def test_x08_removes_only_this_proofs_cached_sessions(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    def session(name: str, arn: str) -> None:
+        (cache / name).write_text(
+            json.dumps({"Credentials": {"SecretAccessKey": "s"}, "AssumedRoleUser": {"Arn": arn}})
+        )
+
+    session(
+        "ours.json",
+        f"arn:aws:sts::{DUMMY_ACCOUNT}:assumed-role/nlw-staging-dataset-api/nlw-staging-api",
+    )
+    session(
+        "admin.json", f"arn:aws:sts::{DUMMY_ACCOUNT}:assumed-role/Admin/nlw-staging-proof-admin"
+    )
+    session("other-session.json", f"arn:aws:sts::{DUMMY_ACCOUNT}:assumed-role/Admin/alice")
+    session("other-account.json", "arn:aws:sts::999999999999:assumed-role/x/nlw-staging-api")
+    (cache / "junk.json").write_text("not json")
+    script = tmp_path / "x08.py"
+    script.write_text(_heredoc_python(block(proof_text(), "X08")))
+    subprocess.run(
+        [sys.executable, str(script), str(cache), DUMMY_ACCOUNT], check=True, capture_output=True
+    )
+    assert sorted(p.name for p in cache.iterdir()) == [
+        "junk.json",
+        "other-account.json",
+        "other-session.json",
+    ]
+
+
+# --- N6/N7/N8/N10 --------------------------------------------------------------------------------
+
+
+def test_nothing_touches_a_new_bucket_before_it_is_proven_new() -> None:
+    assert bucket_creation_strict_violations(proof_text()) == []
+
+
+def test_expected_denied_writes_use_parsed_keys_inside_the_prefixes() -> None:
+    assert denied_write_strict_violations(proof_text()) == []
+
+
+def test_open_uploads_are_recovered_and_aborted_by_exact_ids() -> None:
+    assert multipart_recovery_violations(proof_text()) == []
+
+
+def test_an_unrecorded_bucket_of_this_run_is_recovered_safely() -> None:
+    assert orphan_bucket_violations(proof_text()) == []
+
+
+STATIC_MUTATIONS = [
+    (
+        "N6 configuration before the pristine checks",
+        lambda t: t.replace(
+            'aws s3api create-bucket --profile nlw-proof-admin --bucket "$BUCKET" '
+            "--object-ownership BucketOwnerEnforced\n",
+            'aws s3api create-bucket --profile nlw-proof-admin --bucket "$BUCKET" '
+            "--object-ownership BucketOwnerEnforced\n"
+            'aws s3api delete-bucket-policy --profile nlw-proof-admin --bucket "$BUCKET"\n',
+            1,
+        ),
+        bucket_creation_strict_violations,
+    ),
+    (
+        "N7 --key= form outside the prefixes",
+        lambda t: _after_source(
+            t,
+            "P05-01",
+            'expect_denied aws s3api put-object --profile proof-api --bucket "$BUCKET" '
+            "--key=elsewhere/x --body f",
+        ),
+        denied_write_strict_violations,
+    ),
+    (
+        "N7 high-level aws s3 cp",
+        lambda t: _after_source(
+            t, "P05-01", 'expect_denied aws s3 cp f "s3://$BUCKET/elsewhere/x"'
+        ),
+        denied_write_strict_violations,
+    ),
+    (
+        "N7 delete-objects outside the prefixes",
+        lambda t: _after_source(
+            t,
+            "P05-01",
+            'expect_denied aws s3api delete-objects --profile proof-api --bucket "$BUCKET" '
+            "--delete 'Objects=[{Key=elsewhere/x}]'",
+        ),
+        denied_write_strict_violations,
+    ),
+    (
+        "N8 open uploads not listed",
+        lambda t: t.replace(
+            "aws s3api list-multipart-uploads --profile nlw-proof-operator --bucket "
+            '"${REC_BUCKET}" \\\n    --prefix "versions/$ws/"',
+            'true \\\n    --prefix "versions/$ws/"',
+            1,
+        ),
+        multipart_recovery_violations,
+    ),
+    (
+        "N8 old uploads accepted",
+        lambda t: t.replace('[[ "$initiated" > "$started" ]] || stop S8', "true", 1),
+        multipart_recovery_violations,
+    ),
+    (
+        "N8 recovered uploads not aborted",
+        lambda t: t.replace(
+            '--key "${!v}" --upload-id "${!up}"', '--key "${!up}" --upload-id "${!up}"', 1
+        ),
+        multipart_recovery_violations,
+    ),
+    (
+        "N10 orphan without the suffix check",
+        lambda t: t.replace('[[ "$name" == *"$SUFFIX" ]] || stop S8', "true", 1),
+        orphan_bucket_violations,
+    ),
+    (
+        "N10 absence no longer journalled",
+        lambda t: t.replace('note "absence confirmed: $BUCKET"\n', "", 1),
+        bucket_creation_strict_violations,
+    ),
+    (
+        "N9 human lists not validated",
+        lambda t: t.replace(
+            'source "$PROOF_DIR/lib.sh"\nvalidate_humans "$OPERATOR_HUMANS_JSON" '
+            '"$AUDIT_ADMIN_HUMANS_JSON"\n'
+            'validate_humans "$AUDIT_ADMIN_HUMANS_JSON" '
+            '"$OPERATOR_HUMANS_JSON"\nvalidate_humans "$AUDIT_READER_HUMANS_JSON"\nTAGS=',
+            'source "$PROOF_DIR/lib.sh"\nTAGS=',
+            1,
+        ),
+        human_and_drift_violations,
+    ),
+    (
+        "N9 key policies no longer compared",
+        lambda t: t.replace('same "dataset key policy"', 'true "dataset key policy"', 1),
+        human_and_drift_violations,
+    ),
+    (
+        "N11 ERR trap inherited again",
+        lambda t: t.replace(
+            "(seen on bash 3.2).\nset -euo pipefail\n",
+            "(seen on bash 3.2).\nset -Eeuo pipefail\n",
+            1,
+        ),
+        trap_violations,
+    ),
+    (
+        "N11 rotator not stopped",
+        lambda t: t.replace(
+            'on_exit "kill $ROTATOR 2> /dev/null; wait $ROTATOR 2> /dev/null"', "true", 1
+        ),
+        trap_violations,
+    ),
+    (
+        "N12 P00-01 runs a check",
+        lambda t: t.replace(
+            'export REVIEWED_COMMIT="<the full commit id the owner approved for this run>"\n',
+            'export REVIEWED_COMMIT="<the full commit id the owner approved for this '
+            'run>"\ngit status\n',
+            1,
+        ),
+        consistency_violations,
+    ),
+    (
+        "N12 stop table forgets P03-06",
+        lambda t: t.replace("| P02, P03-06, P03-07 |", "| P02 |", 1),
+        consistency_violations,
+    ),
+    (
+        "N12 ADMIN_ROLE form not checked",
+        lambda t: t.replace('"$ADMIN_ROLE" != arn:*', '"$ADMIN_ROLE" != none', 1),
+        consistency_violations,
+    ),
+    (
+        "N12 identity type not verified",
+        lambda t: t.replace('[[ "$arn" =~ ^arn:aws:iam::${ACCOUNT}:user/ ]]', "true", 1),
+        consistency_violations,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "check"),
+    [(m[1], m[2]) for m in STATIC_MUTATIONS],
+    ids=[m[0] for m in STATIC_MUTATIONS],
+)
+def test_negative_control_n_findings_are_detected(
+    mutation: Callable[[str], str], check: Callable[[str], list[str]]
+) -> None:
+    text = proof_text()
+    weakened = mutation(text)
+    assert weakened != text, "the mutation did not apply"
+    assert check(weakened)
+
+
+# --- N9: human principal validation, rendering and drift comparison -----------------------------
+
+
+def test_human_lists_and_drift_comparison_are_in_place() -> None:
+    assert human_and_drift_violations(proof_text()) == []
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(
+    ("people", "excluded", "ok"),
+    [
+        ([f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice"], [], True),
+        ([f"arn:aws:iam::{DUMMY_ACCOUNT}:user/team/alice"], [], True),
+        (["*"], [], False),
+        ([f"arn:aws:iam::{DUMMY_ACCOUNT}:root"], [], False),
+        (["arn:aws:iam::999999999999:user/alice"], [], False),
+        ([f"arn:aws:iam::{DUMMY_ACCOUNT}:role/alice"], [], False),
+        ([f"arn:aws:iam::{DUMMY_ACCOUNT}:user/*"], [], False),
+        (
+            [
+                f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice",
+                f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice",
+            ],
+            [],
+            False,
+        ),
+        (
+            [f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice"],
+            [f"arn:aws:iam::{DUMMY_ACCOUNT}:user/alice"],
+            False,
+        ),
+        ([], [], False),
+        ("not-a-list", [], False),
+    ],
+    ids=[
+        "user",
+        "user with path",
+        "wildcard",
+        "root",
+        "other account",
+        "role",
+        "user wildcard",
+        "duplicate",
+        "shared with the operator",
+        "empty",
+        "not a list",
+    ],
+)
+def test_negative_control_human_principal_lists_are_validated(
+    tmp_path: Path, people: Any, excluded: list[str], ok: bool
+) -> None:
+    raw = people if isinstance(people, str) else json.dumps(people)
+    result = _lib_run(
+        tmp_path, f"validate_humans {shlex.quote(raw)} {shlex.quote(json.dumps(excluded))}"
+    )
+    assert (result.returncode == 0) is ok, result.stderr
+    if not ok:
+        assert "STOP S9: a human principal list is invalid" in result.stderr
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(
+    "humans",
+    [
+        '["*"]',
+        f'["arn:aws:iam::{DUMMY_ACCOUNT}:root"]',
+        f'["arn:aws:iam::{DUMMY_ACCOUNT}:user/a\\"]}}, {{\\"Sid\\": \\"x"]',
+        "[1]",
+    ],
+    ids=["wildcard", "root", "injection", "not strings"],
+)
+def test_negative_control_render_refuses_unsafe_human_principals(
+    tmp_path: Path, humans: str
+) -> None:
+    result = _lib_run(tmp_path, "render trust-human-mfa", HUMANS=humans)
+    assert result.returncode != 0 and result.stdout == ""
+
+
+def test_normalized_policies_compare_equal_across_aws_representations(tmp_path: Path) -> None:
+    script = tmp_path / "normalize.py"
+    script.write_text(dict(FILE_BLOCK.findall(proof_text()))["normalize-policy.py"])
+
+    def canon(payload: str) -> str:
+        return subprocess.run(
+            [sys.executable, str(script)], input=payload, capture_output=True, text=True, check=True
+        ).stdout
+
+    rendered = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Sid": "B", "Effect": "Deny", "Action": ["s3:*"], "Resource": "*"},
+            {
+                "Sid": "A",
+                "Effect": "Allow",
+                "Action": ["s3:GetObject", "s3:PutObject"],
+                "Resource": ["x"],
+            },
+        ],
+    }
+    deployed = {
+        "Statement": [
+            {
+                "Resource": "x",
+                "Action": ["s3:PutObject", "s3:GetObject"],
+                "Effect": "Allow",
+                "Sid": "A",
+            },
+            {"Sid": "B", "Effect": "Deny", "Action": "s3:*", "Resource": ["*"]},
+        ],
+        "Version": "2012-10-17",
+    }
+    assert canon(json.dumps(rendered)) == canon(json.dumps(deployed))
+    assert canon(json.dumps(json.dumps(deployed))) == canon(
+        json.dumps(rendered)
+    )  # KMS returns a string
+    drifted: dict[str, Any] = copy.deepcopy(deployed)
+    drifted["Statement"][1]["Effect"] = "Allow"
+    assert canon(json.dumps(rendered)) != canon(json.dumps(drifted))
+
+
+# --- N11/N12: traps, background processes and step binding on every available bash -------------
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize("bash", AVAILABLE_BASHES)
+def test_a_guarded_failing_substitution_does_not_record_s10(tmp_path: Path, bash: str) -> None:
+    result = _lib_run(
+        tmp_path, '[[ "$(printf x | grep -c ok)" == 1 ]] || stop S9 "guarded"', BASH_BIN=bash
+    )
+    assert "STOP S9: guarded" in result.stderr and "S10" not in result.stderr
+    assert "S10" not in (tmp_path / "proof" / "journal.log").read_text()
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize("bash", AVAILABLE_BASHES)
+def test_a_failure_inside_a_function_records_s10_with_the_command(
+    tmp_path: Path, bash: str
+) -> None:
+    result = _lib_run(tmp_path, 'f() { python3 -c "import sys; sys.exit(3)"; }; f', BASH_BIN=bash)
+    assert result.returncode != 0 and "STOP S10: command failed: python3" in result.stderr
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize("bash", AVAILABLE_BASHES)
+def test_background_processes_are_stopped_on_every_exit(tmp_path: Path, bash: str) -> None:
+    pid_file = tmp_path / "pid"
+    script = (
+        f"{{ ( while true; do sleep 1; done ) & }} ; R=$!; echo $R > {shlex.quote(str(pid_file))}; "
+        'on_exit "kill $R 2> /dev/null; wait $R 2> /dev/null"; stop S9 "early stop"'
+    )
+    result = _lib_run(tmp_path, script, BASH_BIN=bash)
+    assert "STOP S9: early stop" in result.stderr
+    pid = int(pid_file.read_text())
+    alive = subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0
+    assert not alive, "the background process outlived the step"
+
+
+@needs_bash_and_git
+def test_negative_control_admin_role_must_be_a_name_not_an_arn(tmp_path: Path) -> None:
+    result = _lib_run(tmp_path, "true", ADMIN_ROLE=f"arn:aws:iam::{DUMMY_ACCOUNT}:role/Admin")
+    assert result.returncode != 0 and "STOP S1: ADMIN_ROLE must be the role name" in result.stderr
+
+
+@needs_harness
+def test_negative_control_run_step_refuses_a_modified_step(tmp_path: Path) -> None:
+    proof_dir = tmp_path / "p"
+    (proof_dir / "steps").mkdir(parents=True)
+    files = dict(FILE_BLOCK.findall(proof_text()))
+    (proof_dir / "run-step").write_text(files["run-step"])
+    (proof_dir / "steps" / "P01-01.sh").write_text("echo reviewed\n")
+    digest = __import__("hashlib").sha256(b"echo reviewed\n").hexdigest()
+    (proof_dir / "manifest.json").write_text(json.dumps({"steps/P01-01.sh": digest}))
+    env = {"PATH": os.environ["PATH"], "PROOF_DIR": str(proof_dir)}
+    ok = subprocess.run(
+        ["bash", str(proof_dir / "run-step"), "P01-01"], capture_output=True, text=True, env=env
+    )
+    assert ok.returncode == 0 and ok.stdout == "reviewed\n"
+    (proof_dir / "steps" / "P01-01.sh").write_text("echo tampered\n")
+    bad = subprocess.run(
+        ["bash", str(proof_dir / "run-step"), "P01-01"], capture_output=True, text=True, env=env
+    )
+    assert (
+        bad.returncode != 0
+        and "differs from the reviewed commit" in bad.stderr
+        and "tampered" not in bad.stdout
+    )
+
+
+def test_trap_model_and_execution_instructions_are_consistent() -> None:
+    assert trap_violations(proof_text()) == []
+    assert consistency_violations(proof_text()) == []
 
 
 # --- the probe's offline refusals (no network: each refuses before any AWS call) -------------

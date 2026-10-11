@@ -47,8 +47,18 @@ def _text() -> str:
     return RUNBOOK.read_text()
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"duplicate JSON keys in {keys}")
+    return dict(pairs)
+
+
 def _templates() -> dict[str, Any]:
-    return {name: json.loads(body) for name, body in TEMPLATE.findall(_text())}
+    return {
+        name: json.loads(body, object_pairs_hook=_no_duplicate_keys)
+        for name, body in TEMPLATE.findall(_text())
+    }
 
 
 def _statements(doc: Any) -> list[dict[str, Any]]:
