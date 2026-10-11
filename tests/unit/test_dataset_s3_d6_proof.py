@@ -3956,7 +3956,7 @@ def test_negative_control_kms_grants_are_verified(
 
 @needs_bash_and_git
 @pytest.mark.parametrize(
-    ("answers", "ok"),
+    ("answers", "expected"),
     [
         (
             {
@@ -3970,28 +3970,28 @@ def test_negative_control_kms_grants_are_verified(
                 "FAKE_GET_PUBLIC_ACCESS_BLOCK": "True\tTrue\tFalse\tTrue",
                 "FAKE_GET_BUCKET_OWNERSHIP_CONTROLS": "BucketOwnerEnforced",
             },
-            False,
+            "public access is not fully blocked on",
         ),
         (
             {
                 "FAKE_GET_PUBLIC_ACCESS_BLOCK_RC": "254",
                 "FAKE_GET_BUCKET_OWNERSHIP_CONTROLS": "BucketOwnerEnforced",
             },
-            False,
+            "no public access block on",
         ),
         (
             {
                 "FAKE_GET_PUBLIC_ACCESS_BLOCK": "True\tTrue\tTrue\tTrue",
                 "FAKE_GET_BUCKET_OWNERSHIP_CONTROLS": "ObjectWriter",
             },
-            False,
+            "ACLs are not disabled on",
         ),
         (
             {
                 "FAKE_GET_PUBLIC_ACCESS_BLOCK": "True\tTrue\tTrue\tTrue",
                 "FAKE_GET_BUCKET_OWNERSHIP_CONTROLS_RC": "254",
             },
-            False,
+            "no ownership controls on",
         ),
     ],
     ids=[
@@ -4003,12 +4003,17 @@ def test_negative_control_kms_grants_are_verified(
     ],
 )
 def test_negative_control_bucket_controls_are_verified(
-    tmp_path: Path, answers: dict[str, str], ok: bool
+    tmp_path: Path, answers: dict[str, str], expected: bool | str
 ) -> None:
+    """Each control is checked on its own: the stop names the exact reason."""
     result = _fake_run(
         tmp_path, "verify_bucket_controls nlw-staging-datasets-x nlw-proof-admin", **answers
     )
-    assert (result.returncode == 0) is ok, result.stderr
+    if expected is True:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+        assert f"STOP S9: {expected} nlw-staging-datasets-x" in result.stderr, result.stderr
 
 
 @needs_bash_and_git
@@ -4016,9 +4021,18 @@ def test_negative_control_bucket_controls_are_verified(
     ("answers", "expected"),
     [
         ({"FAKE_SIMULATE_PRINCIPAL_POLICY": "implicitDeny\texplicitDeny"}, None),
-        ({"FAKE_SIMULATE_PRINCIPAL_POLICY": ""}, "STOP S9:"),
-        ({"FAKE_SIMULATE_PRINCIPAL_POLICY_RC": "255"}, "STOP S9:"),
-        ({"FAKE_SIMULATE_PRINCIPAL_POLICY": "implicitDeny\tallowed"}, "STOP S4:"),
+        (
+            {"FAKE_SIMULATE_PRINCIPAL_POLICY": ""},
+            "STOP S9: the simulation for arn:aws:iam::111122223333:user/x returned no decision",
+        ),
+        (
+            {"FAKE_SIMULATE_PRINCIPAL_POLICY_RC": "255"},
+            "STOP S9: the simulation for arn:aws:iam::111122223333:user/x failed",
+        ),
+        (
+            {"FAKE_SIMULATE_PRINCIPAL_POLICY": "implicitDeny\tallowed"},
+            "STOP S4: arn:aws:iam::111122223333:user/x is allowed",
+        ),
     ],
     ids=["all denied", "empty result", "simulation error", "one allowed"],
 )
