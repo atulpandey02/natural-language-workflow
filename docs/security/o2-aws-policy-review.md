@@ -5,65 +5,74 @@ Scope: every IAM, trust, bucket, KMS and CloudTrail template in
 against ADR-033, the S3 store (`nlw.storage.s3`), credential handling
 (`nlw.storage.s3_credentials`), migration 0028 and the dataset alert rules.
 
-## Assurance model (round 4)
+## Assurance model (round 5)
 
-**Production isolation during D6 is the dedicated proof account (E14).**
-D6 runs only in an AWS account that is none of the staging or production
-accounts and holds no production resource. None of the proof's principals is
-trusted outside that account, so nothing the proof does can reach another
-account's resources. P00-02, P01-01 and P01-03 refuse any other account.
+**The dedicated proof account limits the blast radius (E14).** D6 runs only
+in an AWS account that is none of the staging or production accounts and
+holds no production resource. None of the proof's principals is trusted
+outside it, so nothing the proof does can reach another account's resources.
+P00-02, P01-01 and P01-03 refuse any other account. The account does not
+replace least privilege inside it.
 
-- **Additional controls inside the account**
-  ([provisioning §3.6–3.7](../runbooks/dataset-s3-provisioning.md#36-proof-principals-the-dedicated-account-the-boundary-and-the-deny-policy-mandatory-for-d6)):
-  - the **proof boundary**, an allow-list of exactly the actions and
-    resources D6 uses, naming the six exact role ARNs;
-  - the **proof deny policy**, attached to every permission set, with the
-    explicit denies (identity providers, role assumption and passing,
-    indirect execution, organization and account changes, policy and
-    boundary changes, the proof principals themselves, the other
-    environment, other regions);
-  - **exact identity policies** for the four permission sets, with the
-    operator/audit separation denies (E9).
-  These narrow what each principal can do in the proof account. They are
-  not what keeps production safe, and AWS has not evaluated them.
-- **Residual authority (R13).** The account root, the organization's
-  management account and Identity Center administrators can change all of
-  the above. Separation of duties holds only when different approved people
-  hold the operator and audit sides and none of them administers the
-  account.
-- **Credentials.** Human credentials are short-lived Identity Center sessions
-  only (E11). No long-term access key is created or used. **No policy here
-  enforces MFA**; the gate record attests it (R11).
-- **Gate.** D6 is **blocked** until the owner approves the dedicated account
-  and its identities, and an independent verifier records them (E15). P00-02
-  reads that record from the reviewed commit with `git show`, requires that
-  commit's parent to be the procedure commit the record names and the record
-  to be the only change, and refuses any mismatch with the session. It
-  cannot check who wrote the record; that rests on its reviewed pull request.
+**Three separated functions, three machines (E9).**
+
+| Function | May | May never |
+|---|---|---|
+| provisioner | create the six roles with their trust, exact inline policies and exact boundaries; the dataset bucket and key, the instance, the budget | assume any of the six roles; read, write or delete a dataset object; touch the trail, audit bucket, audit key or alias; change a trust policy after creation; change or remove a boundary |
+| dataset operator | assume the operator role, bounded to listing, reading and version-aware deletion under `versions/` | any IAM change, including to its own role; anything on the audit side |
+| audit administrator / reader | assume the audit roles; read (never change) the six roles and the proof policies | any IAM change, including to its own roles; the dataset roles, bucket and key |
+
+- **Enforced by policy, as written** ([provisioning §3.6–3.7](../runbooks/dataset-s3-provisioning.md#36-proof-identities-boundaries-and-the-deny-policy-dedicated-proof-account-mandatory-for-d6)):
+  the operator and audit permission sets deny every IAM write
+  (`NeverChangeIam`); the provisioner denies itself the proof roles, dataset
+  objects and the audit side; every created role carries its own exact
+  boundary, which equals that role's reviewed Allows; the provisioner may
+  create a role only with its own boundary, and nobody can change one. AWS
+  has not evaluated any of it.
+- **Attested, not enforced:** that three different people hold the three
+  functions (IAM sees permission-set roles, not people); that Identity
+  Center requires MFA (R11); that the account's administrators hold none of
+  the functions.
+- **Machines:** each machine's configuration holds only its own profiles,
+  and every step refuses a machine whose configuration or CLI cache holds
+  another persona's profile or session. Values move between machines only
+  as schema-checked handoff files: proof id, commit, ledger values, expected
+  events and evidence hashes, never a credential.
+- **Residual authority (R13, R14):** the account root, the organization's
+  management account and Identity Center administrators can override all of
+  this; the provisioner shapes the six roles, which the audit side checks
+  independently (P03-15).
+- **Gate:** D6 is **blocked** until the owner approves the dedicated account,
+  its identities and the three people, and an independent verifier records
+  them (E15). P00-02 reads the record from the reviewed commit on
+  `origin/main` with `git show`, binds it to its parent procedure commit with
+  a rename-disabled diff, and refuses any mismatch. Templates and steps are
+  rendered from the reviewed commit, never from the working tree.
+
+**Boundaries are upper bounds.** The permission-set boundary's actions are
+exactly the union of the four permission sets' actions; it is broader than
+that union by resource only where a resource is not known before the run
+(bucket names, key ids, EC2 resources, and IAM reads of arbitrary E12
+principals), each listed in §3.6. Each role boundary equals its role's
+Allows with only those substitutions.
 
 **What the tests are.** Regression evidence, not proof of isolation:
 
-- **Template checks:**
-  - strict parsing: duplicate keys, and any `Effect` other than exactly
-    `Allow` or `Deny`, are refused;
-  - every role's and every permission set's Allow statements are pinned
-    exactly, and every Allow in the key, bucket and trust policies is
-    allow-listed by principal, action and condition;
-  - the boundary's Allows are pinned resource by resource and must be
-    exactly the union of the identity policies' actions; every identity
-    Allow must fall inside it;
-  - every Deny, every policy's Sid set, both lifecycle rules and the event
-    selectors are pinned exactly.
+- **Template checks:** strict parsing; every role's and permission set's
+  Allows pinned exactly; every Deny, Sid set, lifecycle rule and event
+  selector pinned; the permission-set boundary's actions equal to the union
+  of the four permission sets; each role boundary equal to its role.
 - **Procedure checks:** every `render` names an existing template and every
-  template is rendered; every session name comes from one helper and matches
-  the profiles; an allow-list of the AWS changes the procedure may make.
-- **Execution against a stub `aws`.** Every step runs through `run-step`
-  from a manifest written by the real P00-02. The run fails at once on a
-  render failure, a missing template, an S10, a malformed configuration, an
-  identity mismatch or any other answer-independent stop. Every executed
-  AWS call is then compared with a reviewed allow-list of service,
-  operation, step, profile and resource. **The stub run does not observe
-  every possible AWS call:** a branch the stub's answers never take, or a
+  template is rendered; every session name comes from one helper; each
+  machine's configuration holds only its own profiles; an allow-list of the
+  AWS changes the procedure may make.
+- **Execution against a stub `aws`.** P00-02 runs on each machine and every
+  step on its own machine through `run-step`; the run fails at once on any
+  answer-independent error. Each executed call is matched against one
+  reviewed tuple of step, machine, profile, service, operation, resource
+  values and argument names. **The stub run does not observe
+  every possible AWS call:** a branch the stub's answers never take, an API
+  call made inside a composite CLI command (`validate-logs`, `wait`), or a
   call the static scan fails to recognise, is not seen. It is regression
   evidence, not a security boundary.
 
@@ -87,7 +96,7 @@ condition differently from this reading. Those questions belong to the
 | Version-aware operator purge | Only the operator role holds `s3:DeleteObjectVersion`; plain `s3:DeleteObject` is granted to nobody; the bucket denies both to every other principal | `test_runtime_roles_can_never_delete` | P11, P12 |
 | No runtime deletion | API, ingest and bootstrap hold no `s3:Delete*`; bucket `DenyDeleteExceptOperator` | `test_runtime_roles_can_never_delete`, `test_every_deny_and_every_sid_is_pinned` (DenyDeleteExceptOperator pinned exactly) | P11 |
 | No operator-role assumption by the instance role | Bootstrap allows `sts:AssumeRole` on exactly the API and ingest roles and denies every other role (`NotResource`); the operator trust (`trust-human`) allows only the named operator permission-set roles with a run-scoped session name, denies every principal that is not an Identity Center role, and denies the bootstrap and runtime roles by name. MFA is not checked by any policy (R11) | `test_the_instance_role_can_never_become_the_operator`, `test_human_roles_admit_only_identity_center_sessions` | P12 |
-| Operator and audit separation (E9) | Distinct permission sets; operator-side inline policies deny every change to the audit roles, trail, audit bucket and audit key; audit-side policies deny the dataset roles, bucket and key; holds only with different people and an account administrator who is neither | `test_operator_and_audit_sides_are_separated` | P01-02 |
+| Separation of the three functions (E9) | Operator and audit permission sets deny every IAM write; the provisioner denies itself the proof roles, dataset objects and the audit side; each created role carries its own exact boundary; trust and boundaries cannot change after creation; different people are attested, not enforced | `test_operator_and_audit_sides_are_separated`, `test_every_created_role_has_an_exact_boundary` | P01-02, P03-11, P03-15 |
 | Dedicated proof account (E14) | P00-02 gate (`dedicated`, distinct from listed staging and production ids), P01-01 and P01-03 (caller account, organization against the gate, no production-named or production-tagged resource) | `test_d6_is_blocked_until_an_independent_verification_record_exists`, P00-02 executed controls | P01 |
 | CloudTrail and audit-bucket tamper protection | Every dataset role denies the trail, audit bucket and audit key, and denies altering any trail; the audit bucket denies dataset roles and every delete or retention change except by the audit administrator; Object Lock; log-file validation; no statement grants scheduling the audit key's deletion, so that needs a key-policy change first, which the account root and delegated administrators can make and the management-event trail must record | existing audit tests, `test_audit_tamper_protection_is_complete`, `test_every_deny_and_every_sid_is_pinned` (every audit Deny pinned exactly, including its condition) | P11, P13 |
 | API and ingest credential separation | Separate roles, trust policies requiring different session names, separate credential files and mounts; only the API may generate data keys, in both the role policies and the key policy | `test_api_and_ingest_credentials_are_separate` | P14, P15 |
@@ -111,7 +120,7 @@ condition differently from this reading. Those questions belong to the
 |---|---|---|---|
 | **R1** | The API role can read object bytes, because `HeadObject` requires `s3:GetObject`. | ADR-033 note 1: the code calls only head and attributes; every read is a data event. | P08-01 records it as allowed and audited |
 | **R2** | The ingest role can read any object under `versions/`, across workspaces. | ADR-033 note 2: exact-object access is enforced in the application against the claimed version; every read is a data event. | P09-02 records it as allowed and audited |
-| **R3** | The account root (through delegated IAM administrators) and the key's administrator may rewrite a key policy, and with it grant themselves use. In D6 the proof administrator's own policy grants no `kms:PutKeyPolicy`; the audit-admin role may change the audit key's. | Recoverability of the key; such a change is a management event in the account trail (decision E7). | none; reviewed with E7 |
+| **R3** | The account root (through delegated IAM administrators) and the key's administrator may rewrite a key policy, and with it grant themselves use. In D6 the provisioner's own policy grants no `kms:PutKeyPolicy`; the audit-admin role may change the audit key's. | Recoverability of the key; such a change is a management event in the account trail (decision E7). | none; reviewed with E7 |
 | **R4** | Whether the encryption denies refuse `UploadPart` or `CompleteMultipartUpload` is not stated by AWS documentation. | No exception is added; a refusal stops the proof (S3) and changes the design instead. | P07 |
 | **R5** | The production-side cross-environment checks are simulations: production resources do not exist. | Creating production-named principals for a staging proof is refused. | P10 |
 | **R6** | The credential refresher is not built. The stand-in cannot show systemd scheduling, retry and backoff, ownership and mode, tmpfs, reboot behaviour or the refresh-failure alert. | It ships with O-6, where those become proof items. | P14 shows application-side rotation and expiry only |
@@ -120,7 +129,8 @@ condition differently from this reading. Those questions belong to the
 | **R9** | `CreateBucket` in us-east-1 succeeds for a bucket the account already owns. A same-account principal racing the proof between `HeadBucket` and `CreateBucket` with an empty, unconfigured bucket would pass the pristine checks. | The random proof suffix makes accidental collision negligible; a deliberate race needs an insider who could alter the bucket anyway, and the management trail records it. | P03-06, P03-07 |
 | **R11** | **No policy in this package enforces MFA.** Whether sign-in requires it is an IAM Identity Center setting, which IAM policy cannot see and nothing here checks. | Identity Center sessions carry no `aws:MultiFactorAuthPresent` after role chaining; the independent gate record attests the setting (E15). | none; attested only |
 | **R12** | The stub run of the procedure is not exhaustive (round-3 F1). | Production isolation rests on the dedicated account; the stub run, its executed-call allow-list and the static scan are regression evidence. | none |
-| **R13** | The proof account's root user, the organization's management account and Identity Center administrators can change the boundary, the deny policy, the permission sets and their assignments, and so undo every control inside the account, including E9 separation. | They are outside the proof. The gate records that they are not the operator (E15); their changes are management events in the account trail (E7). | P01-02 compares every proof principal with its template before any change |
+| **R13** | The proof account's root user, the organization's management account and Identity Center administrators can change the boundaries, the deny policy, the permission sets and their assignments, and so undo every control inside the account, including E9 separation. | They are outside the proof. The gate records that they hold none of the three functions (E15); their changes are management events in the account trail (E7). | P01-02 and P03-15 compare every proof identity and policy with its template |
+| **R14** | The provisioner shapes the six roles: it can rewrite their inline policies (within each role's own boundary) and delete and re-create the four dataset roles. It cannot use any of them, change a trust policy after creation, or change a boundary. | Someone must provision IAM; this keeps that power away from the people who use the roles. | P03-15 checks every role again with the audit reader's identity; the account trail records every change |
 | **R10** | Whether the data-event selector records bucket-level `ListBucket`/`ListBucketVersions` is not established. | Decision E13 after P13 observes it. | P13 |
 
 ## Unresolved AWS behaviour (D6 decides; nothing is inferred)
@@ -132,10 +142,11 @@ condition differently from this reading. Those questions belong to the
 | **I3** | IAM cannot stop the API from re-creating a key whose versions were all purged (`If-None-Match` succeeds when no version exists); only the database guard prevents reuse | not an AWS proof item |
 | **I4** | The API may abort any multipart upload whose id it knows; listing is denied, so this is denial of service at most | not an AWS proof item |
 | E-MPU | Whether the encryption-header denies refuse `UploadPart` or `CompleteMultipartUpload` (R4) | P07 (S3) |
-| M5 | Whether KMS applies `aws:ResourceTag` conditions to the tag-on-create authorization in `TagOnlyUntaggedKeys`, and in the proof administrator's `TagOnlyNewDatasetKeys` | P03-02, P03-04 |
+| M5 | Whether KMS applies `aws:ResourceTag` conditions to the tag-on-create authorization in `TagOnlyUntaggedKeys`, and in the provisioner's `TagOnlyNewDatasetKeys` | P03-02, P03-04 |
 | **I5** | That Identity Center provisions a permission set's inline policy as exactly one role policy named `AwsSSOInlinePolicy`, its customer-managed policy as an attached managed policy, and its boundary as the role's permissions boundary, and that `aws:PrincipalArn` of its sessions is the `aws-reserved/sso.amazonaws.com/` role ARN | P01-02 (a difference is S9; nothing is relaxed) |
 | **I6** | Whether `AddRoleToInstanceProfile` checks `iam:PassRole`, and with what `iam:PassedToService` | P03-01 (a refusal is S10) |
-| **I7** | That the boundary's allow-list is complete for every call each step makes, including actions a CLI command needs implicitly (for example `create-key` with tags, `create-bucket` with Object Lock, `run-instances` with tag specifications) | P03 (a refusal is S10; the boundary is changed only by review) |
+| **I7** | That the boundaries are complete for every call each step makes, including actions a CLI command needs implicitly (for example `create-key` with tags, `create-bucket` with Object Lock, `run-instances` with tag specifications and an encrypted volume, `validate-logs`' `GetBucketLocation`) | P03, P13 (a refusal is S10; a boundary is changed only by review) |
+| **I8** | Whether `GetBucketLifecycleConfiguration` returns fields beyond `Rules` (for example `TransitionDefaultMinimumObjectSize`); the comparison uses only `Rules` either way | P03-11, P03-15 |
 
 ## Security review of PR #60 (round 1) — dispositions
 
@@ -214,9 +225,9 @@ control; before that it was the boundary (round 3).
 | **H1** P03-01 rendered the removed `trust-human-mfa` | Every `render` now names a template that exists, and every template is rendered | `test_every_render_names_an_existing_template_and_every_template_is_rendered` (static, loops and `make_role` resolved); the stub run fails at once on a missing template (S10) |
 | **H2** P12-03 expected the old session name | One helper, `session_name`, builds every session name; P12-03 checks the exact ARN `…:assumed-role/nlw-staging-dataset-operator/nlw-d6-<PROOF_ID>-operator` | `test_every_session_name_is_proof_scoped_and_matches_its_profile`; the stub answers identities from the generated `aws-config`, so a wrong name stops the run |
 | **L2** the stub run masked broken steps | The stub run uses the real `lib.sh` exit semantics: a render failure, missing template, S10, malformed `aws-config`, identity mismatch or other answer-independent stop fails the run immediately | missing template, wrong session name, unexpected command failure, malformed configuration |
-| **F2** executed calls were not checked | Every executed call is compared with `EXECUTED_CALLS`: service, operation, permitted steps, profiles and resource values; records are written atomically, one file each, and a malformed or incomplete record fails the run; static scanning refuses calls through variables, absolute paths, wrappers, subprocesses and SDK/SigV4 code as defence in depth | `cli=aws; "$cli" ssm send-command`; unexpected STS, IAM, KMS, S3 and CloudTrail operations; an allowed operation from the wrong step; an allowed operation on an unexpected resource; an absolute path; `boto3` in a heredoc |
-| **B1–B3** boundary too broad; name patterns; no permission-set policies | **E14 now requires a dedicated proof account**, the blast-radius boundary. The boundary is an allow-list of exactly D6's actions and resources with the six exact role ARNs; a separate deny policy carries the mandated denies; four permission sets have exact inline policies | allow-list pinned per Sid and equal to the identity union; one control per mandated deny; exact role ARNs |
-| **B4** E9 separation unenforced | Distinct operator, audit-admin and audit-reader permission sets; operator-side denies on the audit roles, trail, audit bucket and audit key; audit-side denies on the dataset side; the audit administrator, not the proof administrator, creates the audit roles (P03-03, P03-05). E9 now says the separation holds only with different people and an independent account administrator | `test_operator_and_audit_sides_are_separated` and its controls |
+| **F2** executed calls were not checked | **Partly fixed in round 4; completed in round 5 (N6).** Round 4 compared every executed call with `EXECUTED_CALLS` but checked service, operation, steps, profiles and resource values independently and missed `--opt=value` and `--cli-input-json`; records are written atomically, one file each, and a malformed or incomplete record fails the run; static scanning refuses calls through variables, absolute paths, wrappers, subprocesses and SDK/SigV4 code as defence in depth | `cli=aws; "$cli" ssm send-command`; unexpected STS, IAM, KMS, S3 and CloudTrail operations; an allowed operation from the wrong step; an allowed operation on an unexpected resource; an absolute path; `boto3` in a heredoc |
+| **B1–B3** boundary too broad; name patterns; no permission-set policies | **E14 now requires a dedicated proof account**, which limits the blast radius. The boundary is an upper bound naming the six exact role ARNs; a separate deny policy carries the mandated denies; four permission sets have exact inline policies. (Round 4 called the boundary "exactly the union"; it is that by action only, and broader by resource where listed in §3.6.) | allow-list pinned per Sid and equal to the identity union by action; one control per mandated deny; exact role ARNs |
+| **B4** E9 separation unenforced | **Not closed in round 4** (round-5 N1): each side could rewrite the roles it administered, and those roles carried only the shared boundary. Superseded by the round-5 identity model | — |
 | **M1** gate read from the working tree | `git show "$REVIEWED_COMMIT:…"`; the record must be tracked, name the parent procedure commit, and be the only change; no untracked or ignored file under `docs/runbooks` or `docs/evidence`; the record must say `approved` | `.git/info/exclude`, an untracked replacement, a working-tree edit, a gate from another commit, a gate commit that also changes the procedure, a mismatched commit inside the gate |
 | **L1** `sed` broke on `#` | `render-config.py` fills each value literally after a per-value pattern check and requires the result to parse | an SSO URL with `#` renders byte for byte; a newline is refused |
 | **F6 leftover** dead `AKIA` case in X01 | removed | text check |
@@ -230,6 +241,26 @@ and round-2 N9 rows (now marked superseded); the owner's administrator role
 compares the policies and runs spot-check simulations); P03-11's scope (it
 now lists what it does not check); and the stub run's coverage.
 
+## Security review of PR #60 (round 4, fresh reviewer at `c800e61`) — dispositions
+
+| Finding | Correction | Tests and negative controls |
+|---|---|---|
+| **N1** separation bypassable through the roles each side administered | Three functions. The operator and audit permission sets deny every IAM write (`NeverChangeIam`) and create no role; the provisioner creates all six roles, may assume none (`NeverUseTheProofRoles`), reads no dataset object (`NeverDatasetObjects`), touches nothing of the audit side, and has no `UpdateAssumeRolePolicy`. Every created role carries its own exact boundary (`boundary-<role>`, equal to its Allows); the provisioner may create a role only with its own boundary, and nobody can change or remove one. P03-11 and, with the audit reader's identity, P03-15 check every role's trust, inline policy, managed policies, boundary and tags, and both keys' grants | each identity rewriting itself or another, a role boundary widened or missing, a created role without its boundary, `UpdateAssumeRolePolicy` granted, the provisioner assuming a role or reading an object; `verify_created_role` against a fake `aws` for every field |
+| **N2** both people's sessions on one workstation | Provisioner, operator and audit machines; each `aws-config` holds only its persona's profiles; `isolation.py` (P00-02 and every step) refuses another persona's profile, SSO token or role session; steps are labelled with their machine and `run-step` refuses another machine's step; values move only as schema-checked handoffs | mixed profiles, a foreign SSO token, a foreign role session, a foreign profile in `~/.aws/config`, a step run on the wrong machine; handoffs with another run, commit or direction, an unreviewed name, a malformed value, a credential |
+| **N3** `validate-logs` needs `GetBucketLocation` | `LocateAuditBucket` on the audit reader and its boundary, the exact audit bucket only | the reader's Allows pinned; no other bucket-level or object action added |
+| **N4** lifecycle responses carry extra fields | `same_rules` compares only `Rules`, each rule whole and in ID order; both lifecycle documents are pinned whole | an extra response field passes; a missing, extra or altered rule (status, filter, expiry, noncurrent, abort-multipart) is S9 |
+| **N5** templates rendered from the working tree | `render` reads `git show "$REVIEWED_COMMIT:…"`; P00-02 and `verify_reviewed_commit` refuse skip-worktree and assume-unchanged files and a working tree differing from the commit; the reviewed commit must be on `origin/main`; the ledger schema, `ledger.py`, `isolation.py`, `steps.json` and the session configuration are in the manifest, and the ledger is parsed, never sourced | skip-worktree, assume-unchanged, an ignored replacement, a differing working-tree template, a commit not on `origin/main`, a drifted session variable, a ledger line outside the schema |
+| **N6** allow-list bypasses and cross products | Each executed call must match one reviewed tuple: step, machine, profile, service, operation, resource values and argument names together; `--opt=value` is split; `--cli-input-json` and any unreviewed argument fail; `file://` arguments must name reviewed files; high-level `aws s3` fails | the same operation in the wrong step, as the wrong persona, on the wrong bucket; `--bucket=other`; `--cli-input-json`; a foreign `file://` |
+| **N7** rename-blind only-change check | `git diff --name-only --no-renames` | a file renamed into the gate path |
+| **N8** simulations without region context | Every simulation carries `aws:RequestedRegion=us-east-1`; `sim_expect` requires exactly one expected decision per action (`explicitDeny`, `implicitDeny` or `allowed`); an error, an empty, short or unknown result, or a different deny, is S9 | empty, error, short, ambiguous and wrong-deny results through a fake `aws` |
+| **N9** operational readiness | The boundary is described as an upper bound with every resource broadening listed; the reviewed commit's relation to `main` is checked against `origin/main` as fetched, and its limits stated; P03-13 waits for cloud-init; `verify_tools` pins the AWS CLI per machine (the gate records both pins) and checks `jq`, `python3`, `git` and Docker | an unpinned or different CLI, a missing tool, cloud-init not finished |
+
+**Overclaims corrected in round 5:** "exactly the union" (by action only);
+"F2 fixed" in round 4 (partly; completed here); B4 in round 4 (not closed);
+the round-4 E9 wording; the "owner's administrator" and "proof
+administrator" descriptions; and the claim that the account alone is what
+matters (it limits blast radius; least privilege is separate).
+
 ## Limits of this local validation
 
 - **No AWS evaluation.** Syntax, action names, condition keys and their
@@ -238,7 +269,7 @@ now lists what it does not check); and the stub run's coverage.
   own `render` helper with dummy values and measured without whitespace
   against AWS's documented limits. The tightest are the proof boundary and
   the proof deny policy (managed policies, 6,144 characters each), the
-  proof-administrator permission set's inline policy (10,240) and the human
+  provisioner permission set's inline policy (10,240) and the human
   trust policy (2,048); the test prints none, it only asserts each limit.
   AWS's own counter was not consulted.
 - **No AWS command was run.** The proof's shell is syntax-checked (`bash -n`)

@@ -5,12 +5,14 @@ this and know exactly where the project stands. Update it after each milestone.
 
 ## Phase 2B — O-2 D6 AWS proof package (branch `docs/o2-aws-proof-readiness`, awaiting review; NOT RUN)
 
-**D6 is blocked** until the owner approves a dedicated AWS proof account and
-its Identity Center identities, and an independent verifier records them in a
-separately reviewed gate commit (decisions E14 and E15). Production isolation
-is that dedicated account; the proof boundary, deny policy and exact
-permission-set policies are additional controls inside it, and the contract
-tests are regression evidence.
+**D6 is blocked** until the owner approves a dedicated AWS proof account,
+its Identity Center identities and the three different people who hold the
+provisioner, operator and audit functions, and an independent verifier
+records them in a separately reviewed gate commit (decisions E9, E14, E15).
+The dedicated account limits the blast radius; least privilege and
+separation inside it come from exact role boundaries, the proof deny policy
+and exact permission-set policies; the contract tests are regression
+evidence.
 
 Prepared for independent review; nothing was run against AWS:
 
@@ -21,8 +23,8 @@ Prepared for independent review; nothing was run against AWS:
 - [Owner decisions E1–E15](runbooks/dataset-s3-d6-owner-decisions.md), open
   except E14 (a dedicated proof account is required).
 - [Policy review](security/o2-aws-policy-review.md): findings and their
-  dispositions for four review rounds, residual risks R1–R13, unresolved AWS
-  behaviour I1–I7.
+  dispositions for five review rounds, residual risks R1–R14, unresolved AWS
+  behaviour I1–I8.
 - Contract tests with negative controls:
   `tests/unit/test_dataset_s3_d6_proof.py`.
 
