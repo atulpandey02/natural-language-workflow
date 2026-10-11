@@ -25,11 +25,11 @@ None of these may be replaced by a real value in this repository.
 | `<AUDIT_BUCKET>` | CloudTrail log bucket, `nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1[-<suffix>]`. It is separate from `<BUCKET>` and from the Restic bucket. |
 | `<AUDIT_KEY_ARN>` | a separate customer-managed KMS key for the audit logs |
 | `<TRAIL_ARN>` | `arn:aws:cloudtrail:us-east-1:<ACCOUNT>:trail/nlw-<ENV>-dataset-data-events` |
-| `<ADMIN_ROLE>` | the account administration role that manages the dataset bucket and key |
+| `<ADMIN_ROLE>` | the role that manages the dataset bucket and key. For D6 it is the proof-administrator Identity Center permission-set role (§3.7), given as its name with path |
 | `<AUDIT_ADMIN_ROLE>` | the role that administers the trail, audit bucket and audit key. It is not an application or operator role. |
 | `<AUDIT_READER_ROLE>` | a human, read-only role for audit review |
 | `<HUMAN_PRINCIPAL_ARNS>` | the IAM Identity Center permission-set role ARNs allowed to assume one human role (§3.5). Each human role has its own list; the operator and audit-administrator lists must not overlap. |
-| `<PROOF_BOUNDARY_ARN>` | the customer-managed policy `nlw-<ENV>-d6-proof-boundary` (§3.6), attached as the permissions boundary of every principal the D6 proof uses and every role it creates |
+| `<PROOF_BOUNDARY_ARN>` | the customer-managed policy `nlw-<ENV>-d6-proof-boundary` (§3.6) in the dedicated proof account, attached as the permissions boundary of every principal the D6 proof uses and every role it creates. Its companion, `nlw-<ENV>-d6-proof-denies`, has a fixed name in the same account |
 | `<AUDIT_EXPIRY_DAYS>` | `<AUDIT_RETENTION_DAYS>` + 1, the lifecycle expiry of audit log objects |
 | `<AUDIT_RETENTION_DAYS>` | audit-log retention. It is set with O-3 and O-5, and must outlast any deletion-evidence need. |
 
@@ -54,9 +54,9 @@ None of these may be replaced by a real value in this repository.
   {"Sid": "AdministerNeverUse", "Effect": "Allow",
    "Principal": {"AWS": ["arn:aws:iam::<ACCOUNT>:root", "arn:aws:iam::<ACCOUNT>:role/<ADMIN_ROLE>"]},
    "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:PutKeyPolicy", "kms:GetKeyRotationStatus",
-              "kms:EnableKeyRotation", "kms:ListResourceTags", "kms:TagResource", "kms:UntagResource",
-              "kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias", "kms:EnableKey", "kms:DisableKey",
-              "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion"],
+              "kms:EnableKeyRotation", "kms:ListGrants", "kms:ListResourceTags", "kms:TagResource",
+              "kms:UntagResource", "kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias", "kms:EnableKey",
+              "kms:DisableKey", "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion"],
    "Resource": "*"},
   {"Sid": "ApiEncryptViaS3ForThisBucketOnly", "Effect": "Allow",
    "Principal": {"AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api"},
@@ -416,10 +416,12 @@ dataset objects or the dataset key. Both use `trust-human` (§3.5).
    "Resource": "*",
    "Condition": {"StringEquals": {"aws:RequestTag/nlw-env": "<ENV>"},
                  "Null": {"aws:ResourceTag/nlw-env": "true"}}},
+  {"Sid": "AuditKeyAlias", "Effect": "Allow", "Action": "kms:CreateAlias",
+   "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit"},
   {"Sid": "AdministerAuditKey", "Effect": "Allow",
    "Action": ["kms:CreateAlias", "kms:DescribeKey", "kms:GetKeyPolicy", "kms:PutKeyPolicy",
-              "kms:EnableKeyRotation", "kms:GetKeyRotationStatus", "kms:ListResourceTags"],
-   "Resource": ["<AUDIT_KEY_ARN>", "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit"]},
+              "kms:EnableKeyRotation", "kms:GetKeyRotationStatus", "kms:ListGrants", "kms:ListResourceTags"],
+   "Resource": "<AUDIT_KEY_ARN>"},
   {"Sid": "NeverTouchDatasets", "Effect": "Deny", "Action": ["s3:*", "kms:*"],
    "Resource": ["arn:aws:s3:::<BUCKET>", "arn:aws:s3:::<BUCKET>/*", "<KEY_ARN>"]},
   {"Sid": "NeverPassOrAttachDatasetRoles", "Effect": "Deny",
@@ -444,7 +446,11 @@ dataset objects or the dataset key. Both use `trust-human` (§3.5).
   profile. Who else in the account may do so is decision E12.
 - `AdministerAuditKey` names the key ARN, which exists only after
   `CreateAuditKey`. The proof attaches this statement after the key is
-  created.
+  created. `AuditKeyAlias` is separate so that the alias can be created in
+  the same step as the key: an alias is authorised by IAM on the alias ARN,
+  which the key policy cannot grant.
+- `kms:ListGrants` is granted so that P03-11 can show that the audit key has
+  no grant; both key policies allow it to their administrators.
 
 <!-- template: role-audit-reader -->
 ```json
@@ -525,38 +531,161 @@ is valid before or after those roles exist.
   principal, including an IAM user with a long-term access key.
 - **MFA.** Identity Center sessions reach these roles by role chaining, where
   `aws:MultiFactorAuthPresent` is generally absent, so this template does not
-  test it. MFA is enforced by Identity Center's sign-in settings instead. That
-  is not visible to IAM policy; it is attested in the independent D6 gate
-  record (decision E15). It is a documented residual risk.
+  test it, and **no policy in this package enforces MFA.** Whether a person
+  must use MFA depends on Identity Center's sign-in settings, which IAM
+  policy cannot see. The independent verifier attests that setting in the D6
+  gate record (decision E15); neither the procedure nor the tests check it.
+  It is residual risk R11.
 - `DenyMachineRoles` is a second, name-based refusal of the bootstrap and
   runtime roles.
 - `sts:RoleSessionName` must start with `nlw-d6-`, so every cached session
   carries the proof run's id (`nlw-d6-<PROOF_ID>-<role>`) and cleanup can
   remove exactly that run's sessions.
 
-### 3.6 Proof-principal permissions boundary (mandatory for D6)
+### 3.6 Proof principals: the dedicated account, the boundary and the deny policy (mandatory for D6)
 
-The D6 proof's **production isolation does not rest on reviewing its shell
-commands.** It rests on this AWS-side boundary:
+**Where D6 runs.** D6 runs only in a **dedicated AWS proof account**
+(decision E14). That account holds no production and no staging resource,
+and its id differs from every staging and production account id. **The
+account is the blast-radius boundary:** nothing the proof does, by design or
+by mistake, can reach a resource in another account, because none of the
+proof's principals is trusted anywhere else. The policies below are
+additional controls inside that account; they are not what keeps
+production safe.
 
-- It is the permissions boundary of every Identity Center permission set the
-  proof uses (proof administrator, operator, audit).
-- Every role the proof creates must carry it too (`CreatedRolesCarryThisBoundary`).
-- A boundary can only narrow what an identity policy grants. Whatever a proof
-  command does, an action on a resource named for the other
-  environment (production, for the staging proof), a key tagged for it, an IAM escalation path, or this boundary itself is
-  refused by AWS.
+Three reviewed policy layers apply to the proof's principals. A request
+succeeds only if an Allow in the identity policy (or in a resource policy
+that names the role) **and** an Allow in the boundary match it, and no Deny
+in any of them does.
 
-Decision E14 chooses whether D6 runs in a dedicated proof account (where no
-production resource exists at all) or with this boundary in the staging
-account. The boundary is required in both cases. D6 stays blocked until an
-independent verifier has confirmed the account, the principals, the attached
-boundary and their effective permissions (decision E15).
+| Layer | Attached to | Holds |
+|---|---|---|
+| `proof-principal-boundary` (managed policy `nlw-<ENV>-d6-proof-boundary`) | the permissions boundary of the four permission sets (§3.7) and of every role the proof creates | the **allow-list**: only the services, actions and resources D6 uses |
+| `proof-principal-denies` (managed policy `nlw-<ENV>-d6-proof-denies`) | the only managed policy of each of the four permission sets | the **explicit denies** every proof principal carries |
+| each permission set's inline policy (§3.7) | that permission set | its exact Allows, and the denies that keep the operator and audit sides apart (E9) |
+
+The roles the proof creates carry the boundary and their own inline policy
+(§3), whose denies already cover the other environment, audit tampering and
+role passing. AWS limits a managed policy to 6,144 characters; that is why
+the allow-list and the denies are two policies.
+
+**The allow-list** (the boundary). Its Allow statements are exactly the
+union of what the four permission-set policies (§3.7) and the six role
+policies (§3) allow; the contract tests require that union, action by
+action. Anything else, in any service, is an implicit deny. IAM changes and
+`sts:AssumeRole` name the six exact role ARNs, never a `nlw-<ENV>-dataset-*`
+pattern, and `iam:PassRole` names only the bootstrap role. The one Deny,
+`CreatedRolesCarryThisBoundary`, makes every role the proof creates carry
+this boundary.
+
+**The explicit denies** (`proof-principal-denies`), so that a policy widened
+by mistake still cannot:
+
+- create, update or delete a SAML or OIDC identity provider;
+- assume any role but the five proof roles that are assumed;
+- pass any role but the bootstrap role, or pass it to a service other than
+  EC2;
+- use Lambda, CodeBuild, CloudFormation, ECS, Step Functions, SSM (other
+  than reading the one public AMI parameter), Session Manager channels,
+  instance-profile association, or EC2 serial-console and Instance Connect
+  tunnels;
+- change an organization or account setting;
+- create, version or attach a managed policy, create a user or access key,
+  or put or remove a permissions boundary;
+- change any Identity Center permission-set role, this boundary or this
+  deny policy;
+- act on resources named or tagged for the other environment;
+- act outside `us-east-1`, except for the global services IAM, STS, Budgets
+  and Organizations.
+
+**What these layers do not do.**
+
+- They cannot constrain the account root user, an organization management
+  account, or anyone who can edit permission sets or policies in the
+  account. Those remain residual authority (review R13).
+- They cannot stop an action that an identity policy grants on an allowed
+  resource. That is the identity policies' job (§3, §3.7), checked in P01-02
+  and P03-11.
+- S3 bucket names and KMS key ids are not known before the run. Buckets are
+  matched by this account's proof-name pattern (`…-us-east-1-d6*`); keys by
+  `key/*` in `us-east-1` of this account, with the `nlw-purpose` tag
+  deciding who may administer them.
 
 <!-- template: proof-principal-boundary -->
 ```json
 {"Version": "2012-10-17", "Statement": [
-  {"Sid": "BoundaryAllowsWhatTheIdentityGrants", "Effect": "Allow", "Action": "*", "Resource": "*"},
+  {"Sid": "D6NoResourceScope", "Effect": "Allow",
+   "Action": ["cloudtrail:DescribeTrails", "cloudtrail:ListPublicKeys", "ec2:DescribeAvailabilityZones",
+              "ec2:DescribeInstanceStatus", "ec2:DescribeInstances", "ec2:DescribeTags", "ec2:DescribeVpcs",
+              "iam:ListAccountAliases", "iam:ListRoles", "iam:SimulateCustomPolicy", "kms:CreateKey",
+              "kms:ListAliases", "organizations:DescribeOrganization", "s3:ListAllMyBuckets",
+              "tag:GetResources"],
+   "Resource": "*"},
+  {"Sid": "D6ReadPrincipals", "Effect": "Allow",
+   "Action": ["iam:GetRole", "iam:GetRolePolicy", "iam:ListAttachedRolePolicies", "iam:ListRolePolicies",
+              "iam:ListRoleTags", "iam:SimulatePrincipalPolicy"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/*", "arn:aws:iam::<ACCOUNT>:user/*"]},
+  {"Sid": "D6ReadTheProofPolicies", "Effect": "Allow", "Action": ["iam:GetPolicy", "iam:GetPolicyVersion"],
+   "Resource": ["<PROOF_BOUNDARY_ARN>", "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-proof-denies"]},
+  {"Sid": "D6TheSixRoles", "Effect": "Allow",
+   "Action": ["iam:CreateRole", "iam:DeleteRole", "iam:DeleteRolePolicy", "iam:PutRolePolicy", "iam:TagRole",
+              "sts:AssumeRole"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader"]},
+  {"Sid": "D6TheBootstrapProfileAndRole", "Effect": "Allow",
+   "Action": ["iam:AddRoleToInstanceProfile", "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
+              "iam:GetInstanceProfile", "iam:ListInstanceProfileTags", "iam:PassRole",
+              "iam:RemoveRoleFromInstanceProfile", "iam:TagInstanceProfile"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-bootstrap",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap"]},
+  {"Sid": "D6TheProofBuckets", "Effect": "Allow",
+   "Action": ["s3:AbortMultipartUpload", "s3:CreateBucket", "s3:DeleteBucket", "s3:DeleteObjectVersion",
+              "s3:GetBucketAcl", "s3:GetBucketObjectLockConfiguration", "s3:GetBucketOwnershipControls",
+              "s3:GetBucketPolicy", "s3:GetBucketPublicAccessBlock", "s3:GetBucketTagging",
+              "s3:GetBucketVersioning", "s3:GetEncryptionConfiguration", "s3:GetLifecycleConfiguration",
+              "s3:GetObject", "s3:GetObjectAttributes", "s3:GetObjectVersion", "s3:ListBucket",
+              "s3:ListBucketMultipartUploads", "s3:ListBucketVersions", "s3:PutBucketObjectLockConfiguration",
+              "s3:PutBucketOwnershipControls", "s3:PutBucketPolicy", "s3:PutBucketPublicAccessBlock",
+              "s3:PutBucketTagging", "s3:PutBucketVersioning", "s3:PutEncryptionConfiguration",
+              "s3:PutLifecycleConfiguration", "s3:PutObject"],
+   "Resource": ["arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*",
+                "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*"]},
+  {"Sid": "D6TheProofKeys", "Effect": "Allow",
+   "Action": ["kms:CreateAlias", "kms:Decrypt", "kms:DescribeKey", "kms:DisableKey", "kms:EnableKeyRotation",
+              "kms:GenerateDataKey", "kms:GetKeyPolicy", "kms:GetKeyRotationStatus", "kms:ListGrants",
+              "kms:ListResourceTags", "kms:PutKeyPolicy", "kms:ScheduleKeyDeletion", "kms:TagResource"],
+   "Resource": ["arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+                "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-datasets",
+                "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit"]},
+  {"Sid": "D6TheDataEventTrail", "Effect": "Allow",
+   "Action": ["cloudtrail:AddTags", "cloudtrail:CreateTrail", "cloudtrail:DeleteTrail",
+              "cloudtrail:GetEventSelectors", "cloudtrail:GetTrail", "cloudtrail:GetTrailStatus",
+              "cloudtrail:ListTags", "cloudtrail:PutEventSelectors", "cloudtrail:StartLogging",
+              "cloudtrail:StopLogging", "cloudtrail:UpdateTrail"],
+   "Resource": "<TRAIL_ARN>"},
+  {"Sid": "D6TheProofInstance", "Effect": "Allow",
+   "Action": ["ec2:AuthorizeSecurityGroupIngress", "ec2:CreateSecurityGroup", "ec2:CreateTags",
+              "ec2:DeleteSecurityGroup", "ec2:RunInstances", "ec2:TerminateInstances"],
+   "Resource": ["arn:aws:ec2:us-east-1:<ACCOUNT>:*", "arn:aws:ec2:us-east-1::image/*"]},
+  {"Sid": "D6SshKeyToTheProofInstance", "Effect": "Allow", "Action": "ec2-instance-connect:SendSSHPublicKey",
+   "Resource": "arn:aws:ec2:us-east-1:<ACCOUNT>:instance/*",
+   "Condition": {"StringEquals": {"aws:ResourceTag/nlw-env": "<ENV>", "ec2:osuser": "ec2-user"}}},
+  {"Sid": "D6TheAmiParameter", "Effect": "Allow", "Action": "ssm:GetParameters",
+   "Resource": "arn:aws:ssm:us-east-1::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"},
+  {"Sid": "D6TheProofBudget", "Effect": "Allow", "Action": ["budgets:ModifyBudget", "budgets:ViewBudget"],
+   "Resource": "arn:aws:budgets::<ACCOUNT>:budget/nlw-<ENV>-dataset-proof-*"},
+  {"Sid": "CreatedRolesCarryThisBoundary", "Effect": "Deny", "Action": "iam:CreateRole", "Resource": "*",
+   "Condition": {"StringNotEquals": {"iam:PermissionsBoundary": "<PROOF_BOUNDARY_ARN>"}}}
+]}
+```
+
+<!-- template: proof-principal-denies -->
+```json
+{"Version": "2012-10-17", "Statement": [
   {"Sid": "NeverOtherEnvironmentNames", "Effect": "Deny", "Action": "*",
    "Resource": ["arn:aws:s3:::nlw-<OTHER_ENV>-*", "arn:aws:s3:::nlw-<OTHER_ENV>-*/*",
                 "arn:aws:iam::<ACCOUNT>:role/nlw-<OTHER_ENV>-*",
@@ -566,26 +695,59 @@ boundary and their effective permissions (decision E15).
   {"Sid": "NeverOtherEnvironmentKeys", "Effect": "Deny", "Action": "kms:*", "Resource": "*",
    "Condition": {"StringEquals": {"aws:ResourceTag/nlw-env": "<OTHER_ENV>"}}},
   {"Sid": "NeverEscalate", "Effect": "Deny",
-   "Action": ["iam:AttachRolePolicy", "iam:AttachUserPolicy", "iam:AttachGroupPolicy",
-              "iam:PutUserPolicy", "iam:PutGroupPolicy", "iam:CreatePolicy", "iam:CreatePolicyVersion",
-              "iam:SetDefaultPolicyVersion", "iam:DeletePolicy", "iam:DeletePolicyVersion",
-              "iam:CreateUser", "iam:CreateAccessKey", "iam:CreateLoginProfile", "iam:UpdateLoginProfile",
-              "iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary",
-              "iam:PutUserPermissionsBoundary", "iam:DeleteUserPermissionsBoundary",
-              "organizations:*", "sso:*", "identitystore:*", "account:*"],
+   "Action": ["iam:AttachGroupPolicy", "iam:AttachRolePolicy", "iam:AttachUserPolicy", "iam:CreateAccessKey",
+              "iam:CreateLoginProfile", "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:CreateUser",
+              "iam:DeletePolicy", "iam:DeletePolicyVersion", "iam:DeleteRolePermissionsBoundary",
+              "iam:DeleteUserPermissionsBoundary", "iam:PutGroupPolicy", "iam:PutRolePermissionsBoundary",
+              "iam:PutUserPermissionsBoundary", "iam:PutUserPolicy", "iam:SetDefaultPolicyVersion",
+              "iam:UpdateLoginProfile", "identitystore:*", "sso-directory:*", "sso:*"],
+   "Resource": "*"},
+  {"Sid": "NeverIdentityProviders", "Effect": "Deny",
+   "Action": ["iam:*OpenIDConnectProvider*", "iam:*SAMLProvider"], "Resource": "*"},
+  {"Sid": "NeverOrganizationOrAccountChanges", "Effect": "Deny",
+   "Action": ["account:*", "organizations:Accept*", "organizations:Attach*", "organizations:Cancel*",
+              "organizations:Close*", "organizations:Create*", "organizations:Decline*", "organizations:Delete*",
+              "organizations:Deregister*", "organizations:Detach*", "organizations:Disable*",
+              "organizations:Enable*", "organizations:Invite*", "organizations:Leave*", "organizations:Move*",
+              "organizations:Put*", "organizations:Register*", "organizations:Remove*", "organizations:Tag*",
+              "organizations:Untag*", "organizations:Update*"],
    "Resource": "*"},
   {"Sid": "NeverDirectKmsGrants", "Effect": "Deny", "Action": ["kms:CreateGrant", "kms:RetireGrant", "kms:RevokeGrant"],
    "Resource": "*",
    "Condition": {"Null": {"kms:ViaService": "true"}}},
-  {"Sid": "IamOnlyOnDatasetRoles", "Effect": "Deny",
-   "Action": ["iam:CreateRole", "iam:DeleteRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy",
-              "iam:UpdateAssumeRolePolicy", "iam:UpdateRole", "iam:TagRole", "iam:UntagRole",
-              "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile", "iam:AddRoleToInstanceProfile",
-              "iam:RemoveRoleFromInstanceProfile", "iam:PassRole"],
-   "NotResource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-*",
-                   "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-*"]},
-  {"Sid": "CreatedRolesCarryThisBoundary", "Effect": "Deny", "Action": "iam:CreateRole", "Resource": "*",
-   "Condition": {"StringNotEquals": {"iam:PermissionsBoundary": "<PROOF_BOUNDARY_ARN>"}}}
+  {"Sid": "AssumeOnlyTheProofRoles", "Effect": "Deny",
+   "Action": ["sts:AssumeRole", "sts:AssumeRoleWithSAML", "sts:AssumeRoleWithWebIdentity",
+              "sts:GetFederationToken"],
+   "NotResource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+                   "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+                   "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+                   "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+                   "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader"]},
+  {"Sid": "PassOnlyTheBootstrapRole", "Effect": "Deny", "Action": "iam:PassRole",
+   "NotResource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap"},
+  {"Sid": "PassTheBootstrapRoleOnlyToEc2", "Effect": "Deny", "Action": "iam:PassRole", "Resource": "*",
+   "Condition": {"Null": {"iam:PassedToService": "false"},
+                 "StringNotEquals": {"iam:PassedToService": "ec2.amazonaws.com"}}},
+  {"Sid": "NeverIndirectExecution", "Effect": "Deny",
+   "Action": ["cloudformation:*", "codebuild:*", "ec2-instance-connect:OpenTunnel",
+              "ec2-instance-connect:SendSerialConsoleSSHPublicKey", "ec2:AssociateIamInstanceProfile",
+              "ec2:ReplaceIamInstanceProfileAssociation", "ec2messages:*", "ecs:*", "lambda:*",
+              "ssm-guiconnect:*", "ssmmessages:*", "states:*"],
+   "Resource": "*"},
+  {"Sid": "NeverSsmBeyondTheAmiParameter", "Effect": "Deny", "Action": "ssm:*",
+   "NotResource": "arn:aws:ssm:us-east-1::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"},
+  {"Sid": "NeverChangeTheProofPrincipalsOrPolicies", "Effect": "Deny",
+   "Action": ["iam:AttachRolePolicy", "iam:CreatePolicyVersion", "iam:DeletePolicy", "iam:DeletePolicyVersion",
+              "iam:DeleteRole", "iam:DeleteRolePermissionsBoundary", "iam:DeleteRolePolicy",
+              "iam:DetachRolePolicy", "iam:PutRolePermissionsBoundary", "iam:PutRolePolicy",
+              "iam:SetDefaultPolicyVersion", "iam:TagPolicy", "iam:TagRole", "iam:UntagPolicy", "iam:UntagRole",
+              "iam:UpdateAssumeRolePolicy", "iam:UpdateRole"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/aws-reserved/*", "<PROOF_BOUNDARY_ARN>",
+                "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-proof-denies"]},
+  {"Sid": "OnlyTheApprovedRegion", "Effect": "Deny",
+   "NotAction": ["budgets:*", "iam:*", "organizations:*", "sts:*"],
+   "Resource": "*",
+   "Condition": {"StringNotEquals": {"aws:RequestedRegion": "us-east-1"}}}
 ]}
 ```
 
@@ -593,13 +755,236 @@ boundary and their effective permissions (decision E15).
   caller's behalf (for example EC2 for an encrypted volume). It refuses grants
   made directly, which would bypass the key policy. P03-11 checks that both
   proof keys have no grant.
-- What the boundary does **not** do: it cannot stop an action that an
-  identity policy grants on a staging-named resource. That is the templates'
-  job, checked in P03-11.
-- `iam:CreatePolicyVersion`, `iam:SetDefaultPolicyVersion` and
-  `iam:DeletePolicy` are refused for every policy, so no proof principal can
-  edit this boundary.
+- `PassTheBootstrapRoleOnlyToEc2` denies passing the bootstrap role whenever
+  `iam:PassedToService` is present and is not EC2. It does not deny when the
+  key is absent, because `AddRoleToInstanceProfile` also checks
+  `iam:PassRole` and whether that request carries the key is not documented
+  (review I6). No `…IfExists` operator is used.
+- `NeverIdentityProviders` uses action wildcards: `iam:*SAMLProvider` covers
+  creating, updating, deleting and tagging a SAML provider, and
+  `iam:*OpenIDConnectProvider*` the same for OIDC, including client ids and
+  thumbprints.
 
+### 3.7 Identity Center permission sets for D6 (dedicated proof account)
+
+Four permission sets. Each has **exactly** its inline policy below, exactly
+one managed policy, `nlw-<ENV>-d6-proof-denies` (§3.6), and the proof
+boundary as its permissions boundary. Identity Center provisions each as a
+role named `AWSReservedSSO_<permission set>_<hash>` with the inline policy
+named `AwsSSOInlinePolicy`; P01-02 reads all of this back and compares it
+with the templates. Sessions last one hour or less (E11).
+
+| Permission set | Held by (E9) | May |
+|---|---|---|
+| proof administrator (`<ADMIN_ROLE>`) | the operator | provision and remove the dataset bucket, the dataset key, the bootstrap, API, ingest and operator roles, the proof instance and the budget; read the account inventory; run simulations |
+| operator | the operator | assume only `nlw-<ENV>-dataset-operator` |
+| audit administrator | the audit administrator, a different person | create and configure only the two audit roles; confirm the audit resources are absent; assume only `nlw-<ENV>-dataset-audit-admin` |
+| audit reader | the audit administrator or a third person | assume only `nlw-<ENV>-dataset-audit-reader` |
+
+**Separation of duties (E9).** The operator side (proof administrator and
+operator) is denied every CloudTrail change, every action on the audit
+bucket, every IAM change to and assumption of the audit roles, and every
+KMS action on a key tagged `nlw-purpose=audit` or on the audit alias. The
+audit side (audit administrator and audit reader) is denied every IAM
+change to and assumption of the dataset roles, every action on the dataset
+bucket, and every KMS action on a key tagged `nlw-purpose=dataset` or on the
+dataset alias. These are explicit denies in each side's own inline policy,
+on top of Allows that never grant the other side's resources. **This is
+enforced only when different approved people hold the two sides and
+whoever administers the account and Identity Center is neither of them.**
+The account root, the organization's management account and Identity
+Center administrators can change any of this; they are residual authority
+(review R13).
+
+<!-- template: permission-set-proof-admin -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "ReadTheAccountInventory", "Effect": "Allow",
+   "Action": ["cloudtrail:DescribeTrails", "ec2:DescribeAvailabilityZones", "ec2:DescribeInstanceStatus",
+              "ec2:DescribeInstances", "ec2:DescribeTags", "ec2:DescribeVpcs", "iam:ListAccountAliases",
+              "iam:ListRoles", "iam:SimulateCustomPolicy", "kms:ListAliases",
+              "organizations:DescribeOrganization", "s3:ListAllMyBuckets", "tag:GetResources"],
+   "Resource": "*"},
+  {"Sid": "InspectTheProofPrincipals", "Effect": "Allow",
+   "Action": ["iam:GetRole", "iam:GetRolePolicy", "iam:ListAttachedRolePolicies", "iam:ListRolePolicies",
+              "iam:ListRoleTags"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader",
+                "arn:aws:iam::<ACCOUNT>:role/aws-reserved/sso.amazonaws.com/*"]},
+  {"Sid": "SimulateThisAccountsPrincipals", "Effect": "Allow", "Action": "iam:SimulatePrincipalPolicy",
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/*", "arn:aws:iam::<ACCOUNT>:user/*"]},
+  {"Sid": "ReadTheProofPolicies", "Effect": "Allow", "Action": ["iam:GetPolicy", "iam:GetPolicyVersion"],
+   "Resource": ["<PROOF_BOUNDARY_ARN>", "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-proof-denies"]},
+  {"Sid": "CreateDatasetRolesOnlyWithTheBoundary", "Effect": "Allow", "Action": "iam:CreateRole",
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"],
+   "Condition": {"StringEquals": {"iam:PermissionsBoundary": "<PROOF_BOUNDARY_ARN>"}}},
+  {"Sid": "ConfigureDatasetRoles", "Effect": "Allow",
+   "Action": ["iam:DeleteRole", "iam:DeleteRolePolicy", "iam:PutRolePolicy", "iam:TagRole"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"]},
+  {"Sid": "TheBootstrapInstanceProfile", "Effect": "Allow",
+   "Action": ["iam:AddRoleToInstanceProfile", "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
+              "iam:GetInstanceProfile", "iam:ListInstanceProfileTags", "iam:RemoveRoleFromInstanceProfile",
+              "iam:TagInstanceProfile"],
+   "Resource": "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-bootstrap"},
+  {"Sid": "PassOnlyTheBootstrapRole", "Effect": "Allow", "Action": "iam:PassRole",
+   "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap"},
+  {"Sid": "AdministerTheDatasetBucket", "Effect": "Allow",
+   "Action": ["s3:CreateBucket", "s3:DeleteBucket", "s3:GetBucketOwnershipControls", "s3:GetBucketPolicy",
+              "s3:GetBucketPublicAccessBlock", "s3:GetBucketTagging", "s3:GetBucketVersioning",
+              "s3:GetEncryptionConfiguration", "s3:GetLifecycleConfiguration", "s3:ListBucket",
+              "s3:ListBucketVersions", "s3:PutBucketOwnershipControls", "s3:PutBucketPolicy",
+              "s3:PutBucketPublicAccessBlock", "s3:PutBucketTagging", "s3:PutBucketVersioning",
+              "s3:PutEncryptionConfiguration", "s3:PutLifecycleConfiguration"],
+   "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*"},
+  {"Sid": "FindTheOneWriteOutsideVersions", "Effect": "Allow", "Action": "s3:GetObject",
+   "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*/outside/*"},
+  {"Sid": "CreateOnlyDatasetKeys", "Effect": "Allow", "Action": "kms:CreateKey", "Resource": "*",
+   "Condition": {"StringEquals": {"aws:RequestTag/nlw-env": "<ENV>", "aws:RequestTag/nlw-purpose": "dataset"}}},
+  {"Sid": "TagOnlyNewDatasetKeys", "Effect": "Allow", "Action": "kms:TagResource",
+   "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+   "Condition": {"StringEquals": {"aws:RequestTag/nlw-purpose": "dataset"},
+                 "Null": {"aws:ResourceTag/nlw-purpose": "true"}}},
+  {"Sid": "AdministerOnlyDatasetKeys", "Effect": "Allow",
+   "Action": ["kms:CreateAlias", "kms:DescribeKey", "kms:DisableKey", "kms:EnableKeyRotation", "kms:GetKeyPolicy",
+              "kms:GetKeyRotationStatus", "kms:ListGrants", "kms:ListResourceTags", "kms:ScheduleKeyDeletion"],
+   "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+   "Condition": {"StringEquals": {"aws:ResourceTag/nlw-purpose": "dataset"}}},
+  {"Sid": "TheDatasetKeyAlias", "Effect": "Allow", "Action": "kms:CreateAlias",
+   "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-datasets"},
+  {"Sid": "LaunchTheProofInstance", "Effect": "Allow", "Action": ["ec2:CreateSecurityGroup", "ec2:RunInstances"],
+   "Resource": ["arn:aws:ec2:us-east-1:<ACCOUNT>:*", "arn:aws:ec2:us-east-1::image/*"]},
+  {"Sid": "TagOnlyAtLaunch", "Effect": "Allow", "Action": "ec2:CreateTags",
+   "Resource": ["arn:aws:ec2:us-east-1:<ACCOUNT>:instance/*", "arn:aws:ec2:us-east-1:<ACCOUNT>:security-group/*"],
+   "Condition": {"StringEquals": {"ec2:CreateAction": ["RunInstances", "CreateSecurityGroup"]}}},
+  {"Sid": "ChangeOnlyTheTaggedProofInstance", "Effect": "Allow",
+   "Action": ["ec2:AuthorizeSecurityGroupIngress", "ec2:DeleteSecurityGroup", "ec2:TerminateInstances"],
+   "Resource": ["arn:aws:ec2:us-east-1:<ACCOUNT>:instance/*", "arn:aws:ec2:us-east-1:<ACCOUNT>:security-group/*"],
+   "Condition": {"StringEquals": {"aws:ResourceTag/nlw-env": "<ENV>"}}},
+  {"Sid": "SshKeyToTheProofInstanceOnly", "Effect": "Allow", "Action": "ec2-instance-connect:SendSSHPublicKey",
+   "Resource": "arn:aws:ec2:us-east-1:<ACCOUNT>:instance/*",
+   "Condition": {"StringEquals": {"aws:ResourceTag/nlw-env": "<ENV>", "ec2:osuser": "ec2-user"}}},
+  {"Sid": "ReadTheAmiParameter", "Effect": "Allow", "Action": "ssm:GetParameters",
+   "Resource": "arn:aws:ssm:us-east-1::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"},
+  {"Sid": "TheProofBudget", "Effect": "Allow", "Action": ["budgets:ModifyBudget", "budgets:ViewBudget"],
+   "Resource": "arn:aws:budgets::<ACCOUNT>:budget/nlw-<ENV>-dataset-proof-*"},
+  {"Sid": "NeverAlterAnyTrail", "Effect": "Deny",
+   "Action": ["cloudtrail:AddTags", "cloudtrail:CreateTrail", "cloudtrail:DeleteTrail", "cloudtrail:PutEventSelectors",
+              "cloudtrail:PutInsightSelectors", "cloudtrail:RemoveTags", "cloudtrail:StartLogging",
+              "cloudtrail:StopLogging", "cloudtrail:UpdateTrail"],
+   "Resource": "*"},
+  {"Sid": "NeverTheAuditRolesBucketOrAlias", "Effect": "Deny",
+   "Action": ["iam:AttachRolePolicy", "iam:CreateRole", "iam:DeleteRole", "iam:DeleteRolePermissionsBoundary",
+              "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:PassRole", "iam:PutRolePermissionsBoundary",
+              "iam:PutRolePolicy", "iam:TagRole", "iam:UntagRole", "iam:UpdateAssumeRolePolicy", "iam:UpdateRole",
+              "kms:*", "s3:*", "sts:AssumeRole"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader",
+                "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*",
+                "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit"]},
+  {"Sid": "NeverAuditKeys", "Effect": "Deny", "Action": "kms:*", "Resource": "*",
+   "Condition": {"StringEquals": {"aws:ResourceTag/nlw-purpose": "audit"}}}
+]}
+```
+
+<!-- template: permission-set-operator -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "AssumeOnlyTheOperatorRole", "Effect": "Allow", "Action": "sts:AssumeRole",
+   "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+   "Condition": {"StringLike": {"sts:RoleSessionName": "nlw-d6-*-operator"}}},
+  {"Sid": "NeverAlterAnyTrail", "Effect": "Deny",
+   "Action": ["cloudtrail:AddTags", "cloudtrail:CreateTrail", "cloudtrail:DeleteTrail", "cloudtrail:PutEventSelectors",
+              "cloudtrail:PutInsightSelectors", "cloudtrail:RemoveTags", "cloudtrail:StartLogging",
+              "cloudtrail:StopLogging", "cloudtrail:UpdateTrail"],
+   "Resource": "*"},
+  {"Sid": "NeverTheAuditRolesBucketOrAlias", "Effect": "Deny",
+   "Action": ["iam:AttachRolePolicy", "iam:CreateRole", "iam:DeleteRole", "iam:DeleteRolePermissionsBoundary",
+              "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:PassRole", "iam:PutRolePermissionsBoundary",
+              "iam:PutRolePolicy", "iam:TagRole", "iam:UntagRole", "iam:UpdateAssumeRolePolicy", "iam:UpdateRole",
+              "kms:*", "s3:*", "sts:AssumeRole"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader",
+                "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*",
+                "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit"]},
+  {"Sid": "NeverAuditKeys", "Effect": "Deny", "Action": "kms:*", "Resource": "*",
+   "Condition": {"StringEquals": {"aws:ResourceTag/nlw-purpose": "audit"}}}
+]}
+```
+
+<!-- template: permission-set-audit-admin -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "AssumeOnlyTheAuditAdminRole", "Effect": "Allow", "Action": "sts:AssumeRole",
+   "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+   "Condition": {"StringLike": {"sts:RoleSessionName": "nlw-d6-*-audit-admin"}}},
+  {"Sid": "CreateAuditRolesOnlyWithTheBoundary", "Effect": "Allow", "Action": "iam:CreateRole",
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader"],
+   "Condition": {"StringEquals": {"iam:PermissionsBoundary": "<PROOF_BOUNDARY_ARN>"}}},
+  {"Sid": "ConfigureAuditRoles", "Effect": "Allow",
+   "Action": ["iam:GetRole", "iam:GetRolePolicy", "iam:ListAttachedRolePolicies", "iam:ListRolePolicies",
+              "iam:PutRolePolicy", "iam:TagRole"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader"]},
+  {"Sid": "ConfirmTheAuditResourcesAreAbsent", "Effect": "Allow",
+   "Action": ["cloudtrail:GetTrail", "kms:DescribeKey", "s3:ListBucket"],
+   "Resource": ["<TRAIL_ARN>", "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+                "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*"]},
+  {"Sid": "NeverTheDatasetRolesBucketOrAlias", "Effect": "Deny", "Action": ["iam:*", "kms:*", "s3:*", "sts:AssumeRole"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+                "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-bootstrap",
+                "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*",
+                "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-datasets"]},
+  {"Sid": "NeverDatasetKeys", "Effect": "Deny", "Action": "kms:*", "Resource": "*",
+   "Condition": {"StringEquals": {"aws:ResourceTag/nlw-purpose": "dataset"}}}
+]}
+```
+
+<!-- template: permission-set-audit-reader -->
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Sid": "AssumeOnlyTheAuditReaderRole", "Effect": "Allow", "Action": "sts:AssumeRole",
+   "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader",
+   "Condition": {"StringLike": {"sts:RoleSessionName": "nlw-d6-*-audit-reader"}}},
+  {"Sid": "NeverTheDatasetRolesBucketOrAlias", "Effect": "Deny", "Action": ["iam:*", "kms:*", "s3:*", "sts:AssumeRole"],
+   "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+                "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-bootstrap",
+                "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*",
+                "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-datasets"]},
+  {"Sid": "NeverDatasetKeys", "Effect": "Deny", "Action": "kms:*", "Resource": "*",
+   "Condition": {"StringEquals": {"aws:ResourceTag/nlw-purpose": "dataset"}}}
+]}
+```
+
+- **The proof administrator never assumes a dataset role.** It provisions
+  them; the operator permission set reaches the operator role, and only the
+  bootstrap role reaches the API and ingest roles.
+- **Reading the audit roles is not denied to the operator side.** The
+  operator-side deny lists IAM *changes* to the audit roles, so the proof
+  administrator can still read and simulate them in P03-11. The audit side
+  needs nothing of the dataset roles, so its deny is `iam:*`.
+- **Keys are separated by tag.** The proof administrator may create only a
+  key tagged `nlw-purpose=dataset`, tag only an untagged key, and
+  administer only keys tagged `dataset`. The audit administrator tags the
+  audit key `nlw-purpose=audit` when it creates it (P03-04). How KMS
+  evaluates `aws:ResourceTag` while `CreateKey` applies tags is the same open
+  question as `TagOnlyUntaggedKeys` (§3); P03-02 and P03-04 show it.
 ## 4. CloudTrail object-data audit (one trail per environment)
 
 ADR-033 relies on these records for every API metadata request, every ingest
@@ -663,8 +1048,8 @@ the provisioning review.
   {"Sid": "AdministerNeverUse", "Effect": "Allow",
    "Principal": {"AWS": ["arn:aws:iam::<ACCOUNT>:root", "arn:aws:iam::<ACCOUNT>:role/<AUDIT_ADMIN_ROLE>"]},
    "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:PutKeyPolicy", "kms:GetKeyRotationStatus",
-              "kms:EnableKeyRotation", "kms:ListResourceTags", "kms:TagResource", "kms:UntagResource",
-              "kms:CreateAlias", "kms:UpdateAlias", "kms:EnableKey", "kms:DisableKey"],
+              "kms:EnableKeyRotation", "kms:ListGrants", "kms:ListResourceTags", "kms:TagResource",
+              "kms:UntagResource", "kms:CreateAlias", "kms:UpdateAlias", "kms:EnableKey", "kms:DisableKey"],
    "Resource": "*"},
   {"Sid": "CloudTrailEncryptThisTrailOnly", "Effect": "Allow",
    "Principal": {"Service": "cloudtrail.amazonaws.com"},
@@ -906,8 +1291,9 @@ Both commands:
 
 ## 7. Isolated real-AWS proof (D6; only after explicit authorization)
 
-This runs against the **staging** bucket from an isolated session, never
-production. The ordered commands, stop conditions, evidence rules and cleanup
+This runs in a **dedicated AWS proof account** (decision E14), against
+staging-named resources it creates there, never in a staging or production
+account. The ordered commands, stop conditions, evidence rules and cleanup
 are in [dataset-s3-d6-proof.md](dataset-s3-d6-proof.md); the items below are
 the pass criteria it implements. Every item must pass. A failure stops provisioning, with no
 exceptions added.
