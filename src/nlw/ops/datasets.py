@@ -139,7 +139,9 @@ def purge(
 ) -> dict[str, Any]:
     """Delete and verify the stored objects of DELETING version(s), then record
     a receipt and a ``VERSION_OBJECT_PURGED`` event per version. Idempotent: a
-    repeated purge deletes nothing and records fresh evidence."""
+    repeated purge deletes nothing new; it records a fresh receipt and event
+    for a version with a recorded key, and nothing for a version without one
+    when nothing is stored or no store is configured (ADR-033 note 3)."""
     if not operator.strip() or len(operator) > 64:
         raise TombstoneError("--operator must be a short operator label")
     if isinstance(log, UnconfiguredDeletionLog):

@@ -7,7 +7,8 @@ steps:
 1. A workspace admin/owner **requests** deletion. The dataset or version
    becomes `DELETING` and is unusable at once.
 2. The operator **purges** the stored objects: physical deletion, verified,
-   with a receipt.
+   with a receipt for each version that has a recorded storage key or, with
+   a store configured, anything stored (step 2 below; ADR-033 note 3).
 3. The operator applies the **tombstone** (`DELETING → DELETED`), which scrubs
    every name, the storage key, the profile and the semantic mappings.
 
@@ -80,13 +81,18 @@ For each `DELETING` version, the purge:
 3. appends one `deletion-receipt-2` record to the deletion log;
 4. records `VERSION_OBJECT_PURGED` (`actor_kind = operator`).
 
-Steps 3 and 4 are skipped for a version that has **no recorded storage key and
-nothing stored**: it gets no receipt and no event. A failure part-way can leave
-files removed without a receipt, or a receipt without an event; re-run the
-purge. ADR-033 note 3 states the exact deletion and receipt behaviour.
+With a dataset store configured, steps 3 and 4 are skipped for a version that
+has **no recorded storage key and nothing stored**: it gets no receipt and no
+event. With **no store configured**, the purge refuses if any target version
+has a recorded storage key; otherwise it lists, deletes and records nothing
+(`versions_purged=0`). A failure part-way can leave files removed without a
+receipt, or a receipt without an event; re-run the purge. ADR-033 note 3 states
+the exact deletion and receipt behaviour.
 
-A whole-dataset purge also clears and verifies the dataset's prefixes. It is
-idempotent: a repeat deletes nothing new and records fresh evidence.
+With a store configured, a whole-dataset purge also clears and verifies the
+dataset's prefixes. It is idempotent: a repeat deletes nothing new; it records
+a fresh receipt and event for each version with a recorded storage key, and
+nothing for a version without one when nothing is stored.
 
 Exit code `0` prints `dataset_id=… versions_purged=… objects_deleted=…`. Exit
 code `2` is a refusal:
@@ -105,12 +111,17 @@ python -m nlw.ops.datasets tombstone --dataset <dataset-uuid>
 python -m nlw.ops.datasets tombstone --dataset <dataset-uuid> --version <version-uuid>
 ```
 
-The tombstone is **refused** for any version that references a storage key
-unless both of these hold:
-- a purge was recorded after its deletion request;
-- a live check of the store finds nothing for it.
+The tombstone is **refused** for any version that references a storage key, or
+has any earlier purge event, unless all of these hold:
+- an operator purge event was recorded after its deletion request;
+- the configured deletion log verifies the receipt named by the latest such
+  event;
+- a store is configured and a live check of it finds nothing for the version.
 
-A whole-dataset tombstone also requires the dataset's prefixes to be empty.
+A version with no storage key and no purge event needs only the live absence
+check, and no check at all when no store is configured. With a store
+configured, a whole-dataset tombstone also requires the dataset's prefixes to
+be empty. ADR-033 note 3 states these conditions exactly.
 Exit code `2` messages:
 
 | Message | Meaning | Action |
