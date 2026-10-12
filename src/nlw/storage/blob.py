@@ -397,8 +397,9 @@ class TenantScopedBlobStore:
         verification listing, and the caller's receipt and purge event, come
         after removal and can still fail: the bytes are then gone, and a
         receipt may or may not exist (ADR-033 note 3). A re-run is safe; for a
-        version with a recorded key it records a zero-object receipt, for one
-        without a key it records nothing."""
+        version with a recorded key it records a receipt for what it removes
+        (zero objects if everything was already gone), and for one without a
+        key it records nothing when nothing remains."""
         prefix = self._version_prefix(dataset_id, version_id)
         list(self._inner.list_prefix(prefix))
         legacy = self._legacy_items(dataset_id, version_id)

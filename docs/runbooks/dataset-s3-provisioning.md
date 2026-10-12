@@ -678,15 +678,20 @@ exceptions added.
      `ListBucket`. If it is 403, `verify-objects` stops with an error instead
      of reporting the object as missing (it fails closed). Runtime handling is
      **not** changed until this evidence exists; the result decides it.
-   - **Receipts after a partial failure:** see ADR-033 note 3. A failed final
-     verification leaves bytes removed with no receipt and no purge event. A
-     failure at or after the receipt write (including the event insert and the
-     commit) records no purge event, but a receipt may or may not exist in the
-     deletion log; a dataset purge can likewise leave earlier versions'
-     receipts while the dataset stays `DELETING`. The safe re-run records a
-     zero-object receipt for a version with a recorded key, and no receipt at
-     all for a version without one. A legacy-keyed row purges to a verified
-     zero-object receipt.
+   - **Receipts after a partial failure:** see ADR-033 note 3. A part-way
+     removal failure, or a verification that fails or still finds items,
+     leaves whatever was removed removed, with no receipt and no purge event
+     from that attempt for that version. A failure at or after the receipt
+     write (including the event insert and the commit) records no purge
+     event, but a receipt may or may not exist in the deletion log; a dataset
+     purge can likewise leave earlier versions' receipts while the dataset
+     stays `DELETING`. The safe re-run records a receipt for what it removes
+     (zero objects if everything was already gone) for a version with a
+     recorded key; for a version without one it records no receipt when
+     nothing remains. Tombstone requires a verified purge event and receipt
+     only for a keyed version (or one with an earlier purge event); a
+     version without a key is tombstoned on the live absence check alone. A
+     legacy-keyed row purges to a verified zero-object receipt.
    - **Recovery when a purge is refused:** a malformed or unexpected
      in-progress upload under a version refuses the purge (fail closed). An
      administrator aborts it after review, or the lifecycle rule removes it
