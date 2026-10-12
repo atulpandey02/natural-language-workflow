@@ -358,8 +358,12 @@ UNCHANGED = json.loads(
 )["templates"]
 
 
+def test_the_unchanged_fixture_covers_every_other_template() -> None:
+    assert set(UNCHANGED) == set(_templates()) - {"role-operator"}
+
+
 @pytest.mark.parametrize("name", sorted(UNCHANGED))
-def test_api_ingest_bootstrap_and_bucket_permissions_are_unchanged(name: str) -> None:
+def test_every_template_but_the_operators_is_unchanged(name: str) -> None:
     """8. Only the operator template changed. The worker, scheduler and
     dispatcher have no AWS role at all, and still get no AWS mount."""
     assert _templates()[name] == UNCHANGED[name], name

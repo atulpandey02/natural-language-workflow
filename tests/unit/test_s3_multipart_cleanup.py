@@ -94,8 +94,7 @@ def test_a_look_alike_sibling_of_an_exact_key_prefix_is_ignored() -> None:
     ``…/<id>-x/…``. The store treats a prefix without a trailing slash as ONE
     exact key."""
     bucket, store, client, scoped = _setup()
-    t, d, v = scoped.tenant_id, uuid.uuid4(), uuid.uuid4()
-    exact = f"quarantine/{t}/{d}/{v}"
+    exact = scoped.object_key(uuid.uuid4(), uuid.uuid4())  # one exact key, no trailing '/'
     mine = _upload(client, exact)
     sibling = _upload(client, f"{exact}-x")
     below = _upload(client, f"{exact}/part")
@@ -104,21 +103,27 @@ def test_a_look_alike_sibling_of_an_exact_key_prefix_is_ignored() -> None:
     assert set(bucket.uploads) == {sibling}
 
 
-def test_an_upload_s3_returns_outside_the_prefix_refuses_the_listing_before_any_abort() -> None:
+def _leak_a_stray_upload() -> tuple[Any, TenantScopedBlobStore, uuid.UUID, uuid.UUID, str, str]:
+    """A tampered listing that also returns ANOTHER tenant's real upload."""
     bucket, _, client, scoped = _setup()
     d, v = uuid.uuid4(), uuid.uuid4()
     own = _upload(client, scoped.object_key(d, v))
     stray = f"versions/{uuid.uuid4()}/{d}/{v}/source.csv"
-    _upload(client, stray)
+    stray_id = _upload(client, stray)
 
     def leak(kw: dict[str, Any], out: dict[str, Any]) -> dict[str, Any]:
-        out["Uploads"].append({"Key": stray, "UploadId": "u999999"})
+        out["Uploads"].append({"Key": stray, "UploadId": stray_id})
         return out
 
     bucket.uploads_response = leak
+    return bucket, scoped, d, v, own, stray_id
+
+
+def test_an_upload_s3_returns_outside_the_prefix_refuses_the_listing_before_any_abort() -> None:
+    bucket, scoped, d, v, own, stray_id = _leak_a_stray_upload()
     with pytest.raises(BlobUnavailable, match="unexpected_key"):
         scoped.delete_version_and_verify(d, v)
-    assert bucket.aborted == [] and own in bucket.uploads  # nothing at all was removed
+    assert bucket.aborted == [] and {own, stray_id} <= set(bucket.uploads)  # nothing removed
 
 
 # --- 4. encoded, Unicode and look-alike keys cannot pass the filter ----------------------
@@ -230,6 +235,10 @@ def _paged(bucket: Any, client: Any, n: int = 5) -> set[str]:
         ("malformed_upload", lambda kw, o: {**o, "Uploads": [{"Key": P + "source.csv"}]}),
         ("malformed_upload", lambda kw, o: {**o, "Uploads": [
             {"Key": P + "source.csv", "UploadId": "u1#v=evil"}]}),
+        ("malformed_upload", lambda kw, o: {**o, "Uploads": [
+            {"Key": P + "source.csv", "UploadId": "u000001\n"}]}),  # Python's ``$`` edge
+        ("bad_pagination", lambda kw, o: {**o, "NextUploadIdMarker": o["NextUploadIdMarker"] + "\n"}
+         if o["IsTruncated"] else o),
     ],
 )  # fmt: skip
 def test_a_malformed_or_escaping_page_refuses_the_listing(
@@ -379,7 +388,12 @@ def test_negative_control_without_the_prefix_filter_a_neighbour_is_aborted(
 def test_negative_control_without_the_prefix_filter_a_stray_upload_is_aborted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Without ``upload_in_prefix`` the same tampered listing aborts ANOTHER
+    tenant's real upload (and the refusal the safety test expects is gone)."""
     monkeypatch.setattr(s3mod, "upload_in_prefix", lambda key, prefix: True)
+    bucket, scoped, d, v, own, stray_id = _leak_a_stray_upload()
+    scoped.delete_version_and_verify(d, v)
+    assert {uid for _, uid in bucket.aborted} == {own, stray_id}
     with pytest.raises((AssertionError, pytest.fail.Exception)):
         test_an_upload_s3_returns_outside_the_prefix_refuses_the_listing_before_any_abort()
 

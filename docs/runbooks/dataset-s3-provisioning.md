@@ -662,11 +662,40 @@ exceptions added.
      application never aborts outside the requested prefix; D6 proves that
      AWS evaluates the grants as above, not that every client of the
      operator role filters.
-   - **Known gap, open:** `purge` and `verify-objects` also list the legacy
-     `quarantine/` and `datasets/` areas through `ListObjectVersions`, which
-     `ListVersionsBounded` denies outside `versions/*`. On S3 that listing
-     fails, and purge then stops before recording anything (it fails
-     closed). It must be resolved before this item can pass.
+   - **O-LEGACY:** with the operator role, `purge`, `tombstone` and
+     `verify-objects` make **no** request outside `versions/` (the S3 store
+     answers the legacy `quarantine/` and `datasets/` areas as empty without
+     asking), and none is denied;
+   - **O-BUCKET-ONLY-VERSIONS:** an administrator listing of the whole bucket
+     shows nothing outside `versions/`. Anything there would be invisible to
+     the operator role, `verify-objects`, purge and tombstone (ADR-033 note 3).
+     This is a point-in-time check.
+   - **O-MISSING-STATUS (record, do not assume):** with the operator role,
+     `HeadObject` and `GetObjectAttributes` on a key under `versions/` that
+     does not exist. Record the exact status AWS returns (403 or 404). The
+     operator's `s3:ListBucket` grant is conditioned on `s3:prefix`, which these
+     requests do not carry, and S3 may answer 403 for a missing key without
+     `ListBucket`. If it is 403, `verify-objects` stops with an error instead
+     of reporting the object as missing (it fails closed). Runtime handling is
+     **not** changed until this evidence exists; the result decides it.
+   - **Receipts after a partial failure:** see ADR-033 note 3. A part-way
+     removal failure, or a verification that fails or still finds items,
+     leaves whatever was removed removed, with no receipt and no purge event
+     from that attempt for that version. A failure at or after the receipt
+     write (including the event insert and the commit) records no purge
+     event, but a receipt may or may not exist in the deletion log; a dataset
+     purge can likewise leave earlier versions' receipts while the dataset
+     stays `DELETING`. The safe re-run records a receipt for what it removes
+     (zero objects if everything was already gone) for a version with a
+     recorded key; for a version without one it records no receipt when
+     nothing remains. Tombstone requires a verified purge event and receipt
+     only for a keyed version (or one with an earlier purge event); a
+     version without a key is tombstoned on the live absence check alone. A
+     legacy-keyed row purges to a verified zero-object receipt.
+   - **Recovery when a purge is refused:** a malformed or unexpected
+     in-progress upload under a version refuses the purge (fail closed). An
+     administrator aborts it after review, or the lifecycle rule removes it
+     after one day; then re-run the purge.
 9. **IMDS is unreachable** from every container, and no static credential
    exists anywhere.
 10. **Audit:**

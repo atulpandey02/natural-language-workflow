@@ -96,7 +96,11 @@ def s3(
         }
     )
     bucket = fake.FakeBucket()
-    views = SimpleNamespace(api=bucket.client(), ingest=bucket.client(), operator=bucket.client())
+    # The operator view applies role-operator's IAM grants (listing only under
+    # versions/, DeleteObjectVersion and abort only under versions/).
+    views = SimpleNamespace(
+        api=bucket.client(), ingest=bucket.client(), operator=bucket.client(role="operator")
+    )
     m = pg_stack.seed_member("owner")
     app = create_app(settings)
     with TestClient(app) as c:
@@ -235,7 +239,7 @@ def test_a_rejected_object_is_retained_until_the_operator_purges_every_version(
     assert status == "REJECTED"
     assert key in s3.bucket.objects  # the ingest runtime deleted nothing
     assert set(s3.views.ingest.calls) == {"get_object"}
-    s3.views.operator.delete_object(Bucket=fake.BUCKET, Key=key)  # a stray delete marker
+    s3.bucket.client().delete_object(Bucket=fake.BUCKET, Key=key)  # a stray delete marker
     with psycopg.connect(s3.pg.owner_libpq, autocommit=True) as c:
         assert [str(r[2]) for r in ops.rejected_pending(c)] == [vid]
         assert ops.rejected_stats(c)["retained"] == 1
@@ -259,6 +263,39 @@ def test_a_rejected_object_is_retained_until_the_operator_purges_every_version(
         "list_object_versions", "list_multipart_uploads", "delete_object", "head_object",
         "abort_multipart_upload",
     }  # fmt: skip
+    assert s3.views.operator.denied == []  # nothing the operator role may not do
+
+
+def test_verify_objects_and_a_deletion_purge_work_with_the_operator_role(
+    s3: SimpleNamespace,
+) -> None:
+    """verify-objects lists every area: on S3 only versions/ is asked, and the
+    legacy areas cost no request (the operator may not list them). A user
+    deletion is then purged, verified and tombstoned with the operator role."""
+    did = _dataset(s3)
+    vid, put = _upload(s3, did, CSV)
+    assert put.status_code == 202, put.text
+    key = _row(s3, vid)[1]
+    clean: dict[str, list[str]] = {
+        "missing_objects": [],
+        "digest_mismatches": [],
+        "unaccounted_objects": [],
+        "noncurrent_versions": [],
+    }
+    with psycopg.connect(s3.pg.owner_libpq, autocommit=True) as c:
+        assert ops.verify_objects(c, s3.operator) == clean
+        r = s3.c.delete(f"/datasets/{did}/versions/{vid}", headers=s3.h)
+        assert r.status_code == 202, r.text
+        assert _row(s3, vid)[0] == "DELETING"
+        done = ops.purge(c, s3.operator, s3.log, dataset_id=uuid.UUID(did),
+                         version_id=uuid.UUID(vid), operator="op", environment="local")  # fmt: skip
+        assert done["versions_purged"] == 1 and key not in s3.bucket.objects
+        assert ops.tombstone(c, dataset_id=uuid.UUID(did), version_id=uuid.UUID(vid),
+                             store=s3.operator, log=s3.log)["versions_tombstoned"] == 1  # fmt: skip
+        assert ops.verify_objects(c, s3.operator) == clean
+    assert s3.views.operator.denied == []
+    listed = [c for c in s3.views.operator.calls if c.startswith("list_")]
+    assert listed and all(c in ("list_object_versions", "list_multipart_uploads") for c in listed)
 
 
 def test_purge_commands_refuse_while_the_recovery_lock_is_active(s3: SimpleNamespace) -> None:

@@ -74,10 +74,16 @@ python -m nlw.ops.datasets purge --dataset <dataset-uuid> --version <version-uui
 ```
 
 For each `DELETING` version, the purge:
-1. deletes every stored file (published, quarantine, crash-orphaned partials);
+1. deletes every stored file (published, quarantine, crash-orphaned partials;
+   on S3 only `versions/` is ever stored or looked at);
 2. **verifies absence**;
 3. appends one `deletion-receipt-2` record to the deletion log;
 4. records `VERSION_OBJECT_PURGED` (`actor_kind = operator`).
+
+Steps 3 and 4 are skipped for a version that has **no recorded storage key and
+nothing stored**: it gets no receipt and no event. A failure part-way can leave
+files removed without a receipt, or a receipt without an event; re-run the
+purge. ADR-033 note 3 states the exact deletion and receipt behaviour.
 
 A whole-dataset purge also clears and verifies the dataset's prefixes. It is
 idempotent: a repeat deletes nothing new and records fresh evidence.
@@ -123,15 +129,19 @@ python -m nlw.ops.datasets pending          # the dataset is gone from the list
 python -m nlw.ops.datasets verify-objects   # every count is 0
 ```
 
-The version's events end with `VERSION_DELETION_REQUESTED`,
-`VERSION_OBJECT_PURGED`, `VERSION_TOMBSTONED` (and `DATASET_TOMBSTONED`).
+A version with a recorded storage key ends with `VERSION_DELETION_REQUESTED`,
+`VERSION_OBJECT_PURGED`, `VERSION_TOMBSTONED` (and `DATASET_TOMBSTONED`). A
+version with no key and nothing stored has no `VERSION_OBJECT_PURGED`.
 
 ## Never
 
 - Never `DELETE` rows from the dataset tables by hand. The tombstone, the
   receipts and the event trail are the deletion evidence.
-- Never delete objects by hand instead of `purge`: the tombstone would refuse
-  (there would be no receipt and no evidence).
+- Never delete objects by hand instead of `purge`. For a version with a
+  recorded storage key the tombstone would refuse (no purge event, no
+  receipt). For a version **without** a key it would not: the tombstone then
+  needs only a live absence check, so hand deletion would leave no receipt and
+  no purge evidence at all.
 - Never downgrade migrations `0024`/`0025` on an environment that holds
   dataset data. Fix forward.
 - Never set `DATASETS_API_ENABLED=true` or `DATASET_STORAGE_BACKEND=local` in

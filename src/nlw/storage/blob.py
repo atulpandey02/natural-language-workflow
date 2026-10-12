@@ -14,8 +14,15 @@ copied, moved or rewritten:
     versions/<workspace_id>/<dataset_id>/<version_id>/source.csv
 
 PostgreSQL holds the version's lifecycle; "published" is a database state. The
-legacy ``quarantine/`` and ``datasets/`` areas (development data written before
-ADR-033) remain only listable and purgeable by the operator.
+legacy ``quarantine/`` and ``datasets/`` areas hold development data written
+before ADR-033:
+
+- **local store:** they remain listable and purgeable by the operator, and
+  version and dataset purges still remove legacy copies and partial files;
+- **S3 store:** it holds ``versions/`` only. A legacy key is refused for reads
+  and writes, reported absent, and a legacy listing is answered as empty
+  without a request; the operator role may not list outside ``versions/``.
+  Anything placed outside ``versions/`` by other means is invisible here.
 
 Runtime code can create and read objects, never remove them:
 ``TenantScopedBlobStore`` has no single-object delete or copy. Removal is the
@@ -338,10 +345,18 @@ class TenantScopedBlobStore:
     def delete_dataset_and_verify(self, dataset_id: uuid.UUID) -> bool:
         """OPERATOR ONLY. Remove every item (all versions, markers, partial
         uploads) of a dataset in every area, then verify none remains. True only
-        when verification holds; the caller keeps the dataset DELETING otherwise."""
-        for area in AREAS:
-            prefix = f"{area}/{self._tenant}/{dataset_id}/"
+        when verification holds; the caller keeps the dataset DELETING otherwise.
+        Every area is listed before the first removal. On S3 (legacy areas cost
+        no request) no PRE-deletion listing can then fail after a deletion; the
+        local store lists again while purging each area. The final
+        verification listing runs after removal and can still fail; a re-run
+        is safe."""
+        prefixes = [f"{area}/{self._tenant}/{dataset_id}/" for area in AREAS]
+        for prefix in prefixes:
             self._check(prefix + "x")
+        for area in AREAS:
+            self.list_dataset(area, dataset_id)
+        for prefix in prefixes:
             self._inner.purge_prefix(prefix)
         return not any(self.list_dataset(area, dataset_id) for area in AREAS)
 
@@ -375,8 +390,20 @@ class TenantScopedBlobStore:
     ) -> tuple[list[str], bool]:
         """OPERATOR ONLY. Remove every item of one version (version-aware on
         S3), then verify none remains. Returns (removed items, verified).
-        Idempotent: a second call removes nothing and still verifies."""
-        removed = self._inner.purge_prefix(self._version_prefix(dataset_id, version_id))
-        for item in self._legacy_items(dataset_id, version_id):
+        Idempotent: a second call removes nothing and still verifies. Every
+        prefix is listed before the first removal. On S3 (legacy areas cost no
+        request) no PRE-deletion listing can then fail after a deletion; the
+        local store lists each legacy item again while purging it. The final
+        verification listing, and the caller's receipt and purge event, come
+        after removal and can still fail: the bytes are then gone, and a
+        receipt may or may not exist (ADR-033 note 3). A re-run is safe; for a
+        version with a recorded key it records a receipt for what it removes
+        (zero objects if everything was already gone), and for one without a
+        key it records nothing when nothing remains."""
+        prefix = self._version_prefix(dataset_id, version_id)
+        list(self._inner.list_prefix(prefix))
+        legacy = self._legacy_items(dataset_id, version_id)
+        removed = self._inner.purge_prefix(prefix)
+        for item in legacy:
             removed += self._inner.purge_prefix(item_key(item))
         return removed, not self.list_version(dataset_id, version_id)
