@@ -5,8 +5,9 @@ The operator role may list object versions only under ``versions/*``
 (``ListVersionsBounded``). The legacy ``quarantine/`` and ``datasets/`` areas
 are local development data from before ADR-033: nothing writes them to S3, so
 ``S3BlobStore`` answers them as empty WITHOUT a request instead of being
-denied. Every prefix is also listed before anything is removed, so a listing
-failure can never follow a deletion. The fake applies the operator role's IAM
+denied. Every prefix is also listed before the first removal, so no
+pre-deletion listing can fail after a deletion (the final verification listing
+still runs after removal). The fake applies the operator role's IAM
 grants (``FakeBucket.client(role="operator")``). No network, no AWS."""
 
 from __future__ import annotations
@@ -122,6 +123,30 @@ def test_legacy_keys_are_never_sent_to_s3(area: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "key",
+    [
+        "quarantine/../x/y",
+        "quarantine/a/../../versions/x",
+        "datasets//x/y",
+        "quarantine/X/y",
+        "quarantine/%2e%2e/x",
+        "quarantine/a/b\n",
+        "quarantine/a/\u0435",
+        "datasets/a/b\x00",
+        "quarantine/",
+        "quarantine",
+    ],
+)
+def test_malformed_legacy_keys_given_to_exists_are_refused_without_a_request(key: str) -> None:
+    """``exists`` answers a well-formed legacy key ``False`` without asking S3;
+    a malformed one is refused, never answered and never sent."""
+    _, client, _, operator = _stores()
+    with pytest.raises(BlobKeyError):
+        operator.exists(key)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
     "prefix",
     ["quarantine/../x/", "datasets//x", "quarantine/X/", "other/", "versions", "quarantine", ""],
 )
@@ -132,9 +157,9 @@ def test_malformed_listing_prefixes_are_still_refused(prefix: str) -> None:
     assert client.calls == []
 
 
-def test_a_listing_failure_never_follows_a_deletion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every prefix is listed before anything is removed: if a later listing
-    fails, the object is still there (no bytes gone without a receipt)."""
+def test_no_pre_deletion_listing_fails_after_a_deletion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every prefix is listed before the first removal: if a later prefix's
+    listing fails, the object is still there (no bytes gone without a receipt)."""
     bucket, client, writer, operator = _stores()
     tenant = uuid.uuid4()
     d, v, key = _version(writer, tenant)

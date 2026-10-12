@@ -668,7 +668,21 @@ exceptions added.
      asking), and none is denied;
    - **O-BUCKET-ONLY-VERSIONS:** an administrator listing of the whole bucket
      shows nothing outside `versions/`. Anything there would be invisible to
-     the operator role and to `verify-objects` (ADR-033 note 3).
+     the operator role, `verify-objects`, purge and tombstone (ADR-033 note 3).
+     This is a point-in-time check.
+   - **O-MISSING-STATUS (record, do not assume):** with the operator role,
+     `HeadObject` and `GetObjectAttributes` on a key under `versions/` that
+     does not exist. Record the exact status AWS returns (403 or 404). The
+     operator's `s3:ListBucket` grant is conditioned on `s3:prefix`, which these
+     requests do not carry, and S3 may answer 403 for a missing key without
+     `ListBucket`. If it is 403, `verify-objects` stops with an error instead
+     of reporting the object as missing (it fails closed). Runtime handling is
+     **not** changed until this evidence exists; the result decides it.
+   - **Receipts after a partial failure:** see ADR-033 note 3. A failed final
+     verification leaves bytes removed without a receipt; a dataset purge can
+     leave earlier versions' receipts in the deletion log while the dataset
+     stays `DELETING`; the safe re-run may record a zero-object receipt; a
+     legacy-keyed row purges to a verified zero-object receipt.
    - **Recovery when a purge is refused:** a malformed or unexpected
      in-progress upload under a version refuses the purge (fail closed). An
      administrator aborts it after review, or the lifecycle rule removes it

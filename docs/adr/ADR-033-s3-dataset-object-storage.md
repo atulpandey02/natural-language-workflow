@@ -221,12 +221,37 @@ Now:
   legacy key, reports one as absent (`verify-objects` lists such a version as
   missing), and answers a legacy listing as empty **without a request**;
 - the `versions/` area root is a valid listing prefix;
-- every prefix is listed **before anything is removed**, so a listing failure
-  can no longer follow a deletion.
+- for each version purge (and each dataset-wide removal), **every required
+  pre-deletion listing finishes before that purge removes anything**.
+
+What this does **not** guarantee (deletion and receipt behaviour, exactly):
+
+- **Final verification can fail after deletion.** Removal is followed by a
+  verification listing and only then by the receipt. If that listing (or the
+  receipt write) fails, the bytes are gone, no receipt or purge event is
+  recorded, and the version stays `DELETING`.
+- **A dataset purge is not atomic across versions.** Versions are purged one
+  after another. An earlier version can be removed, and its receipt appended
+  to the external deletion log, before a later version fails, or before the
+  final dataset-wide removal and verification fail. The database transaction
+  then rolls back, including the earlier versions' purge events, so **earlier
+  receipts can exist while the overall dataset purge has not completed**.
+- **A re-run is safe but may record zero objects.** Re-running removes
+  whatever remains, verifies, and records a receipt; for a version whose bytes
+  an earlier failed run already removed, that receipt lists **zero objects**.
+- **A legacy-keyed row on S3 purges to a verified zero-object receipt.** A
+  version whose database key is a legacy `quarantine/` or `datasets/` key has
+  nothing under `versions/`. On S3 its purge verifies, records a receipt for
+  zero objects, and the version can then be tombstoned. `verify-objects`
+  reports a live row of this kind as missing. Neither the receipt nor the
+  tombstone proves that no bytes were ever placed outside `versions/` by an
+  administrator: the store never looks there.
 
 **Residual:** an object an administrator puts outside `versions/` is invisible
-to the operator role and to `verify-objects`. The application never writes
-there; the D6 proof checks the bucket holds nothing else (runbook §7, item 8).
+to the operator role, to `verify-objects`, to purge and to tombstone. The
+application never writes there. The D6 proof checks once that the bucket holds
+nothing else (runbook §7, item 8); that is a point-in-time check, not a
+continuous control.
 
 **Credential delivery on the single host** (an explicitly documented
 single-host design; on ECS or EKS it is replaced by task or pod identity):
