@@ -138,7 +138,7 @@ def _partial_hint(key: str) -> str:
 
 def validate_key(key: str) -> list[str]:
     parts = key.split("/")
-    if len(parts) < 2 or any(not _SEGMENT.match(p) for p in parts):
+    if len(parts) < 2 or any(not _SEGMENT.fullmatch(p) for p in parts):
         raise BlobKeyError("malformed blob key")
     return parts
 

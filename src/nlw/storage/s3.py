@@ -28,7 +28,9 @@ Reads: the ingest runtime only ``open``s (``GetObject``); the API only uses
 ``attributes`` (``GetObjectAttributes``, metadata, never content). The
 operator alone lists versions and purges (``ListObjectVersions``,
 ``ListMultipartUploads``, ``DeleteObject`` with a ``VersionId``,
-``AbortMultipartUpload``).
+``AbortMultipartUpload``). IAM cannot confine ``ListMultipartUploads`` to a
+prefix, so its results are filtered here (``upload_in_prefix``) and a response
+that is not exactly what was asked for refuses the listing before any abort.
 
 Nothing here logs or returns a bucket, key, ARN, request id or credential:
 failures surface as ``BlobUnavailable`` with author-controlled messages.
@@ -38,8 +40,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 from collections.abc import Callable, Iterator
-from typing import Any, BinaryIO, Protocol
+from typing import Any, BinaryIO, NoReturn, Protocol
 
 import structlog
 
@@ -59,6 +62,35 @@ log = structlog.get_logger(__name__)
 PART_SIZE = 8 * 1024 * 1024
 _READ = 1 << 20
 COMPOSITE_FINGERPRINT = "sha256-composite:"
+# Multipart-upload listing bounds: an operator prefix is one version or one
+# dataset, so these are far above any legitimate count; reaching the page
+# bound refuses the listing rather than truncating it.
+_UPLOAD_PAGE = 1000
+_MAX_UPLOAD_PAGES = 100
+# S3 upload ids are opaque printable tokens; never '#', whitespace or controls.
+_UPLOAD_ID = re.compile(r"^[A-Za-z0-9._~+/=-]{1,1024}$")
+
+
+def upload_in_prefix(key: object, prefix: str) -> bool:
+    """Whether a ``ListMultipartUploads`` result belongs to ``prefix``.
+
+    ``True``: the key is ``prefix`` itself or lies below it as a path (a
+    prefix ending in ``/`` is a directory; any other prefix is one exact key,
+    so ``<id>-x`` is NOT below ``<id>``) and is a well-formed dataset key.
+    ``False``: a look-alike sibling S3's plain string match also returns; it
+    is ignored, never aborted. ``BlobKeyError``: S3 returned something that
+    does not even start with the requested prefix, or a malformed key inside
+    it (percent-encoded, non-ASCII, ``..``, empty segments): the caller
+    refuses the whole listing. Comparison is exact code points; nothing is
+    decoded or normalized, so an encoded or Unicode look-alike never matches."""
+    if not isinstance(key, str) or not key.startswith(prefix):
+        raise BlobKeyError("an upload outside the requested prefix")
+    if not (prefix.endswith("/") or key == prefix or key.startswith(prefix + "/")):
+        return False
+    validate_key(key)
+    if key.split("/", 1)[0] not in AREAS:
+        raise BlobKeyError("unknown storage area")
+    return True
 
 
 class S3Client(Protocol):
@@ -434,31 +466,77 @@ class S3BlobStore:
                 "KeyMarker": page["NextKeyMarker"],
                 "VersionIdMarker": page["NextVersionIdMarker"],
             }
-        kw = {"Prefix": prefix}
-        while True:
+        yield from self._list_uploads(prefix)
+
+    def _list_uploads(self, prefix: str) -> Iterator[str]:
+        """In-progress uploads under ``prefix``, filtered HERE: IAM cannot bound
+        this listing (``s3:ListBucketMultipartUploads`` supports no ``s3:prefix``
+        condition key), so the operator role may list the whole bucket. Every
+        page is checked before anything is yielded; a response that is not
+        exactly what was asked for raises ``BlobUnavailable``, and because
+        ``purge_prefix`` lists everything before acting, nothing is aborted."""
+        kw: dict[str, Any] = {"Prefix": prefix, "MaxUploads": _UPLOAD_PAGE}
+        seen: tuple[str, str] | None = None
+        for _ in range(_MAX_UPLOAD_PAGES):
             page = self._call("list_multipart_uploads", self._s3.list_multipart_uploads, **kw)
-            for u in page.get("Uploads") or []:
-                yield f"{u['Key']}#u={u['UploadId']}"
-            if not page.get("IsTruncated"):
-                break
-            kw = {
-                "Prefix": prefix,
-                "KeyMarker": page["NextKeyMarker"],
-                "UploadIdMarker": page["NextUploadIdMarker"],
-            }
+            # EncodingType=url would percent-encode the keys; it is never sent.
+            if page.get("EncodingType") or page.get("Prefix", prefix) != prefix:
+                self._refuse_listing("unexpected_response")
+            uploads = page.get("Uploads", [])
+            truncated = page.get("IsTruncated")
+            if not isinstance(uploads, list) or not isinstance(truncated, bool):
+                self._refuse_listing("partial_response")
+            items = []
+            for u in uploads:
+                key, upload_id = (u.get("Key"), u.get("UploadId")) if isinstance(u, dict) else (
+                    None, None)  # fmt: skip
+                if not isinstance(upload_id, str) or not _UPLOAD_ID.match(upload_id):
+                    self._refuse_listing("malformed_upload")
+                try:
+                    inside = upload_in_prefix(key, prefix)
+                except BlobKeyError:
+                    self._refuse_listing("unexpected_key")
+                if inside:
+                    items.append(f"{key}#u={upload_id}")
+            if not truncated:
+                yield from items
+                return
+            key_marker, id_marker = page.get("NextKeyMarker"), page.get("NextUploadIdMarker")
+            if not (
+                isinstance(key_marker, str) and key_marker.startswith(prefix)
+                and isinstance(id_marker, str) and _UPLOAD_ID.match(id_marker)
+                # S3 orders by key, then by initiation time (not by upload id):
+                # the key never goes back and the position always moves.
+                and (seen is None or (key_marker >= seen[0] and (key_marker, id_marker) != seen))
+            ):  # fmt: skip
+                self._refuse_listing("bad_pagination")
+            seen = (key_marker, id_marker)
+            yield from items
+            kw = {**kw, "KeyMarker": key_marker, "UploadIdMarker": id_marker}
+        self._refuse_listing("too_many_pages")
+
+    def _refuse_listing(self, reason: str) -> NoReturn:
+        log.warning("dataset.s3_listing_refused", op="list_multipart_uploads", reason=reason)
+        raise BlobUnavailable(f"list_multipart_uploads refused ({reason})")
 
     def purge_prefix(self, prefix: str) -> list[str]:
         """OPERATOR: abort every upload, delete every version and delete marker
-        (``DeleteObject`` WITH a ``VersionId``: physical removal)."""
+        (``DeleteObject`` WITH a ``VersionId``: physical removal). Everything is
+        listed (and checked) before the first removal. A failure part-way
+        leaves the rest for a re-run; an upload that is already gone (aborted
+        concurrently, or by the lifecycle rule) is not an error."""
         removed: list[str] = []
         for item in list(self.list_prefix(prefix)):
             key, _, ref = item.partition("#")
             kind, _, ident = ref.partition("=")
             if kind == "u":
-                self._call(
-                    "abort_multipart_upload", self._s3.abort_multipart_upload,
-                    Key=key, UploadId=ident,
-                )  # fmt: skip
+                try:
+                    self._call(
+                        "abort_multipart_upload", self._s3.abort_multipart_upload,
+                        Key=key, UploadId=ident,
+                    )  # fmt: skip
+                except FileNotFoundError:
+                    continue  # NoSuchUpload: nothing left to remove
             else:
                 self._call("delete_object", self._s3.delete_object, Key=key, VersionId=ident)
             removed.append(item)

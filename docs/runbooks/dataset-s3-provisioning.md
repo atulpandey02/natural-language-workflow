@@ -281,9 +281,12 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
 ```json
 {"Version": "2012-10-17", "Statement": [
   {"Sid": "ListVersionsBounded", "Effect": "Allow",
-   "Action": ["s3:ListBucket", "s3:ListBucketVersions", "s3:ListBucketMultipartUploads"],
+   "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
    "Resource": "arn:aws:s3:::<BUCKET>",
    "Condition": {"StringLike": {"s3:prefix": ["versions/*"]}}},
+  {"Sid": "ListInProgressUploads", "Effect": "Allow",
+   "Action": "s3:ListBucketMultipartUploads",
+   "Resource": "arn:aws:s3:::<BUCKET>"},
   {"Sid": "PurgeAndVerify", "Effect": "Allow",
    "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectAttributes",
               "s3:DeleteObjectVersion", "s3:AbortMultipartUpload"],
@@ -301,6 +304,34 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
 
 - The operator purges dataset objects, never audit records. Audit review uses
   `<AUDIT_READER_ROLE>`.
+- **Multipart listing is not prefix-bounded by IAM.** The AWS Service
+  Authorization Reference (S3 actions table, checked 2026-10-12) lists **no**
+  `s3:prefix` condition key for `s3:ListBucketMultipartUploads`, whose only
+  resource is the bucket. Under the earlier template, which put it in the
+  `s3:prefix`-conditioned statement, the condition could never match, so every
+  `ListMultipartUploads` call would have been implicitly denied and purge
+  verification would have failed. It is now its own statement on the exact
+  bucket ARN, with no condition. What this adds, and what it does not:
+  - the operator can list the **keys and upload ids of in-progress uploads
+    anywhere in this bucket** (metadata only, no object bytes);
+  - it can **abort** only under `versions/*`: `AbortMultipartUpload` is an
+    object-resource action, so `PurgeAndVerify` still scopes it;
+  - `s3:ListMultipartUploadParts` is **not** granted (no operator command
+    lists parts), and no read, write or delete grant changes;
+  - the prefix is enforced by the application: `S3BlobStore` aborts only
+    uploads whose key lies inside the requested version or dataset prefix,
+    ignores look-alike siblings, and refuses the whole listing, before any
+    abort, on a key outside the requested prefix, a malformed or encoded key,
+    `EncodingType`, a prefix echo that differs, bad pagination markers, a
+    partial page, or more than 100 pages.
+
+| Action | Resource type (AWS) | `s3:prefix` supported | Operator grant |
+|---|---|---|---|
+| `s3:ListBucketVersions` | bucket | yes | `versions/*` only (`ListVersionsBounded`) |
+| `s3:ListBucketMultipartUploads` | bucket | **no** | whole bucket, filtered in code (`ListInProgressUploads`) |
+| `s3:ListMultipartUploadParts` | object | no | not granted |
+| `s3:AbortMultipartUpload` | object | no (resource-scoped) | `versions/*` (`PurgeAndVerify`) |
+| `s3:DeleteObjectVersion` | object | no (resource-scoped) | `versions/*` (`PurgeAndVerify`), and the bucket policy denies every other principal |
 - It is used only through reviewed operator commands:
 
 | Command | Purpose |
@@ -617,6 +648,25 @@ exceptions added.
    not exist yet.
 8. **Operator purge** removes every version and delete marker; listing shows
    none; the receipt lists version ids.
+   - **O-MPU-LIST:** the operator's `ListMultipartUploads` with
+     `Prefix=<version key>` is **allowed**, and returns only that prefix's
+     uploads;
+   - **O-MPU-ABORT:** the operator aborts an upload under `versions/`, and an
+     abort of an upload outside `versions/` is **denied**;
+   - **O-MPU-PARTS:** the operator's `ListParts` is **denied**;
+   - **O-LIST-OUTSIDE:** the operator's `ListObjectVersions` outside
+     `versions/` is **denied**.
+   - **Limitation, not provable here:** IAM cannot stop the operator role
+     from listing in-progress uploads anywhere in the bucket. The offline
+     tests (`tests/unit/test_s3_multipart_cleanup.py`) prove only that the
+     application never aborts outside the requested prefix; D6 proves that
+     AWS evaluates the grants as above, not that every client of the
+     operator role filters.
+   - **Known gap, open:** `purge` and `verify-objects` also list the legacy
+     `quarantine/` and `datasets/` areas through `ListObjectVersions`, which
+     `ListVersionsBounded` denies outside `versions/*`. On S3 that listing
+     fails, and purge then stops before recording anything (it fails
+     closed). It must be resolved before this item can pass.
 9. **IMDS is unreachable** from every container, and no static credential
    exists anywhere.
 10. **Audit:**

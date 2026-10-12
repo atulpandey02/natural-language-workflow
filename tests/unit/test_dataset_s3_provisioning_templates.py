@@ -251,3 +251,121 @@ def test_the_proof_checklist_covers_encryption_and_audit_cases() -> None:
         "A-SCOPE",
     ):  # fmt: skip
         assert f"**{case}:**" in text, case
+
+
+# --- multipart cleanup permissions (review finding F5) -------------------------------------
+
+# From the AWS Service Authorization Reference, Amazon S3 actions table
+# (https://docs.aws.amazon.com/service-authorization/latest/reference/list_s3.html,
+# read 2026-10-12): the resource type each action takes and whether ``s3:prefix``
+# is among its condition keys. Only actions the dataset templates use.
+S3_ACTIONS = {
+    "s3:ListBucket": ("bucket", True),
+    "s3:ListBucketVersions": ("bucket", True),
+    "s3:ListBucketMultipartUploads": ("bucket", False),
+    "s3:ListMultipartUploadParts": ("object", False),
+    "s3:AbortMultipartUpload": ("object", False),
+    "s3:DeleteObjectVersion": ("object", False),
+    "s3:DeleteObject": ("object", False),
+    "s3:GetObject": ("object", False),
+    "s3:GetObjectVersion": ("object", False),
+    "s3:GetObjectAttributes": ("object", False),
+    "s3:PutObject": ("object", False),
+}
+BUCKET_ARN = "arn:aws:s3:::<BUCKET>"
+
+
+def _allows(doc: Any, action: str) -> list[dict[str, Any]]:
+    return [s for s in _statements(doc) if s["Effect"] == "Allow" and action in _actions(s)]
+
+
+def test_the_operator_may_list_in_progress_uploads_on_exactly_its_bucket() -> None:
+    """1. What AWS needs: ``ListBucketMultipartUploads`` on the bucket ARN,
+    with no condition it cannot satisfy."""
+    (grant,) = _allows(_templates()["role-operator"], "s3:ListBucketMultipartUploads")
+    assert grant["Sid"] == "ListInProgressUploads"
+    assert _actions(grant) == {"s3:ListBucketMultipartUploads"}
+    assert grant["Resource"] == BUCKET_ARN  # the exact environment bucket, not "*" or "/*"
+    assert "Condition" not in grant and "NotAction" not in grant and "NotResource" not in grant
+
+
+def test_no_statement_conditions_an_action_on_a_key_it_does_not_support() -> None:
+    """2. ``s3:prefix`` appears only with actions AWS evaluates it for: an
+    unsupported key in an Allow never matches (the action is silently denied),
+    and in a Deny it would silently never apply."""
+    for name, doc in _templates().items():
+        for s in _statements(doc):
+            keys = {k for cond in s.get("Condition", {}).values() for k in cond}
+            if "s3:prefix" not in keys:
+                continue
+            for action in _actions(s):
+                assert action in S3_ACTIONS and S3_ACTIONS[action][1], (name, s.get("Sid"), action)
+
+
+def test_bucket_and_object_actions_name_the_matching_resource_type() -> None:
+    for name, doc in _templates().items():
+        for s in _statements(doc):
+            if s.get("Effect") != "Allow":
+                continue
+            kinds = {S3_ACTIONS[a][0] for a in _actions(s) if a in S3_ACTIONS}
+            if not kinds:
+                continue  # no action from the table (for example the audit bucket's ACL check)
+            for r in _as_list(s.get("Resource", [])):
+                if not r.startswith("arn:aws:s3:::"):
+                    continue
+                assert kinds == {"object" if "/" in r[len("arn:aws:s3:::"):] else "bucket"}, (
+                    name, s.get("Sid"), r)  # fmt: skip
+
+
+def test_the_prose_never_claims_the_multipart_listing_is_prefix_bounded() -> None:
+    for path in (RUNBOOK, ROOT / "docs" / "adr" / "ADR-033-s3-dataset-object-storage.md"):
+        text = path.read_text()
+        assert "Bounded listing (prefix-conditioned)" not in text, path
+        assert "ListBucketMultipartUploads" in text and "s3:prefix" in text, path
+    text = _text()
+    assert "lists **no**\n  `s3:prefix` condition key for `s3:ListBucketMultipartUploads`" in text
+    assert "**O-MPU-LIST:**" in text and "**O-MPU-ABORT:**" in text
+
+
+def test_the_operator_gains_no_object_data_permission() -> None:
+    """7. The fix adds a bucket-level listing only: every object action stays
+    exactly as before, under ``versions/*``, and nothing lists parts."""
+    op = _templates()["role-operator"]
+    assert _allowed(op) == {
+        "s3:ListBucket", "s3:ListBucketVersions", "s3:ListBucketMultipartUploads",
+        "s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectAttributes",
+        "s3:DeleteObjectVersion", "s3:AbortMultipartUpload", "kms:Decrypt",
+    }  # fmt: skip
+    sids = _by_sid(op)
+    assert sids["PurgeAndVerify"]["Resource"] == "arn:aws:s3:::<BUCKET>/versions/*"
+    assert _actions(sids["PurgeAndVerify"]) == {
+        "s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectAttributes",
+        "s3:DeleteObjectVersion", "s3:AbortMultipartUpload",
+    }  # fmt: skip
+    assert sids["ListVersionsBounded"]["Condition"] == {"StringLike": {"s3:prefix": ["versions/*"]}}
+    assert _actions(sids["ListVersionsBounded"]) == {"s3:ListBucket", "s3:ListBucketVersions"}
+    for s in _statements(op):
+        objects = {a for a in _actions(s) if a in S3_ACTIONS and S3_ACTIONS[a][0] == "object"}
+        if s["Effect"] == "Allow" and objects:
+            assert s["Resource"] == "arn:aws:s3:::<BUCKET>/versions/*", s["Sid"]
+    assert "s3:ListMultipartUploadParts" not in _allowed(op)
+
+
+# The reviewed JSON of these templates on origin/main at eb42250, before this
+# fix: any change to them is a deliberate, reviewed edit of the fixture.
+UNCHANGED = json.loads(
+    (ROOT / "tests" / "fixtures" / "dataset_s3_unchanged_templates.json").read_text()
+)["templates"]
+
+
+@pytest.mark.parametrize("name", sorted(UNCHANGED))
+def test_api_ingest_bootstrap_and_bucket_permissions_are_unchanged(name: str) -> None:
+    """8. Only the operator template changed. The worker, scheduler and
+    dispatcher have no AWS role at all, and still get no AWS mount."""
+    assert _templates()[name] == UNCHANGED[name], name
+
+
+def test_worker_scheduler_and_dispatcher_still_get_no_aws_role_or_mount() -> None:
+    assert not {n for n in _templates() if re.search(r"worker|scheduler|dispatch", n)}
+    assert "The dispatcher, worker, scheduler and web containers get **no** AWS mount." in _text()
+    assert set(ROLES) == {n for n in _templates() if n.startswith("role-")}

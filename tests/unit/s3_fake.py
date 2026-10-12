@@ -81,6 +81,11 @@ class FakeBucket:
         self.page_size = page_size
         self.conflict_next: list[str] = []  # ops that answer 409 once
         self.tamper_response: dict[str, Any] = {}  # fields overridden in write responses
+        self.aborted: list[tuple[str, str]] = []  # (key, upload id) of every abort
+        self.abort_fail_next: list[str] = []  # upload ids whose next abort answers 500
+        # Rewrites every ListMultipartUploads response (a misbehaving or
+        # tampered S3): ``(request kwargs, honest response) -> response``.
+        self.uploads_response: Any = None
 
     def client(self) -> FakeS3:
         return FakeS3(self)
@@ -184,7 +189,15 @@ class FakeS3:
 
     def abort_multipart_upload(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("abort_multipart_upload")
-        self.b.uploads.pop(kw["UploadId"], None)
+        uid = kw["UploadId"]
+        if uid in self.b.abort_fail_next:
+            self.b.abort_fail_next.remove(uid)
+            raise error("InternalError", 500, "AbortMultipartUpload")
+        up = self.b.uploads.get(uid)
+        if up is None or up.key != kw["Key"]:
+            raise error("NoSuchUpload", 404, "AbortMultipartUpload")
+        self.b.aborted.append((kw["Key"], uid))
+        del self.b.uploads[uid]
         return {}
 
     # --- reads ------------------------------------------------------------------
@@ -248,16 +261,31 @@ class FakeS3:
         return out
 
     def list_multipart_uploads(self, **kw: Any) -> dict[str, Any]:
+        """Keys in order, then uploads of one key in initiation order (as S3
+        does); ``MaxUploads`` per page, resumed after ``KeyMarker`` /
+        ``UploadIdMarker``. No ``EncodingType``: keys are returned raw."""
         self.calls.append("list_multipart_uploads")
         prefix = kw.get("Prefix", "")
-        return {
-            "Uploads": [
-                {"Key": u.key, "UploadId": uid}
-                for uid, u in sorted(self.b.uploads.items())
-                if u.key.startswith(prefix)
-            ],
-            "IsTruncated": False,
+        rows = sorted(
+            ((u.key, uid) for uid, u in self.b.uploads.items() if u.key.startswith(prefix)),
+            key=lambda r: (r[0], int(r[1][1:])),
+        )
+        start = 0
+        if "KeyMarker" in kw:
+            marker = (kw["KeyMarker"], int(kw["UploadIdMarker"][1:]))
+            start = sum(1 for k, uid in rows if (k, int(uid[1:])) <= marker)
+        size = min(int(kw.get("MaxUploads", 1000)), self.b.page_size)
+        page, rest = rows[start : start + size], rows[start + size :]
+        out: dict[str, Any] = {
+            "Prefix": prefix,
+            "Uploads": [{"Key": k, "UploadId": uid} for k, uid in page],
+            "IsTruncated": bool(rest),
         }
+        if rest:
+            out["NextKeyMarker"], out["NextUploadIdMarker"] = page[-1]
+        if self.b.uploads_response is not None:
+            out = self.b.uploads_response(kw, out)
+        return out
 
     def delete_object(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("delete_object")
