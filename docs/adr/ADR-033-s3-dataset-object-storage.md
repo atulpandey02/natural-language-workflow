@@ -221,24 +221,42 @@ Now:
   legacy key, reports one as absent (`verify-objects` lists such a version as
   missing), and answers a legacy listing as empty **without a request**;
 - the `versions/` area root is a valid listing prefix;
-- for each version purge (and each dataset-wide removal), **every required
-  pre-deletion listing finishes before that purge removes anything**.
+- on S3, for each version purge (and each dataset-wide removal), **every
+  required pre-deletion listing finishes before that purge removes anything**.
+  (The local development store lists each legacy item again while purging
+  it, after `versions/` has been removed, so there a listing can follow a
+  deletion.)
 
 What this does **not** guarantee (deletion and receipt behaviour, exactly):
 
 - **Final verification can fail after deletion.** Removal is followed by a
-  verification listing and only then by the receipt. If that listing (or the
-  receipt write) fails, the bytes are gone, no receipt or purge event is
-  recorded, and the version stays `DELETING`.
+  verification listing and only then by the receipt. If that listing fails,
+  the bytes are gone, no receipt and no purge event is recorded, and the
+  version stays `DELETING`.
+- **A receipt can exist without a purge event.** The receipt is appended to
+  the external deletion log **before** the purge event is inserted and the
+  transaction commits. If the receipt write fails, or anything after it fails
+  (the event insert, a later version, the commit), no purge event is recorded
+  and the version stays `DELETING`, but **a receipt may or may not exist** in
+  the deletion log: the local log writes the line before `fsync`, and an
+  external sink can accept a record and then time out. Receipts are therefore
+  evidence of a deletion attempt, not proof that the purge completed; the
+  purge event (with its receipt id and digest) is what tombstone requires.
 - **A dataset purge is not atomic across versions.** Versions are purged one
   after another. An earlier version can be removed, and its receipt appended
   to the external deletion log, before a later version fails, or before the
   final dataset-wide removal and verification fail. The database transaction
   then rolls back, including the earlier versions' purge events, so **earlier
   receipts can exist while the overall dataset purge has not completed**.
-- **A re-run is safe but may record zero objects.** Re-running removes
-  whatever remains, verifies, and records a receipt; for a version whose bytes
-  an earlier failed run already removed, that receipt lists **zero objects**.
+- **A re-run is safe but may record zero objects, or nothing.** Re-running
+  removes whatever remains and verifies. For a version **with a recorded
+  storage key**, it then records a receipt; if an earlier failed run already
+  removed the bytes, that receipt lists **zero objects**. For a version
+  **without a recorded key** (for example an upload that crashed before its
+  key was recorded), a re-run that finds nothing left records **no receipt
+  and no purge event**; that version is later tombstoned on the live absence
+  check alone (with no store configured, without any check), so bytes an
+  earlier failed run removed for it never get a receipt.
 - **A legacy-keyed row on S3 purges to a verified zero-object receipt.** A
   version whose database key is a legacy `quarantine/` or `datasets/` key has
   nothing under `versions/`. On S3 its purge verifies, records a receipt for

@@ -346,9 +346,11 @@ class TenantScopedBlobStore:
         """OPERATOR ONLY. Remove every item (all versions, markers, partial
         uploads) of a dataset in every area, then verify none remains. True only
         when verification holds; the caller keeps the dataset DELETING otherwise.
-        Every area is listed before the first removal, so no PRE-deletion
-        listing can fail after a deletion. The final verification listing runs
-        after removal and can still fail; a re-run is safe."""
+        Every area is listed before the first removal. On S3 (legacy areas cost
+        no request) no PRE-deletion listing can then fail after a deletion; the
+        local store lists again while purging each area. The final
+        verification listing runs after removal and can still fail; a re-run
+        is safe."""
         prefixes = [f"{area}/{self._tenant}/{dataset_id}/" for area in AREAS]
         for prefix in prefixes:
             self._check(prefix + "x")
@@ -389,11 +391,14 @@ class TenantScopedBlobStore:
         """OPERATOR ONLY. Remove every item of one version (version-aware on
         S3), then verify none remains. Returns (removed items, verified).
         Idempotent: a second call removes nothing and still verifies. Every
-        prefix is listed before the first removal, so no PRE-deletion listing
-        can fail after a deletion. The final verification listing (and the
-        caller's receipt) come after removal and can still fail: the bytes are
-        then gone without a receipt, and a safe re-run records a receipt for
-        zero objects."""
+        prefix is listed before the first removal. On S3 (legacy areas cost no
+        request) no PRE-deletion listing can then fail after a deletion; the
+        local store lists each legacy item again while purging it. The final
+        verification listing, and the caller's receipt and purge event, come
+        after removal and can still fail: the bytes are then gone, and a
+        receipt may or may not exist (ADR-033 note 3). A re-run is safe; for a
+        version with a recorded key it records a zero-object receipt, for one
+        without a key it records nothing."""
         prefix = self._version_prefix(dataset_id, version_id)
         list(self._inner.list_prefix(prefix))
         legacy = self._legacy_items(dataset_id, version_id)

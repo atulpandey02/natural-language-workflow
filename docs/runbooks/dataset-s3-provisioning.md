@@ -679,10 +679,14 @@ exceptions added.
      of reporting the object as missing (it fails closed). Runtime handling is
      **not** changed until this evidence exists; the result decides it.
    - **Receipts after a partial failure:** see ADR-033 note 3. A failed final
-     verification leaves bytes removed without a receipt; a dataset purge can
-     leave earlier versions' receipts in the deletion log while the dataset
-     stays `DELETING`; the safe re-run may record a zero-object receipt; a
-     legacy-keyed row purges to a verified zero-object receipt.
+     verification leaves bytes removed with no receipt and no purge event. A
+     failure at or after the receipt write (including the event insert and the
+     commit) records no purge event, but a receipt may or may not exist in the
+     deletion log; a dataset purge can likewise leave earlier versions'
+     receipts while the dataset stays `DELETING`. The safe re-run records a
+     zero-object receipt for a version with a recorded key, and no receipt at
+     all for a version without one. A legacy-keyed row purges to a verified
+     zero-object receipt.
    - **Recovery when a purge is refused:** a malformed or unexpected
      in-progress upload under a version refuses the purge (fail closed). An
      administrator aborts it after review, or the lifecycle rule removes it
