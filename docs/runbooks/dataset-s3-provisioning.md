@@ -662,11 +662,17 @@ exceptions added.
      application never aborts outside the requested prefix; D6 proves that
      AWS evaluates the grants as above, not that every client of the
      operator role filters.
-   - **Known gap, open:** `purge` and `verify-objects` also list the legacy
-     `quarantine/` and `datasets/` areas through `ListObjectVersions`, which
-     `ListVersionsBounded` denies outside `versions/*`. On S3 that listing
-     fails, and purge then stops before recording anything (it fails
-     closed). It must be resolved before this item can pass.
+   - **O-LEGACY:** with the operator role, `purge`, `tombstone` and
+     `verify-objects` make **no** request outside `versions/` (the S3 store
+     answers the legacy `quarantine/` and `datasets/` areas as empty without
+     asking), and none is denied;
+   - **O-BUCKET-ONLY-VERSIONS:** an administrator listing of the whole bucket
+     shows nothing outside `versions/`. Anything there would be invisible to
+     the operator role and to `verify-objects` (ADR-033 note 3).
+   - **Recovery when a purge is refused:** a malformed or unexpected
+     in-progress upload under a version refuses the purge (fail closed). An
+     administrator aborts it after review, or the lifecycle rule removes it
+     after one day; then re-run the purge.
 9. **IMDS is unreachable** from every container, and no static credential
    exists anywhere.
 10. **Audit:**

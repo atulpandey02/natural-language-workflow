@@ -48,7 +48,9 @@ import structlog
 
 from nlw.storage.blob import (
     AREAS,
+    LEGACY_AREAS,
     LOCAL_FINGERPRINT,
+    OBJECT_AREA,
     BlobExistsError,
     BlobKeyError,
     BlobSizeMismatch,
@@ -68,7 +70,7 @@ COMPOSITE_FINGERPRINT = "sha256-composite:"
 _UPLOAD_PAGE = 1000
 _MAX_UPLOAD_PAGES = 100
 # S3 upload ids are opaque printable tokens; never '#', whitespace or controls.
-_UPLOAD_ID = re.compile(r"^[A-Za-z0-9._~+/=-]{1,1024}$")
+_UPLOAD_ID = re.compile(r"[A-Za-z0-9._~+/=-]{1,1024}")  # always ``fullmatch``
 
 
 def upload_in_prefix(key: object, prefix: str) -> bool:
@@ -208,10 +210,29 @@ class S3BlobStore:
 
     # --- helpers ---------------------------------------------------------------
     def _key(self, key: str) -> str:
+        """An object key in S3: only the ``versions/`` area. The legacy areas
+        are local development data from before ADR-033; nothing writes them
+        to S3 and the operator role may not list them (``_in_s3``)."""
         validate_key(key.removesuffix("/"))
-        if key.split("/", 1)[0] not in AREAS:
+        area = key.split("/", 1)[0]
+        if area not in AREAS:
             raise BlobKeyError("unknown storage area")
+        if area != OBJECT_AREA:
+            raise BlobKeyError("the S3 store holds only the versions/ area")
         return key
+
+    def _in_s3(self, prefix: str) -> bool:
+        """Whether a listing prefix can hold anything in this bucket: the
+        ``versions/`` area root, or a well-formed key or directory below it.
+        A well-formed legacy-area prefix holds nothing here and is answered
+        WITHOUT a request: ``ListVersionsBounded`` allows listing only under
+        ``versions/*``, so asking S3 would be denied."""
+        area = prefix.split("/", 1)[0]
+        if area not in AREAS:
+            raise BlobKeyError("unknown storage area")
+        if prefix != f"{area}/":
+            validate_key(prefix.removesuffix("/"))
+        return area == OBJECT_AREA
 
     def _call(self, op: str, fn: Callable[..., dict[str, Any]], **kw: Any) -> dict[str, Any]:
         try:
@@ -443,6 +464,9 @@ class S3BlobStore:
         return size, single_fingerprint(digest)
 
     def exists(self, key: str) -> bool:
+        if key.split("/", 1)[0] in LEGACY_AREAS:
+            validate_key(key.removesuffix("/"))
+            return False  # a pre-ADR-033 local key: never in S3 (verify-objects: missing)
         try:
             self._call("head_object", self._s3.head_object, Key=self._key(key))
         except FileNotFoundError:
@@ -450,8 +474,10 @@ class S3BlobStore:
         return True
 
     def list_prefix(self, prefix: str) -> Iterator[str]:
-        """OPERATOR: every version, delete marker and in-progress upload."""
-        self._key(prefix)
+        """OPERATOR: every version, delete marker and in-progress upload
+        (nothing, without a request, for a legacy area: ``_in_s3``)."""
+        if not self._in_s3(prefix):
+            return
         kw: dict[str, Any] = {"Prefix": prefix}
         while True:
             page = self._call("list_object_versions", self._s3.list_object_versions, **kw)
@@ -490,7 +516,7 @@ class S3BlobStore:
             for u in uploads:
                 key, upload_id = (u.get("Key"), u.get("UploadId")) if isinstance(u, dict) else (
                     None, None)  # fmt: skip
-                if not isinstance(upload_id, str) or not _UPLOAD_ID.match(upload_id):
+                if not isinstance(upload_id, str) or not _UPLOAD_ID.fullmatch(upload_id):
                     self._refuse_listing("malformed_upload")
                 try:
                     inside = upload_in_prefix(key, prefix)
@@ -504,7 +530,7 @@ class S3BlobStore:
             key_marker, id_marker = page.get("NextKeyMarker"), page.get("NextUploadIdMarker")
             if not (
                 isinstance(key_marker, str) and key_marker.startswith(prefix)
-                and isinstance(id_marker, str) and _UPLOAD_ID.match(id_marker)
+                and isinstance(id_marker, str) and _UPLOAD_ID.fullmatch(id_marker)
                 # S3 orders by key, then by initiation time (not by upload id):
                 # the key never goes back and the position always moves.
                 and (seen is None or (key_marker >= seen[0] and (key_marker, id_marker) != seen))

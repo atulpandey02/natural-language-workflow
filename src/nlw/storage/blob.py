@@ -338,10 +338,15 @@ class TenantScopedBlobStore:
     def delete_dataset_and_verify(self, dataset_id: uuid.UUID) -> bool:
         """OPERATOR ONLY. Remove every item (all versions, markers, partial
         uploads) of a dataset in every area, then verify none remains. True only
-        when verification holds; the caller keeps the dataset DELETING otherwise."""
-        for area in AREAS:
-            prefix = f"{area}/{self._tenant}/{dataset_id}/"
+        when verification holds; the caller keeps the dataset DELETING otherwise.
+        Every area is listed before anything is removed, so a listing failure
+        never follows a deletion."""
+        prefixes = [f"{area}/{self._tenant}/{dataset_id}/" for area in AREAS]
+        for prefix in prefixes:
             self._check(prefix + "x")
+        for area in AREAS:
+            self.list_dataset(area, dataset_id)
+        for prefix in prefixes:
             self._inner.purge_prefix(prefix)
         return not any(self.list_dataset(area, dataset_id) for area in AREAS)
 
@@ -375,8 +380,13 @@ class TenantScopedBlobStore:
     ) -> tuple[list[str], bool]:
         """OPERATOR ONLY. Remove every item of one version (version-aware on
         S3), then verify none remains. Returns (removed items, verified).
-        Idempotent: a second call removes nothing and still verifies."""
-        removed = self._inner.purge_prefix(self._version_prefix(dataset_id, version_id))
-        for item in self._legacy_items(dataset_id, version_id):
+        Idempotent: a second call removes nothing and still verifies. Every
+        prefix is listed before anything is removed, so a listing failure never
+        follows a deletion (which would leave bytes gone without a receipt)."""
+        prefix = self._version_prefix(dataset_id, version_id)
+        list(self._inner.list_prefix(prefix))
+        legacy = self._legacy_items(dataset_id, version_id)
+        removed = self._inner.purge_prefix(prefix)
+        for item in legacy:
             removed += self._inner.purge_prefix(item_key(item))
         return removed, not self.list_version(dataset_id, version_id)

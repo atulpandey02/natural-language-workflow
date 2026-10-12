@@ -204,11 +204,29 @@ enforces the prefix:
 **Residual:** the operator role can see the keys and upload ids (not the
 bytes) of every in-progress upload in its environment's bucket.
 
-**Open (found while fixing this):** `purge` and `verify-objects` also list the
-legacy `quarantine/` and `datasets/` areas with `ListObjectVersions`, which
-the operator's `versions/*` prefix condition denies. On S3 that listing fails
-and the purge stops before recording anything; it must be resolved before
-the D6 operator-purge item can pass (provisioning runbook §7, item 8).
+**Legacy areas on S3 (resolved after F5).** `purge`, the tombstone absence
+check and `verify-objects` also cover the legacy `quarantine/` and `datasets/`
+areas, which the operator may not list on S3 (`ListVersionsBounded` is
+`versions/*` only). Before this was fixed, on S3:
+
+- a version purge **deleted the version's objects first**, then failed on
+  the denied legacy listing before any receipt was written, and every re-run
+  failed the same way;
+- `verify-objects` failed inside the application before any request
+  (`versions/` was refused as a key).
+
+Now:
+
+- the S3 store holds only `versions/` keys: it refuses to write or read a
+  legacy key, reports one as absent (`verify-objects` lists such a version as
+  missing), and answers a legacy listing as empty **without a request**;
+- the `versions/` area root is a valid listing prefix;
+- every prefix is listed **before anything is removed**, so a listing failure
+  can no longer follow a deletion.
+
+**Residual:** an object an administrator puts outside `versions/` is invisible
+to the operator role and to `verify-objects`. The application never writes
+there; the D6 proof checks the bucket holds nothing else (runbook §7, item 8).
 
 **Credential delivery on the single host** (an explicitly documented
 single-host design; on ECS or EKS it is replaced by task or pod identity):
