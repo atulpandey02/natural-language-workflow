@@ -156,7 +156,7 @@ policy (O-5). Customer uploads stay disabled while O-3 and O-5 are open.
 | `nlw-<env>-dataset-bootstrap` (EC2 instance profile) | `sts:AssumeRole` on **only** `nlw-<env>-dataset-api` and `nlw-<env>-dataset-ingest` | Any S3 object action; any KMS encrypt or decrypt; assume the operator role |
 | `nlw-<env>-dataset-api` | Under `versions/` of its own bucket only: `PutObject` (conditional create, plus the multipart create, part and complete calls), `AbortMultipartUpload`, and object metadata for retries and orphan adoption (see note 1). KMS `GenerateDataKey` and `Decrypt` on its own key | Delete objects or versions, list, access other prefixes, access the other environment's bucket or key |
 | `nlw-<env>-dataset-ingest` | `GetObject` on `versions/` of its own bucket (see note 2), and KMS `Decrypt` | Upload, overwrite, copy, delete or list. Operator credentials |
-| `nlw-<env>-dataset-operator` | Bounded listing (prefix-conditioned), version-aware purge (`DeleteObjectVersion`), verification and multipart abort | Assumption by the bootstrap role or any application identity. It requires a separate **human** assumption path with **MFA**, and is used only through reviewed operator commands |
+| `nlw-<env>-dataset-operator` | Version listing bounded to `versions/` (`s3:prefix`); listing of in-progress multipart uploads on the bucket, which IAM cannot bound by prefix and the application filters (note 3); version-aware purge (`DeleteObjectVersion`), verification and multipart abort, under `versions/` only | Assumption by the bootstrap role or any application identity. It requires a separate **human** assumption path with **MFA**, and is used only through reviewed operator commands |
 
 **Note 1, API metadata.** S3 cannot grant metadata-only reads.
 `HeadObject` and `GetObjectAttributes` both require `s3:GetObject`. So the
@@ -184,6 +184,31 @@ in the application:
 
 A future refinement is per-message STS session policies through a broker. It
 is not adopted now, because it would require the ingest container to call STS.
+
+**Note 3, multipart listing.** The AWS Service Authorization Reference
+lists no `s3:prefix` condition key for `s3:ListBucketMultipartUploads`
+(bucket resource only); `s3:ListBucketVersions` and `s3:ListBucket` do
+support it. A prefix condition on the multipart listing would never match,
+so every listing would be denied. The operator therefore lists in-progress
+uploads on the exact bucket ARN, without a condition, and the application
+enforces the prefix:
+
+- only uploads whose key lies inside the requested version or dataset prefix
+  are aborted; look-alike siblings are ignored;
+- a key outside the requested prefix, a malformed, encoded or non-ASCII key,
+  `EncodingType`, a differing prefix echo, bad pagination markers, a partial
+  page or more than 100 pages refuse the whole listing before any abort;
+- `AbortMultipartUpload` and `DeleteObjectVersion` remain object-resource
+  grants under `versions/*`; `ListMultipartUploadParts` is not granted.
+
+**Residual:** the operator role can see the keys and upload ids (not the
+bytes) of every in-progress upload in its environment's bucket.
+
+**Open (found while fixing this):** `purge` and `verify-objects` also list the
+legacy `quarantine/` and `datasets/` areas with `ListObjectVersions`, which
+the operator's `versions/*` prefix condition denies. On S3 that listing fails
+and the purge stops before recording anything; it must be resolved before
+the D6 operator-purge item can pass (provisioning runbook §7, item 8).
 
 **Credential delivery on the single host** (an explicitly documented
 single-host design; on ECS or EKS it is replaced by task or pod identity):
@@ -362,7 +387,8 @@ AWS facts this design relies on (AWS documentation, checked 2026-10-09):
 ### Purge (operator; deletion requests and D2)
 
 1. Check the recovery lock.
-2. `ListMultipartUploads(Prefix=<version key>)`, then abort each.
+2. `ListMultipartUploads(Prefix=<version key>)`, keep only uploads inside
+   that prefix (note 3), then abort each.
 3. `ListObjectVersions(Prefix=<version key>)`.
 4. `DeleteObjectVersion` for every version and delete marker.
 5. Verify that nothing remains.
