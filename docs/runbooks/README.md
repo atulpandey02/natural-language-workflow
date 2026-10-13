@@ -31,5 +31,5 @@ control plane) and the internal Prometheus metrics (ADR-016).
 - [dataset-metadata-deletion.md](dataset-metadata-deletion.md) — dataset deletion: purge stored objects (verified; receipts and tombstone conditions exactly as in ADR-033 note 3), then tombstone; `verify-objects` after a restore (ADR-029, ADR-030; development only)
 - [dataset-s3-provisioning.md](dataset-s3-provisioning.md) — **security sensitive**: AWS S3 dataset store templates: buckets, keys, roles, trust, audit trail (ADR-033; NOT RUN)
 - [dataset-s3-d6-proof.md](dataset-s3-d6-proof.md) — the ordered D6 AWS proof, in a dedicated proof account only: stop conditions, evidence rules, cleanup and recovery (NOT RUN; blocked until the account and identities are approved)
-- [dataset-s3-d6-owner-decisions.md](dataset-s3-d6-owner-decisions.md) — owner decisions E1–E15 required before the D6 proof (OPEN; E14 requires a dedicated proof account)
+- [dataset-s3-d6-owner-decisions.md](dataset-s3-d6-owner-decisions.md) — owner decisions E1–E16 required before the D6 proof (OPEN, except two decided ones: E14, a dedicated proof account, and E16, synthetic data only)
 - [dataset-uploads-staging-checklist.md](dataset-uploads-staging-checklist.md) — owner decisions, engineering and release steps required before dataset uploads may reach staging (NOT RUN)

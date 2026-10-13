@@ -6446,7 +6446,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role-policy",
@@ -6494,7 +6494,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role-policy",
@@ -6542,7 +6542,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role-policy",
@@ -6590,7 +6590,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role-policy",
@@ -6638,7 +6638,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role-policy",
@@ -6686,7 +6686,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role-policy",
@@ -7112,7 +7112,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role",
@@ -7152,7 +7152,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role",
@@ -7192,7 +7192,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role",
@@ -7232,7 +7232,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role",
@@ -7272,7 +7272,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role",
@@ -7312,7 +7312,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role",
@@ -7432,7 +7432,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-attached-role-policies",
@@ -7472,7 +7472,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-attached-role-policies",
@@ -7512,7 +7512,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-attached-role-policies",
@@ -7552,7 +7552,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-attached-role-policies",
@@ -7592,7 +7592,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-attached-role-policies",
@@ -7632,7 +7632,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-attached-role-policies",
@@ -7752,7 +7752,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-policies",
@@ -7792,7 +7792,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-policies",
@@ -7832,7 +7832,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-policies",
@@ -7872,7 +7872,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-policies",
@@ -7912,7 +7912,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-policies",
@@ -7952,7 +7952,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-policies",
@@ -7992,7 +7992,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-tags",
@@ -8032,7 +8032,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-tags",
@@ -8072,7 +8072,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-tags",
@@ -8112,7 +8112,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-tags",
@@ -8152,7 +8152,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-tags",
@@ -8192,7 +8192,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-tags",
@@ -9224,7 +9224,7 @@
   ]
  },
  {
-  "step": "P13-02",
+  "step": "P15-03",
   "machine": "audit",
   "service": "sts",
   "operation": "get-caller-identity",

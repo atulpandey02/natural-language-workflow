@@ -2895,8 +2895,11 @@ def gate_violations(text: str) -> list[str]:
         'git merge-base --is-ancestor "$REVIEWED_COMMIT" origin/main',
         "[[ -z \"$(git ls-files -v | grep -v '^H ' || true)\" ]]",
         'git show "$REVIEWED_COMMIT:$f" | cmp -s - "$f"',
-        '"people": gate.get("people") == people and len(set(people.values())) == 3',
-        '"three_people_verified": gate.get("three_people_verified") is True',
+        '"people": gate.get("people") == people and all(names)',
+        "and len(set(names)) == (1 if single else 3),",
+        '"separation": gate.get("separation") in ("three-people", "single-owner")',
+        '"data_scope": gate.get("data_scope") == "synthetic-only"',
+        'else gate.get("three_people_verified") is True',
         '"role_boundaries_verified": gate.get("role_boundaries_verified") is True',
         '"distinct_identities": admin not in operator + audit_admin + audit_reader',
         'python3 "$PROOF_DIR/isolation.py" "$PROOF_PERSONA" "$PROOF_ID" '
@@ -2914,8 +2917,7 @@ def gate_violations(text: str) -> list[str]:
         '"boundary_attached_verified": gate.get("boundary_attached_verified") is True',
         '"effective_permissions_verified": gate.get("effective_permissions_verified") is True',
         '"identity_center_mfa_required": gate.get("identity_center_mfa_required") is True',
-        '"account_administrators_outside_functions": '
-        'gate.get("account_administrators_outside_functions") is True',
+        'if single else gate.get("account_administrators_outside_functions") is True',
         "STOP S9: D6 is blocked (decision E15)",
         'git show "$REVIEWED_COMMIT:docs/runbooks/dataset-s3-d6-proof.md"',
     ):
@@ -3996,7 +3998,9 @@ def test_every_owner_decision_is_open_with_options_and_a_recommendation() -> Non
     assert "**Required; D6 is blocked until then.**" in decisions["E15"][3]
     assert "`git show`" in decisions["E15"][3]
     assert "rest on the reviewed pull request" in decisions["E15"][3]
-    assert "**Three different people.**" in decisions["E9"][3]
+    assert "**(a) three different people where available; otherwise (b)" in decisions["E9"][3]
+    assert "`separation: single-owner`" in decisions["E9"][2]
+    assert "blocks real customer data" in decisions["E9"][3] and "R21" in decisions["E9"][3]
     assert "**What is attested, not enforced:**" in decisions["E9"][3]
     assert "can make no IAM change at all" in decisions["E9"][3]
     # Round 6: the provisioner's use of the runtime roles is stated, not hidden.
@@ -4059,7 +4063,8 @@ def test_overclaims_are_corrected() -> None:
     assert "**What protects production.** AWS does" not in proof
     assert "The\n  account does not replace least privilege inside it." in proof
     assert "**But the\n  provisioner operates the proof instance**" in proof  # R15, not hidden
-    assert "**Three people, three machines.**" in proof
+    assert "**Three functions, three machines.**" in proof
+    assert "**people are not separated at all** (R21)" in proof
     assert "**The shell and its tests are regression evidence only.**" in proof
     assert "It is not a security boundary and not an\n  exhaustive observation" in proof
     assert "**The account limits the\nblast radius:**" in prov
@@ -5637,7 +5642,7 @@ _OTHER_ROLE_ID = "AROA" + "EXAMPLEROLEID0002"
 def test_negative_control_a_replaced_role_is_caught_at_the_end(
     tmp_path: Path, recorded: str | None, now: str | None, expected: str | None
 ) -> None:
-    """F3: P03-15 records each role's RoleId; P13-02 expects it unchanged. A
+    """F3: P03-15 records each role's RoleId; P15-03 expects it unchanged. A
     role deleted and re-created with identical content has a new RoleId."""
     (tmp_path / "proof").mkdir()
     (tmp_path / "proof" / "trust-api.json").write_text(json.dumps(ROLE_TRUST))
@@ -5673,17 +5678,19 @@ def test_p03_15_records_a_well_formed_role_id(tmp_path: Path, now: str | None, o
         assert "nlw-staging-dataset-api has no role id" in result.stderr
 
 
-def test_p13_02_repeats_the_independent_role_check_after_the_roles_were_used() -> None:
-    """F3: P13-02 runs on the audit machine after P12, with the audit reader,
+def test_p15_03_repeats_the_independent_role_check_after_the_roles_were_used() -> None:
+    """F3: P15-03 runs on the audit machine after the last role-using step
+    (P15-02), with the audit reader,
     in expect mode for all six roles; P03-15 records."""
     blocks = {b["label"]["id"]: b for b in labelled_blocks(proof_text()) if b["label"]}
-    p03, p13 = blocks["P03-15"], blocks["P13-02"]
+    p03, p13 = blocks["P03-15"], blocks["P15-03"]
     assert p13["label"]["where"] == "audit machine" and p13["label"]["cls"] == "READ-ONLY"
     assert 'verify_created_role "$READER" "$r" record' in p03["body"]
     assert 'verify_created_role "$READER" "$r" expect' in p13["body"]
     assert "for r in bootstrap api ingest operator audit-admin audit-reader; do" in p13["body"]
     order = list(blocks)
-    assert order.index("P12-03") < order.index("P13-02") < order.index("X01")
+    assert order.index("P15-02") < order.index("P15-03") < order.index("P16-01")
+    assert order.index("P14-01") < order.index("P15-03")
 
 
 @needs_bash_and_git
@@ -6095,9 +6102,112 @@ def _good_gate() -> dict[str, Any]:
         "three_people_verified": True,
         "role_boundaries_verified": True,
         "aws_cli_versions": {"workstation": "2.22.0", "instance": "2.23.1"},
+        "separation": "three-people",
+        "data_scope": "synthetic-only",
         "verified_by": "independent verifier",
         "verified_at": "2026-10-12",
     }
+
+
+_ONE_OWNER = {"PROVISIONER_NAME": "owner", "OPERATOR_NAME": "owner", "AUDIT_NAME": "owner"}
+
+
+def _single_owner_gate(**change: Any) -> dict[str, Any]:
+    gate = {**_good_gate(), "separation": "single-owner",
+            "people": {"provisioner": "owner", "operator": "owner", "audit": "owner"},
+            "single_owner_separate_sessions_verified": True,
+            "account_administrators_outside_functions": False}  # fmt: skip
+    del gate["three_people_verified"]
+    gate.update(change)
+    return gate
+
+
+@needs_bash_and_git
+def test_p00_02_accepts_a_single_owner_for_synthetic_data_only(tmp_path: Path) -> None:
+    """E9 (b), R21: when three participants are unavailable, one authorized
+    owner may hold all three functions from separate OS accounts, profiles and
+    sessions; the owner may also administer the account. Synthetic data only."""
+    result = _p00_02(tmp_path, gate=_single_owner_gate(), overrides=_ONE_OWNER)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "proof" / "manifest.json").exists()
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(
+    ("gate", "overrides", "expected"),
+    [
+        (_single_owner_gate(data_scope="customer"), _ONE_OWNER, "data_scope"),
+        ({**_single_owner_gate(), "data_scope": None}, _ONE_OWNER, "data_scope"),
+        ({**_good_gate(), "data_scope": "real"}, {}, "data_scope"),
+        (_single_owner_gate(single_owner_separate_sessions_verified=False), _ONE_OWNER,
+         "three_people_verified"),
+        (_single_owner_gate(), {}, "people"),  # one owner in the record, three names in the run
+        (_single_owner_gate(people={"provisioner": "owner", "operator": "owner",
+                                    "audit": "other"}),
+         {**_ONE_OWNER, "AUDIT_NAME": "other"}, "people"),
+        (_single_owner_gate(verified_by="owner"), _ONE_OWNER, "verified_by"),
+        (_single_owner_gate(account_administrators_outside_functions="yes"), _ONE_OWNER,
+         "account_administrators_outside_functions"),
+        ({**_good_gate(), "separation": "two-people"}, {}, "separation"),
+        ({k: v for k, v in _good_gate().items() if k != "separation"}, {}, "separation"),
+        ({**_good_gate(), "account_administrators_outside_functions": False}, {},
+         "account_administrators_outside_functions"),
+    ],
+    ids=[
+        "single owner for customer data",
+        "single owner with no data scope",
+        "three people for real data",
+        "single owner's separate sessions not attested",
+        "single-owner record, three people at the keyboards",
+        "single owner plus a second person",
+        "the single owner verified their own run",
+        "administrator status not recorded",
+        "unknown separation mode",
+        "no separation mode",
+        "three people, administrator holds a function",
+    ],
+)  # fmt: skip
+def test_negative_control_the_single_owner_mode_never_admits_real_data(
+    tmp_path: Path, gate: dict[str, Any], overrides: dict[str, str], expected: str
+) -> None:
+    result = _p00_02(tmp_path, gate=gate, overrides=overrides)
+    assert result.returncode != 0 and expected in result.stderr, result.stderr
+    assert not (tmp_path / "proof" / "manifest.json").exists()
+
+
+@needs_bash_and_git
+def test_negative_control_render_refuses_a_grafts_file(tmp_path: Path) -> None:
+    """L1: lib.sh's grafts check resolves git's common directory as an
+    absolute path, so it fires from any working directory."""
+
+    def add_grafts(repo: Path) -> None:
+        env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
+        git = ["git", "-C", str(repo)]
+        head = subprocess.run(
+            [*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True, env=env
+        ).stdout.strip()
+        (repo / ".git" / "info").mkdir(exist_ok=True)
+        (repo / ".git" / "info" / "grafts").write_text(f"{head}\n")
+
+    result = _lib_run(tmp_path, 'render role-api > "$PROOF_DIR/out.json"', add_grafts)
+    assert result.returncode != 0
+    assert "STOP S9: a grafts file exists" in result.stderr
+
+
+def test_git_redirecting_variables_are_cleared_before_any_git_call() -> None:
+    """F4: GIT_GRAFT_FILE and the object-directory variables are honoured even
+    with GIT_NO_REPLACE_OBJECTS; both git-reading blocks unset them first."""
+    text = proof_text()
+    for marker in ("# shellcheck shell=bash", "GATE=docs/evidence/o2-d6/d6-gate.json"):
+        at = text.index(marker)
+        start = text.rindex("```", 0, at)
+        block = text[start : text.index("```", at)]
+        unset = block.index("unset GIT_GRAFT_FILE GIT_DIR GIT_OBJECT_DIRECTORY")
+        code = re.compile(
+            r"(?m)^(?!\s*#)[^\n]*\bgit\s+(?:-C|show|rev-parse|for-each-ref|status|ls-files|merge-base|cat-file|diff)\b"
+        )
+        first_git = code.search(block)
+        assert first_git and unset < first_git.start(), marker
 
 
 @needs_bash_and_git

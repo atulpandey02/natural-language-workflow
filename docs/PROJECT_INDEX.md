@@ -20,7 +20,7 @@ Prepared for independent review; nothing was run against AWS:
   ordered steps P00–P18 in the dedicated proof account, with every command
   labelled READ-ONLY, MUTATING, HOST or LOCAL, stop conditions S1–S10,
   sanitized evidence, ledger-based cleanup and recovery.
-- [Owner decisions E1–E15](runbooks/dataset-s3-d6-owner-decisions.md), open
+- [Owner decisions E1–E16](runbooks/dataset-s3-d6-owner-decisions.md), open except E14 and E16 (synthetic data only)
   except E14 (a dedicated proof account is required).
 - [Policy review](security/o2-aws-policy-review.md): findings and their
   dispositions for five review rounds, residual risks R1–R14, unresolved AWS

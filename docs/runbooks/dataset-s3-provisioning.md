@@ -612,8 +612,8 @@ permission set, used on its own machine (the procedure's persona sections):
   boundary, and can create a role only with that role's own boundary. It
   **can** delete the bootstrap, API, ingest and operator roles and re-create
   them with any trust (no IAM condition constrains trust content); the audit
-  reader's checks at P03-15 and again at P13-02 (which also compares each
-  role's `RoleId`) detect that only up to P13-02 (R17).
+  reader's checks at P03-15 and again at P15-03 (which also compares each
+  role's `RoleId`) detect that only up to P15-03 (R17).
 - **Not enforced by these policies:** the provisioner operates the proof
   instance, so it uses the API and ingest roles' permissions there,
   including reading and writing dataset objects (R15); the dataset bucket
@@ -624,14 +624,18 @@ permission set, used on its own machine (the procedure's persona sections):
   three functions. IAM sees permission-set roles, not people; who is assigned
   which permission set is an Identity Center setting that the gate record
   attests (E15). If one person holds two functions, the separation above
-  still constrains each identity but no longer separates people.
+  still constrains each identity but no longer separates people. The
+  single-owner mode (E9 (b), `separation: single-owner`) makes that explicit
+  for when three participants are unavailable: one authorized owner, a
+  separate OS account, profiles and sessions per function, synthetic data
+  only (review R21); real customer data stays blocked.
 - **Residual authority:** the account root user, the organization's
   management account and anyone who administers Identity Center or this
   account's IAM outside the proof can override all of it (review R13). The
   provisioner's IAM authority over the six roles is itself a residual risk
   (R14): its permission set cannot assume the roles, but it shapes them and
   uses the API and ingest roles through the proof instance (R15); the audit
-  side checks its work independently (P03-15, and again at P13-02), and the
+  side checks its work independently (P03-15, and again at P15-03), and the
   account trail (E7) records every change.
 
 **Policy layers.**
