@@ -688,9 +688,12 @@ exceptions added.
      stays `DELETING`. The safe re-run records a receipt for what it removes
      (zero objects if everything was already gone) for a version with a
      recorded key; for a version without one it records no receipt when
-     nothing remains. Tombstone requires a verified purge event and receipt
-     only for a keyed version (or one with an earlier purge event); a
-     version without a key is tombstoned on the live absence check alone. A
+     nothing remains. Only for a version with a recorded key, or with any
+     earlier purge event, does tombstone require the latest operator purge
+     event after the deletion request, a receipt for it that the configured
+     deletion log verifies, and a live check that nothing is stored; a
+     version with no key and no purge event is tombstoned on the live absence
+     check alone, or with no check when no store is configured. A
      legacy-keyed row purges to a verified zero-object receipt.
    - **Recovery when a purge is refused:** a malformed or unexpected
      in-progress upload under a version refuses the purge (fail closed). An
