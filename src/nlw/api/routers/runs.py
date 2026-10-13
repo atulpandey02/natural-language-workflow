@@ -93,7 +93,7 @@ def _action_out(a: ExternalAction) -> ExternalActionOut:
 @router.get("/runs", response_model=list[RunOut])
 async def list_runs(
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     workflow_id: uuid.UUID | None = Query(default=None),
     run_status: str | None = Query(default=None, alias="status"),
     limit: int = Query(50, ge=1, le=100),
@@ -116,7 +116,7 @@ async def _load_run(run_id: uuid.UUID, ctx: TenantContext, session: AsyncSession
 async def get_run(
     run_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> RunOut:
     return _run_out(await _load_run(run_id, ctx, session))
 
@@ -125,7 +125,7 @@ async def get_run(
 async def get_run_steps(
     run_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[StepRunOut]:
     await _load_run(run_id, ctx, session)  # 404 if not the tenant's run
     steps = await RunRepository(session).steps(run_id, ctx.tenant_id)
@@ -136,7 +136,7 @@ async def get_run_steps(
 async def get_run_actions(
     run_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[ExternalActionOut]:
     await _load_run(run_id, ctx, session)
     actions = await RunRepository(session).actions(run_id, ctx.tenant_id)
@@ -147,7 +147,7 @@ async def get_run_actions(
 async def get_run_summary(
     run_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> RunSummary:
     """Deterministic, grounded run summary (M12B-A, Part H).
 

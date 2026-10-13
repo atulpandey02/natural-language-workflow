@@ -149,7 +149,7 @@ async def create_plan(
     body: PlanRequest,
     request: Request,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     provider: LLMProvider = Depends(get_llm_provider),
     settings: Settings = Depends(get_app_settings),
 ) -> PlanProposalDetailOut:
@@ -294,7 +294,7 @@ async def create_plan(
 @router.get("/plans", response_model=list[PlanProposalOut])
 async def list_plans(
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[PlanProposalOut]:
     proposals = await PlanProposalRepository(session).list_for_tenant(ctx.tenant_id)
     # Handoff messages contain analytical data: detail-only, never list payloads.
@@ -312,7 +312,7 @@ async def list_plans(
 async def get_plan(
     proposal_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> PlanProposalDetailOut:
     proposal = await PlanProposalRepository(session).get(proposal_id, ctx.tenant_id)
     if proposal is None:
@@ -340,7 +340,7 @@ async def get_plan(
 async def materialize_plan(
     proposal_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ) -> MaterializeOut:
     repo = PlanProposalRepository(session)

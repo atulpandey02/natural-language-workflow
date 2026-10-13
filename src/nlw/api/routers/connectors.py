@@ -67,7 +67,7 @@ def _to_out(connector: object) -> ConnectorOut:
 async def create_connector(
     body: ConnectorCreate,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ) -> ConnectorOut:
     try:
@@ -116,7 +116,7 @@ async def create_connector(
 @router.get("/connectors", response_model=list[ConnectorOut])
 async def list_connectors(
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[ConnectorOut]:
     connectors = await ConnectorRepository(session).list_for_tenant(ctx.tenant_id)
     return [_to_out(c) for c in connectors]
@@ -125,7 +125,7 @@ async def list_connectors(
 @router.get("/tools", response_model=list[ToolOut])
 async def list_tools(
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ) -> list[ToolOut]:
     """The tools NEW plans may use for this tenant. Demo tools (``ToolSpec.demo``)

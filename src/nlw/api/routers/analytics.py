@@ -69,7 +69,7 @@ async def datasets(
 async def analytics_result(
     run_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> AnalyticsResult:
     started = time.perf_counter()
     result = await load_analytics(run_id, ctx, session)
@@ -89,7 +89,7 @@ async def slack_proposal(
     run_id: uuid.UUID,
     body: SlackRequest,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ) -> PlanProposalDetailOut:
     result = await load_analytics(run_id, ctx, session)

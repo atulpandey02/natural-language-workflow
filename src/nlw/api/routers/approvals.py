@@ -103,7 +103,7 @@ def _iso(value: Any) -> str | None:
 @router.get("/approvals", response_model=list[ApprovalOut])
 async def list_approvals(
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[ApprovalOut]:
     approvals = await ApprovalRepository(session).list_for_tenant(ctx.tenant_id, pending_only=True)
     # The viewer may decide only when eligible (admin/owner) AND not the requester.
@@ -217,7 +217,7 @@ async def approve(
     approval_id: uuid.UUID,
     request: Request,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> ApprovalDecisionOut:
     # An action whose payload is too large to review safely must NOT be approved
     # unseen (P1C). It can only be rejected. This is defence-in-depth on top of

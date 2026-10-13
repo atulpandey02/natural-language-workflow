@@ -74,7 +74,7 @@ def _version_out(version: object) -> WorkflowVersionOut:
 @router.get("/workflows", response_model=list[WorkflowOut])
 async def list_workflows(
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> list[WorkflowOut]:
@@ -96,7 +96,7 @@ async def list_workflows(
 async def get_workflow(
     workflow_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> WorkflowDetailOut:
     repo = WorkflowRepository(session)
     workflow = await repo.get(workflow_id, ctx.tenant_id)
@@ -119,7 +119,7 @@ async def get_workflow(
 async def get_workflow_version(
     version_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> WorkflowVersionOut:
     version = await WorkflowRepository(session).get_version(version_id, ctx.tenant_id)
     if version is None:
@@ -131,7 +131,7 @@ async def get_workflow_version(
 async def get_workflow_provenance(
     version_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> WorkflowProvenanceOut:
     """The original NL request + planner identity + feasibility decision that
     produced this version (M12B-A). Read-only, tenant-scoped, authorized-member

@@ -60,7 +60,7 @@ async def read_me(user: User = Depends(get_current_user)) -> User:
 @router.get("/workspaces", response_model=list[WorkspaceOut])
 async def list_workspaces(
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[WorkspaceOut]:
     rows = await WorkspaceRepository(session).list_for_user(user.id)
     return [WorkspaceOut(id=ws.id, name=ws.name, slug=ws.slug, role=role) for ws, role in rows]
@@ -75,7 +75,7 @@ async def list_workspaces(
 async def create_workspace(
     body: WorkspaceCreate,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ) -> WorkspaceOut:
     # Founding a tenant is operator-granted (Phase 2 B01). The DATABASE is the

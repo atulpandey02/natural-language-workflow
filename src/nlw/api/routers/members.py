@@ -89,7 +89,7 @@ async def _admin_ctx(ctx: TenantContext = Depends(get_tenant_context)) -> Tenant
 @router.get("/members", response_model=list[MemberOut])
 async def list_members(
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[MemberOut]:
     rows = await MembershipRepository(session).list_for_workspace(ctx.tenant_id)
     return [MemberOut(user_id=m.user_id, role=m.role, joined_at=_iso(m.created_at)) for m in rows]
@@ -137,7 +137,7 @@ async def remove_member(
 @router.get("/invitations", response_model=list[InvitationOut])
 async def list_invitations(
     ctx: TenantContext = Depends(_admin_ctx),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[InvitationOut]:
     rows = await InvitationRepository(session).list_pending(ctx.tenant_id)
     return [
@@ -250,7 +250,7 @@ async def revoke_invitation(
 async def accept_invitation(
     body: InvitationAccept,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> InvitationAcceptedOut:
     # Use the REQUEST session: get_current_user provisioned this user (and applied
     # the signed identity context that public.ctx_user_id() verifies) in THIS

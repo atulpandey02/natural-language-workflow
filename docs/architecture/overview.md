@@ -29,6 +29,12 @@ Internet → HTTPS/reverse proxy → api (FastAPI control plane)
 - **Postgres is the system of record** — [ADR-001](../adr/ADR-001-postgres-state-store.md).
   Losing Redis loses no workflow state.
 - **Redis/Dramatiq is transport only** — [ADR-002](../adr/ADR-002-redis-dramatiq-queue.md).
+- **Commit before respond** — every API request transaction (`get_session`, always
+  `Depends(get_session, scope="function")`) commits before the response is sent, so a
+  2xx means the write is durable and visible, and a commit failure is a 500, never a
+  2xx. Queue publications happen only after their own transaction commits
+  (commit-before-enqueue). Enforced by `tests/unit/test_session_scope_commits_first.py`
+  and proven against Postgres by `tests/integration/test_commit_before_response.py`.
 - **Durable execution** — [ADR-010](../adr/ADR-010-durable-execution.md): one step per
   `advance_run`, `FOR UPDATE` serialization, commit-before-enqueue, idempotent replay;
   worker derives tenant via a worker-only SECURITY DEFINER resolver.
