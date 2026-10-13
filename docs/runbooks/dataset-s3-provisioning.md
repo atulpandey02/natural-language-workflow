@@ -594,7 +594,7 @@ permission set, used on its own machine (the procedure's persona sections):
 
 | Function | Permission set | May | Never |
 |---|---|---|---|
-| **provisioner** | `<ADMIN_ROLE>` (§3.7 `permission-set-provisioner`) | create the six roles with their trust, exact inline policies and exact boundaries; create the dataset bucket, dataset key, proof instance and budget; read the account inventory; run simulations | read, write or delete any dataset object; touch the trail, the audit bucket, the audit key or its alias; assume any of the six roles; change any trust policy after creation; change or remove any boundary |
+| **provisioner** | `<ADMIN_ROLE>` (§3.7 `permission-set-provisioner`) | create the six roles with their trust, exact inline policies and exact boundaries; create the dataset bucket, dataset key, proof instance and budget; read the account inventory; run simulations | read, write or delete any dataset object **with its own permission set**; touch the trail, the audit bucket, the audit key or its alias; assume any of the six roles from its permission set; update a trust policy in place; change or remove any boundary. **It still** operates the proof instance and so exercises the API and ingest roles there (R15), and can delete and re-create four roles with another trust (R17) |
 | **dataset operator** | operator (§3.7) | assume only `nlw-<ENV>-dataset-operator`, whose boundary allows only listing, reading and version-aware deletion under `versions/` | any IAM change, including to its own role; the trail, audit bucket, audit key or audit roles |
 | **audit administrator / reader** | audit administrator and audit reader (§3.7) | assume only the audit-admin or audit-reader role; confirm the audit resources are absent; the reader may also read (never change) the six roles and the proof policies, to check the provisioner's work independently | any IAM change, including to its own roles; any dataset role, the dataset bucket or the dataset key |
 
@@ -607,9 +607,19 @@ permission set, used on its own machine (the procedure's persona sections):
   action on the audit bucket, audit key and audit alias. Every role the
   proof creates carries an exact boundary of its own (below), so a rewritten
   inline policy can never exceed what that role was reviewed to do. The
-  provisioner cannot change a trust policy after creation
+  provisioner cannot update a trust policy in place
   (`UpdateAssumeRolePolicy` is not granted), cannot remove or replace a
-  boundary, and can create a role only with that role's own boundary.
+  boundary, and can create a role only with that role's own boundary. It
+  **can** delete the bootstrap, API, ingest and operator roles and re-create
+  them with any trust (no IAM condition constrains trust content); the audit
+  reader's checks at P03-15 and again at P13-02 (which also compares each
+  role's `RoleId`) detect that only up to P13-02 (R17).
+- **Not enforced by these policies:** the provisioner operates the proof
+  instance, so it uses the API and ingest roles' permissions there,
+  including reading and writing dataset objects (R15); the dataset bucket
+  policy and key policy are checked only by the provisioner (P03-11), whose
+  permission set may rewrite the bucket policy (R16). Both are accepted for
+  a synthetic-data pilot only (E16).
 - **Not enforced, only attested:** that three **different people** hold the
   three functions. IAM sees permission-set roles, not people; who is assigned
   which permission set is an Identity Center setting that the gate record
@@ -619,9 +629,10 @@ permission set, used on its own machine (the procedure's persona sections):
   management account and anyone who administers Identity Center or this
   account's IAM outside the proof can override all of it (review R13). The
   provisioner's IAM authority over the six roles is itself a residual risk
-  (R14): it cannot use the roles, but it shapes them; the audit side checks
-  its work independently (P03-15), and the account trail (E7) records every
-  change.
+  (R14): its permission set cannot assume the roles, but it shapes them and
+  uses the API and ingest roles through the proof instance (R15); the audit
+  side checks its work independently (P03-15, and again at P13-02), and the
+  account trail (E7) records every change.
 
 **Policy layers.**
 
@@ -633,8 +644,9 @@ permission set, used on its own machine (the procedure's persona sections):
 | permission-set inline policies (§3.7) | each permission set | its exact Allows, and the denies that separate the functions |
 
 **Upper bounds, and where they are broader by resource.** A boundary only
-limits; it never grants. The permission-set boundary's actions are exactly
-the union of the four permission sets' actions. It is broader than that
+limits; it never grants. The permission-set boundary's actions are
+the union of the four permission sets' actions (by action; it is broader by
+resource as listed here). It is broader than that
 union **by resource** only where the resource is not known until the run,
 and each case is listed: S3 bucket names (matched by the proof-name pattern
 `…-us-east-1-d6*`), KMS key ids (`key/*` in `us-east-1` of this account;
@@ -800,12 +812,16 @@ compare it with the templates. Sessions last one hour or less (E11).
   denies it `sts:AssumeRole` on all six; `NeverDatasetObjects` denies every
   object action in the dataset bucket; it holds nothing on the trail, the
   audit bucket, the audit key or its alias. It has no
-  `iam:UpdateAssumeRolePolicy`, so a trust policy cannot change after
-  creation, and it may create each role only with that role's boundary.
+  `iam:UpdateAssumeRolePolicy`, so a trust policy cannot be updated in
+  place, and it may create each role only with that role's boundary; it can
+  still delete four roles and re-create them with another trust (R17).
 - **The operator and audit sets change no IAM at all.** `NeverChangeIam`
-  denies every IAM write (`Add*`, `Attach*`, `Create*`, `Delete*`, `Put*`,
-  `Update*`, `PassRole` and the rest) on every resource, including their own
-  roles.
+  denies every IAM write family (`Add*`, `Attach*`, `Change*`, `Create*`,
+  `Deactivate*`, `Delete*`, `Detach*`, `Disable*`, `Enable*`, `Generate*`,
+  `PassRole`, `Put*`, `Remove*`, `Reset*`, `Resync*`, `Set*`, `Tag*`,
+  `Untag*`, `Update*`, `Upload*`) on every resource, including their own
+  roles. An IAM write action AWS adds later under a new verb would not be
+  covered until this list is updated.
 - **The audit reader verifies, read-only.** `VerifyTheProofPrincipals` and
   `ReadTheProofPolicies` let the audit side read the six roles, the four
   permission-set roles and the proof policies, so P03-15 checks the
@@ -858,7 +874,7 @@ compare it with the templates. Sessions last one hour or less (E11).
 ```json
 {"Version": "2012-10-17", "Statement": [
   {"Sid": "AssumeOnlyTheOperatorRole", "Effect": "Allow", "Action": "sts:AssumeRole", "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator", "Condition": {"StringLike": {"sts:RoleSessionName": "nlw-d6-*-operator"}}},
-  {"Sid": "NeverChangeIam", "Effect": "Deny", "Action": ["iam:Add*", "iam:Attach*", "iam:Change*", "iam:Create*", "iam:Deactivate*", "iam:Delete*", "iam:Detach*", "iam:Enable*", "iam:PassRole", "iam:Put*", "iam:Remove*", "iam:Reset*", "iam:Resync*", "iam:Set*", "iam:Tag*", "iam:Untag*", "iam:Update*", "iam:Upload*"], "Resource": "*"},
+  {"Sid": "NeverChangeIam", "Effect": "Deny", "Action": ["iam:Add*", "iam:Attach*", "iam:Change*", "iam:Create*", "iam:Deactivate*", "iam:Delete*", "iam:Detach*", "iam:Disable*", "iam:Enable*", "iam:Generate*", "iam:PassRole", "iam:Put*", "iam:Remove*", "iam:Reset*", "iam:Resync*", "iam:Set*", "iam:Tag*", "iam:Untag*", "iam:Update*", "iam:Upload*"], "Resource": "*"},
   {"Sid": "NeverAlterAnyTrail", "Effect": "Deny", "Action": ["cloudtrail:AddTags", "cloudtrail:CreateTrail", "cloudtrail:DeleteTrail", "cloudtrail:PutEventSelectors", "cloudtrail:PutInsightSelectors", "cloudtrail:RemoveTags", "cloudtrail:StartLogging", "cloudtrail:StopLogging", "cloudtrail:UpdateTrail"], "Resource": "*"},
   {"Sid": "NeverTheAuditRolesBucketOrAlias", "Effect": "Deny", "Action": ["kms:*", "s3:*", "sts:AssumeRole"], "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader", "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*", "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit"]},
   {"Sid": "NeverAuditKeys", "Effect": "Deny", "Action": "kms:*", "Resource": "*", "Condition": {"StringEquals": {"aws:ResourceTag/nlw-purpose": "audit"}}}
@@ -870,7 +886,7 @@ compare it with the templates. Sessions last one hour or less (E11).
 {"Version": "2012-10-17", "Statement": [
   {"Sid": "AssumeOnlyTheAuditAdminRole", "Effect": "Allow", "Action": "sts:AssumeRole", "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin", "Condition": {"StringLike": {"sts:RoleSessionName": "nlw-d6-*-audit-admin"}}},
   {"Sid": "ConfirmTheAuditResourcesAreAbsent", "Effect": "Allow", "Action": ["cloudtrail:GetTrail", "kms:DescribeKey", "s3:ListBucket"], "Resource": ["<TRAIL_ARN>", "arn:aws:kms:us-east-1:<ACCOUNT>:key/*", "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*"]},
-  {"Sid": "NeverChangeIam", "Effect": "Deny", "Action": ["iam:Add*", "iam:Attach*", "iam:Change*", "iam:Create*", "iam:Deactivate*", "iam:Delete*", "iam:Detach*", "iam:Enable*", "iam:PassRole", "iam:Put*", "iam:Remove*", "iam:Reset*", "iam:Resync*", "iam:Set*", "iam:Tag*", "iam:Untag*", "iam:Update*", "iam:Upload*"], "Resource": "*"},
+  {"Sid": "NeverChangeIam", "Effect": "Deny", "Action": ["iam:Add*", "iam:Attach*", "iam:Change*", "iam:Create*", "iam:Deactivate*", "iam:Delete*", "iam:Detach*", "iam:Disable*", "iam:Enable*", "iam:Generate*", "iam:PassRole", "iam:Put*", "iam:Remove*", "iam:Reset*", "iam:Resync*", "iam:Set*", "iam:Tag*", "iam:Untag*", "iam:Update*", "iam:Upload*"], "Resource": "*"},
   {"Sid": "NeverTheDatasetRolesBucketOrAlias", "Effect": "Deny", "Action": ["kms:*", "s3:*", "sts:AssumeRole"], "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator", "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-bootstrap", "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*", "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-datasets"]},
   {"Sid": "NeverDatasetKeys", "Effect": "Deny", "Action": "kms:*", "Resource": "*", "Condition": {"StringEquals": {"aws:ResourceTag/nlw-purpose": "dataset"}}}
 ]}
@@ -882,7 +898,7 @@ compare it with the templates. Sessions last one hour or less (E11).
   {"Sid": "AssumeOnlyTheAuditReaderRole", "Effect": "Allow", "Action": "sts:AssumeRole", "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader", "Condition": {"StringLike": {"sts:RoleSessionName": "nlw-d6-*-audit-reader"}}},
   {"Sid": "VerifyTheProofPrincipals", "Effect": "Allow", "Action": ["iam:GetRole", "iam:GetRolePolicy", "iam:ListAttachedRolePolicies", "iam:ListRolePolicies", "iam:ListRoleTags"], "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader", "arn:aws:iam::<ACCOUNT>:role/aws-reserved/sso.amazonaws.com/*"]},
   {"Sid": "ReadTheProofPolicies", "Effect": "Allow", "Action": ["iam:GetPolicy", "iam:GetPolicyVersion"], "Resource": ["<PROOF_BOUNDARY_ARN>", "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-proof-denies", "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-bootstrap", "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-api", "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-ingest", "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-operator", "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-admin", "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-reader"]},
-  {"Sid": "NeverChangeIam", "Effect": "Deny", "Action": ["iam:Add*", "iam:Attach*", "iam:Change*", "iam:Create*", "iam:Deactivate*", "iam:Delete*", "iam:Detach*", "iam:Enable*", "iam:PassRole", "iam:Put*", "iam:Remove*", "iam:Reset*", "iam:Resync*", "iam:Set*", "iam:Tag*", "iam:Untag*", "iam:Update*", "iam:Upload*"], "Resource": "*"},
+  {"Sid": "NeverChangeIam", "Effect": "Deny", "Action": ["iam:Add*", "iam:Attach*", "iam:Change*", "iam:Create*", "iam:Deactivate*", "iam:Delete*", "iam:Detach*", "iam:Disable*", "iam:Enable*", "iam:Generate*", "iam:PassRole", "iam:Put*", "iam:Remove*", "iam:Reset*", "iam:Resync*", "iam:Set*", "iam:Tag*", "iam:Untag*", "iam:Update*", "iam:Upload*"], "Resource": "*"},
   {"Sid": "NeverTheDatasetRolesBucketOrAlias", "Effect": "Deny", "Action": ["kms:*", "s3:*", "sts:AssumeRole"], "Resource": ["arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest", "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator", "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-bootstrap", "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*", "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-datasets"]},
   {"Sid": "NeverDatasetKeys", "Effect": "Deny", "Action": "kms:*", "Resource": "*", "Condition": {"StringEquals": {"aws:ResourceTag/nlw-purpose": "dataset"}}}
 ]}

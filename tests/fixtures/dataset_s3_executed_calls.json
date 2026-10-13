@@ -6446,7 +6446,55 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role-policy",
@@ -6494,7 +6542,55 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role-policy",
@@ -6542,7 +6638,55 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role-policy",
@@ -6968,7 +7112,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role",
@@ -7008,7 +7192,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role",
@@ -7048,7 +7272,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "get-role",
@@ -7168,7 +7432,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "list-attached-role-policies",
@@ -7208,7 +7512,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "list-attached-role-policies",
@@ -7248,7 +7592,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "list-attached-role-policies",
@@ -7368,7 +7752,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-policies",
@@ -7408,6 +7832,26 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
   "machine": "audit",
   "service": "iam",
@@ -7428,7 +7872,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-policies",
@@ -7468,7 +7952,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-tags",
@@ -7508,7 +8032,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-tags",
@@ -7548,6 +8112,26 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
   "machine": "audit",
   "service": "iam",
@@ -7568,7 +8152,47 @@
   ]
  },
  {
+  "step": "P13-02",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
   "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "iam",
   "operation": "list-role-tags",
@@ -8585,6 +9209,22 @@
  },
  {
   "step": "P00-03",
+  "machine": "audit",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P13-02",
   "machine": "audit",
   "service": "sts",
   "operation": "get-caller-identity",

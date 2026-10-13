@@ -3224,6 +3224,9 @@ IAM_WRITES = {
     "iam:DeleteRolePermissionsBoundary",
     "iam:DeleteRolePolicy",
     "iam:DetachRolePolicy",
+    # F9: the remaining write families, so "every IAM write" is literal.
+    "iam:DisableOrganizationsRootCredentialsManagement",
+    "iam:GenerateCredentialReport",
     "iam:PassRole",
     "iam:PutRolePermissionsBoundary",
     "iam:PutRolePolicy",
@@ -3260,9 +3263,11 @@ def _denied(t: Templates, name: str, sid: str, action: str, resources: set[str])
 
 def separation_violations(t: Templates) -> list[str]:
     """E9, three functions. The operator and audit identities can make no IAM
-    change at all, on any resource including their own roles. The provisioner
-    can use none of the six roles, touches no dataset object and nothing of
-    the audit side, and cannot change a trust policy or a boundary. The
+    change at all, on any resource including their own roles. The
+    provisioner's permission set can assume none of the six roles, touches no
+    dataset object and nothing of the audit side, and cannot update a trust
+    policy in place or change a boundary (it still operates the instance,
+    R15, and can re-create four roles, R17: residuals, not checked here). The
     operator never reaches the audit side, the audit side never the dataset
     side."""
     v = []
@@ -3975,7 +3980,7 @@ def test_the_audit_admin_can_tag_only_untagged_keys() -> None:
 def test_every_owner_decision_is_open_with_options_and_a_recommendation() -> None:
     text = DECISIONS.read_text()
     rows = re.findall(r"^\| \*\*(E\d+)\*\* \| (.+?) \| (.+?) \| (.+?) \|$", text, re.M)
-    assert [r[0] for r in rows] == [f"E{n}" for n in range(1, 16)]
+    assert [r[0] for r in rows] == [f"E{n}" for n in range(1, 17)]
     for _, _, options, recommendation in rows:
         assert options.strip() and recommendation.strip()
     assert "every decision below is open" in text
@@ -3994,6 +3999,11 @@ def test_every_owner_decision_is_open_with_options_and_a_recommendation() -> Non
     assert "**Three different people.**" in decisions["E9"][3]
     assert "**What is attested, not enforced:**" in decisions["E9"][3]
     assert "can make no IAM change at all" in decisions["E9"][3]
+    # Round 6: the provisioner's use of the runtime roles is stated, not hidden.
+    assert "R15" in decisions["E8"][3] and "R15" in decisions["E9"][3]
+    assert "touches no dataset object or audit record" not in decisions["E9"][3]
+    assert "**Decided by the owner (2026-10-13): (a) synthetic data only" in decisions["E16"][3]
+    assert "blocker before real data" in decisions["E16"][3]
 
     assert "**The dedicated proof account only.**" in decisions["E5"][3]
     assert (
@@ -4027,7 +4037,11 @@ def test_overclaims_are_corrected() -> None:
     assert "**The stub run does not observe\n  every possible AWS call:**" in review
     assert "**Production isolation during D6 is an AWS-side control" not in review
     assert "**The dedicated proof account limits the blast radius (E14).**" in review
-    assert "The account does not\nreplace least privilege inside it." in review
+    assert "The account does\nnot replace least privilege inside it." in review
+    for rid in ("R15", "R16", "R17", "R18", "R19", "R20"):
+        assert f"| **{rid}** |" in review, rid
+    assert "synthetic-data staging pilot (E16" in review
+    assert "**IAM template changes in round 6**" in review
     assert "| **R14** |" in review and "| **I8** |" in review
     assert "| **N1** separation bypassable" in review and "| **N9** operational readiness" in review
     assert (
@@ -4043,7 +4057,8 @@ def test_overclaims_are_corrected() -> None:
     # Round 4: the dedicated account is the blast-radius boundary; the policies
     # are additional controls; the stub is regression evidence only.
     assert "**What protects production.** AWS does" not in proof
-    assert "It does not replace least privilege\n  inside the account." in proof
+    assert "The\n  account does not replace least privilege inside it." in proof
+    assert "**But the\n  provisioner operates the proof instance**" in proof  # R15, not hidden
     assert "**Three people, three machines.**" in proof
     assert "**The shell and its tests are regression evidence only.**" in proof
     assert "It is not a security boundary and not an\n  exhaustive observation" in proof
@@ -5604,6 +5619,73 @@ def test_negative_control_role_shape_is_verified(
         assert expected in result.stderr, result.stderr
 
 
+_ROLE_ID = "AROA" + "EXAMPLEROLEID0001"
+_OTHER_ROLE_ID = "AROA" + "EXAMPLEROLEID0002"
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(
+    ("recorded", "now", "expected"),
+    [
+        (_ROLE_ID, _ROLE_ID, None),
+        (_ROLE_ID, _OTHER_ROLE_ID, "nlw-staging-dataset-api was replaced after P03-15"),
+        (None, _ROLE_ID, "nlw-staging-dataset-api was replaced after P03-15"),
+        (_ROLE_ID, None, "nlw-staging-dataset-api was replaced after P03-15"),
+    ],
+    ids=["same role", "deleted and re-created", "nothing recorded", "no role id now"],
+)
+def test_negative_control_a_replaced_role_is_caught_at_the_end(
+    tmp_path: Path, recorded: str | None, now: str | None, expected: str | None
+) -> None:
+    """F3: P03-15 records each role's RoleId; P13-02 expects it unchanged. A
+    role deleted and re-created with identical content has a new RoleId."""
+    (tmp_path / "proof").mkdir()
+    (tmp_path / "proof" / "trust-api.json").write_text(json.dumps(ROLE_TRUST))
+    (tmp_path / "proof" / "policy-api.json").write_text(json.dumps(ROLE_POLICY))
+    if recorded is not None:
+        (tmp_path / "proof" / "role-id-api").write_text(recorded + "\n")
+    role = _role() if now is None else _role(RoleId=now)
+    result = _fake_run(
+        tmp_path, "verify_created_role nlw-proof-human-audit-reader api expect",
+        **{**GOOD_ROLE, "FAKE_GET_ROLE": role},
+    )  # fmt: skip
+    if expected is None:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0 and expected in result.stderr, result.stderr
+
+
+@needs_bash_and_git
+@pytest.mark.parametrize(("now", "ok"), [(_ROLE_ID, True), (None, False), ("not-a-role-id", False)])
+def test_p03_15_records_a_well_formed_role_id(tmp_path: Path, now: str | None, ok: bool) -> None:
+    (tmp_path / "proof").mkdir()
+    (tmp_path / "proof" / "trust-api.json").write_text(json.dumps(ROLE_TRUST))
+    (tmp_path / "proof" / "policy-api.json").write_text(json.dumps(ROLE_POLICY))
+    role = _role() if now is None else _role(RoleId=now)
+    result = _fake_run(
+        tmp_path, "verify_created_role nlw-proof-human-audit-reader api record",
+        **{**GOOD_ROLE, "FAKE_GET_ROLE": role},
+    )  # fmt: skip
+    assert (result.returncode == 0) is ok, result.stderr
+    if ok:
+        assert (tmp_path / "proof" / "role-id-api").read_text() == _ROLE_ID + "\n"
+    else:
+        assert "nlw-staging-dataset-api has no role id" in result.stderr
+
+
+def test_p13_02_repeats_the_independent_role_check_after_the_roles_were_used() -> None:
+    """F3: P13-02 runs on the audit machine after P12, with the audit reader,
+    in expect mode for all six roles; P03-15 records."""
+    blocks = {b["label"]["id"]: b for b in labelled_blocks(proof_text()) if b["label"]}
+    p03, p13 = blocks["P03-15"], blocks["P13-02"]
+    assert p13["label"]["where"] == "audit machine" and p13["label"]["cls"] == "READ-ONLY"
+    assert 'verify_created_role "$READER" "$r" record' in p03["body"]
+    assert 'verify_created_role "$READER" "$r" expect' in p13["body"]
+    assert "for r in bootstrap api ingest operator audit-admin audit-reader; do" in p13["body"]
+    order = list(blocks)
+    assert order.index("P12-03") < order.index("P13-02") < order.index("X01")
+
+
 @needs_bash_and_git
 @pytest.mark.parametrize(
     ("answers", "ok"),
@@ -5919,6 +6001,18 @@ def _p00_02(
     if layout == "assume-unchanged":
         _git(repo, git_env, "update-index", "--assume-unchanged", f"docs/runbooks/{PROOF.name}")
         (repo / "docs" / "runbooks" / PROOF.name).write_text(PROOF.read_text() + "\n# edited\n")
+    if layout == "git-replace":  # F4: the template's blob replaced by a tampered one
+        blob = _git(repo, git_env, "rev-parse", f"HEAD:docs/runbooks/{PROVISIONING.name}")
+        tampered = tmp_path / "tampered.md"
+        tampered.write_text(
+            PROVISIONING.read_text().replace('"Effect": "Deny"', '"Effect": "Allow"')
+        )
+        fake = _git(repo, git_env, "hash-object", "-w", str(tampered))
+        _git(repo, git_env, "replace", blob, fake)
+    if layout == "grafts":  # F4: history rewritten by a grafts file
+        (repo / ".git" / "info" / "grafts").write_text(f"{head} {procedure}\n")
+    if layout == "shallow":  # F4: a shallow boundary hides history
+        (repo / ".git" / "shallow").write_text(f"{procedure}\n")
     humans = {
         "OPERATOR_HUMANS_JSON": json.dumps([sso_role(DUMMY_ACCOUNT, "NlwD6Operator")]),
         "AUDIT_ADMIN_HUMANS_JSON": json.dumps([sso_role(DUMMY_ACCOUNT, "NlwD6AuditAdmin")]),
@@ -6137,6 +6231,9 @@ def test_negative_control_p00_02_refuses_to_start(
         ("not-on-main", "STOP S9: the reviewed commit is not on origin/main"),
         ("skip-worktree", "STOP S9: a tracked file is marked skip-worktree or assume-unchanged"),
         ("assume-unchanged", "STOP S9: a tracked file is marked skip-worktree or assume-unchanged"),
+        ("git-replace", "STOP S9: replace refs exist"),
+        ("grafts", "STOP S9: a grafts file exists"),
+        ("shallow", "STOP S9: the checkout is shallow"),
     ],
     ids=[
         "gate hidden by .git/info/exclude",
@@ -6148,6 +6245,9 @@ def test_negative_control_p00_02_refuses_to_start(
         "a commit not on origin/main",
         "a template hidden by skip-worktree",
         "a step file hidden by assume-unchanged",
+        "a template blob replaced by git replace (F4)",
+        "history rewritten by info/grafts (F4)",
+        "a shallow clone (F4)",
     ],
 )
 def test_negative_control_the_gate_is_read_only_from_the_reviewed_commit(
@@ -8337,6 +8437,48 @@ def test_negative_control_render_refuses_a_hidden_working_tree_edit(
     result = _lib_run(tmp_path, 'render role-api > "$PROOF_DIR/out.json"', hide_an_edit)
     assert result.returncode != 0
     assert "STOP S9: a tracked file is marked skip-worktree or assume-unchanged" in result.stderr
+
+
+@needs_bash_and_git
+def test_negative_control_render_refuses_a_replaced_template_blob(tmp_path: Path) -> None:
+    """F4: `git replace` makes `git show` print another blob for the reviewed
+    commit while every working-tree check still passes. Render refuses any
+    replace ref, and lib.sh never honours one."""
+
+    def replace_the_template(repo: Path) -> None:
+        env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
+        git = ["git", "-C", str(repo)]
+        blob = subprocess.run(
+            [*git, "rev-parse", f"HEAD:docs/runbooks/{PROVISIONING.name}"],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()  # fmt: skip
+        tampered = repo.parent / "tampered.md"
+        tampered.write_text(PROVISIONING.read_text().replace("CreateOnce", "CreateTwice"))
+        fake = subprocess.run(
+            [*git, "hash-object", "-w", str(tampered)],
+            capture_output=True, text=True, check=True, env=env,
+        ).stdout.strip()  # fmt: skip
+        subprocess.run([*git, "replace", blob, fake], check=True, env=env)
+
+    result = _lib_run(tmp_path, 'render role-api > "$PROOF_DIR/out.json"', replace_the_template)
+    assert result.returncode != 0
+    assert "STOP S9: replace refs exist or are honoured" in result.stderr
+
+
+def test_every_git_reading_block_disables_replace_objects() -> None:
+    """F4: lib.sh and P00-02, the two places that read the reviewed commit,
+    export GIT_NO_REPLACE_OBJECTS=1 before any git call."""
+    text = proof_text()
+    for marker in ("# shellcheck shell=bash", "GATE=docs/evidence/o2-d6/d6-gate.json"):
+        at = text.index(marker)
+        start = text.rindex("```", 0, at)  # the start of the code block holding it
+        block = text[start : text.index("```", at)]
+        code = re.compile(
+            r"(?m)^(?!\s*#)[^\n]*\bgit\s+(?:-C|show|rev-parse|for-each-ref|status|ls-files|merge-base|cat-file|diff)\b"
+        )
+        first_git = code.search(block)
+        assert first_git, marker
+        assert 0 <= block.index("export GIT_NO_REPLACE_OBJECTS=1") < first_git.start(), marker
 
 
 @needs_bash_and_git
