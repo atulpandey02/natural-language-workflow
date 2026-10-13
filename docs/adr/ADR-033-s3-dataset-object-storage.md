@@ -156,7 +156,7 @@ policy (O-5). Customer uploads stay disabled while O-3 and O-5 are open.
 | `nlw-<env>-dataset-bootstrap` (EC2 instance profile) | `sts:AssumeRole` on **only** `nlw-<env>-dataset-api` and `nlw-<env>-dataset-ingest` | Any S3 object action; any KMS encrypt or decrypt; assume the operator role |
 | `nlw-<env>-dataset-api` | Under `versions/` of its own bucket only: `PutObject` (conditional create, plus the multipart create, part and complete calls), `AbortMultipartUpload`, and object metadata for retries and orphan adoption (see note 1). KMS `GenerateDataKey` and `Decrypt` on its own key | Delete objects or versions, list, access other prefixes, access the other environment's bucket or key |
 | `nlw-<env>-dataset-ingest` | `GetObject` on `versions/` of its own bucket (see note 2), and KMS `Decrypt` | Upload, overwrite, copy, delete or list. Operator credentials |
-| `nlw-<env>-dataset-operator` | Bounded listing (prefix-conditioned), version-aware purge (`DeleteObjectVersion`), verification and multipart abort | Assumption by the bootstrap role or any application identity. It requires a separate **human** assumption path with **MFA**, and is used only through reviewed operator commands |
+| `nlw-<env>-dataset-operator` | Version listing bounded to `versions/` (`s3:prefix`); listing of in-progress multipart uploads on the bucket, which IAM cannot bound by prefix and the application filters (note 3); version-aware purge (`DeleteObjectVersion`), verification and multipart abort, under `versions/` only | Assumption by the bootstrap role or any application identity. It requires a separate **human** assumption path with **MFA**, and is used only through reviewed operator commands |
 
 **Note 1, API metadata.** S3 cannot grant metadata-only reads.
 `HeadObject` and `GetObjectAttributes` both require `s3:GetObject`. So the
@@ -184,6 +184,104 @@ in the application:
 
 A future refinement is per-message STS session policies through a broker. It
 is not adopted now, because it would require the ingest container to call STS.
+
+**Note 3, multipart listing.** The AWS Service Authorization Reference
+lists no `s3:prefix` condition key for `s3:ListBucketMultipartUploads`
+(bucket resource only); `s3:ListBucketVersions` and `s3:ListBucket` do
+support it. A prefix condition on the multipart listing would never match,
+so every listing would be denied. The operator therefore lists in-progress
+uploads on the exact bucket ARN, without a condition, and the application
+enforces the prefix:
+
+- only uploads whose key lies inside the requested version or dataset prefix
+  are aborted; look-alike siblings are ignored;
+- a key outside the requested prefix, a malformed, encoded or non-ASCII key,
+  `EncodingType`, a differing prefix echo, bad pagination markers, a partial
+  page or more than 100 pages refuse the whole listing before any abort;
+- `AbortMultipartUpload` and `DeleteObjectVersion` remain object-resource
+  grants under `versions/*`; `ListMultipartUploadParts` is not granted.
+
+**Residual:** the operator role can see the keys and upload ids (not the
+bytes) of every in-progress upload in its environment's bucket.
+
+**Legacy areas on S3 (resolved after F5).** `purge`, the tombstone absence
+check and `verify-objects` also cover the legacy `quarantine/` and `datasets/`
+areas, which the operator may not list on S3 (`ListVersionsBounded` is
+`versions/*` only). Before this was fixed, on S3:
+
+- a version purge **deleted the version's objects first**, then failed on
+  the denied legacy listing before any receipt was written, and every re-run
+  failed the same way;
+- `verify-objects` failed inside the application before any request
+  (`versions/` was refused as a key).
+
+Now:
+
+- the S3 store holds only `versions/` keys: it refuses to write or read a
+  legacy key, reports one as absent (`verify-objects` lists such a version as
+  missing), and answers a legacy listing as empty **without a request**;
+- the `versions/` area root is a valid listing prefix;
+- on S3, for each version purge (and each dataset-wide removal), **every
+  required pre-deletion listing finishes before that purge removes anything**.
+  (The local development store lists each legacy item again while purging
+  it, after `versions/` has been removed, so there a listing can follow a
+  deletion.)
+
+What this does **not** guarantee (deletion and receipt behaviour, exactly):
+
+- **A purge can stop after removing some or all bytes.** Removal is followed
+  by a verification listing and only then by the receipt. If a removal fails
+  part-way (a delete or abort error), or the verification listing fails or
+  still finds items, the purge stops before that version's receipt: whatever
+  was removed stays removed, **no receipt and no purge event is recorded for
+  that version by this attempt**, and it stays `DELETING`. (In a dataset purge,
+  receipts appended earlier for other versions may exist; see below.)
+- **A receipt can exist without a purge event.** The receipt is appended to
+  the external deletion log **before** the purge event is inserted and the
+  transaction commits. If the receipt write fails, or anything after it fails
+  (the event insert, a later version, the commit), no purge event is recorded
+  and the version stays `DELETING`, but **a receipt may or may not exist** in
+  the deletion log: the local log writes the line before `fsync`, and an
+  external sink can accept a record and then time out. Receipts are therefore
+  evidence of a deletion attempt, not proof that the purge completed.
+- **What tombstone requires.** For a version **with a recorded storage key,
+  or with any earlier purge event**, tombstone requires the latest operator
+  purge event recorded after the deletion request, a receipt that the
+  configured deletion log verifies for it, and a live check that nothing is
+  stored. For a version **with neither**, tombstone requires only the live
+  absence check, and no check at all when no store is configured. A receipt
+  without a purge event therefore never lets a keyed version be tombstoned,
+  but a version without a key can be tombstoned with no event and no receipt.
+- **A dataset purge is not atomic across versions.** Versions are purged one
+  after another. An earlier version can be removed, and its receipt appended
+  to the external deletion log, before a later version fails, or before the
+  final dataset-wide removal and verification fail. The database transaction
+  then rolls back, including the earlier versions' purge events, so **earlier
+  receipts can exist while the overall dataset purge has not completed**.
+- **A re-run is safe but may record zero objects, or nothing.** Re-running
+  removes whatever remains and verifies. For a version **with a recorded
+  storage key**, it then records a receipt for what it removed, listing
+  **zero objects** if an earlier failed run had already removed everything.
+  For a version **without a recorded key** (for example an upload that
+  crashed before its key was recorded), a re-run that removes something
+  records a receipt for it, but a re-run that **finds nothing left records no
+  receipt and no purge event**; the version is then tombstoned on the live
+  absence check alone (see above). Bytes an earlier failed attempt removed for
+  such a version get **no receipt from the re-run**; a receipt from that
+  earlier attempt may or may not exist.
+- **A legacy-keyed row on S3 purges to a verified zero-object receipt.** A
+  version whose database key is a legacy `quarantine/` or `datasets/` key has
+  nothing under `versions/`. On S3 its purge verifies, records a receipt for
+  zero objects, and the version can then be tombstoned. `verify-objects`
+  reports a live row of this kind as missing. Neither the receipt nor the
+  tombstone proves that no bytes were ever placed outside `versions/` by an
+  administrator: the store never looks there.
+
+**Residual:** an object an administrator puts outside `versions/` is invisible
+to the operator role, to `verify-objects`, to purge and to tombstone. The
+application never writes there. The D6 proof checks once that the bucket holds
+nothing else (runbook §7, item 8); that is a point-in-time check, not a
+continuous control.
 
 **Credential delivery on the single host** (an explicitly documented
 single-host design; on ECS or EKS it is replaced by task or pod identity):
@@ -362,7 +460,8 @@ AWS facts this design relies on (AWS documentation, checked 2026-10-09):
 ### Purge (operator; deletion requests and D2)
 
 1. Check the recovery lock.
-2. `ListMultipartUploads(Prefix=<version key>)`, then abort each.
+2. `ListMultipartUploads(Prefix=<version key>)`, keep only uploads inside
+   that prefix (note 3), then abort each.
 3. `ListObjectVersions(Prefix=<version key>)`.
 4. `DeleteObjectVersion` for every version and delete marker.
 5. Verify that nothing remains.

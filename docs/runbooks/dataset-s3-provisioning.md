@@ -344,9 +344,12 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
 ```json
 {"Version": "2012-10-17", "Statement": [
   {"Sid": "ListVersionsBounded", "Effect": "Allow",
-   "Action": ["s3:ListBucket", "s3:ListBucketVersions", "s3:ListBucketMultipartUploads"],
+   "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
    "Resource": "arn:aws:s3:::<BUCKET>",
    "Condition": {"StringLike": {"s3:prefix": ["versions/*"]}}},
+  {"Sid": "ListInProgressUploads", "Effect": "Allow",
+   "Action": "s3:ListBucketMultipartUploads",
+   "Resource": "arn:aws:s3:::<BUCKET>"},
   {"Sid": "PurgeAndVerify", "Effect": "Allow",
    "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectAttributes",
               "s3:DeleteObjectVersion", "s3:AbortMultipartUpload"],
@@ -374,6 +377,34 @@ Every role in this section also carries the **audit-protection deny** in §4.3.
   version id, which would only add a delete marker, is not granted.
 - The operator purges dataset objects, never audit records. Audit review uses
   `<AUDIT_READER_ROLE>`.
+- **Multipart listing is not prefix-bounded by IAM.** The AWS Service
+  Authorization Reference (S3 actions table, checked 2026-10-12) lists **no**
+  `s3:prefix` condition key for `s3:ListBucketMultipartUploads`, whose only
+  resource is the bucket. Under the earlier template, which put it in the
+  `s3:prefix`-conditioned statement, the condition could never match, so every
+  `ListMultipartUploads` call would have been implicitly denied and purge
+  verification would have failed. It is now its own statement on the exact
+  bucket ARN, with no condition. What this adds, and what it does not:
+  - the operator can list the **keys and upload ids of in-progress uploads
+    anywhere in this bucket** (metadata only, no object bytes);
+  - it can **abort** only under `versions/*`: `AbortMultipartUpload` is an
+    object-resource action, so `PurgeAndVerify` still scopes it;
+  - `s3:ListMultipartUploadParts` is **not** granted (no operator command
+    lists parts), and no read, write or delete grant changes;
+  - the prefix is enforced by the application: `S3BlobStore` aborts only
+    uploads whose key lies inside the requested version or dataset prefix,
+    ignores look-alike siblings, and refuses the whole listing, before any
+    abort, on a key outside the requested prefix, a malformed or encoded key,
+    `EncodingType`, a prefix echo that differs, bad pagination markers, a
+    partial page, or more than 100 pages.
+
+| Action | Resource type (AWS) | `s3:prefix` supported | Operator grant |
+|---|---|---|---|
+| `s3:ListBucketVersions` | bucket | yes | `versions/*` only (`ListVersionsBounded`) |
+| `s3:ListBucketMultipartUploads` | bucket | **no** | whole bucket, filtered in code (`ListInProgressUploads`) |
+| `s3:ListMultipartUploadParts` | object | no | not granted |
+| `s3:AbortMultipartUpload` | object | no (resource-scoped) | `versions/*` (`PurgeAndVerify`) |
+| `s3:DeleteObjectVersion` | object | no (resource-scoped) | `versions/*` (`PurgeAndVerify`), and the bucket policy denies every other principal |
 - It is used only through reviewed operator commands:
 
 | Command | Purpose |
@@ -719,7 +750,8 @@ may change or remove a boundary.
 <!-- template: boundary-operator -->
 ```json
 {"Version": "2012-10-17", "Statement": [
-  {"Sid": "ListVersionsBounded", "Effect": "Allow", "Action": ["s3:ListBucket", "s3:ListBucketVersions", "s3:ListBucketMultipartUploads"], "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*", "Condition": {"StringLike": {"s3:prefix": ["versions/*"]}}},
+  {"Sid": "ListVersionsBounded", "Effect": "Allow", "Action": ["s3:ListBucket", "s3:ListBucketVersions"], "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*", "Condition": {"StringLike": {"s3:prefix": ["versions/*"]}}},
+  {"Sid": "ListInProgressUploads", "Effect": "Allow", "Action": "s3:ListBucketMultipartUploads", "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*"},
   {"Sid": "PurgeAndVerify", "Effect": "Allow", "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectAttributes", "s3:DeleteObjectVersion", "s3:AbortMultipartUpload"], "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*/versions/*"},
   {"Sid": "Decrypt", "Effect": "Allow", "Action": ["kms:Decrypt"], "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*"}
 ]}
@@ -1204,6 +1236,57 @@ exceptions added.
    not exist yet.
 8. **Operator purge** removes every version and delete marker; listing shows
    none; the receipt lists version ids.
+   - **O-MPU-LIST:** the operator's `ListMultipartUploads` with
+     `Prefix=<version key>` is **allowed**, and returns only that prefix's
+     uploads;
+   - **O-MPU-ABORT:** the operator aborts an upload under `versions/`, and an
+     abort of an upload outside `versions/` is **denied**;
+   - **O-MPU-PARTS:** the operator's `ListParts` is **denied**;
+   - **O-LIST-OUTSIDE:** the operator's `ListObjectVersions` outside
+     `versions/` is **denied**.
+   - **Limitation, not provable here:** IAM cannot stop the operator role
+     from listing in-progress uploads anywhere in the bucket. The offline
+     tests (`tests/unit/test_s3_multipart_cleanup.py`) prove only that the
+     application never aborts outside the requested prefix; D6 proves that
+     AWS evaluates the grants as above, not that every client of the
+     operator role filters.
+   - **O-LEGACY:** with the operator role, `purge`, `tombstone` and
+     `verify-objects` make **no** request outside `versions/` (the S3 store
+     answers the legacy `quarantine/` and `datasets/` areas as empty without
+     asking), and none is denied;
+   - **O-BUCKET-ONLY-VERSIONS:** an administrator listing of the whole bucket
+     shows nothing outside `versions/`. Anything there would be invisible to
+     the operator role, `verify-objects`, purge and tombstone (ADR-033 note 3).
+     This is a point-in-time check.
+   - **O-MISSING-STATUS (record, do not assume):** with the operator role,
+     `HeadObject` and `GetObjectAttributes` on a key under `versions/` that
+     does not exist. Record the exact status AWS returns (403 or 404). The
+     operator's `s3:ListBucket` grant is conditioned on `s3:prefix`, which these
+     requests do not carry, and S3 may answer 403 for a missing key without
+     `ListBucket`. If it is 403, `verify-objects` stops with an error instead
+     of reporting the object as missing (it fails closed). Runtime handling is
+     **not** changed until this evidence exists; the result decides it.
+   - **Receipts after a partial failure:** see ADR-033 note 3. A part-way
+     removal failure, or a verification that fails or still finds items,
+     leaves whatever was removed removed, with no receipt and no purge event
+     from that attempt for that version. A failure at or after the receipt
+     write (including the event insert and the commit) records no purge
+     event, but a receipt may or may not exist in the deletion log; a dataset
+     purge can likewise leave earlier versions' receipts while the dataset
+     stays `DELETING`. The safe re-run records a receipt for what it removes
+     (zero objects if everything was already gone) for a version with a
+     recorded key; for a version without one it records no receipt when
+     nothing remains. Only for a version with a recorded key, or with any
+     earlier purge event, does tombstone require the latest operator purge
+     event after the deletion request, a receipt for it that the configured
+     deletion log verifies, and a live check that nothing is stored; a
+     version with no key and no purge event is tombstoned on the live absence
+     check alone, or with no check when no store is configured. A
+     legacy-keyed row purges to a verified zero-object receipt.
+   - **Recovery when a purge is refused:** a malformed or unexpected
+     in-progress upload under a version refuses the purge (fail closed). An
+     administrator aborts it after review, or the lifecycle rule removes it
+     after one day; then re-run the purge.
 9. **IMDS is unreachable** from every container, and no static credential
    exists anywhere.
 10. **Audit:**

@@ -140,6 +140,7 @@
   "boundary-operator": {
    "sids": [
     "ListVersionsBounded",
+    "ListInProgressUploads",
     "PurgeAndVerify",
     "Decrypt"
    ],
@@ -1158,6 +1159,7 @@
   "role-operator": {
    "sids": [
     "ListVersionsBounded",
+    "ListInProgressUploads",
     "PurgeAndVerify",
     "Decrypt",
     "NeverOtherEnvironment",

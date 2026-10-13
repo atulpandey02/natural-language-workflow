@@ -404,10 +404,13 @@ EXPECTED_ROLE_ALLOWS: dict[str, dict[str, tuple[set[str], set[str], dict[str, An
     },
     "role-operator": {
         "ListVersionsBounded": (
-            {"s3:ListBucket", "s3:ListBucketVersions", "s3:ListBucketMultipartUploads"},
+            {"s3:ListBucket", "s3:ListBucketVersions"},
             {_DS},
             {"StringLike": {"s3:prefix": ["versions/*"]}},
         ),
+        # F5 (PR #61): no s3:prefix key exists for this action; the bucket only,
+        # filtered by prefix in the application.
+        "ListInProgressUploads": ({"s3:ListBucketMultipartUploads"}, {_DS}, None),
         "PurgeAndVerify": (
             {
                 "s3:GetObject",

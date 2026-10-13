@@ -81,9 +81,16 @@ class FakeBucket:
         self.page_size = page_size
         self.conflict_next: list[str] = []  # ops that answer 409 once
         self.tamper_response: dict[str, Any] = {}  # fields overridden in write responses
+        self.aborted: list[tuple[str, str]] = []  # (key, upload id) of every abort
+        self.abort_fail_next: list[str] = []  # upload ids whose next abort answers 500
+        # Rewrites every ListMultipartUploads response (a misbehaving or
+        # tampered S3): ``(request kwargs, honest response) -> response``.
+        self.uploads_response: Any = None
 
-    def client(self) -> FakeS3:
-        return FakeS3(self)
+    def client(self, role: str | None = None) -> FakeS3:
+        """A recording view. ``role="operator"`` applies the operator role's
+        IAM grants from the provisioning runbook (``role-operator``)."""
+        return FakeS3(self, role)
 
     def current(self, key: str) -> Version | None:
         versions = self.objects.get(key) or []
@@ -98,9 +105,37 @@ class FakeBucket:
 class FakeS3:
     """A recording client view over a ``FakeBucket`` (boto3 S3 client API)."""
 
-    def __init__(self, bucket: FakeBucket) -> None:
+    def __init__(self, bucket: FakeBucket, role: str | None = None) -> None:
         self.b = bucket
+        self.role = role
         self.calls: list[str] = []
+        self.denied: list[str] = []  # operations IAM refused (as AccessDenied)
+
+    # --- IAM (role-operator in docs/runbooks/dataset-s3-provisioning.md) --------
+    _OPERATOR_OBJECT_OPS = {
+        "get_object", "head_object", "get_object_attributes", "delete_object",
+        "abort_multipart_upload",
+    }  # fmt: skip
+
+    def _iam(self, op: str, kw: dict[str, Any]) -> None:
+        if self.role is None:
+            return
+        assert self.role == "operator", self.role
+        if op == "list_object_versions":
+            # ListVersionsBounded: StringLike s3:prefix "versions/*"; an absent
+            # prefix never matches.
+            allowed = str(kw.get("Prefix", "\0")).startswith("versions/")
+        elif op == "list_multipart_uploads":
+            allowed = True  # ListInProgressUploads: the bucket, no condition
+        elif op == "delete_object" and "VersionId" not in kw:
+            allowed = False  # s3:DeleteObject is not granted, only DeleteObjectVersion
+        elif op in self._OPERATOR_OBJECT_OPS:
+            allowed = str(kw.get("Key", "")).startswith("versions/")  # PurgeAndVerify
+        else:
+            allowed = False  # no PutObject, multipart create/part/complete, ...
+        if not allowed:
+            self.denied.append(op)
+            raise error("AccessDenied", 403, op)
 
     # --- policy -----------------------------------------------------------------
     def _encryption_policy(self, op: str, kw: dict[str, Any]) -> None:
@@ -120,6 +155,7 @@ class FakeS3:
     # --- writes -----------------------------------------------------------------
     def put_object(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("put_object")
+        self._iam("put_object", kw)
         self._encryption_policy("PutObject", kw)
         if kw.get("IfNoneMatch") != "*":
             raise error("AccessDenied", 403, "PutObject")  # DenyUnconditionalCreate
@@ -139,6 +175,7 @@ class FakeS3:
 
     def create_multipart_upload(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("create_multipart_upload")
+        self._iam("create_multipart_upload", kw)
         self._encryption_policy("CreateMultipartUpload", kw)
         upload_id = f"u{next(self.b._ids):06d}"
         self.b.uploads[upload_id] = Upload(kw["Key"], "aws:kms", kw["SSEKMSKeyId"])
@@ -146,6 +183,7 @@ class FakeS3:
 
     def upload_part(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("upload_part")
+        self._iam("upload_part", kw)
         up = self.b.uploads.get(kw["UploadId"])
         if up is None or up.key != kw["Key"]:
             raise error("NoSuchUpload", 404, "UploadPart")
@@ -158,6 +196,7 @@ class FakeS3:
 
     def complete_multipart_upload(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("complete_multipart_upload")
+        self._iam("complete_multipart_upload", kw)
         if kw.get("IfNoneMatch") != "*":
             raise error("AccessDenied", 403, "CompleteMultipartUpload")
         self._conflict("complete_multipart_upload")
@@ -184,12 +223,22 @@ class FakeS3:
 
     def abort_multipart_upload(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("abort_multipart_upload")
-        self.b.uploads.pop(kw["UploadId"], None)
+        self._iam("abort_multipart_upload", kw)
+        uid = kw["UploadId"]
+        if uid in self.b.abort_fail_next:
+            self.b.abort_fail_next.remove(uid)
+            raise error("InternalError", 500, "AbortMultipartUpload")
+        up = self.b.uploads.get(uid)
+        if up is None or up.key != kw["Key"]:
+            raise error("NoSuchUpload", 404, "AbortMultipartUpload")
+        self.b.aborted.append((kw["Key"], uid))
+        del self.b.uploads[uid]
         return {}
 
     # --- reads ------------------------------------------------------------------
     def get_object(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("get_object")
+        self._iam("get_object", kw)
         v = self.b.current(kw["Key"])
         if v is None or v.data is None:
             raise error("NoSuchKey", 404, "GetObject")
@@ -197,6 +246,7 @@ class FakeS3:
 
     def head_object(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("head_object")
+        self._iam("head_object", kw)
         v = self.b.current(kw["Key"])
         if v is None or v.data is None:
             raise error("404", 404, "HeadObject")
@@ -204,6 +254,7 @@ class FakeS3:
 
     def get_object_attributes(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("get_object_attributes")
+        self._iam("get_object_attributes", kw)
         v = self.b.current(kw["Key"])
         if v is None or v.data is None:
             raise error("NoSuchKey", 404, "GetObjectAttributes")
@@ -222,6 +273,7 @@ class FakeS3:
     # --- operator ---------------------------------------------------------------
     def list_object_versions(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("list_object_versions")
+        self._iam("list_object_versions", kw)
         prefix = kw.get("Prefix", "")
         rows = [
             (key, v)
@@ -248,19 +300,36 @@ class FakeS3:
         return out
 
     def list_multipart_uploads(self, **kw: Any) -> dict[str, Any]:
+        """Keys in order, then uploads of one key in initiation order (as S3
+        does); ``MaxUploads`` per page, resumed after ``KeyMarker`` /
+        ``UploadIdMarker``. No ``EncodingType``: keys are returned raw."""
         self.calls.append("list_multipart_uploads")
+        self._iam("list_multipart_uploads", kw)
         prefix = kw.get("Prefix", "")
-        return {
-            "Uploads": [
-                {"Key": u.key, "UploadId": uid}
-                for uid, u in sorted(self.b.uploads.items())
-                if u.key.startswith(prefix)
-            ],
-            "IsTruncated": False,
+        rows = sorted(
+            ((u.key, uid) for uid, u in self.b.uploads.items() if u.key.startswith(prefix)),
+            key=lambda r: (r[0], int(r[1][1:])),
+        )
+        start = 0
+        if "KeyMarker" in kw:
+            marker = (kw["KeyMarker"], int(kw["UploadIdMarker"][1:]))
+            start = sum(1 for k, uid in rows if (k, int(uid[1:])) <= marker)
+        size = min(int(kw.get("MaxUploads", 1000)), self.b.page_size)
+        page, rest = rows[start : start + size], rows[start + size :]
+        out: dict[str, Any] = {
+            "Prefix": prefix,
+            "Uploads": [{"Key": k, "UploadId": uid} for k, uid in page],
+            "IsTruncated": bool(rest),
         }
+        if rest:
+            out["NextKeyMarker"], out["NextUploadIdMarker"] = page[-1]
+        if self.b.uploads_response is not None:
+            out = self.b.uploads_response(kw, out)
+        return out
 
     def delete_object(self, **kw: Any) -> dict[str, Any]:
         self.calls.append("delete_object")
+        self._iam("delete_object", kw)
         key, vid = kw["Key"], kw.get("VersionId")
         versions = self.b.objects.get(key, [])
         if vid is None:  # an unversioned delete only hides the object

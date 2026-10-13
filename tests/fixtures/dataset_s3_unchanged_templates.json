@@ -1,0 +1,2411 @@
+{
+  "_source": "docs/runbooks/dataset-s3-provisioning.md as reviewed in PR #60 integrated with main f57f75d (F5 operator split); every template except role-operator",
+  "templates": {
+    "audit-bucket-lifecycle": {
+      "Rules": [
+        {
+          "Expiration": {
+            "Days": "<AUDIT_EXPIRY_DAYS>"
+          },
+          "Filter": {
+            "Prefix": "dataset-data-events/"
+          },
+          "ID": "expire-after-retention",
+          "NoncurrentVersionExpiration": {
+            "NoncurrentDays": 1
+          },
+          "Status": "Enabled"
+        }
+      ]
+    },
+    "audit-bucket-policy": {
+      "Statement": [
+        {
+          "Action": "s3:GetBucketAcl",
+          "Condition": {
+            "StringEquals": {
+              "aws:SourceAccount": "<ACCOUNT>",
+              "aws:SourceArn": "<TRAIL_ARN>"
+            }
+          },
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "cloudtrail.amazonaws.com"
+          },
+          "Resource": "arn:aws:s3:::<AUDIT_BUCKET>",
+          "Sid": "CloudTrailAclCheck"
+        },
+        {
+          "Action": "s3:PutObject",
+          "Condition": {
+            "StringEquals": {
+              "aws:SourceAccount": "<ACCOUNT>",
+              "aws:SourceArn": "<TRAIL_ARN>",
+              "s3:x-amz-acl": "bucket-owner-full-control"
+            }
+          },
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "cloudtrail.amazonaws.com"
+          },
+          "Resource": "arn:aws:s3:::<AUDIT_BUCKET>/dataset-data-events/AWSLogs/<ACCOUNT>/*",
+          "Sid": "CloudTrailWriteThisTrailOnly"
+        },
+        {
+          "Action": "s3:*",
+          "Condition": {
+            "Bool": {
+              "aws:SecureTransport": "false"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": [
+            "arn:aws:s3:::<AUDIT_BUCKET>",
+            "arn:aws:s3:::<AUDIT_BUCKET>/*"
+          ],
+          "Sid": "DenyNonTLS"
+        },
+        {
+          "Action": "s3:*",
+          "Condition": {
+            "ArnLike": {
+              "aws:PrincipalArn": [
+                "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-api",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-ingest",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-bootstrap",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-operator"
+              ]
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": [
+            "arn:aws:s3:::<AUDIT_BUCKET>",
+            "arn:aws:s3:::<AUDIT_BUCKET>/*"
+          ],
+          "Sid": "DenyDatasetRoles"
+        },
+        {
+          "Action": [
+            "s3:DeleteObject",
+            "s3:DeleteObjectVersion",
+            "s3:BypassGovernanceRetention",
+            "s3:PutObjectRetention",
+            "s3:PutObjectLegalHold"
+          ],
+          "Condition": {
+            "ArnNotEquals": {
+              "aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/<AUDIT_ADMIN_ROLE>"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:s3:::<AUDIT_BUCKET>/*",
+          "Sid": "DenyRecordDeletionExceptAuditAdmin"
+        },
+        {
+          "Action": [
+            "s3:PutBucket*",
+            "s3:DeleteBucket*",
+            "s3:PutLifecycleConfiguration",
+            "s3:PutEncryptionConfiguration",
+            "s3:PutBucketVersioning",
+            "s3:PutBucketObjectLockConfiguration",
+            "s3:PutReplicationConfiguration",
+            "s3:PutInventoryConfiguration",
+            "s3:PutAnalyticsConfiguration",
+            "s3:PutMetricsConfiguration",
+            "s3:PutIntelligentTieringConfiguration",
+            "s3:PutAccelerateConfiguration"
+          ],
+          "Condition": {
+            "ArnNotEquals": {
+              "aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/<AUDIT_ADMIN_ROLE>"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:s3:::<AUDIT_BUCKET>",
+          "Sid": "DenyBucketConfigExceptAuditAdmin"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "audit-kms-key-statements": [
+      {
+        "Action": [
+          "kms:DescribeKey",
+          "kms:GetKeyPolicy",
+          "kms:PutKeyPolicy",
+          "kms:GetKeyRotationStatus",
+          "kms:EnableKeyRotation",
+          "kms:ListGrants",
+          "kms:ListResourceTags",
+          "kms:TagResource",
+          "kms:UntagResource",
+          "kms:CreateAlias",
+          "kms:UpdateAlias",
+          "kms:EnableKey",
+          "kms:DisableKey"
+        ],
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": [
+            "arn:aws:iam::<ACCOUNT>:root",
+            "arn:aws:iam::<ACCOUNT>:role/<AUDIT_ADMIN_ROLE>"
+          ]
+        },
+        "Resource": "*",
+        "Sid": "AdministerNeverUse"
+      },
+      {
+        "Action": "kms:GenerateDataKey*",
+        "Condition": {
+          "StringEquals": {
+            "aws:SourceAccount": "<ACCOUNT>",
+            "aws:SourceArn": "<TRAIL_ARN>"
+          },
+          "StringLike": {
+            "kms:EncryptionContext:aws:cloudtrail:arn": "<TRAIL_ARN>"
+          }
+        },
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "cloudtrail.amazonaws.com"
+        },
+        "Resource": "*",
+        "Sid": "CloudTrailEncryptThisTrailOnly"
+      },
+      {
+        "Action": "kms:DescribeKey",
+        "Condition": {
+          "StringEquals": {
+            "aws:SourceAccount": "<ACCOUNT>",
+            "aws:SourceArn": "<TRAIL_ARN>"
+          }
+        },
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "cloudtrail.amazonaws.com"
+        },
+        "Resource": "*",
+        "Sid": "CloudTrailDescribeKey"
+      },
+      {
+        "Action": "kms:Decrypt",
+        "Condition": {
+          "StringEquals": {
+            "kms:EncryptionContext:aws:cloudtrail:arn": "<TRAIL_ARN>"
+          }
+        },
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::<ACCOUNT>:role/<AUDIT_READER_ROLE>"
+        },
+        "Resource": "*",
+        "Sid": "AuditReadersDecrypt"
+      }
+    ],
+    "boundary-api": {
+      "Statement": [
+        {
+          "Action": [
+            "s3:PutObject",
+            "s3:AbortMultipartUpload"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*/versions/*",
+          "Sid": "CreateOnce"
+        },
+        {
+          "Action": [
+            "s3:GetObject",
+            "s3:GetObjectAttributes"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*/versions/*",
+          "Sid": "RetryAndOrphanMetadata"
+        },
+        {
+          "Action": [
+            "kms:GenerateDataKey",
+            "kms:Decrypt"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+          "Sid": "Encrypt"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "boundary-audit-admin": {
+      "Statement": [
+        {
+          "Action": [
+            "cloudtrail:CreateTrail",
+            "cloudtrail:GetTrail",
+            "cloudtrail:GetTrailStatus",
+            "cloudtrail:DescribeTrails",
+            "cloudtrail:GetEventSelectors",
+            "cloudtrail:PutEventSelectors",
+            "cloudtrail:StartLogging",
+            "cloudtrail:StopLogging",
+            "cloudtrail:UpdateTrail",
+            "cloudtrail:DeleteTrail",
+            "cloudtrail:AddTags",
+            "cloudtrail:ListTags"
+          ],
+          "Effect": "Allow",
+          "Resource": "<TRAIL_ARN>",
+          "Sid": "AdministerThisTrail"
+        },
+        {
+          "Action": [
+            "s3:CreateBucket",
+            "s3:ListBucket",
+            "s3:ListBucketVersions",
+            "s3:GetBucketPolicy",
+            "s3:PutBucketPolicy",
+            "s3:GetBucketAcl",
+            "s3:GetBucketVersioning",
+            "s3:PutBucketVersioning",
+            "s3:GetEncryptionConfiguration",
+            "s3:PutEncryptionConfiguration",
+            "s3:GetLifecycleConfiguration",
+            "s3:PutLifecycleConfiguration",
+            "s3:GetBucketObjectLockConfiguration",
+            "s3:PutBucketObjectLockConfiguration",
+            "s3:GetBucketPublicAccessBlock",
+            "s3:PutBucketPublicAccessBlock",
+            "s3:GetBucketOwnershipControls",
+            "s3:PutBucketOwnershipControls",
+            "s3:GetBucketTagging",
+            "s3:PutBucketTagging",
+            "s3:DeleteBucket"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*",
+          "Sid": "AdministerAuditBucket"
+        },
+        {
+          "Action": "kms:CreateKey",
+          "Condition": {
+            "StringEquals": {
+              "aws:RequestTag/nlw-env": "<ENV>"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "*",
+          "Sid": "CreateAuditKey"
+        },
+        {
+          "Action": "kms:TagResource",
+          "Condition": {
+            "Null": {
+              "aws:ResourceTag/nlw-env": "true"
+            },
+            "StringEquals": {
+              "aws:RequestTag/nlw-env": "<ENV>"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "*",
+          "Sid": "TagOnlyUntaggedKeys"
+        },
+        {
+          "Action": "kms:CreateAlias",
+          "Effect": "Allow",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit",
+          "Sid": "AuditKeyAlias"
+        },
+        {
+          "Action": [
+            "kms:CreateAlias",
+            "kms:DescribeKey",
+            "kms:GetKeyPolicy",
+            "kms:PutKeyPolicy",
+            "kms:EnableKeyRotation",
+            "kms:GetKeyRotationStatus",
+            "kms:ListGrants",
+            "kms:ListResourceTags"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+          "Sid": "AdministerAuditKey"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "boundary-audit-reader": {
+      "Statement": [
+        {
+          "Action": [
+            "s3:GetObject"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*/dataset-data-events/*",
+          "Sid": "ReadAuditLogs"
+        },
+        {
+          "Action": "s3:GetBucketLocation",
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*",
+          "Sid": "LocateAuditBucket"
+        },
+        {
+          "Action": [
+            "s3:ListBucket"
+          ],
+          "Condition": {
+            "StringLike": {
+              "s3:prefix": [
+                "dataset-data-events/*"
+              ]
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*",
+          "Sid": "ListAuditLogs"
+        },
+        {
+          "Action": [
+            "kms:Decrypt"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+          "Sid": "DecryptAuditLogs"
+        },
+        {
+          "Action": [
+            "cloudtrail:DescribeTrails",
+            "cloudtrail:GetTrailStatus",
+            "cloudtrail:ListPublicKeys"
+          ],
+          "Effect": "Allow",
+          "Resource": "*",
+          "Sid": "ValidateTrail"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "boundary-bootstrap": {
+      "Statement": [
+        {
+          "Action": "sts:AssumeRole",
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest"
+          ],
+          "Sid": "AssumeRuntimeRolesOnly"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "boundary-ingest": {
+      "Statement": [
+        {
+          "Action": [
+            "s3:GetObject"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*/versions/*",
+          "Sid": "ReadVersions"
+        },
+        {
+          "Action": [
+            "kms:Decrypt"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+          "Sid": "Decrypt"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "boundary-operator": {
+      "Statement": [
+        {
+          "Action": [
+            "s3:ListBucket",
+            "s3:ListBucketVersions"
+          ],
+          "Condition": {
+            "StringLike": {
+              "s3:prefix": [
+                "versions/*"
+              ]
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*",
+          "Sid": "ListVersionsBounded"
+        },
+        {
+          "Action": "s3:ListBucketMultipartUploads",
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*",
+          "Sid": "ListInProgressUploads"
+        },
+        {
+          "Action": [
+            "s3:GetObject",
+            "s3:GetObjectVersion",
+            "s3:GetObjectAttributes",
+            "s3:DeleteObjectVersion",
+            "s3:AbortMultipartUpload"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*/versions/*",
+          "Sid": "PurgeAndVerify"
+        },
+        {
+          "Action": [
+            "kms:Decrypt"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+          "Sid": "Decrypt"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "dataset-bucket-lifecycle": {
+      "Rules": [
+        {
+          "AbortIncompleteMultipartUpload": {
+            "DaysAfterInitiation": 1
+          },
+          "Filter": {
+            "Prefix": "versions/"
+          },
+          "ID": "abort-incomplete-multipart",
+          "Status": "Enabled"
+        }
+      ]
+    },
+    "dataset-bucket-policy": {
+      "Statement": [
+        {
+          "Action": "s3:*",
+          "Condition": {
+            "Bool": {
+              "aws:SecureTransport": "false"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": [
+            "arn:aws:s3:::<BUCKET>",
+            "arn:aws:s3:::<BUCKET>/*"
+          ],
+          "Sid": "DenyNonTLS"
+        },
+        {
+          "Action": "s3:*",
+          "Condition": {
+            "StringNotEquals": {
+              "aws:PrincipalAccount": "<ACCOUNT>"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": [
+            "arn:aws:s3:::<BUCKET>",
+            "arn:aws:s3:::<BUCKET>/*"
+          ],
+          "Sid": "DenyOutsideAccount"
+        },
+        {
+          "Action": "s3:*",
+          "Condition": {
+            "ArnLike": {
+              "aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/nlw-<OTHER_ENV>-*"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": [
+            "arn:aws:s3:::<BUCKET>",
+            "arn:aws:s3:::<BUCKET>/*"
+          ],
+          "Sid": "DenyOtherEnvironmentRoles"
+        },
+        {
+          "Action": "s3:PutObject",
+          "Condition": {
+            "Bool": {
+              "s3:ObjectCreationOperation": "true"
+            },
+            "Null": {
+              "s3:if-none-match": "true"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:s3:::<BUCKET>/versions/*",
+          "Sid": "DenyUnconditionalCreate"
+        },
+        {
+          "Action": "s3:PutObject",
+          "Condition": {
+            "Null": {
+              "s3:x-amz-server-side-encryption": "true"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:s3:::<BUCKET>/*",
+          "Sid": "DenyMissingSseAlgorithmHeader"
+        },
+        {
+          "Action": "s3:PutObject",
+          "Condition": {
+            "Null": {
+              "s3:x-amz-server-side-encryption-aws-kms-key-id": "true"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:s3:::<BUCKET>/*",
+          "Sid": "DenyMissingSseKmsKeyHeader"
+        },
+        {
+          "Action": "s3:PutObject",
+          "Condition": {
+            "StringNotEquals": {
+              "s3:x-amz-server-side-encryption": "aws:kms"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:s3:::<BUCKET>/*",
+          "Sid": "DenyWrongSseAlgorithm"
+        },
+        {
+          "Action": "s3:PutObject",
+          "Condition": {
+            "StringNotEquals": {
+              "s3:x-amz-server-side-encryption-aws-kms-key-id": "<KEY_ARN>"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:s3:::<BUCKET>/*",
+          "Sid": "DenyWrongSseKmsKey"
+        },
+        {
+          "Action": "s3:PutObject",
+          "Condition": {
+            "Null": {
+              "s3:x-amz-copy-source": "false"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:s3:::<BUCKET>/*",
+          "Sid": "DenyServerSideCopy"
+        },
+        {
+          "Action": [
+            "s3:DeleteObject",
+            "s3:DeleteObjectVersion"
+          ],
+          "Condition": {
+            "ArnNotEquals": {
+              "aws:PrincipalArn": [
+                "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"
+              ]
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:s3:::<BUCKET>/*",
+          "Sid": "DenyDeleteExceptOperator"
+        },
+        {
+          "Action": [
+            "s3:PutBucket*",
+            "s3:DeleteBucket*",
+            "s3:PutLifecycleConfiguration",
+            "s3:PutEncryptionConfiguration",
+            "s3:PutBucketVersioning",
+            "s3:PutReplicationConfiguration",
+            "s3:PutInventoryConfiguration",
+            "s3:PutAnalyticsConfiguration",
+            "s3:PutMetricsConfiguration",
+            "s3:PutIntelligentTieringConfiguration",
+            "s3:PutAccelerateConfiguration"
+          ],
+          "Condition": {
+            "ArnNotEquals": {
+              "aws:PrincipalArn": [
+                "arn:aws:iam::<ACCOUNT>:role/<ADMIN_ROLE>"
+              ]
+            }
+          },
+          "Effect": "Deny",
+          "Principal": "*",
+          "Resource": "arn:aws:s3:::<BUCKET>",
+          "Sid": "DenyBucketConfigExceptAdmin"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "dataset-kms-key-statements": [
+      {
+        "Action": [
+          "kms:DescribeKey",
+          "kms:GetKeyPolicy",
+          "kms:PutKeyPolicy",
+          "kms:GetKeyRotationStatus",
+          "kms:EnableKeyRotation",
+          "kms:ListGrants",
+          "kms:ListResourceTags",
+          "kms:TagResource",
+          "kms:UntagResource",
+          "kms:CreateAlias",
+          "kms:UpdateAlias",
+          "kms:DeleteAlias",
+          "kms:EnableKey",
+          "kms:DisableKey",
+          "kms:ScheduleKeyDeletion",
+          "kms:CancelKeyDeletion"
+        ],
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": [
+            "arn:aws:iam::<ACCOUNT>:root",
+            "arn:aws:iam::<ACCOUNT>:role/<ADMIN_ROLE>"
+          ]
+        },
+        "Resource": "*",
+        "Sid": "AdministerNeverUse"
+      },
+      {
+        "Action": [
+          "kms:GenerateDataKey",
+          "kms:Decrypt"
+        ],
+        "Condition": {
+          "StringEquals": {
+            "kms:EncryptionContext:aws:s3:arn": "arn:aws:s3:::<BUCKET>",
+            "kms:ViaService": "s3.us-east-1.amazonaws.com"
+          }
+        },
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api"
+        },
+        "Resource": "*",
+        "Sid": "ApiEncryptViaS3ForThisBucketOnly"
+      },
+      {
+        "Action": "kms:Decrypt",
+        "Condition": {
+          "StringEquals": {
+            "kms:EncryptionContext:aws:s3:arn": "arn:aws:s3:::<BUCKET>",
+            "kms:ViaService": "s3.us-east-1.amazonaws.com"
+          }
+        },
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"
+          ]
+        },
+        "Resource": "*",
+        "Sid": "ReadersDecryptViaS3ForThisBucketOnly"
+      }
+    ],
+    "permission-set-audit-admin": {
+      "Statement": [
+        {
+          "Action": "sts:AssumeRole",
+          "Condition": {
+            "StringLike": {
+              "sts:RoleSessionName": "nlw-d6-*-audit-admin"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+          "Sid": "AssumeOnlyTheAuditAdminRole"
+        },
+        {
+          "Action": [
+            "cloudtrail:GetTrail",
+            "kms:DescribeKey",
+            "s3:ListBucket"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "<TRAIL_ARN>",
+            "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+            "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*"
+          ],
+          "Sid": "ConfirmTheAuditResourcesAreAbsent"
+        },
+        {
+          "Action": [
+            "iam:Add*",
+            "iam:Attach*",
+            "iam:Change*",
+            "iam:Create*",
+            "iam:Deactivate*",
+            "iam:Delete*",
+            "iam:Detach*",
+            "iam:Enable*",
+            "iam:PassRole",
+            "iam:Put*",
+            "iam:Remove*",
+            "iam:Reset*",
+            "iam:Resync*",
+            "iam:Set*",
+            "iam:Tag*",
+            "iam:Untag*",
+            "iam:Update*",
+            "iam:Upload*"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverChangeIam"
+        },
+        {
+          "Action": [
+            "kms:*",
+            "s3:*",
+            "sts:AssumeRole"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+            "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*",
+            "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-datasets"
+          ],
+          "Sid": "NeverTheDatasetRolesBucketOrAlias"
+        },
+        {
+          "Action": "kms:*",
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/nlw-purpose": "dataset"
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverDatasetKeys"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "permission-set-audit-reader": {
+      "Statement": [
+        {
+          "Action": "sts:AssumeRole",
+          "Condition": {
+            "StringLike": {
+              "sts:RoleSessionName": "nlw-d6-*-audit-reader"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader",
+          "Sid": "AssumeOnlyTheAuditReaderRole"
+        },
+        {
+          "Action": [
+            "iam:GetRole",
+            "iam:GetRolePolicy",
+            "iam:ListAttachedRolePolicies",
+            "iam:ListRolePolicies",
+            "iam:ListRoleTags"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader",
+            "arn:aws:iam::<ACCOUNT>:role/aws-reserved/sso.amazonaws.com/*"
+          ],
+          "Sid": "VerifyTheProofPrincipals"
+        },
+        {
+          "Action": [
+            "iam:GetPolicy",
+            "iam:GetPolicyVersion"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "<PROOF_BOUNDARY_ARN>",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-proof-denies",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-api",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-ingest",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-operator",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-admin",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-reader"
+          ],
+          "Sid": "ReadTheProofPolicies"
+        },
+        {
+          "Action": [
+            "iam:Add*",
+            "iam:Attach*",
+            "iam:Change*",
+            "iam:Create*",
+            "iam:Deactivate*",
+            "iam:Delete*",
+            "iam:Detach*",
+            "iam:Enable*",
+            "iam:PassRole",
+            "iam:Put*",
+            "iam:Remove*",
+            "iam:Reset*",
+            "iam:Resync*",
+            "iam:Set*",
+            "iam:Tag*",
+            "iam:Untag*",
+            "iam:Update*",
+            "iam:Upload*"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverChangeIam"
+        },
+        {
+          "Action": [
+            "kms:*",
+            "s3:*",
+            "sts:AssumeRole"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+            "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*",
+            "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-datasets"
+          ],
+          "Sid": "NeverTheDatasetRolesBucketOrAlias"
+        },
+        {
+          "Action": "kms:*",
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/nlw-purpose": "dataset"
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverDatasetKeys"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "permission-set-operator": {
+      "Statement": [
+        {
+          "Action": "sts:AssumeRole",
+          "Condition": {
+            "StringLike": {
+              "sts:RoleSessionName": "nlw-d6-*-operator"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+          "Sid": "AssumeOnlyTheOperatorRole"
+        },
+        {
+          "Action": [
+            "iam:Add*",
+            "iam:Attach*",
+            "iam:Change*",
+            "iam:Create*",
+            "iam:Deactivate*",
+            "iam:Delete*",
+            "iam:Detach*",
+            "iam:Enable*",
+            "iam:PassRole",
+            "iam:Put*",
+            "iam:Remove*",
+            "iam:Reset*",
+            "iam:Resync*",
+            "iam:Set*",
+            "iam:Tag*",
+            "iam:Untag*",
+            "iam:Update*",
+            "iam:Upload*"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverChangeIam"
+        },
+        {
+          "Action": [
+            "cloudtrail:AddTags",
+            "cloudtrail:CreateTrail",
+            "cloudtrail:DeleteTrail",
+            "cloudtrail:PutEventSelectors",
+            "cloudtrail:PutInsightSelectors",
+            "cloudtrail:RemoveTags",
+            "cloudtrail:StartLogging",
+            "cloudtrail:StopLogging",
+            "cloudtrail:UpdateTrail"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverAlterAnyTrail"
+        },
+        {
+          "Action": [
+            "kms:*",
+            "s3:*",
+            "sts:AssumeRole"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader",
+            "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*",
+            "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit"
+          ],
+          "Sid": "NeverTheAuditRolesBucketOrAlias"
+        },
+        {
+          "Action": "kms:*",
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/nlw-purpose": "audit"
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverAuditKeys"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "permission-set-provisioner": {
+      "Statement": [
+        {
+          "Action": [
+            "cloudtrail:DescribeTrails",
+            "ec2:DescribeAvailabilityZones",
+            "ec2:DescribeInstanceStatus",
+            "ec2:DescribeInstances",
+            "ec2:DescribeTags",
+            "ec2:DescribeVpcs",
+            "iam:ListAccountAliases",
+            "iam:ListRoles",
+            "iam:SimulateCustomPolicy",
+            "kms:ListAliases",
+            "organizations:DescribeOrganization",
+            "s3:ListAllMyBuckets",
+            "tag:GetResources"
+          ],
+          "Effect": "Allow",
+          "Resource": "*",
+          "Sid": "ReadTheAccountInventory"
+        },
+        {
+          "Action": [
+            "iam:GetRole",
+            "iam:GetRolePolicy",
+            "iam:ListAttachedRolePolicies",
+            "iam:ListRolePolicies",
+            "iam:ListRoleTags"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader",
+            "arn:aws:iam::<ACCOUNT>:role/aws-reserved/sso.amazonaws.com/*"
+          ],
+          "Sid": "InspectTheProofPrincipals"
+        },
+        {
+          "Action": "iam:SimulatePrincipalPolicy",
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/*",
+            "arn:aws:iam::<ACCOUNT>:user/*"
+          ],
+          "Sid": "SimulateThisAccountsPrincipals"
+        },
+        {
+          "Action": [
+            "iam:GetPolicy",
+            "iam:GetPolicyVersion"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "<PROOF_BOUNDARY_ARN>",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-proof-denies",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-api",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-ingest",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-operator",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-admin",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-reader"
+          ],
+          "Sid": "ReadTheProofPolicies"
+        },
+        {
+          "Action": "iam:CreateRole",
+          "Condition": {
+            "StringEquals": {
+              "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-bootstrap"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+          "Sid": "CreateBootstrapWithItsBoundary"
+        },
+        {
+          "Action": "iam:CreateRole",
+          "Condition": {
+            "StringEquals": {
+              "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-api"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+          "Sid": "CreateApiWithItsBoundary"
+        },
+        {
+          "Action": "iam:CreateRole",
+          "Condition": {
+            "StringEquals": {
+              "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-ingest"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+          "Sid": "CreateIngestWithItsBoundary"
+        },
+        {
+          "Action": "iam:CreateRole",
+          "Condition": {
+            "StringEquals": {
+              "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-operator"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+          "Sid": "CreateOperatorWithItsBoundary"
+        },
+        {
+          "Action": "iam:CreateRole",
+          "Condition": {
+            "StringEquals": {
+              "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-admin"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+          "Sid": "CreateAuditAdminWithItsBoundary"
+        },
+        {
+          "Action": "iam:CreateRole",
+          "Condition": {
+            "StringEquals": {
+              "iam:PermissionsBoundary": "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-reader"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader",
+          "Sid": "CreateAuditReaderWithItsBoundary"
+        },
+        {
+          "Action": [
+            "iam:PutRolePolicy",
+            "iam:TagRole"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader"
+          ],
+          "Sid": "ConfigureTheSixRoles"
+        },
+        {
+          "Action": [
+            "iam:DeleteRole",
+            "iam:DeleteRolePolicy"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"
+          ],
+          "Sid": "RemoveTheDatasetRoles"
+        },
+        {
+          "Action": [
+            "iam:AddRoleToInstanceProfile",
+            "iam:CreateInstanceProfile",
+            "iam:DeleteInstanceProfile",
+            "iam:GetInstanceProfile",
+            "iam:ListInstanceProfileTags",
+            "iam:RemoveRoleFromInstanceProfile",
+            "iam:TagInstanceProfile"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-bootstrap",
+          "Sid": "TheBootstrapInstanceProfile"
+        },
+        {
+          "Action": "iam:PassRole",
+          "Effect": "Allow",
+          "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+          "Sid": "PassOnlyTheBootstrapRole"
+        },
+        {
+          "Action": "iam:PassRole",
+          "Condition": {
+            "Null": {
+              "iam:PassedToService": "false"
+            },
+            "StringNotEquals": {
+              "iam:PassedToService": "ec2.amazonaws.com"
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "PassTheBootstrapRoleOnlyToEc2"
+        },
+        {
+          "Action": [
+            "s3:CreateBucket",
+            "s3:DeleteBucket",
+            "s3:GetBucketOwnershipControls",
+            "s3:GetBucketPolicy",
+            "s3:GetBucketPublicAccessBlock",
+            "s3:GetBucketTagging",
+            "s3:GetBucketVersioning",
+            "s3:GetEncryptionConfiguration",
+            "s3:GetLifecycleConfiguration",
+            "s3:ListBucket",
+            "s3:ListBucketVersions",
+            "s3:PutBucketOwnershipControls",
+            "s3:PutBucketPolicy",
+            "s3:PutBucketPublicAccessBlock",
+            "s3:PutBucketTagging",
+            "s3:PutBucketVersioning",
+            "s3:PutEncryptionConfiguration",
+            "s3:PutLifecycleConfiguration"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*",
+          "Sid": "AdministerTheDatasetBucket"
+        },
+        {
+          "Action": "kms:CreateKey",
+          "Condition": {
+            "StringEquals": {
+              "aws:RequestTag/nlw-env": "<ENV>",
+              "aws:RequestTag/nlw-purpose": "dataset"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "*",
+          "Sid": "CreateOnlyDatasetKeys"
+        },
+        {
+          "Action": "kms:TagResource",
+          "Condition": {
+            "Null": {
+              "aws:ResourceTag/nlw-purpose": "true"
+            },
+            "StringEquals": {
+              "aws:RequestTag/nlw-purpose": "dataset"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+          "Sid": "TagOnlyNewDatasetKeys"
+        },
+        {
+          "Action": [
+            "kms:CreateAlias",
+            "kms:DescribeKey",
+            "kms:DisableKey",
+            "kms:EnableKeyRotation",
+            "kms:GetKeyPolicy",
+            "kms:GetKeyRotationStatus",
+            "kms:ListGrants",
+            "kms:ListResourceTags",
+            "kms:ScheduleKeyDeletion"
+          ],
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/nlw-purpose": "dataset"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+          "Sid": "AdministerOnlyDatasetKeys"
+        },
+        {
+          "Action": "kms:CreateAlias",
+          "Effect": "Allow",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-datasets",
+          "Sid": "TheDatasetKeyAlias"
+        },
+        {
+          "Action": [
+            "ec2:CreateSecurityGroup",
+            "ec2:RunInstances"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:ec2:us-east-1:<ACCOUNT>:*",
+            "arn:aws:ec2:us-east-1::image/*"
+          ],
+          "Sid": "LaunchTheProofInstance"
+        },
+        {
+          "Action": "ec2:CreateTags",
+          "Condition": {
+            "StringEquals": {
+              "ec2:CreateAction": [
+                "RunInstances",
+                "CreateSecurityGroup"
+              ]
+            }
+          },
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:ec2:us-east-1:<ACCOUNT>:instance/*",
+            "arn:aws:ec2:us-east-1:<ACCOUNT>:security-group/*"
+          ],
+          "Sid": "TagOnlyAtLaunch"
+        },
+        {
+          "Action": [
+            "ec2:AuthorizeSecurityGroupIngress",
+            "ec2:DeleteSecurityGroup",
+            "ec2:TerminateInstances"
+          ],
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/nlw-env": "<ENV>"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:ec2:us-east-1:<ACCOUNT>:instance/*",
+            "arn:aws:ec2:us-east-1:<ACCOUNT>:security-group/*"
+          ],
+          "Sid": "ChangeOnlyTheTaggedProofInstance"
+        },
+        {
+          "Action": "ec2-instance-connect:SendSSHPublicKey",
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/nlw-env": "<ENV>",
+              "ec2:osuser": "ec2-user"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:ec2:us-east-1:<ACCOUNT>:instance/*",
+          "Sid": "SshKeyToTheProofInstanceOnly"
+        },
+        {
+          "Action": "ssm:GetParameters",
+          "Effect": "Allow",
+          "Resource": "arn:aws:ssm:us-east-1::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64",
+          "Sid": "ReadTheAmiParameter"
+        },
+        {
+          "Action": [
+            "budgets:ModifyBudget",
+            "budgets:ViewBudget"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:budgets::<ACCOUNT>:budget/nlw-<ENV>-dataset-proof-*",
+          "Sid": "TheProofBudget"
+        },
+        {
+          "Action": "sts:AssumeRole",
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader"
+          ],
+          "Sid": "NeverUseTheProofRoles"
+        },
+        {
+          "Action": [
+            "s3:AbortMultipartUpload",
+            "s3:BypassGovernanceRetention",
+            "s3:DeleteObject",
+            "s3:DeleteObjectVersion",
+            "s3:GetObject",
+            "s3:GetObjectAttributes",
+            "s3:GetObjectVersion",
+            "s3:PutObject",
+            "s3:PutObjectLegalHold",
+            "s3:PutObjectRetention",
+            "s3:RestoreObject"
+          ],
+          "Effect": "Deny",
+          "Resource": "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*/*",
+          "Sid": "NeverDatasetObjects"
+        },
+        {
+          "Action": [
+            "cloudtrail:AddTags",
+            "cloudtrail:CreateTrail",
+            "cloudtrail:DeleteTrail",
+            "cloudtrail:PutEventSelectors",
+            "cloudtrail:PutInsightSelectors",
+            "cloudtrail:RemoveTags",
+            "cloudtrail:StartLogging",
+            "cloudtrail:StopLogging",
+            "cloudtrail:UpdateTrail"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverAlterAnyTrail"
+        },
+        {
+          "Action": [
+            "kms:*",
+            "s3:*"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*",
+            "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit"
+          ],
+          "Sid": "NeverTheAuditBucketOrAlias"
+        },
+        {
+          "Action": "kms:*",
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/nlw-purpose": "audit"
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverAuditKeys"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "proof-principal-boundary": {
+      "Statement": [
+        {
+          "Action": [
+            "cloudtrail:DescribeTrails",
+            "ec2:DescribeAvailabilityZones",
+            "ec2:DescribeInstanceStatus",
+            "ec2:DescribeInstances",
+            "ec2:DescribeTags",
+            "ec2:DescribeVpcs",
+            "iam:ListAccountAliases",
+            "iam:ListRoles",
+            "iam:SimulateCustomPolicy",
+            "kms:CreateKey",
+            "kms:ListAliases",
+            "organizations:DescribeOrganization",
+            "s3:ListAllMyBuckets",
+            "tag:GetResources"
+          ],
+          "Effect": "Allow",
+          "Resource": "*",
+          "Sid": "D6NoResourceScope"
+        },
+        {
+          "Action": [
+            "iam:GetRole",
+            "iam:GetRolePolicy",
+            "iam:ListAttachedRolePolicies",
+            "iam:ListRolePolicies",
+            "iam:ListRoleTags",
+            "iam:SimulatePrincipalPolicy"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/*",
+            "arn:aws:iam::<ACCOUNT>:user/*"
+          ],
+          "Sid": "D6ReadPrincipals"
+        },
+        {
+          "Action": [
+            "iam:GetPolicy",
+            "iam:GetPolicyVersion"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "<PROOF_BOUNDARY_ARN>",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-proof-denies",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-api",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-ingest",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-operator",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-admin",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-reader"
+          ],
+          "Sid": "D6ReadTheProofPolicies"
+        },
+        {
+          "Action": [
+            "iam:CreateRole",
+            "iam:DeleteRole",
+            "iam:DeleteRolePolicy",
+            "iam:PutRolePolicy",
+            "iam:TagRole",
+            "sts:AssumeRole"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader"
+          ],
+          "Sid": "D6TheSixRoles"
+        },
+        {
+          "Action": [
+            "iam:AddRoleToInstanceProfile",
+            "iam:CreateInstanceProfile",
+            "iam:DeleteInstanceProfile",
+            "iam:GetInstanceProfile",
+            "iam:ListInstanceProfileTags",
+            "iam:PassRole",
+            "iam:RemoveRoleFromInstanceProfile",
+            "iam:TagInstanceProfile"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<ENV>-dataset-bootstrap",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap"
+          ],
+          "Sid": "D6TheBootstrapProfileAndRole"
+        },
+        {
+          "Action": [
+            "s3:CreateBucket",
+            "s3:DeleteBucket",
+            "s3:GetBucketOwnershipControls",
+            "s3:GetBucketPolicy",
+            "s3:GetBucketPublicAccessBlock",
+            "s3:GetBucketTagging",
+            "s3:GetBucketVersioning",
+            "s3:GetEncryptionConfiguration",
+            "s3:GetLifecycleConfiguration",
+            "s3:ListBucket",
+            "s3:ListBucketVersions",
+            "s3:PutBucketOwnershipControls",
+            "s3:PutBucketPolicy",
+            "s3:PutBucketPublicAccessBlock",
+            "s3:PutBucketTagging",
+            "s3:PutBucketVersioning",
+            "s3:PutEncryptionConfiguration",
+            "s3:PutLifecycleConfiguration"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:s3:::nlw-<ENV>-datasets-<ACCOUNT>-us-east-1-d6*",
+            "arn:aws:s3:::nlw-<ENV>-dataset-audit-<ACCOUNT>-us-east-1-d6*"
+          ],
+          "Sid": "D6TheProofBuckets"
+        },
+        {
+          "Action": [
+            "kms:CreateAlias",
+            "kms:DescribeKey",
+            "kms:DisableKey",
+            "kms:EnableKeyRotation",
+            "kms:GetKeyPolicy",
+            "kms:GetKeyRotationStatus",
+            "kms:ListGrants",
+            "kms:ListResourceTags",
+            "kms:ScheduleKeyDeletion",
+            "kms:TagResource"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+            "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-datasets"
+          ],
+          "Sid": "D6TheProofKeys"
+        },
+        {
+          "Action": "cloudtrail:GetTrail",
+          "Effect": "Allow",
+          "Resource": "<TRAIL_ARN>",
+          "Sid": "D6TheDataEventTrail"
+        },
+        {
+          "Action": [
+            "ec2:AuthorizeSecurityGroupIngress",
+            "ec2:CreateSecurityGroup",
+            "ec2:CreateTags",
+            "ec2:DeleteSecurityGroup",
+            "ec2:RunInstances",
+            "ec2:TerminateInstances"
+          ],
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:ec2:us-east-1:<ACCOUNT>:*",
+            "arn:aws:ec2:us-east-1::image/*"
+          ],
+          "Sid": "D6TheProofInstance"
+        },
+        {
+          "Action": "ec2-instance-connect:SendSSHPublicKey",
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/nlw-env": "<ENV>",
+              "ec2:osuser": "ec2-user"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:ec2:us-east-1:<ACCOUNT>:instance/*",
+          "Sid": "D6SshKeyToTheProofInstance"
+        },
+        {
+          "Action": "ssm:GetParameters",
+          "Effect": "Allow",
+          "Resource": "arn:aws:ssm:us-east-1::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64",
+          "Sid": "D6TheAmiParameter"
+        },
+        {
+          "Action": [
+            "budgets:ModifyBudget",
+            "budgets:ViewBudget"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:budgets::<ACCOUNT>:budget/nlw-<ENV>-dataset-proof-*",
+          "Sid": "D6TheProofBudget"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "proof-principal-denies": {
+      "Statement": [
+        {
+          "Action": "*",
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:s3:::nlw-<OTHER_ENV>-*",
+            "arn:aws:s3:::nlw-<OTHER_ENV>-*/*",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<OTHER_ENV>-*",
+            "arn:aws:iam::<ACCOUNT>:instance-profile/nlw-<OTHER_ENV>-*",
+            "arn:aws:cloudtrail:*:<ACCOUNT>:trail/nlw-<OTHER_ENV>-*",
+            "arn:aws:kms:*:<ACCOUNT>:alias/nlw-<OTHER_ENV>-*"
+          ],
+          "Sid": "NeverOtherEnvironmentNames"
+        },
+        {
+          "Action": "kms:*",
+          "Condition": {
+            "StringEquals": {
+              "aws:ResourceTag/nlw-env": "<OTHER_ENV>"
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverOtherEnvironmentKeys"
+        },
+        {
+          "Action": [
+            "iam:AttachGroupPolicy",
+            "iam:AttachRolePolicy",
+            "iam:AttachUserPolicy",
+            "iam:CreateAccessKey",
+            "iam:CreateLoginProfile",
+            "iam:CreatePolicy",
+            "iam:CreatePolicyVersion",
+            "iam:CreateUser",
+            "iam:DeletePolicy",
+            "iam:DeletePolicyVersion",
+            "iam:DeleteRolePermissionsBoundary",
+            "iam:DeleteUserPermissionsBoundary",
+            "iam:PutGroupPolicy",
+            "iam:PutRolePermissionsBoundary",
+            "iam:PutUserPermissionsBoundary",
+            "iam:PutUserPolicy",
+            "iam:SetDefaultPolicyVersion",
+            "iam:UpdateLoginProfile",
+            "identitystore:*",
+            "sso-directory:*",
+            "sso:*"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverEscalate"
+        },
+        {
+          "Action": [
+            "iam:*OpenIDConnectProvider*",
+            "iam:*SAMLProvider"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverIdentityProviders"
+        },
+        {
+          "Action": [
+            "account:*",
+            "organizations:Accept*",
+            "organizations:Attach*",
+            "organizations:Cancel*",
+            "organizations:Close*",
+            "organizations:Create*",
+            "organizations:Decline*",
+            "organizations:Delete*",
+            "organizations:Deregister*",
+            "organizations:Detach*",
+            "organizations:Disable*",
+            "organizations:Enable*",
+            "organizations:Invite*",
+            "organizations:Leave*",
+            "organizations:Move*",
+            "organizations:Put*",
+            "organizations:Register*",
+            "organizations:Remove*",
+            "organizations:Tag*",
+            "organizations:Untag*",
+            "organizations:Update*"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverOrganizationOrAccountChanges"
+        },
+        {
+          "Action": [
+            "kms:CreateGrant",
+            "kms:RetireGrant",
+            "kms:RevokeGrant"
+          ],
+          "Condition": {
+            "Null": {
+              "kms:ViaService": "true"
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverDirectKmsGrants"
+        },
+        {
+          "Action": [
+            "sts:AssumeRole",
+            "sts:AssumeRoleWithSAML",
+            "sts:AssumeRoleWithWebIdentity",
+            "sts:GetFederationToken"
+          ],
+          "Effect": "Deny",
+          "NotResource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-admin",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-audit-reader"
+          ],
+          "Sid": "AssumeOnlyTheProofRoles"
+        },
+        {
+          "Action": "iam:PassRole",
+          "Effect": "Deny",
+          "NotResource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap",
+          "Sid": "PassOnlyTheBootstrapRole"
+        },
+        {
+          "Action": "iam:PassRole",
+          "Condition": {
+            "Null": {
+              "iam:PassedToService": "false"
+            },
+            "StringNotEquals": {
+              "iam:PassedToService": "ec2.amazonaws.com"
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "PassTheBootstrapRoleOnlyToEc2"
+        },
+        {
+          "Action": [
+            "cloudformation:*",
+            "codebuild:*",
+            "ec2-instance-connect:OpenTunnel",
+            "ec2-instance-connect:SendSerialConsoleSSHPublicKey",
+            "ec2:AssociateIamInstanceProfile",
+            "ec2:ReplaceIamInstanceProfileAssociation",
+            "ec2messages:*",
+            "ecs:*",
+            "lambda:*",
+            "ssm-guiconnect:*",
+            "ssmmessages:*",
+            "states:*"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverIndirectExecution"
+        },
+        {
+          "Action": "ssm:*",
+          "Effect": "Deny",
+          "NotResource": "arn:aws:ssm:us-east-1::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64",
+          "Sid": "NeverSsmBeyondTheAmiParameter"
+        },
+        {
+          "Action": [
+            "iam:AttachRolePolicy",
+            "iam:CreatePolicyVersion",
+            "iam:DeletePolicy",
+            "iam:DeletePolicyVersion",
+            "iam:DeleteRole",
+            "iam:DeleteRolePermissionsBoundary",
+            "iam:DeleteRolePolicy",
+            "iam:DetachRolePolicy",
+            "iam:PutRolePermissionsBoundary",
+            "iam:PutRolePolicy",
+            "iam:SetDefaultPolicyVersion",
+            "iam:TagPolicy",
+            "iam:TagRole",
+            "iam:UntagPolicy",
+            "iam:UntagRole",
+            "iam:UpdateAssumeRolePolicy",
+            "iam:UpdateRole"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/aws-reserved/*",
+            "<PROOF_BOUNDARY_ARN>",
+            "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-*"
+          ],
+          "Sid": "NeverChangeTheProofPrincipalsOrPolicies"
+        },
+        {
+          "Action": "iam:CreateRole",
+          "Condition": {
+            "StringNotEquals": {
+              "iam:PermissionsBoundary": [
+                "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-bootstrap",
+                "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-api",
+                "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-ingest",
+                "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-operator",
+                "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-admin",
+                "arn:aws:iam::<ACCOUNT>:policy/nlw-<ENV>-d6-boundary-audit-reader"
+              ]
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "CreatedRolesCarryTheirBoundary"
+        },
+        {
+          "Condition": {
+            "StringNotEquals": {
+              "aws:RequestedRegion": "us-east-1"
+            }
+          },
+          "Effect": "Deny",
+          "NotAction": [
+            "budgets:*",
+            "iam:*",
+            "organizations:*",
+            "sts:*"
+          ],
+          "Resource": "*",
+          "Sid": "OnlyTheApprovedRegion"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "role-api": {
+      "Statement": [
+        {
+          "Action": [
+            "s3:PutObject",
+            "s3:AbortMultipartUpload"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::<BUCKET>/versions/*",
+          "Sid": "CreateOnce"
+        },
+        {
+          "Action": [
+            "s3:GetObject",
+            "s3:GetObjectAttributes"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::<BUCKET>/versions/*",
+          "Sid": "RetryAndOrphanMetadata"
+        },
+        {
+          "Action": [
+            "kms:GenerateDataKey",
+            "kms:Decrypt"
+          ],
+          "Effect": "Allow",
+          "Resource": "<KEY_ARN>",
+          "Sid": "Encrypt"
+        },
+        {
+          "Action": [
+            "s3:*",
+            "kms:*"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:s3:::nlw-<OTHER_ENV>-*",
+            "arn:aws:s3:::nlw-<OTHER_ENV>-*/*"
+          ],
+          "Sid": "NeverOtherEnvironment"
+        },
+        {
+          "Action": "kms:*",
+          "Condition": {
+            "StringNotEquals": {
+              "aws:ResourceTag/nlw-env": "<ENV>"
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+          "Sid": "NeverOtherEnvironmentKeys"
+        },
+        {
+          "Action": [
+            "iam:PassRole",
+            "ec2:AssociateIamInstanceProfile",
+            "ec2:ReplaceIamInstanceProfileAssociation"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverPassOrAttachDatasetRoles"
+        },
+        {
+          "Action": [
+            "cloudtrail:*",
+            "s3:*",
+            "kms:*"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "<TRAIL_ARN>",
+            "arn:aws:s3:::<AUDIT_BUCKET>",
+            "arn:aws:s3:::<AUDIT_BUCKET>/*",
+            "<AUDIT_KEY_ARN>"
+          ],
+          "Sid": "NeverTouchAudit"
+        },
+        {
+          "Action": [
+            "cloudtrail:StopLogging",
+            "cloudtrail:DeleteTrail",
+            "cloudtrail:UpdateTrail",
+            "cloudtrail:PutEventSelectors",
+            "cloudtrail:PutInsightSelectors"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverAlterAnyTrail"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "role-audit-admin": {
+      "Statement": [
+        {
+          "Action": [
+            "cloudtrail:CreateTrail",
+            "cloudtrail:GetTrail",
+            "cloudtrail:GetTrailStatus",
+            "cloudtrail:DescribeTrails",
+            "cloudtrail:GetEventSelectors",
+            "cloudtrail:PutEventSelectors",
+            "cloudtrail:StartLogging",
+            "cloudtrail:StopLogging",
+            "cloudtrail:UpdateTrail",
+            "cloudtrail:DeleteTrail",
+            "cloudtrail:AddTags",
+            "cloudtrail:ListTags"
+          ],
+          "Effect": "Allow",
+          "Resource": "<TRAIL_ARN>",
+          "Sid": "AdministerThisTrail"
+        },
+        {
+          "Action": [
+            "s3:CreateBucket",
+            "s3:ListBucket",
+            "s3:ListBucketVersions",
+            "s3:GetBucketPolicy",
+            "s3:PutBucketPolicy",
+            "s3:GetBucketAcl",
+            "s3:GetBucketVersioning",
+            "s3:PutBucketVersioning",
+            "s3:GetEncryptionConfiguration",
+            "s3:PutEncryptionConfiguration",
+            "s3:GetLifecycleConfiguration",
+            "s3:PutLifecycleConfiguration",
+            "s3:GetBucketObjectLockConfiguration",
+            "s3:PutBucketObjectLockConfiguration",
+            "s3:GetBucketPublicAccessBlock",
+            "s3:PutBucketPublicAccessBlock",
+            "s3:GetBucketOwnershipControls",
+            "s3:PutBucketOwnershipControls",
+            "s3:GetBucketTagging",
+            "s3:PutBucketTagging",
+            "s3:DeleteBucket"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::<AUDIT_BUCKET>",
+          "Sid": "AdministerAuditBucket"
+        },
+        {
+          "Action": "kms:CreateKey",
+          "Condition": {
+            "StringEquals": {
+              "aws:RequestTag/nlw-env": "<ENV>"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "*",
+          "Sid": "CreateAuditKey"
+        },
+        {
+          "Action": "kms:TagResource",
+          "Condition": {
+            "Null": {
+              "aws:ResourceTag/nlw-env": "true"
+            },
+            "StringEquals": {
+              "aws:RequestTag/nlw-env": "<ENV>"
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "*",
+          "Sid": "TagOnlyUntaggedKeys"
+        },
+        {
+          "Action": "kms:CreateAlias",
+          "Effect": "Allow",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:alias/nlw-<ENV>-dataset-audit",
+          "Sid": "AuditKeyAlias"
+        },
+        {
+          "Action": [
+            "kms:CreateAlias",
+            "kms:DescribeKey",
+            "kms:GetKeyPolicy",
+            "kms:PutKeyPolicy",
+            "kms:EnableKeyRotation",
+            "kms:GetKeyRotationStatus",
+            "kms:ListGrants",
+            "kms:ListResourceTags"
+          ],
+          "Effect": "Allow",
+          "Resource": "<AUDIT_KEY_ARN>",
+          "Sid": "AdministerAuditKey"
+        },
+        {
+          "Action": [
+            "s3:*",
+            "kms:*"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:s3:::<BUCKET>",
+            "arn:aws:s3:::<BUCKET>/*",
+            "<KEY_ARN>"
+          ],
+          "Sid": "NeverTouchDatasets"
+        },
+        {
+          "Action": [
+            "iam:PassRole",
+            "ec2:AssociateIamInstanceProfile",
+            "ec2:ReplaceIamInstanceProfileAssociation"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverPassOrAttachDatasetRoles"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "role-audit-reader": {
+      "Statement": [
+        {
+          "Action": [
+            "s3:GetObject"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::<AUDIT_BUCKET>/dataset-data-events/*",
+          "Sid": "ReadAuditLogs"
+        },
+        {
+          "Action": "s3:GetBucketLocation",
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::<AUDIT_BUCKET>",
+          "Sid": "LocateAuditBucket"
+        },
+        {
+          "Action": [
+            "s3:ListBucket"
+          ],
+          "Condition": {
+            "StringLike": {
+              "s3:prefix": [
+                "dataset-data-events/*"
+              ]
+            }
+          },
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::<AUDIT_BUCKET>",
+          "Sid": "ListAuditLogs"
+        },
+        {
+          "Action": [
+            "kms:Decrypt"
+          ],
+          "Effect": "Allow",
+          "Resource": "<AUDIT_KEY_ARN>",
+          "Sid": "DecryptAuditLogs"
+        },
+        {
+          "Action": [
+            "cloudtrail:DescribeTrails",
+            "cloudtrail:GetTrailStatus",
+            "cloudtrail:ListPublicKeys"
+          ],
+          "Effect": "Allow",
+          "Resource": "*",
+          "Sid": "ValidateTrail"
+        },
+        {
+          "Action": [
+            "s3:*",
+            "kms:*"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:s3:::<BUCKET>",
+            "arn:aws:s3:::<BUCKET>/*",
+            "<KEY_ARN>"
+          ],
+          "Sid": "NeverTouchDatasets"
+        },
+        {
+          "Action": [
+            "iam:PassRole",
+            "ec2:AssociateIamInstanceProfile",
+            "ec2:ReplaceIamInstanceProfileAssociation"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverPassOrAttachDatasetRoles"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "role-bootstrap": {
+      "Statement": [
+        {
+          "Action": "sts:AssumeRole",
+          "Effect": "Allow",
+          "Resource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest"
+          ],
+          "Sid": "AssumeRuntimeRolesOnly"
+        },
+        {
+          "Action": "sts:AssumeRole",
+          "Effect": "Deny",
+          "NotResource": [
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-api",
+            "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-ingest"
+          ],
+          "Sid": "NeverAssumeAnyOtherRole"
+        },
+        {
+          "Action": [
+            "s3:*",
+            "kms:*"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverDataPlane"
+        },
+        {
+          "Action": [
+            "iam:PassRole",
+            "ec2:AssociateIamInstanceProfile",
+            "ec2:ReplaceIamInstanceProfileAssociation"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverPassOrAttachDatasetRoles"
+        },
+        {
+          "Action": [
+            "cloudtrail:*",
+            "s3:*",
+            "kms:*"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "<TRAIL_ARN>",
+            "arn:aws:s3:::<AUDIT_BUCKET>",
+            "arn:aws:s3:::<AUDIT_BUCKET>/*",
+            "<AUDIT_KEY_ARN>"
+          ],
+          "Sid": "NeverTouchAudit"
+        },
+        {
+          "Action": [
+            "cloudtrail:StopLogging",
+            "cloudtrail:DeleteTrail",
+            "cloudtrail:UpdateTrail",
+            "cloudtrail:PutEventSelectors",
+            "cloudtrail:PutInsightSelectors"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverAlterAnyTrail"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "role-ingest": {
+      "Statement": [
+        {
+          "Action": [
+            "s3:GetObject"
+          ],
+          "Effect": "Allow",
+          "Resource": "arn:aws:s3:::<BUCKET>/versions/*",
+          "Sid": "ReadVersions"
+        },
+        {
+          "Action": [
+            "kms:Decrypt"
+          ],
+          "Effect": "Allow",
+          "Resource": "<KEY_ARN>",
+          "Sid": "Decrypt"
+        },
+        {
+          "Action": [
+            "s3:*",
+            "kms:*"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "arn:aws:s3:::nlw-<OTHER_ENV>-*",
+            "arn:aws:s3:::nlw-<OTHER_ENV>-*/*"
+          ],
+          "Sid": "NeverOtherEnvironment"
+        },
+        {
+          "Action": "kms:*",
+          "Condition": {
+            "StringNotEquals": {
+              "aws:ResourceTag/nlw-env": "<ENV>"
+            }
+          },
+          "Effect": "Deny",
+          "Resource": "arn:aws:kms:us-east-1:<ACCOUNT>:key/*",
+          "Sid": "NeverOtherEnvironmentKeys"
+        },
+        {
+          "Action": [
+            "iam:PassRole",
+            "ec2:AssociateIamInstanceProfile",
+            "ec2:ReplaceIamInstanceProfileAssociation"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverPassOrAttachDatasetRoles"
+        },
+        {
+          "Action": [
+            "cloudtrail:*",
+            "s3:*",
+            "kms:*"
+          ],
+          "Effect": "Deny",
+          "Resource": [
+            "<TRAIL_ARN>",
+            "arn:aws:s3:::<AUDIT_BUCKET>",
+            "arn:aws:s3:::<AUDIT_BUCKET>/*",
+            "<AUDIT_KEY_ARN>"
+          ],
+          "Sid": "NeverTouchAudit"
+        },
+        {
+          "Action": [
+            "cloudtrail:StopLogging",
+            "cloudtrail:DeleteTrail",
+            "cloudtrail:UpdateTrail",
+            "cloudtrail:PutEventSelectors",
+            "cloudtrail:PutInsightSelectors"
+          ],
+          "Effect": "Deny",
+          "Resource": "*",
+          "Sid": "NeverAlterAnyTrail"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "trail-advanced-event-selectors": [
+      {
+        "FieldSelectors": [
+          {
+            "Equals": [
+              "Data"
+            ],
+            "Field": "eventCategory"
+          },
+          {
+            "Equals": [
+              "AWS::S3::Object"
+            ],
+            "Field": "resources.type"
+          },
+          {
+            "Field": "resources.ARN",
+            "StartsWith": [
+              "arn:aws:s3:::<BUCKET>/"
+            ]
+          }
+        ],
+        "Name": "nlw-<ENV>-dataset-object-reads-and-writes"
+      }
+    ],
+    "trust-api": {
+      "Statement": [
+        {
+          "Action": "sts:AssumeRole",
+          "Condition": {
+            "StringEquals": {
+              "sts:RoleSessionName": "nlw-<ENV>-api"
+            }
+          },
+          "Effect": "Allow",
+          "Principal": {
+            "AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap"
+          },
+          "Sid": "BootstrapWithApiSessionName"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "trust-bootstrap": {
+      "Statement": [
+        {
+          "Action": "sts:AssumeRole",
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "ec2.amazonaws.com"
+          },
+          "Sid": "Ec2InstanceProfileOnly"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "trust-human": {
+      "Statement": [
+        {
+          "Action": "sts:AssumeRole",
+          "Condition": {
+            "StringLike": {
+              "sts:RoleSessionName": "nlw-d6-*"
+            }
+          },
+          "Effect": "Allow",
+          "Principal": {
+            "AWS": "<HUMAN_PRINCIPAL_ARNS>"
+          },
+          "Sid": "NamedSsoPermissionSetRolesOnly"
+        },
+        {
+          "Action": "sts:AssumeRole",
+          "Condition": {
+            "ArnNotLike": {
+              "aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/aws-reserved/sso.amazonaws.com/*"
+            }
+          },
+          "Effect": "Deny",
+          "Principal": {
+            "AWS": "*"
+          },
+          "Sid": "DenyAnythingButIdentityCenter"
+        },
+        {
+          "Action": "sts:AssumeRole",
+          "Condition": {
+            "ArnLike": {
+              "aws:PrincipalArn": [
+                "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-bootstrap",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-api",
+                "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-ingest"
+              ]
+            }
+          },
+          "Effect": "Deny",
+          "Principal": {
+            "AWS": "*"
+          },
+          "Sid": "DenyMachineRoles"
+        }
+      ],
+      "Version": "2012-10-17"
+    },
+    "trust-ingest": {
+      "Statement": [
+        {
+          "Action": "sts:AssumeRole",
+          "Condition": {
+            "StringEquals": {
+              "sts:RoleSessionName": "nlw-<ENV>-ingest"
+            }
+          },
+          "Effect": "Allow",
+          "Principal": {
+            "AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-bootstrap"
+          },
+          "Sid": "BootstrapWithIngestSessionName"
+        }
+      ],
+      "Version": "2012-10-17"
+    }
+  }
+}
