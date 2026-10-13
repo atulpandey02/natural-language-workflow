@@ -1,0 +1,10159 @@
+[
+ {
+  "step": "P03-00",
+  "machine": "provisioner",
+  "service": "budgets",
+  "operation": "create-budget",
+  "resources": {
+   "--account-id": [
+    "{ACCOUNT}"
+   ],
+   "--budget": [
+    "file://{PROOF_DIR}/budget.json"
+   ],
+   "--notifications-with-subscribers": [
+    "file://{PROOF_DIR}/budget-notify.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--account-id",
+   "--budget",
+   "--notifications-with-subscribers",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-00",
+  "machine": "provisioner",
+  "service": "budgets",
+  "operation": "describe-budget",
+  "resources": {
+   "--account-id": [
+    "{ACCOUNT}"
+   ],
+   "--budget-name": [
+    "nlw-staging-dataset-proof-{PROOF_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--account-id",
+   "--budget-name",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-00",
+  "machine": "provisioner",
+  "service": "budgets",
+  "operation": "describe-notifications-for-budget",
+  "resources": {
+   "--account-id": [
+    "{ACCOUNT}"
+   ],
+   "--budget-name": [
+    "nlw-staging-dataset-proof-{PROOF_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--account-id",
+   "--budget-name",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P10-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-custom-policy",
+  "resources": {
+   "--caller-arn": [
+    "arn:aws:iam::{ACCOUNT}:user/nlw-d6-simulated-caller"
+   ],
+   "--policy-input-list": [
+    "file://{PROOF_DIR}/allow-all.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{BUCKET}/versions/x"
+   ],
+   "--resource-policy": [
+    "file://{PROOF_DIR}/bucket-policy.json"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--caller-arn",
+   "--context-entries",
+   "--output",
+   "--policy-input-list",
+   "--profile",
+   "--query",
+   "--resource-arns",
+   "--resource-owner",
+   "--resource-policy"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "*"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-production-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-unreviewed"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:kms:us-east-1:{ACCOUNT}:key/00000000-0000-0000-0000-000000000000"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{OTHER_BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "*"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-production-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-unreviewed"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:kms:us-east-1:{ACCOUNT}:key/00000000-0000-0000-0000-000000000000"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{OTHER_BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "*"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-production-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-unreviewed"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:kms:us-east-1:{ACCOUNT}:key/00000000-0000-0000-0000-000000000000"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{AUDIT_BUCKET}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{OTHER_BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P10-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:kms:us-east-1:{ACCOUNT}:key/00000000-0000-0000-0000-000000000000"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{AUDIT_BUCKET}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{AUDIT_BUCKET}/dataset-data-events/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P10-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{OTHER_BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "{AUDIT_KEY_ARN}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{AUDIT_BUCKET}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{AUDIT_BUCKET}/dataset-data-events/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P10-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "{AUDIT_KEY_ARN}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P10-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:kms:us-east-1:{ACCOUNT}:key/00000000-0000-0000-0000-000000000000"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{AUDIT_BUCKET}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{AUDIT_BUCKET}/dataset-data-events/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P09-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{BUCKET}/outside/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P09-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P10-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P10-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{OTHER_BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "{AUDIT_KEY_ARN}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P09-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "{KEY_ARN}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P10-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:kms:us-east-1:{ACCOUNT}:key/00000000-0000-0000-0000-000000000000"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{AUDIT_BUCKET}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{AUDIT_BUCKET}/dataset-data-events/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P10-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{OTHER_BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P11-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "{AUDIT_KEY_ARN}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "*"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-production-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-unreviewed"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:kms:us-east-1:{ACCOUNT}:key/00000000-0000-0000-0000-000000000000"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{AUDIT_BUCKET}"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/{ADMIN_ROLE}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:s3:::{OTHER_BUCKET}/versions/x"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "simulate-principal-policy",
+  "resources": {
+   "--policy-source-arn": [
+    "arn:aws:iam::{ACCOUNT}:user/x"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--resource-arns": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--action-names",
+   "--context-entries",
+   "--output",
+   "--policy-source-arn",
+   "--profile",
+   "--query",
+   "--resource-arns"
+  ]
+ },
+ {
+  "step": "P03-08",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "put-event-selectors",
+  "resources": {
+   "--advanced-event-selectors": [
+    "file://{PROOF_DIR}/selectors.json"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ],
+   "--trail-name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--advanced-event-selectors",
+   "--profile",
+   "--trail-name"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "cloudtrail",
+  "operation": "put-event-selectors",
+  "resources": {
+   "--advanced-event-selectors": [
+    "file://{PROOF_DIR}/selectors.json"
+   ],
+   "--profile": [
+    "proof-api"
+   ],
+   "--trail-name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--advanced-event-selectors",
+   "--profile",
+   "--trail-name"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "cloudtrail",
+  "operation": "put-event-selectors",
+  "resources": {
+   "--advanced-event-selectors": [
+    "file://{PROOF_DIR}/selectors.json"
+   ],
+   "--profile": [
+    "proof-bootstrap"
+   ],
+   "--trail-name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--advanced-event-selectors",
+   "--profile",
+   "--trail-name"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "cloudtrail",
+  "operation": "put-event-selectors",
+  "resources": {
+   "--advanced-event-selectors": [
+    "file://{PROOF_DIR}/selectors.json"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ],
+   "--trail-name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--advanced-event-selectors",
+   "--profile",
+   "--trail-name"
+  ]
+ },
+ {
+  "step": "P03-04",
+  "machine": "audit",
+  "service": "kms",
+  "operation": "create-alias",
+  "resources": {
+   "--alias-name": [
+    "alias/nlw-staging-dataset-audit"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ],
+   "--target-key-id": [
+    "{AUDIT_KEY_ARN}"
+   ]
+  },
+  "arguments": [
+   "--alias-name",
+   "--profile",
+   "--target-key-id"
+  ]
+ },
+ {
+  "step": "P03-02",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "create-alias",
+  "resources": {
+   "--alias-name": [
+    "alias/nlw-staging-datasets"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--target-key-id": [
+    "{KEY_ARN}"
+   ]
+  },
+  "arguments": [
+   "--alias-name",
+   "--profile",
+   "--target-key-id"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "create-role",
+  "resources": {
+   "--assume-role-policy-document": [
+    "file://{PROOF_DIR}/trust-api.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--assume-role-policy-document",
+   "--max-session-duration",
+   "--output",
+   "--permissions-boundary",
+   "--profile",
+   "--query",
+   "--role-name",
+   "--tags"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "create-role",
+  "resources": {
+   "--assume-role-policy-document": [
+    "file://{PROOF_DIR}/trust-audit-admin.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--assume-role-policy-document",
+   "--max-session-duration",
+   "--output",
+   "--permissions-boundary",
+   "--profile",
+   "--query",
+   "--role-name",
+   "--tags"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "create-role",
+  "resources": {
+   "--assume-role-policy-document": [
+    "file://{PROOF_DIR}/trust-audit-reader.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--assume-role-policy-document",
+   "--max-session-duration",
+   "--output",
+   "--permissions-boundary",
+   "--profile",
+   "--query",
+   "--role-name",
+   "--tags"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "create-role",
+  "resources": {
+   "--assume-role-policy-document": [
+    "file://{PROOF_DIR}/trust-bootstrap.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--assume-role-policy-document",
+   "--max-session-duration",
+   "--output",
+   "--permissions-boundary",
+   "--profile",
+   "--query",
+   "--role-name",
+   "--tags"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "create-role",
+  "resources": {
+   "--assume-role-policy-document": [
+    "file://{PROOF_DIR}/trust-ingest.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--assume-role-policy-document",
+   "--max-session-duration",
+   "--output",
+   "--permissions-boundary",
+   "--profile",
+   "--query",
+   "--role-name",
+   "--tags"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "create-role",
+  "resources": {
+   "--assume-role-policy-document": [
+    "file://{PROOF_DIR}/trust-operator.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--assume-role-policy-document",
+   "--max-session-duration",
+   "--output",
+   "--permissions-boundary",
+   "--profile",
+   "--query",
+   "--role-name",
+   "--tags"
+  ]
+ },
+ {
+  "step": "P03-10",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "run-instances",
+  "resources": {
+   "--iam-instance-profile": [
+    "Name=nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--security-group-ids": [
+    "{SG_ID}"
+   ],
+   "--user-data": [
+    "file://{PROOF_DIR}/user-data.sh"
+   ]
+  },
+  "arguments": [
+   "--block-device-mappings",
+   "--count",
+   "--iam-instance-profile",
+   "--image-id",
+   "--instance-type",
+   "--metadata-options",
+   "--output",
+   "--profile",
+   "--query",
+   "--security-group-ids",
+   "--tag-specifications",
+   "--user-data"
+  ]
+ },
+ {
+  "step": "P04-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--bucket-key-enabled",
+   "--checksum-algorithm",
+   "--checksum-sha256",
+   "--if-none-match",
+   "--key",
+   "--output",
+   "--profile",
+   "--query",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P05-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--bucket-key-enabled",
+   "--if-none-match",
+   "--key",
+   "--output",
+   "--profile",
+   "--query",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P09-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--bucket-key-enabled",
+   "--if-none-match",
+   "--key",
+   "--output",
+   "--profile",
+   "--query",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P14-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--bucket-key-enabled",
+   "--if-none-match",
+   "--key",
+   "--output",
+   "--profile",
+   "--query",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P05-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--bucket-key-enabled",
+   "--if-none-match",
+   "--key",
+   "--profile",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P05-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--bucket-key-enabled",
+   "--key",
+   "--profile",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P07-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "upload-part",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--checksum-algorithm",
+   "--key",
+   "--output",
+   "--part-number",
+   "--profile",
+   "--query",
+   "--upload-id"
+  ]
+ },
+ {
+  "step": "P07-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "upload-part",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--checksum-algorithm",
+   "--key",
+   "--output",
+   "--part-number",
+   "--profile",
+   "--query",
+   "--upload-id"
+  ]
+ },
+ {
+  "step": "P06-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--if-none-match",
+   "--key",
+   "--profile",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P09-04",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--if-none-match",
+   "--key",
+   "--profile",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P12-03",
+  "machine": "operator",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--if-none-match",
+   "--key",
+   "--profile",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P06-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--if-none-match",
+   "--key",
+   "--profile",
+   "--server-side-encryption"
+  ]
+ },
+ {
+  "step": "P06-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--body",
+   "--bucket",
+   "--if-none-match",
+   "--key",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P07-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "create-multipart-upload",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--bucket-key-enabled",
+   "--checksum-algorithm",
+   "--key",
+   "--output",
+   "--profile",
+   "--query",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P07-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "create-multipart-upload",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--bucket-key-enabled",
+   "--checksum-algorithm",
+   "--key",
+   "--output",
+   "--profile",
+   "--query",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P05-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "copy-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--copy-source": [
+    "{BUCKET}/{OBJ_K1}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--copy-source",
+   "--if-none-match",
+   "--key",
+   "--profile",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P07-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "complete-multipart-upload",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--multipart-upload": [
+    "file://{PROOF_DIR}/parts.json"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--if-none-match",
+   "--key",
+   "--multipart-upload",
+   "--output",
+   "--profile",
+   "--query",
+   "--upload-id"
+  ]
+ },
+ {
+  "step": "P07-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "complete-multipart-upload",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--multipart-upload": [
+    "file://{PROOF_DIR}/u2parts.json"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--if-none-match",
+   "--key",
+   "--multipart-upload",
+   "--profile",
+   "--upload-id"
+  ]
+ },
+ {
+  "step": "P07-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "complete-multipart-upload",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--multipart-upload": [
+    "file://{PROOF_DIR}/parts.json"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--multipart-upload",
+   "--profile",
+   "--upload-id"
+  ]
+ },
+ {
+  "step": "P07-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "get-object-attributes",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--object-attributes",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P08-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "get-object-attributes",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--object-attributes",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P12-03",
+  "machine": "operator",
+  "service": "s3api",
+  "operation": "delete-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--output",
+   "--profile",
+   "--query",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "X04",
+  "machine": "operator",
+  "service": "s3api",
+  "operation": "delete-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--output",
+   "--profile",
+   "--query",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P13-01",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-object",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P08-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "get-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P09-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "get-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P06-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "head-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P07-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "head-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P06-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "create-multipart-upload",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile",
+   "--server-side-encryption",
+   "--ssekms-key-id"
+  ]
+ },
+ {
+  "step": "P06-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "create-multipart-upload",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile",
+   "--server-side-encryption"
+  ]
+ },
+ {
+  "step": "P07-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "abort-multipart-upload",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile",
+   "--upload-id"
+  ]
+ },
+ {
+  "step": "X04",
+  "machine": "operator",
+  "service": "s3api",
+  "operation": "abort-multipart-upload",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile",
+   "--upload-id"
+  ]
+ },
+ {
+  "step": "P11-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "delete-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P11-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "delete-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P11-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "delete-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P06-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "create-multipart-upload",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "delete-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "delete-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-01",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "delete-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P10-03",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "head-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P12-03",
+  "machine": "operator",
+  "service": "s3api",
+  "operation": "delete-object",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--key",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "put-bucket-lifecycle-configuration",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--lifecycle-configuration": [
+    "file://{PROOF_DIR}/audit-lifecycle.json"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--lifecycle-configuration",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-bucket-lifecycle-configuration",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--lifecycle-configuration": [
+    "file://{PROOF_DIR}/audit-lifecycle.json"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--lifecycle-configuration",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-bucket-lifecycle-configuration",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--lifecycle-configuration": [
+    "file://{PROOF_DIR}/audit-lifecycle.json"
+   ],
+   "--profile": [
+    "proof-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--lifecycle-configuration",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-bucket-lifecycle-configuration",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--lifecycle-configuration": [
+    "file://{PROOF_DIR}/audit-lifecycle.json"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--lifecycle-configuration",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "put-bucket-lifecycle-configuration",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--lifecycle-configuration": [
+    "file://{PROOF_DIR}/lifecycle.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--lifecycle-configuration",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "list-object-versions",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--max-items",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X14",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "list-object-versions",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--max-items",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "list-object-versions",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--max-items",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X12",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "list-object-versions",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--max-items",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P08-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "list-object-versions",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--max-items",
+   "--prefix",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P08-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "list-objects-v2",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--max-items",
+   "--prefix",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P09-04",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "list-objects-v2",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--max-items",
+   "--prefix",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "list-objects-v2",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--max-items",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "list-objects-v2",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "proof-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--max-items",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "list-objects-v2",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--max-items",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "put-object-lock-configuration",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--object-lock-configuration": [
+    "file://{PROOF_DIR}/lock.json"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--object-lock-configuration",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "create-bucket",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--object-lock-enabled-for-bucket",
+   "--object-ownership",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "create-bucket",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--object-ownership",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P13-01",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "list-objects-v2",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--prefix",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X05",
+  "machine": "operator",
+  "service": "s3api",
+  "operation": "list-multipart-uploads",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--prefix",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X10",
+  "machine": "operator",
+  "service": "s3api",
+  "operation": "list-multipart-uploads",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--prefix",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P12-03",
+  "machine": "operator",
+  "service": "s3api",
+  "operation": "list-object-versions",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--prefix",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X05",
+  "machine": "operator",
+  "service": "s3api",
+  "operation": "list-object-versions",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--prefix",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X10",
+  "machine": "operator",
+  "service": "s3api",
+  "operation": "list-object-versions",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--prefix",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X11",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "list-object-versions",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--prefix",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-bucket-encryption",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-bucket-ownership-controls",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-object-lock-configuration",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-public-access-block",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-bucket-encryption",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-bucket-ownership-controls",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X02",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-bucket-tagging",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-bucket-versioning",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-public-access-block",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-bucket-lifecycle-configuration",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-bucket-lifecycle-configuration",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--output",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "put-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--policy": [
+    "file://{PROOF_DIR}/audit-bucket-policy.json"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--policy",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--policy": [
+    "file://{PROOF_DIR}/audit-bucket-policy.json"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--policy",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--policy": [
+    "file://{PROOF_DIR}/audit-bucket-policy.json"
+   ],
+   "--profile": [
+    "proof-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--policy",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "s3api",
+  "operation": "put-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--policy": [
+    "file://{PROOF_DIR}/audit-bucket-policy.json"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--policy",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "put-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--policy": [
+    "file://{PROOF_DIR}/bucket-policy.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--policy",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "put-public-access-block",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile",
+   "--public-access-block-configuration"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "put-public-access-block",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile",
+   "--public-access-block-configuration"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "put-bucket-encryption",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ],
+   "--server-side-encryption-configuration": [
+    "file://{PROOF_DIR}/audit-enc.json"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile",
+   "--server-side-encryption-configuration"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "put-bucket-encryption",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--server-side-encryption-configuration": [
+    "file://{PROOF_DIR}/enc.json"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile",
+   "--server-side-encryption-configuration"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "put-bucket-tagging",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile",
+   "--tagging"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "put-bucket-tagging",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile",
+   "--tagging"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "put-bucket-versioning",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile",
+   "--versioning-configuration"
+  ]
+ },
+ {
+  "step": "X14",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "delete-bucket",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X14",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-bucket-tagging",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X14",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "get-bucket-tagging",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-07",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "head-bucket",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X14",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "head-bucket",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P02-02",
+  "machine": "audit",
+  "service": "s3api",
+  "operation": "head-bucket",
+  "resources": {
+   "--bucket": [
+    "{AUDIT_BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "delete-bucket",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X12",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "delete-bucket",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X12",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-bucket-policy",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-bucket-tagging",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X12",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "get-bucket-tagging",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "head-bucket",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-06",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "head-bucket",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X12",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "head-bucket",
+  "resources": {
+   "--bucket": [
+    "{BUCKET}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--bucket",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-10",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "create-security-group",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--description",
+   "--group-name",
+   "--output",
+   "--profile",
+   "--query",
+   "--tag-specifications",
+   "--vpc-id"
+  ]
+ },
+ {
+  "step": "P03-04",
+  "machine": "audit",
+  "service": "kms",
+  "operation": "create-key",
+  "resources": {
+   "--policy": [
+    "file://{PROOF_DIR}/audit-key-policy.json"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--description",
+   "--key-spec",
+   "--key-usage",
+   "--output",
+   "--policy",
+   "--profile",
+   "--query",
+   "--tags"
+  ]
+ },
+ {
+  "step": "P03-02",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "create-key",
+  "resources": {
+   "--policy": [
+    "file://{PROOF_DIR}/key-policy.json"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--description",
+   "--key-spec",
+   "--key-usage",
+   "--output",
+   "--policy",
+   "--profile",
+   "--query",
+   "--tags"
+  ]
+ },
+ {
+  "step": "P03-08",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "create-trail",
+  "resources": {
+   "--kms-key-id": [
+    "{AUDIT_KEY_ARN}"
+   ],
+   "--name": [
+    "nlw-staging-dataset-data-events"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ],
+   "--s3-bucket-name": [
+    "{AUDIT_BUCKET}"
+   ]
+  },
+  "arguments": [
+   "--enable-log-file-validation",
+   "--kms-key-id",
+   "--name",
+   "--no-include-global-service-events",
+   "--no-is-multi-region-trail",
+   "--output",
+   "--profile",
+   "--query",
+   "--s3-bucket-name",
+   "--s3-key-prefix",
+   "--tags-list"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "describe-instances",
+  "resources": {
+   "--filters": [
+    "Name=tag:Name,Values=nlw-staging-dataset-proof",
+    "Name=instance-state-name,Values=pending,running,stopping,stopped"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--filters",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X02",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "describe-tags",
+  "resources": {
+   "--filters": [
+    "Name=resource-id,Values={INSTANCE_ID}",
+    "Name=key,Values=nlw-proof"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--filters",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X02",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "describe-tags",
+  "resources": {
+   "--filters": [
+    "Name=resource-id,Values={SG_ID}",
+    "Name=key,Values=nlw-proof"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--filters",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "describe-vpcs",
+  "resources": {
+   "--filters": [
+    "Name=isDefault,Values=true"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--filters",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-10",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "describe-vpcs",
+  "resources": {
+   "--filters": [
+    "Name=isDefault,Values=true"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--filters",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P14-02",
+  "machine": "instance",
+  "service": "configure",
+  "operation": "export-credentials",
+  "resources": {
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--format",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P14-03",
+  "machine": "instance",
+  "service": "configure",
+  "operation": "export-credentials",
+  "resources": {
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--format",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P14-05",
+  "machine": "instance",
+  "service": "configure",
+  "operation": "export-credentials",
+  "resources": {
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--format",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P15-01",
+  "machine": "instance",
+  "service": "configure",
+  "operation": "export-credentials",
+  "resources": {
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--format",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P15-01",
+  "machine": "instance",
+  "service": "configure",
+  "operation": "export-credentials",
+  "resources": {
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--format",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-10",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "authorize-security-group-ingress",
+  "resources": {
+   "--group-id": [
+    "{SG_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--group-id",
+   "--ip-permissions",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X03",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "delete-security-group",
+  "resources": {
+   "--group-id": [
+    "{SG_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--group-id",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "cloudtrail",
+  "operation": "describe-trails",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--include-shadow-trails",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-12",
+  "machine": "provisioner",
+  "service": "ec2-instance-connect",
+  "operation": "send-ssh-public-key",
+  "resources": {
+   "--instance-id": [
+    "{INSTANCE_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--ssh-public-key": [
+    "file://{PROOF_DIR}/proof-key.pub"
+   ]
+  },
+  "arguments": [
+   "--instance-id",
+   "--instance-os-user",
+   "--output",
+   "--profile",
+   "--query",
+   "--ssh-public-key"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "describe-instances",
+  "resources": {
+   "--instance-ids": [
+    "{INSTANCE_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-ids",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-12",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "describe-instances",
+  "resources": {
+   "--instance-ids": [
+    "{INSTANCE_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-ids",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P18-01",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "describe-instances",
+  "resources": {
+   "--instance-ids": [
+    "{INSTANCE_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-ids",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X03",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "terminate-instances",
+  "resources": {
+   "--instance-ids": [
+    "{INSTANCE_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-ids",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-10",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "wait",
+  "resources": {
+   "--instance-ids": [
+    "{INSTANCE_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-ids",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X03",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "wait",
+  "resources": {
+   "--instance-ids": [
+    "{INSTANCE_ID}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-ids",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "create-instance-profile",
+  "resources": {
+   "--instance-profile-name": [
+    "nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-profile-name",
+   "--output",
+   "--profile",
+   "--query",
+   "--tags"
+  ]
+ },
+ {
+  "step": "X02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-instance-profile",
+  "resources": {
+   "--instance-profile-name": [
+    "nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-profile-name",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-instance-profile-tags",
+  "resources": {
+   "--instance-profile-name": [
+    "nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-profile-name",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "add-role-to-instance-profile",
+  "resources": {
+   "--instance-profile-name": [
+    "nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--instance-profile-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "remove-role-from-instance-profile",
+  "resources": {
+   "--instance-profile-name": [
+    "nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--instance-profile-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "delete-instance-profile",
+  "resources": {
+   "--instance-profile-name": [
+    "nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-profile-name",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-instance-profile",
+  "resources": {
+   "--instance-profile-name": [
+    "nlw-staging-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--instance-profile-name",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "kms",
+  "operation": "get-key-policy",
+  "resources": {
+   "--key-id": [
+    "{AUDIT_KEY_ARN}"
+   ],
+   "--policy-name": [
+    "default"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "get-key-policy",
+  "resources": {
+   "--key-id": [
+    "{KEY_ARN}"
+   ],
+   "--policy-name": [
+    "default"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "kms",
+  "operation": "get-key-rotation-status",
+  "resources": {
+   "--key-id": [
+    "{AUDIT_KEY_ARN}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "kms",
+  "operation": "list-grants",
+  "resources": {
+   "--key-id": [
+    "{AUDIT_KEY_ARN}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "get-key-rotation-status",
+  "resources": {
+   "--key-id": [
+    "{KEY_ARN}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "list-grants",
+  "resources": {
+   "--key-id": [
+    "{KEY_ARN}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X02",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "list-resource-tags",
+  "resources": {
+   "--key-id": [
+    "{KEY_ARN}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "schedule-key-deletion",
+  "resources": {
+   "--key-id": [
+    "{KEY_ARN}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--pending-window-in-days",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P02-02",
+  "machine": "audit",
+  "service": "kms",
+  "operation": "describe-key",
+  "resources": {
+   "--key-id": [
+    "alias/nlw-staging-dataset-audit"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-04",
+  "machine": "audit",
+  "service": "kms",
+  "operation": "enable-key-rotation",
+  "resources": {
+   "--key-id": [
+    "{AUDIT_KEY_ARN}"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "kms",
+  "operation": "describe-key",
+  "resources": {
+   "--key-id": [
+    "{AUDIT_KEY_ARN}"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "kms",
+  "operation": "describe-key",
+  "resources": {
+   "--key-id": [
+    "{AUDIT_KEY_ARN}"
+   ],
+   "--profile": [
+    "proof-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "kms",
+  "operation": "describe-key",
+  "resources": {
+   "--key-id": [
+    "{AUDIT_KEY_ARN}"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P10-03",
+  "machine": "instance",
+  "service": "kms",
+  "operation": "describe-key",
+  "resources": {
+   "--key-id": [
+    "{KEY_ARN}"
+   ],
+   "--profile": [
+    "proof-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "describe-key",
+  "resources": {
+   "--key-id": [
+    "alias/nlw-staging-datasets"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "disable-key",
+  "resources": {
+   "--key-id": [
+    "{KEY_ARN}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-02",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "enable-key-rotation",
+  "resources": {
+   "--key-id": [
+    "{KEY_ARN}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--key-id",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X13",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "get-trail",
+  "resources": {
+   "--name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--name",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "get-trail-status",
+  "resources": {
+   "--name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--name",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "X07",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "delete-trail",
+  "resources": {
+   "--name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--name",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P02-02",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "get-trail",
+  "resources": {
+   "--name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--name",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-08",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "start-logging",
+  "resources": {
+   "--name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--name",
+   "--profile"
+  ]
+ },
+ {
+  "step": "X07",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "stop-logging",
+  "resources": {
+   "--name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ],
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--name",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "cloudtrail",
+  "operation": "stop-logging",
+  "resources": {
+   "--name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ],
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--name",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "cloudtrail",
+  "operation": "stop-logging",
+  "resources": {
+   "--name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ],
+   "--profile": [
+    "proof-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--name",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P11-02",
+  "machine": "instance",
+  "service": "cloudtrail",
+  "operation": "stop-logging",
+  "resources": {
+   "--name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ],
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--name",
+   "--profile"
+  ]
+ },
+ {
+  "step": "P03-10",
+  "machine": "provisioner",
+  "service": "ssm",
+  "operation": "get-parameters",
+  "resources": {
+   "--names": [
+    "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--names",
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy-version",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy-version",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy-version",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy-version",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy-version",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy-version",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy-version",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-proof-denies"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy-version",
+  "resources": {
+   "--policy-arn": [
+    "{BOUNDARY}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query",
+   "--version-id"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-boundary-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy",
+  "resources": {
+   "--policy-arn": [
+    "arn:aws:iam::{ACCOUNT}:policy/nlw-staging-d6-proof-denies"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-policy",
+  "resources": {
+   "--policy-arn": [
+    "{BOUNDARY}"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-arn",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "AwsSSOInlinePolicy"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "AwsSSOInlinePolicy"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "AwsSSOInlinePolicy"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "AwsSSOInlinePolicy"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Provisioner_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "AwsSSOInlinePolicy"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "AwsSSOInlinePolicy"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "AwsSSOInlinePolicy"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "AwsSSOInlinePolicy"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Provisioner_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--policy-name",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X13",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "list-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ],
+   "--resource-id-list": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--resource-id-list"
+  ]
+ },
+ {
+  "step": "P12-02",
+  "machine": "instance",
+  "service": "sts",
+  "operation": "assume-role",
+  "resources": {
+   "--profile": [
+    "proof-api"
+   ],
+   "--role-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-arn",
+   "--role-session-name"
+  ]
+ },
+ {
+  "step": "P12-02",
+  "machine": "instance",
+  "service": "sts",
+  "operation": "assume-role",
+  "resources": {
+   "--profile": [
+    "proof-bootstrap"
+   ],
+   "--role-arn": [
+    "arn:aws:iam::{ACCOUNT}:role/nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-arn",
+   "--role-session-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Provisioner_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Provisioner_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Provisioner_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Provisioner_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P18-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P18-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P18-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P18-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P18-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P18-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Provisioner_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-attached-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditAdmin_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6AuditReader_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Operator_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "AWSReservedSSO_NlwD6Provisioner_0123456789abcdef"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-policies",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-11",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X02",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-role-tags",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P01-03",
+  "machine": "provisioner",
+  "service": "resourcegroupstaggingapi",
+  "operation": "get-resources",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--tag-filters": [
+    "Key=nlw-env,Values=production"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--tag-filters"
+  ]
+ },
+ {
+  "step": "P18-01",
+  "machine": "provisioner",
+  "service": "resourcegroupstaggingapi",
+  "operation": "get-resources",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--tag-filters": [
+    "Key=nlw-proof,Values={PROOF_ID}"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--tag-filters"
+  ]
+ },
+ {
+  "step": "P03-15",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "get-event-selectors",
+  "resources": {
+   "--profile": [
+    "nlw-proof-audit-admin"
+   ],
+   "--trail-name": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query",
+   "--trail-name"
+  ]
+ },
+ {
+  "step": "P00-03",
+  "machine": "audit",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P00-03",
+  "machine": "audit",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P15-03",
+  "machine": "audit",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-14",
+  "machine": "instance",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "proof-api"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-14",
+  "machine": "instance",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "proof-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-14",
+  "machine": "instance",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "proof-ingest"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P00-03",
+  "machine": "operator",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "nlw-proof-human-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P12-03",
+  "machine": "operator",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "nlw-proof-operator"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-01",
+  "machine": "provisioner",
+  "service": "ec2",
+  "operation": "describe-availability-zones",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-03",
+  "machine": "provisioner",
+  "service": "organizations",
+  "operation": "describe-organization",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-03",
+  "machine": "provisioner",
+  "service": "cloudtrail",
+  "operation": "describe-trails",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P00-03",
+  "machine": "provisioner",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-01",
+  "machine": "provisioner",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-account-aliases",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-03",
+  "machine": "provisioner",
+  "service": "kms",
+  "operation": "list-aliases",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-03",
+  "machine": "provisioner",
+  "service": "s3api",
+  "operation": "list-buckets",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P01-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "list-roles",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--output",
+   "--profile",
+   "--query"
+  ]
+ },
+ {
+  "step": "P03-09",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "put-role-policy",
+  "resources": {
+   "--policy-document": [
+    "file://{PROOF_DIR}/policy-api.json"
+   ],
+   "--policy-name": [
+    "nlw-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--policy-document",
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-03",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "put-role-policy",
+  "resources": {
+   "--policy-document": [
+    "file://{PROOF_DIR}/policy-audit-admin.json"
+   ],
+   "--policy-name": [
+    "nlw-dataset-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--policy-document",
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-05",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "put-role-policy",
+  "resources": {
+   "--policy-document": [
+    "file://{PROOF_DIR}/policy-audit-admin.json"
+   ],
+   "--policy-name": [
+    "nlw-dataset-audit-admin"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--policy-document",
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-05",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "put-role-policy",
+  "resources": {
+   "--policy-document": [
+    "file://{PROOF_DIR}/policy-audit-reader.json"
+   ],
+   "--policy-name": [
+    "nlw-dataset-audit-reader"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--policy-document",
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-09",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "put-role-policy",
+  "resources": {
+   "--policy-document": [
+    "file://{PROOF_DIR}/policy-bootstrap.json"
+   ],
+   "--policy-name": [
+    "nlw-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--policy-document",
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-09",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "put-role-policy",
+  "resources": {
+   "--policy-document": [
+    "file://{PROOF_DIR}/policy-ingest.json"
+   ],
+   "--policy-name": [
+    "nlw-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--policy-document",
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-09",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "put-role-policy",
+  "resources": {
+   "--policy-document": [
+    "file://{PROOF_DIR}/policy-operator.json"
+   ],
+   "--policy-name": [
+    "nlw-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--policy-document",
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "delete-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-api"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "delete-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-bootstrap"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "delete-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-ingest"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "delete-role-policy",
+  "resources": {
+   "--policy-name": [
+    "nlw-dataset-operator"
+   ],
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--policy-name",
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "delete-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "delete-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "delete-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "X06",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "delete-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P02-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "get-role",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "wait",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-api"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "wait",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-admin"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "wait",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-audit-reader"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "wait",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-bootstrap"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "wait",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-ingest"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P03-01",
+  "machine": "provisioner",
+  "service": "iam",
+  "operation": "wait",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ],
+   "--role-name": [
+    "nlw-staging-dataset-operator"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--role-name"
+  ]
+ },
+ {
+  "step": "P13-01",
+  "machine": "audit",
+  "service": "cloudtrail",
+  "operation": "validate-logs",
+  "resources": {
+   "--profile": [
+    "nlw-proof-audit-reader"
+   ],
+   "--trail-arn": [
+    "arn:aws:cloudtrail:us-east-1:{ACCOUNT}:trail/nlw-staging-dataset-data-events"
+   ]
+  },
+  "arguments": [
+   "--profile",
+   "--start-time",
+   "--trail-arn"
+  ]
+ },
+ {
+  "step": "P12-01",
+  "machine": "audit",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "nlw-proof-operator-from-audit"
+   ]
+  },
+  "arguments": [
+   "--profile"
+  ]
+ },
+ {
+  "step": "P08-02",
+  "machine": "instance",
+  "service": "sts",
+  "operation": "get-caller-identity",
+  "resources": {
+   "--profile": [
+    "proof-api-wrong-session"
+   ]
+  },
+  "arguments": [
+   "--profile"
+  ]
+ },
+ {
+  "step": "P01-01",
+  "machine": "provisioner",
+  "service": "configure",
+  "operation": "get",
+  "resources": {
+   "--profile": [
+    "nlw-proof-provisioner"
+   ]
+  },
+  "arguments": [
+   "--profile"
+  ]
+ },
+ {
+  "step": "P00-03",
+  "machine": "audit",
+  "service": "sso",
+  "operation": "login",
+  "resources": {
+   "--sso-session": [
+    "nlw-d6-{PROOF_ID}-audit"
+   ]
+  },
+  "arguments": [
+   "--sso-session"
+  ]
+ },
+ {
+  "step": "P00-03",
+  "machine": "operator",
+  "service": "sso",
+  "operation": "login",
+  "resources": {
+   "--sso-session": [
+    "nlw-d6-{PROOF_ID}-operator"
+   ]
+  },
+  "arguments": [
+   "--sso-session"
+  ]
+ },
+ {
+  "step": "P00-03",
+  "machine": "provisioner",
+  "service": "sso",
+  "operation": "login",
+  "resources": {
+   "--sso-session": [
+    "nlw-d6-{PROOF_ID}-provisioner"
+   ]
+  },
+  "arguments": [
+   "--sso-session"
+  ]
+ },
+ {
+  "step": "P00-03",
+  "machine": "audit",
+  "service": "cli",
+  "operation": "--version",
+  "resources": {},
+  "arguments": []
+ },
+ {
+  "step": "P03-13",
+  "machine": "instance",
+  "service": "cli",
+  "operation": "--version",
+  "resources": {},
+  "arguments": []
+ },
+ {
+  "step": "P00-03",
+  "machine": "operator",
+  "service": "cli",
+  "operation": "--version",
+  "resources": {},
+  "arguments": []
+ },
+ {
+  "step": "P00-03",
+  "machine": "provisioner",
+  "service": "cli",
+  "operation": "--version",
+  "resources": {},
+  "arguments": []
+ }
+]

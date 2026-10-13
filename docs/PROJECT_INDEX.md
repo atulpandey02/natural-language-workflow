@@ -3,7 +3,32 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
-## Phase 2B — S3 dataset store, O-2 implementation (branch `feat/o2-s3-dataset-store`, awaiting review)
+## Phase 2B — O-2 D6 AWS proof package (branch `docs/o2-aws-proof-readiness`, awaiting review; NOT RUN)
+
+**D6 is blocked** until the owner approves a dedicated AWS proof account,
+its Identity Center identities and the three different people who hold the
+provisioner, operator and audit functions, and an independent verifier
+records them in a separately reviewed gate commit (decisions E9, E14, E15).
+The dedicated account limits the blast radius; least privilege and
+separation inside it come from exact role boundaries, the proof deny policy
+and exact permission-set policies; the contract tests are regression
+evidence.
+
+Prepared for independent review; nothing was run against AWS:
+
+- [D6 proof procedure](runbooks/dataset-s3-d6-proof.md): resource inventory,
+  ordered steps P00–P18 in the dedicated proof account, with every command
+  labelled READ-ONLY, MUTATING, HOST or LOCAL, stop conditions S1–S10,
+  sanitized evidence, ledger-based cleanup and recovery.
+- [Owner decisions E1–E16](runbooks/dataset-s3-d6-owner-decisions.md), open except E14 and E16 (synthetic data only)
+  except E14 (a dedicated proof account is required).
+- [Policy review](security/o2-aws-policy-review.md): findings and their
+  dispositions for five review rounds, residual risks R1–R14, unresolved AWS
+  behaviour I1–I8.
+- Contract tests with negative controls:
+  `tests/unit/test_dataset_s3_d6_proof.py`.
+
+## Phase 2B — S3 dataset store, O-2 implementation (merged as `eb42250`)
 
 ADR-033 is implemented with no AWS contact:
 

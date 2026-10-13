@@ -22,26 +22,56 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK = ROOT / "docs" / "runbooks" / "dataset-s3-provisioning.md"
 TEMPLATE = re.compile(r"<!-- template: ([a-z0-9-]+) -->\n```json\n(.*?)```", re.S)
 EXPECTED = {
-    "dataset-kms-key-statement",
+    "dataset-kms-key-statements",
     "dataset-bucket-lifecycle",
     "dataset-bucket-policy",
     "role-bootstrap",
     "role-api",
     "role-ingest",
     "role-operator",
+    "role-audit-admin",
+    "role-audit-reader",
+    "trust-bootstrap",
+    "trust-api",
+    "trust-ingest",
+    "trust-human",
+    "proof-principal-boundary",
+    "proof-principal-denies",
+    "boundary-bootstrap",
+    "boundary-api",
+    "boundary-ingest",
+    "boundary-operator",
+    "boundary-audit-admin",
+    "boundary-audit-reader",
+    "permission-set-provisioner",
+    "permission-set-operator",
+    "permission-set-audit-admin",
+    "permission-set-audit-reader",
     "trail-advanced-event-selectors",
     "audit-kms-key-statements",
     "audit-bucket-policy",
+    "audit-bucket-lifecycle",
 }
 ROLES = ("role-bootstrap", "role-api", "role-ingest", "role-operator")
+AUDIT_ROLES = ("role-audit-admin", "role-audit-reader")
 
 
 def _text() -> str:
     return RUNBOOK.read_text()
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"duplicate JSON keys in {keys}")
+    return dict(pairs)
+
+
 def _templates() -> dict[str, Any]:
-    return {name: json.loads(body) for name, body in TEMPLATE.findall(_text())}
+    return {
+        name: json.loads(body, object_pairs_hook=_no_duplicate_keys)
+        for name, body in TEMPLATE.findall(_text())
+    }
 
 
 def _statements(doc: Any) -> list[dict[str, Any]]:
@@ -351,8 +381,9 @@ def test_the_operator_gains_no_object_data_permission() -> None:
     assert "s3:ListMultipartUploadParts" not in _allowed(op)
 
 
-# The reviewed JSON of these templates on origin/main at eb42250, before this
-# fix: any change to them is a deliberate, reviewed edit of the fixture.
+# The reviewed JSON of every template except role-operator (pinned by the
+# tests above), as reviewed in PR #60 and integrated with the F5 split: any
+# change to them is a deliberate, reviewed edit of the fixture.
 UNCHANGED = json.loads(
     (ROOT / "tests" / "fixtures" / "dataset_s3_unchanged_templates.json").read_text()
 )["templates"]
@@ -364,12 +395,14 @@ def test_the_unchanged_fixture_covers_every_other_template() -> None:
 
 @pytest.mark.parametrize("name", sorted(UNCHANGED))
 def test_every_template_but_the_operators_is_unchanged(name: str) -> None:
-    """8. Only the operator template changed. The worker, scheduler and
-    dispatcher have no AWS role at all, and still get no AWS mount."""
+    """8. Every other template is exactly its reviewed JSON. The worker,
+    scheduler and dispatcher have no AWS role at all, and still get no AWS
+    mount."""
     assert _templates()[name] == UNCHANGED[name], name
 
 
 def test_worker_scheduler_and_dispatcher_still_get_no_aws_role_or_mount() -> None:
     assert not {n for n in _templates() if re.search(r"worker|scheduler|dispatch", n)}
     assert "The dispatcher, worker, scheduler and web containers get **no** AWS mount." in _text()
-    assert set(ROLES) == {n for n in _templates() if n.startswith("role-")}
+    # The dataset roles plus the two D6 audit roles (PR #60): nothing else.
+    assert set(ROLES) | set(AUDIT_ROLES) == {n for n in _templates() if n.startswith("role-")}
