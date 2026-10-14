@@ -123,7 +123,7 @@ below remove all three.
 3. The version becomes eligible for **operator purge**.
 4. The operator runs the version-aware purge.
 5. Deletion is verified.
-6. O-3 records the external deletion receipt, once O-3 exists.
+6. The external deletion log (O-3, [ADR-034](ADR-034-external-deletion-receipt-log.md)) records the receipt.
 7. The database tombstone follows the established lifecycle.
 
 **Provisional policy:** a rejected object **must be purged within 7 days.** This
@@ -465,7 +465,8 @@ AWS facts this design relies on (AWS documentation, checked 2026-10-09):
 3. `ListObjectVersions(Prefix=<version key>)`.
 4. `DeleteObjectVersion` for every version and delete marker.
 5. Verify that nothing remains.
-6. The receipt (O-3) records the deleted version ids.
+6. The receipt (O-3, ADR-034) records the hashed references of every deleted
+   version, delete marker and upload, and their count (never ids in clear).
 7. Tombstone only after verification. A failure leaves the version `DELETING`.
 
 ### `verify-objects`
@@ -497,7 +498,7 @@ AWS facts this design relies on (AWS documentation, checked 2026-10-09):
 | Ingest writing, copying or deleting | The role has `GetObject` only; the code has no write path (import and Stubber tests); the bucket policy denies version deletion |
 | Ingest reading another tenant's object | The key is derived from the signed, database-verified envelope, and tenant and dataset are checked. **Residual:** IAM scope is the environment prefix, not the exact object |
 | Physical deletion by an application identity | Only the operator role holds `DeleteObjectVersion`, enforced by a bucket-policy deny for everyone else; the operator role is not assumable by the bootstrap role and needs MFA |
-| A plain delete mistaken for deletion | Purge deletes every version and delete marker and verifies none remains; receipts list version ids; no code path calls an unversioned delete "deleted" |
+| A plain delete mistaken for deletion | Purge deletes every version and delete marker and verifies none remains; receipts record hashed references to every deleted version; no code path calls an unversioned delete "deleted" |
 | Cross-environment access | Separate buckets, keys and roles; role policies name only their own bucket and key; startup refuses mismatched identifiers |
 | Credential theft from containers | No static keys; per-container 1 h credentials; IMDS blocked and verified; startup checks the role ARN; no fallback chain; values never logged |
 | Unencrypted, or encrypted with the wrong key | Four bucket-policy denies (missing algorithm, missing key, wrong algorithm, wrong key); no `…IfExists` operator; no fallback to the bucket default; proven case by case, including multipart, in the D6 proof (a multipart denial stops provisioning, with no exception) |
@@ -559,7 +560,8 @@ AWS facts this design relies on (AWS documentation, checked 2026-10-09):
   Uploads stay disabled in staging and production until O-6.
 - ADR-031 tightens: the ingest runtime loses its write and delete paths, and
   the key can no longer move.
-- **O-3** receives the version ids from each purge.
+- **O-3** ([ADR-034](ADR-034-external-deletion-receipt-log.md)) receives one
+  receipt per purged version, with hashed references to every deleted item.
 - **O-4** designs replication and restore for the `versions/` layout.
 - **O-5** replaces the provisional 7-day rejected-file window and sets
   noncurrent-version expiry.

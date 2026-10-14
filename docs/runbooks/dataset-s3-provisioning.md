@@ -1255,7 +1255,8 @@ exceptions added.
    key, and the reverse, by policy simulation if the production bucket does
    not exist yet.
 8. **Operator purge** removes every version and delete marker; listing shows
-   none; the receipt lists version ids.
+   none; the receipt records hashed references to every removed version and
+   delete marker (ADR-034).
    - **O-MPU-LIST:** the operator's `ListMultipartUploads` with
      `Prefix=<version key>` is **allowed**, and returns only that prefix's
      uploads;

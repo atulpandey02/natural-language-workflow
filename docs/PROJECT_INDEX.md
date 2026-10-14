@@ -3,6 +3,25 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Phase 2B — external deletion-receipt log, O-3 (branch `feat/o3-s3-deletion-log`, awaiting review; NOT RUN on AWS)
+
+Owner decision O-3 (2026-10-14, [ADR-034](adr/ADR-034-external-deletion-receipt-log.md)):
+a dedicated S3 Object Lock bucket per environment, in the dataset account,
+GOVERNANCE retention until O-5. Implemented and tested without AWS contact:
+
+- `S3DeletionLog`: one write-once, retained receipt per purged version; a
+  preflight confirms Object Lock retention **before** any byte is deleted;
+  verification by the ids the database expects;
+- `reconcile-receipts` (purge events vs receipts) and `reapply-receipts` (a
+  restore step, run only under the recovery lock), migration
+  `0029_deletion_receipt_reapply` (reason `RESTORE_REAPPLY`; 74 policies);
+- [provisioning templates](runbooks/deletion-receipt-log-provisioning.md)
+  (NOT RUN): bucket policy, lifecycle, and second inline policies for the
+  operator and audit roles; the reviewed `role-operator` and D6 pins unchanged.
+
+Still open: O-5 retention, workspace offboarding receipts, CloudTrail coverage
+of the receipt bucket, the real-AWS proof. **Uploads remain disabled.**
+
 ## Phase 2B — O-2 D6 AWS proof package (branch `docs/o2-aws-proof-readiness`, awaiting review; NOT RUN)
 
 **D6 is blocked** until the owner approves a dedicated AWS proof account,

@@ -146,7 +146,8 @@ implementation from a trace of the code at `main` `9bc5f74`.
      semantic labels.
 
    The external deletion log is a **narrow interface** with a local fake sink
-   only. It is a launch gate (**owner decision O-3**: provider).
+   only. It is a launch gate (**owner decision O-3**: provider; decided in
+   ADR-034, S3 Object Lock, NOT RUN against AWS).
 8. **Backup and restore.**
    - The PostgreSQL backup holds metadata, profiles, semantics and events,
      never bytes or storage credentials.
@@ -207,7 +208,7 @@ These are pilot defaults, not permanent product decisions.
   dormant outside development until O-6;
 - **O-2** S3-compatible client dependency and its ADR; per-environment bucket;
   object durability;
-- **O-3** external deletion-log provider and record retention;
+- **O-3** external deletion-log provider (decided, ADR-034) and record retention (O-5);
 - **O-4** object backup/restore policy and RPO for uploaded files;
 - **O-5** retention periods (ADR-029 decision 14, unchanged);
 - **O-6** when `DATASETS_API_ENABLED` may be allowed outside development.
