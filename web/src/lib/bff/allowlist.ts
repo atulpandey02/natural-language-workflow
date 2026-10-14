@@ -59,7 +59,32 @@ const RULES: Rule[] = [
   { method: "POST", pattern: /^\/invitations$/ },
   { method: "POST", pattern: new RegExp(`^/invitations/${UUID}/revoke$`) },
   { method: "POST", pattern: /^\/invitations\/accept$/ },
+  // Datasets (ADR-029/030). Reads for members; every write is admin/owner and
+  // re-checked by the API. Physical purge is operator-only: no route here.
+  { method: "GET", pattern: /^\/datasets$/ },
+  { method: "POST", pattern: /^\/datasets$/ },
+  { method: "GET", pattern: new RegExp(`^/datasets/${UUID}$`) },
+  { method: "DELETE", pattern: new RegExp(`^/datasets/${UUID}$`) },
+  { method: "GET", pattern: new RegExp(`^/datasets/${UUID}/versions$`) },
+  { method: "POST", pattern: new RegExp(`^/datasets/${UUID}/versions$`) },
+  { method: "GET", pattern: new RegExp(`^/datasets/${UUID}/versions/${UUID}$`) },
+  { method: "DELETE", pattern: new RegExp(`^/datasets/${UUID}/versions/${UUID}$`) },
+  { method: "POST", pattern: new RegExp(`^/datasets/${UUID}/versions/${UUID}/process$`) },
+  { method: "GET", pattern: new RegExp(`^/datasets/${UUID}/versions/${UUID}/profile$`) },
+  { method: "GET", pattern: new RegExp(`^/datasets/${UUID}/versions/${UUID}/semantics$`) },
+  { method: "POST", pattern: new RegExp(`^/datasets/${UUID}/versions/${UUID}/semantics$`) },
+  { method: "POST", pattern: new RegExp(`^/datasets/${UUID}/versions/${UUID}/activate$`) },
 ];
+
+/**
+ * The ONE streamed request the BFF forwards: a version's raw CSV body. It is
+ * handled by its own code path (never buffered, size-capped, text/csv only).
+ */
+const UPLOAD = new RegExp(`^/datasets/${UUID}/versions/${UUID}/content$`);
+
+export function isUploadPath(method: string, path: string): boolean {
+  return method.toUpperCase() === "PUT" && UPLOAD.test(path);
+}
 
 /** True only when the exact method+path is explicitly allowed. */
 export function isAllowed(method: string, path: string): boolean {

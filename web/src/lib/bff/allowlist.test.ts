@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAllowed } from "./allowlist";
+import { isAllowed, isUploadPath } from "./allowlist";
 
 const UUID = "11111111-2222-3333-4444-555555555555";
 
@@ -82,5 +82,45 @@ describe("BFF allowlist", () => {
     expect(isAllowed("POST", "/runs")).toBe(false); // runs are read-only here
     expect(isAllowed("GET", "/step_runs")).toBe(false);
     expect(isAllowed("GET", "/../secrets")).toBe(false);
+  });
+});
+
+describe("BFF allowlist: datasets", () => {
+  const D = UUID;
+  const V = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+  it("allows exactly the dataset journey's endpoints", () => {
+    for (const [m, p] of [
+      ["GET", "/datasets"],
+      ["POST", "/datasets"],
+      ["GET", `/datasets/${D}`],
+      ["DELETE", `/datasets/${D}`],
+      ["GET", `/datasets/${D}/versions`],
+      ["POST", `/datasets/${D}/versions`],
+      ["GET", `/datasets/${D}/versions/${V}`],
+      ["DELETE", `/datasets/${D}/versions/${V}`],
+      ["POST", `/datasets/${D}/versions/${V}/process`],
+      ["GET", `/datasets/${D}/versions/${V}/profile`],
+      ["GET", `/datasets/${D}/versions/${V}/semantics`],
+      ["POST", `/datasets/${D}/versions/${V}/semantics`],
+      ["POST", `/datasets/${D}/versions/${V}/activate`],
+    ] as const)
+      expect(isAllowed(m, p), `${m} ${p}`).toBe(true);
+  });
+
+  it("never allows purge, status writes or the raw body through the JSON proxy", () => {
+    expect(isAllowed("PUT", `/datasets/${D}/versions/${V}/content`)).toBe(false);
+    expect(isAllowed("POST", `/datasets/${D}/versions/${V}/content`)).toBe(false);
+    expect(isAllowed("POST", `/datasets/${D}/purge`)).toBe(false);
+    expect(isAllowed("PATCH", `/datasets/${D}/versions/${V}`)).toBe(false);
+    expect(isAllowed("DELETE", `/datasets/${D}/versions`)).toBe(false);
+    expect(isAllowed("GET", `/datasets/${D}/versions/${V}/profile/raw`)).toBe(false);
+    expect(isAllowed("GET", "/datasets/not-a-uuid")).toBe(false);
+  });
+
+  it("streams only the exact content path, by PUT", () => {
+    expect(isUploadPath("PUT", `/datasets/${D}/versions/${V}/content`)).toBe(true);
+    expect(isUploadPath("POST", `/datasets/${D}/versions/${V}/content`)).toBe(false);
+    expect(isUploadPath("PUT", `/datasets/${D}/versions/${V}/content/x`)).toBe(false);
+    expect(isUploadPath("PUT", `/datasets/${D}/versions/${V}`)).toBe(false);
   });
 });

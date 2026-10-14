@@ -17,6 +17,11 @@ Copy `.env.example` to `.env.local`:
   the same Supabase project (private DNS / host gateway).
 - `NLW_API_URL` — internal FastAPI base URL (server-only).
 - `WORKSPACE_COOKIE_SECRET` — signs the workspace-selection cookie (server-only).
+- `NLW_DATASET_MAX_UPLOAD_BYTES` — optional (default and ceiling 25000000): the
+  dataset upload limit this app shows and enforces before forwarding a file. Set
+  it to the API's `DATASET_MAX_UPLOAD_BYTES`; the API remains authoritative and
+  refuses a larger file (413) even when the two disagree. Uploads exist only where
+  the API mounts them (local/dev storage); staging and production refuse them.
 
 A real Supabase project (or local Supabase) is required for auth. Because the
 public config is runtime-supplied, the **same** built image + digest is promoted
