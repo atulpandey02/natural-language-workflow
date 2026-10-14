@@ -42,6 +42,7 @@ describe("Playwright spec routing between the seeded-stack and pilot-harness job
         "pilot-analytics.spec.ts",
         "pilot-visual-states.spec.ts",
         "pilot-launch.spec.ts",
+        "pilot-datasets.spec.ts",
       ]),
     );
   });

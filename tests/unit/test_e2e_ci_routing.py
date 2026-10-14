@@ -69,6 +69,15 @@ def test_pilot_job_runs_both_harness_journeys_and_rejects_skips() -> None:
         assert "--junitxml=" in step["run"] and step["env"]["E2E_JSON_REPORT"]
         assert "scripts/ci/check_pilot_browser_run.py" in step["run"]
         assert 'exit "$status"' in step["run"]
+    datasets = _step(
+        pilot, "Dataset journey (upload, ingest, profile, semantics, activate, delete; faults)"
+    )
+    assert "tests/integration/test_pilot_dataset_browser.py" in datasets["run"]
+    assert "--junitxml=" in datasets["run"] and datasets["env"]["E2E_JSON_REPORT"]
+    assert "scripts/ci/check_pilot_browser_run.py" in datasets["run"]
+    assert 'exit "$status"' in datasets["run"]
+    reports = [s["env"]["E2E_JSON_REPORT"] for s in (golden, visual, launch, datasets)]
+    assert len(set(reports)) == len(reports)
     paths = _step(pilot, "Define private harness paths")
     assert pilot["steps"][0] is paths
     assert 'PILOT_AUTH_CONFIG=$RUNNER_TEMP/pilot-auth.json" >> "$GITHUB_ENV"' in paths["run"]

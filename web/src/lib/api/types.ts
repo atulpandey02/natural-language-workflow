@@ -246,3 +246,106 @@ export interface PlanStep {
   args?: Record<string, unknown>;
   depends_on?: string[];
 }
+
+// --- Datasets (ADR-029/030/033). Mirrors nlw.api.schemas; pinned by
+// tests/unit/test_web_dataset_contract.py. No storage key, path, digest of
+// another file or queue detail is ever part of these shapes.
+
+export type DatasetStatus = "ACTIVE" | "DELETING";
+
+export interface DatasetOut {
+  id: string;
+  name: string;
+  description: string | null;
+  status: DatasetStatus;
+  active_version_id: string | null;
+  version_count: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  deletion_requested_at: string | null;
+}
+
+export type VersionStatus =
+  "QUARANTINED" | "PROFILING" | "PROFILED" | "ACTIVE" | "SUPERSEDED" | "REJECTED" | "DELETING";
+
+export interface DatasetVersionOut {
+  id: string;
+  dataset_id: string;
+  version_number: number;
+  status: VersionStatus;
+  original_filename: string;
+  media_type: string;
+  declared_size_bytes: number;
+  content_sha256: string | null;
+  rejection_code: string | null;
+  created_by: string;
+  created_at: string;
+  activated_at: string | null;
+  superseded_at: string | null;
+  rejected_at: string | null;
+  deletion_requested_at: string | null;
+  has_content: boolean;
+  profiling_started_at: string | null;
+  profiled_at: string | null;
+}
+
+export type SemanticType =
+  | "category"
+  | "text"
+  | "count"
+  | "amount"
+  | "currency"
+  | "percentage"
+  | "ratio"
+  | "date"
+  | "timestamp"
+  | "boolean"
+  | "identifier"
+  | "contact";
+
+export type SemanticRole = "dimension" | "measure" | "identifier" | "timestamp" | "attribute";
+
+/** One column of a semantics-1 confirmation (SemanticColumnIn). */
+export interface SemanticColumn {
+  name: string;
+  label: string;
+  semantic_type: SemanticType;
+  role: SemanticRole;
+  analysis_allowed: boolean;
+  description: string | null;
+}
+
+export interface SemanticRevisionOut {
+  id: string;
+  revision_number: number;
+  mapping: { contract_version?: string; columns?: SemanticColumn[] };
+  confirmed_by: string;
+  confirmed_at: string;
+}
+
+/** The value-free view of one profiled column (see lib/datasets profileView). */
+export interface ProfileColumnView {
+  position: number;
+  header: string;
+  name: string;
+  inferredType: "boolean" | "integer" | "decimal" | "date" | "timestamp" | "string";
+  nonNull: number;
+  nulls: number;
+  distinct: number | null;
+  distinctOverLimit: boolean;
+  parseErrors: number;
+  formulaLike: number;
+  indicators: string[];
+  warnings: string[];
+}
+
+export interface ProfileView {
+  rows: number;
+  columnCount: number;
+  sizeBytes: number;
+  encoding: string;
+  formulaLikeCells: number;
+  warnings: string[];
+  columns: ProfileColumnView[];
+}

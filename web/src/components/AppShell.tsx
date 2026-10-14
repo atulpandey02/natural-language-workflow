@@ -27,6 +27,7 @@ const NAV_GROUPS = [
   {
     caption: "Workspace",
     items: [
+      { href: "/datasets", label: "Datasets", icon: "▤" },
       { href: "/connectors", label: "Connectors", icon: "⊞" },
       { href: "/members", label: "Members", icon: "⚇" },
       { href: "/settings", label: "Settings", icon: "⚙" },
@@ -64,7 +65,8 @@ export function AppShell({ children }: { children: ReactNode }) {
                       (item.href === "/workflows" &&
                         pathname.startsWith("/workflows/") &&
                         pathname !== "/workflows/new") ||
-                      (item.href === "/runs" && pathname.startsWith("/runs/"))
+                      (item.href === "/runs" && pathname.startsWith("/runs/")) ||
+                      (item.href === "/datasets" && pathname.startsWith("/datasets/"))
                         ? "page"
                         : undefined
                     }
