@@ -11,6 +11,20 @@ OWNER credential ``DATABASE_MIGRATION_URL``, exactly like ``python -m nlw.ops.gr
     python -m nlw.ops.datasets dispatch-pending [--dry-run] [--limit N]
     python -m nlw.ops.datasets rejected-pending [--limit N] [--metrics-file PATH]
     python -m nlw.ops.datasets purge-rejected --operator <name> [--dry-run] [--limit N]
+    python -m nlw.ops.datasets reconcile-receipts
+    python -m nlw.ops.datasets reapply-receipts [--dry-run]
+
+``reconcile-receipts`` (ADR-034) checks every recorded purge against its
+receipt in the configured deletion log, and lists receipts no purge event names
+(expected after a purge that failed after its receipt was written, ADR-033
+note 3). ``reapply-receipts`` is a RESTORE step: it runs only while the
+recovery lock holds a restored database, before any runtime starts. Every
+receipt in the external log proves a version's bytes were deleted; a restored
+database that predates the deletion may still show that version as usable, or
+as DELETING without its purge evidence. It moves such a version to DELETING
+and records the receipt as its purge evidence (reason ``RESTORE_REAPPLY``),
+reports a version whose content digest differs from the receipt (never
+changed), and is idempotent.
 
 ``rejected-pending`` / ``purge-rejected`` (ADR-033 D2): a rejected object stays
 immutable (the ingest runtime deletes nothing) until the operator removes it.
@@ -59,6 +73,7 @@ import argparse
 import os
 import sys
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -70,7 +85,9 @@ from nlw.datasets.deletion_log import (
     DeletionReceipt,
     ExpectedReceipt,
     ReceiptCheck,
+    ReceiptRef,
     UnconfiguredDeletionLog,
+    check_receipt,
     deletion_log_from_settings,
 )
 from nlw.datasets.lifecycle import ActorKind, EventType, ReasonCode
@@ -144,12 +161,9 @@ def purge(
     when nothing is stored or no store is configured (ADR-033 note 3)."""
     if not operator.strip() or len(operator) > 64:
         raise TombstoneError("--operator must be a short operator label")
-    if isinstance(log, UnconfiguredDeletionLog):
-        # Checked BEFORE anything is deleted: physical deletion cannot be undone,
-        # so it never happens without a place to record its receipt.
-        raise TombstoneError(
-            "no deletion log is configured (the external deletion log is a launch gate)"
-        )
+    # Checked BEFORE anything is deleted: physical deletion cannot be undone, so
+    # it never happens without a working place to record (and protect) its receipt.
+    _preflight(log)
     _require_runtimes_permitted(conn)
     with conn.transaction():
         ds = conn.execute(
@@ -218,6 +232,13 @@ def purge(
             "versions_purged": purged,
             "objects_deleted": deleted_total,
         }
+
+
+def _preflight(log: DeletionLog) -> None:
+    try:
+        log.preflight()
+    except DeletionLogUnavailable as exc:
+        raise TombstoneError(str(exc)) from None
 
 
 def _require_runtimes_permitted(conn: psycopg.Connection[Any]) -> None:
@@ -357,10 +378,7 @@ def purge_rejected(
     batch += [(r[0], r[1], r[2], False) for r in fresh[: max(0, limit - len(resume))]]
     if dry_run:
         return {"selected": len(batch), "moved": 0, "purged": 0, "more": int(more), "dry_run": 1}
-    if isinstance(log, UnconfiguredDeletionLog):
-        raise TombstoneError(
-            "no deletion log is configured (the external deletion log is a launch gate)"
-        )
+    _preflight(log)
     moved = purged = 0
     for tenant_id, dataset_id, vid, resumed in batch:
         if not resumed:
@@ -401,7 +419,7 @@ def _require_purged(
     exactly that purge, and a live check that nothing is stored for it."""
     evidence = conn.execute(
         "SELECT e.receipt_sink, e.receipt_id, e.receipt_digest, v.content_sha256, "
-        "v.deletion_requested_at FROM dataset_events e "
+        "v.deletion_requested_at, e.reason_code FROM dataset_events e "
         "JOIN dataset_versions v ON v.id = e.version_id "
         "WHERE e.version_id = %s AND e.event_type = 'VERSION_OBJECT_PURGED' "
         "AND e.actor_kind = 'operator' AND e.created_at >= v.deletion_requested_at "
@@ -416,7 +434,7 @@ def _require_purged(
         raise TombstoneError("no dataset store is configured: cannot verify object absence")
     if TenantScopedBlobStore(store, tenant_id).list_version(dataset_id, version_id):
         raise TombstoneError(f"objects of version {version_id} are still present: run purge")
-    sink, receipt_id, digest, content_sha256, requested_at = evidence
+    sink, receipt_id, digest, content_sha256, requested_at, reason = evidence
     if sink != log.sink_id:
         raise TombstoneError(
             f"deletion receipt for version {version_id} is held by sink {sink!r}; "
@@ -431,13 +449,25 @@ def _require_purged(
             version_id=version_id,
             content_sha256=content_sha256,
             deletion_set_sha256=digest,
-            not_before=requested_at,
+            not_before=_not_before(requested_at, reason),
         )
     )
     if check is not ReceiptCheck.VERIFIED:
         raise TombstoneError(
             f"deletion receipt for version {version_id} was not verified: {check.value}"
         )
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _not_before(requested_at: datetime, reason: str | None) -> datetime:
+    """A receipt must postdate the deletion request it answers, except one
+    re-applied after a restore (``RESTORE_REAPPLY``): its deletion happened in
+    the timeline the restored database forgot, so it necessarily predates the
+    request the restore re-created. Identity, digests and live absence are
+    still checked."""
+    return _EPOCH if reason == ReasonCode.RESTORE_REAPPLY.value else requested_at
 
 
 def _scrub_derived(conn: psycopg.Connection[Any], version_id: uuid.UUID) -> None:
@@ -633,6 +663,188 @@ def dispatch_pending(
     }
 
 
+# --- deletion receipts: reconciliation and restore re-application (ADR-034) -----
+
+_SQL_PURGE_EVIDENCE = (
+    "SELECT e.version_id, e.tenant_id, e.dataset_id, e.receipt_sink, e.receipt_id, "
+    "e.receipt_digest, v.content_sha256, v.deletion_requested_at, e.reason_code "
+    "FROM dataset_events e JOIN dataset_versions v ON v.id = e.version_id "
+    "WHERE e.event_type = 'VERSION_OBJECT_PURGED' ORDER BY e.created_at, e.id"
+)
+
+
+def reconcile_receipts(conn: psycopg.Connection[Any], log: DeletionLog) -> dict[str, list[str]]:
+    """Every purge event checked against its receipt, and every receipt no event
+    names (ids only). ``unverified`` entries are ``<version>:<check>``; only they
+    (and ``other_sink``) indicate a problem: a receipt without an event is the
+    documented trace of a purge that failed after writing it (ADR-033 note 3)."""
+    unverified: list[str] = []
+    other_sink: list[str] = []
+    named: set[str] = set()
+    for vid, tid, did, sink, rid, digest, content, requested, reason in conn.execute(
+        _SQL_PURGE_EVIDENCE
+    ).fetchall():
+        if sink != log.sink_id:
+            other_sink.append(str(vid))
+            continue
+        named.add(rid)
+        check = log.verify(
+            ExpectedReceipt(
+                sink=sink, receipt_id=rid, tenant_id=tid, dataset_id=did, version_id=vid,
+                content_sha256=content, deletion_set_sha256=digest,
+                not_before=_not_before(requested, reason),
+            )
+        )  # fmt: skip
+        if check is not ReceiptCheck.VERIFIED:
+            unverified.append(f"{vid}:{check.value}")
+    try:
+        refs = sorted(log.refs())
+    except DeletionLogUnavailable as exc:
+        raise TombstoneError(str(exc)) from None
+    without_event = sorted({str(r.version_id) for r in refs if r.receipt_id not in named})
+    return {
+        "unverified": sorted(unverified),
+        "other_sink": sorted(other_sink),
+        "receipts_without_event": without_event,
+    }
+
+
+def _self_consistent(record: dict[str, Any], ref: ReceiptRef, sink: str) -> bool:
+    """A receipt is re-applied only if it is well formed, filed where it says it
+    belongs, from this sink, and its digest recomputes."""
+    try:
+        expected = ExpectedReceipt(
+            sink=sink,
+            receipt_id=ref.receipt_id,
+            tenant_id=ref.tenant_id,
+            dataset_id=ref.dataset_id,
+            version_id=ref.version_id,
+            content_sha256=record["content_sha256"],
+            deletion_set_sha256=record["deletion_set_sha256"],
+            not_before=_EPOCH,
+        )
+    except (KeyError, TypeError):
+        return False
+    return (
+        record.get("receipt_id") == ref.receipt_id
+        and check_receipt(record, expected) is ReceiptCheck.VERIFIED
+    )
+
+
+def _require_recovery_locked(conn: psycopg.Connection[Any]) -> None:
+    from nlw.backup.recovery_lock import (
+        RecoveryLocked,
+        RecoveryStateUnknown,
+        check_recovery_lock_psycopg,
+    )
+
+    try:
+        check_recovery_lock_psycopg(conn)
+    except RecoveryLocked:
+        return
+    except RecoveryStateUnknown:
+        raise TombstoneError("refused: the recovery lock state is unknown") from None
+    raise TombstoneError(
+        "reapply-receipts runs only while the recovery lock holds a restored database"
+    )
+
+
+def reapply_receipts(
+    conn: psycopg.Connection[Any], log: DeletionLog, *, dry_run: bool = False
+) -> dict[str, Any]:
+    """Re-apply every deletion receipt to a restored database (see the module
+    docstring). Counts, plus version ids for ``conflict`` and ``unreadable``."""
+    _require_recovery_locked(conn)
+    try:
+        refs = sorted(set(log.refs()))
+    except DeletionLogUnavailable as exc:
+        raise TombstoneError(str(exc)) from None
+    counts = dict.fromkeys(
+        ("receipts", "reapplied", "recorded", "already_recorded", "already_tombstoned",
+         "absent"), 0,
+    )  # fmt: skip
+    conflict: list[str] = []
+    unreadable: list[str] = []
+    for ref in refs:
+        counts["receipts"] += 1
+        try:
+            record = log.read(ref)
+        except DeletionLogUnavailable:
+            record = None
+        if record is None or not _self_consistent(record, ref, log.sink_id):
+            unreadable.append(str(ref.version_id))
+            continue
+        outcome = _reapply_one(conn, log, ref, record, dry_run=dry_run)
+        if outcome == "conflict":
+            conflict.append(str(ref.version_id))
+        else:
+            counts[outcome] += 1
+    return {
+        **counts,
+        "conflict": sorted(set(conflict)),
+        "unreadable": sorted(set(unreadable)),
+        "dry_run": int(dry_run),
+    }
+
+
+def _reapply_one(
+    conn: psycopg.Connection[Any],
+    log: DeletionLog,
+    ref: ReceiptRef,
+    record: dict[str, Any],
+    *,
+    dry_run: bool,
+) -> str:
+    with conn.transaction():
+        row = conn.execute(
+            "SELECT v.status, v.content_sha256, d.active_version_id FROM dataset_versions v "
+            "JOIN datasets d ON d.id = v.dataset_id AND d.tenant_id = v.tenant_id "
+            "WHERE v.id = %s AND v.dataset_id = %s AND v.tenant_id = %s FOR UPDATE OF v, d",
+            (ref.version_id, ref.dataset_id, ref.tenant_id),
+        ).fetchone()
+        if row is None:
+            return "absent"  # created after the restored snapshot
+        status, content, active = row
+        if status == "DELETED":
+            return "already_tombstoned"
+        if content != record["content_sha256"]:
+            return "conflict"  # never altered: the operator investigates
+        evidence = (log.sink_id, ref.receipt_id, record["deletion_set_sha256"])
+        recorded = conn.execute(
+            "SELECT 1 FROM dataset_events WHERE version_id = %s "
+            "AND event_type = 'VERSION_OBJECT_PURGED' AND receipt_id = %s",
+            (ref.version_id, ref.receipt_id),
+        ).fetchone()
+        if status == "DELETING" and recorded is not None:
+            return "already_recorded"
+        if dry_run:
+            return "recorded" if status == "DELETING" else "reapplied"
+        outcome = "recorded"
+        if status != "DELETING":
+            conn.execute(
+                "UPDATE dataset_versions SET status = 'DELETING' WHERE id = %s AND status = %s",
+                (ref.version_id, status),
+            )
+            if active == ref.version_id:
+                conn.execute(
+                    "UPDATE datasets SET active_version_id = NULL "
+                    "WHERE id = %s AND active_version_id = %s",
+                    (ref.dataset_id, ref.version_id),
+                )
+            _event(
+                conn, ref.tenant_id, ref.dataset_id, ref.version_id,
+                EventType.VERSION_DELETION_REQUESTED, status, to_status="DELETING",
+                reason=ReasonCode.RESTORE_REAPPLY,
+            )  # fmt: skip
+            outcome = "reapplied"
+        _event(
+            conn, ref.tenant_id, ref.dataset_id, ref.version_id,
+            EventType.VERSION_OBJECT_PURGED, "DELETING", to_status="DELETING",
+            reason=ReasonCode.RESTORE_REAPPLY, receipt=evidence,
+        )  # fmt: skip
+        return outcome
+
+
 # --- restore validation --------------------------------------------------------
 
 
@@ -680,6 +892,32 @@ def _object_id(key: str) -> str:
     return parts[3] if len(parts) > 3 else parts[-1]
 
 
+def configured_deletion_log(settings: Settings) -> DeletionLog:
+    """The deletion log for the operator commands. ``s3`` runs as the verified
+    operator role (``nlw-<env>-dataset-operator``) with the pinned credential
+    file, exactly like the dataset store; it never uses another identity."""
+    if settings.dataset_deletion_log != "s3":
+        return deletion_log_from_settings(
+            settings.dataset_deletion_log, settings.dataset_deletion_log_path, settings.app_env
+        )
+    from nlw.datasets.deletion_log_s3 import S3DeletionLog
+    from nlw.storage.s3_credentials import CredentialError, build_clients
+
+    assert settings.dataset_deletion_log_bucket  # Settings validated it
+    try:
+        client, _ = build_clients(settings, "operator")
+    except CredentialError as exc:
+        raise DeletionLogUnavailable(str(exc)) from None
+    return S3DeletionLog(client, settings.dataset_deletion_log_bucket)
+
+
+def _configured_log(settings: Settings) -> DeletionLog:
+    try:
+        return configured_deletion_log(settings)
+    except DeletionLogUnavailable as exc:
+        raise TombstoneError(str(exc)) from None
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m nlw.ops.datasets")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -695,6 +933,9 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--operator", required=True)
     pr.add_argument("--dry-run", action="store_true")
     pr.add_argument("--limit", type=int, default=REJECTED_BATCH)
+    sub.add_parser("reconcile-receipts")
+    ra = sub.add_parser("reapply-receipts")
+    ra.add_argument("--dry-run", action="store_true")
     for name in ("purge", "tombstone"):
         sp = sub.add_parser(name)
         sp.add_argument("--dataset", required=True)
@@ -724,6 +965,23 @@ def main(argv: list[str] | None = None) -> int:
                 result = dispatch_pending(conn, broker, dry_run=args.dry_run, limit=args.limit)
                 print(" ".join(f"{k}={v}" for k, v in result.items()))
                 return 0
+            if args.cmd in ("reconcile-receipts", "reapply-receipts"):
+                log = _configured_log(settings)
+                if args.cmd == "reconcile-receipts":
+                    report = reconcile_receipts(conn, log)
+                    for key, ids in report.items():
+                        print(f"{key}={len(ids)}" + ("" if not ids else " " + ",".join(ids)))
+                    return 0 if not (report["unverified"] or report["other_sink"]) else 1
+                result = reapply_receipts(conn, log, dry_run=args.dry_run)
+                print(
+                    " ".join(
+                        f"{k}={len(v)}" + ("" if not v else " " + ",".join(v))
+                        if isinstance(v, list)
+                        else f"{k}={v}"
+                        for k, v in result.items()
+                    )
+                )
+                return 0 if not (result["conflict"] or result["unreadable"]) else 1
             store = dataset_store(settings, service="operator")
             if args.cmd == "verify-objects":
                 if store is None:
@@ -732,14 +990,7 @@ def main(argv: list[str] | None = None) -> int:
                 for key, ids in report.items():
                     print(f"{key}={len(ids)}" + ("" if not ids else " " + ",".join(ids)))
                 return 0 if not any(report.values()) else 1
-            try:
-                log = deletion_log_from_settings(
-                    settings.dataset_deletion_log,
-                    settings.dataset_deletion_log_path,
-                    settings.app_env,
-                )
-            except DeletionLogUnavailable as exc:
-                raise TombstoneError(str(exc)) from None
+            log = _configured_log(settings)
             if args.cmd == "purge-rejected":
                 rej = purge_rejected(
                     conn, store, log, operator=args.operator, environment=settings.app_env,

@@ -873,8 +873,8 @@ def test_0026_refuses_a_downgrade_with_an_ingest_key_and_goes_down_and_up_otherw
     down_0025 = _shape(pg_stack)
     command.upgrade(cfg, "head")
     head = _shape(pg_stack)
-    # Head is 0028 (ADR-033); 0027 and 0028 add no policy on top of 0026.
-    assert head["revision"] == "0028_dataset_object_layout" and head["policies"] == 74
+    # Head is 0029 (ADR-034); 0027-0029 add no policy on top of 0026.
+    assert head["revision"] == "0029_deletion_receipt_reapply" and head["policies"] == 74
     assert down_0025["revision"] == "0025_dataset_ingestion"
     assert (down_0025["policies"], down_0025["requests"], down_0025["ingest_grants"]) == (65, 0, 0)
     for fn in ("verifier", "guard", "required", "consistency"):
@@ -1503,9 +1503,9 @@ async def test_a_populated_0025_database_upgrades_to_0026_without_rewriting_anyt
     command.downgrade(cfg, "0025_dataset_ingestion")
     assert snapshot() == before  # the populated 0025 state
     command.upgrade(cfg, "head")
-    assert snapshot() == before  # 0025 -> 0028 rewrote nothing (legacy keys stay valid)
+    assert snapshot() == before  # 0025 -> 0029 rewrote nothing (legacy keys stay valid)
     with st.owner() as c:
         assert c.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0028_dataset_object_layout",
+            "0029_deletion_receipt_reapply",
         )
         assert c.execute("SELECT count(*) FROM pg_policies").fetchone() == (74,)

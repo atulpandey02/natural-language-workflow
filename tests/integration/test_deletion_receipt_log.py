@@ -1,0 +1,384 @@
+"""The external deletion log on S3 Object Lock, end to end against PostgreSQL
+(ADR-034, owner decision O-3). The receipt bucket is the in-memory S3 of
+``tests/unit/receipt_s3_fake.py`` (no network, no AWS); objects live in a
+local store.
+
+- purge -> a retained, write-once receipt -> tombstone verifies it;
+- no purge without a log that can retain its receipt (checked before deleting);
+- ``reconcile-receipts`` checks every purge event against its receipt;
+- ``reapply-receipts`` re-applies the external log to a restored database while
+  the recovery lock holds it: a live version whose bytes a receipt proves
+  deleted becomes DELETING with ``RESTORE_REAPPLY`` evidence the tombstone
+  accepts; conflicts and untrustworthy receipts change nothing.
+"""
+
+import importlib.util
+import json
+import sys
+import uuid
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import psycopg
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from nlw.datasets import ingestion
+from nlw.datasets import service as svc
+from nlw.datasets.deletion_log import DeletionReceipt, ReceiptRef
+from nlw.datasets.deletion_log_s3 import S3DeletionLog, receipt_key
+from nlw.datasets.lifecycle import EventType, ReasonCode
+from nlw.datasets.service import Actor
+from nlw.ingest.strict import StrictLimits
+from nlw.ingest_service import processing
+from nlw.ops import datasets as ops
+from nlw.storage.blob import LocalBlobStore, TenantScopedBlobStore
+from nlw.tenancy.context import Role, TenantContext
+from nlw.tenancy.signing import Purpose
+
+_FAKE = Path(__file__).resolve().parents[1] / "unit" / "receipt_s3_fake.py"
+_spec = importlib.util.spec_from_file_location("receipt_s3_fake", _FAKE)
+assert _spec is not None and _spec.loader is not None
+fake = importlib.util.module_from_spec(_spec)
+sys.modules.setdefault("receipt_s3_fake", fake)
+_spec.loader.exec_module(fake)
+
+pytestmark = pytest.mark.integration
+
+CSV = b"region,amount\n" + b"".join(f"r{i % 4},{i}\n".encode() for i in range(30))
+CONFIG = processing.IngestionConfig(limits=StrictLimits(timeout_s=30), memory_mb=768)
+MAPPING = json.dumps({"contract_version": "semantics-1", "columns": [
+    {"name": "region", "label": "Region", "semantic_type": "category", "role": "dimension",
+     "analysis_allowed": True, "description": None},
+    {"name": "amount", "label": "Amount", "semantic_type": "count", "role": "measure",
+     "analysis_allowed": True, "description": None}]})  # fmt: skip
+
+
+class H:
+    def __init__(self, pg: SimpleNamespace, root: Path) -> None:
+        m = pg.seed_member("owner")
+        self.pg = pg
+        self.tenant = m.tenant_id
+        self.ctx = TenantContext(user_id=m.user_id, tenant_id=m.tenant_id, role=Role.OWNER)
+        self.actor = Actor.user(m.user_id)
+        self.engine = create_async_engine(pg.settings.database_url, pool_size=6)
+        self.maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            self.engine, expire_on_commit=False
+        )
+        self.signer = pg.signers[Purpose.API_REQUEST]
+        pg.enable_ingest()
+        self.ingest_engine = create_async_engine(pg.ingest_sa, pool_size=6)
+        self.ingest_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            self.ingest_engine, expire_on_commit=False
+        )
+        self.ingest_signer = pg.signers[Purpose.DATASET_INGEST]
+        self.store = LocalBlobStore(root / "store")
+        self.bucket = fake.ReceiptBucket()
+        self.log = S3DeletionLog(self.bucket.client("operator"), fake.BUCKET)
+
+    async def run(self, fn: Any) -> Any:
+        return await ingestion.in_context(self.maker, self.signer, self.ctx, fn)
+
+    async def dataset(self) -> uuid.UUID:
+        name = f"r-{uuid.uuid4().hex[:8]}"
+        d = await self.run(
+            lambda s: svc.create_dataset(s, self.tenant, self.actor, name=name, description=None)
+        )
+        return d.id  # type: ignore[no-any-return]
+
+    async def profiled(self, d: uuid.UUID) -> uuid.UUID:
+        v = (
+            await self.run(
+                lambda s: svc.create_version(
+                    s, self.tenant, self.actor, d, original_filename="a.csv",
+                    media_type="text/csv", declared_size_bytes=len(CSV),
+                    idempotency_key=uuid.uuid4().hex,
+                )
+            )
+        ).id  # fmt: skip
+
+        async def chunks() -> AsyncIterator[bytes]:
+            yield CSV
+
+        _, env = await ingestion.store_content(
+            maker=self.maker, signer=self.signer, store=self.store, ctx=self.ctx,
+            dataset_id=d, version_id=v, chunks=chunks(), max_bytes=10**6,
+        )  # fmt: skip
+        assert env is not None
+        await processing.process_envelope(
+            maker=self.ingest_maker, signer=self.ingest_signer, store=self.store,
+            config=CONFIG, message=env.to_json(),
+        )  # fmt: skip
+        return v  # type: ignore[no-any-return]
+
+    async def active(self, d: uuid.UUID) -> uuid.UUID:
+        v = await self.profiled(d)
+        t, a = self.tenant, self.actor
+        await self.run(lambda s: svc.confirm_semantics(s, t, a, d, v, mapping_json=MAPPING))
+        await self.run(lambda s: svc.activate_version(s, t, a, d, v))
+        return v
+
+    def owner(self) -> psycopg.Connection[Any]:
+        return psycopg.connect(self.pg.owner_libpq, autocommit=True)
+
+    def row(self, v: uuid.UUID) -> tuple[Any, ...]:
+        with self.owner() as c:
+            row = c.execute(
+                "SELECT v.status, d.active_version_id FROM dataset_versions v "
+                "JOIN datasets d ON d.id = v.dataset_id WHERE v.id = %s",
+                (v,),
+            ).fetchone()
+        assert row is not None
+        return tuple(row)
+
+    def reasons(self, v: uuid.UUID) -> list[tuple[str, str]]:
+        with self.owner() as c:
+            return [
+                (str(e), str(r))
+                for e, r in c.execute(
+                    "SELECT event_type, reason_code FROM dataset_events WHERE version_id = %s "
+                    "AND reason_code = 'RESTORE_REAPPLY' ORDER BY created_at, event_type",
+                    (v,),
+                ).fetchall()
+            ]
+
+    def digest(self, v: uuid.UUID) -> str:
+        with self.owner() as c:
+            row = c.execute("SELECT content_sha256 FROM dataset_versions WHERE id = %s", (v,))
+            return str(row.fetchone()[0])  # type: ignore[index]
+
+    def bytes_deleted_after_snapshot(
+        self, d: uuid.UUID, v: uuid.UUID, *, content: str | None = None
+    ) -> DeletionReceipt:
+        """What a purge after the restored snapshot left behind: the bytes are
+        gone and its receipt is in the external log; the database forgot both."""
+        keys, verified = TenantScopedBlobStore(self.store, self.tenant).delete_version_and_verify(
+            d, v
+        )
+        assert verified
+        r = DeletionReceipt.for_version(
+            sink=self.log.sink_id, environment="local", tenant_id=self.tenant, dataset_id=d,
+            version_id=v, content_sha256=content or self.digest(v), deleted_keys=keys,
+            operator="op-before-restore",
+        )  # fmt: skip
+        self.log.append(r)
+        return r
+
+    def lock(self) -> uuid.UUID:
+        rid = uuid.uuid4()
+        with self.owner() as c:
+            c.execute("INSERT INTO dr_restore_events (id, cutoff_at) VALUES (%s, now())", (rid,))
+        return rid
+
+    def unlock(self, rid: uuid.UUID) -> None:
+        with self.owner() as c:
+            c.execute(
+                "UPDATE dr_restore_events SET validation_completed_at = now(), "
+                "runtime_enabled_at = now() WHERE id = %s",
+                (rid,),
+            )
+
+
+@pytest.fixture
+async def h(pg_stack: SimpleNamespace, tmp_path: Path) -> AsyncIterator[H]:
+    harness = H(pg_stack, tmp_path)
+    yield harness
+    await harness.engine.dispose()
+    await harness.ingest_engine.dispose()
+
+
+async def _deleting(h: H) -> tuple[uuid.UUID, uuid.UUID]:
+    d = await h.dataset()
+    v = await h.profiled(d)
+    await h.run(lambda s: svc.request_dataset_deletion(s, h.tenant, h.actor, d))
+    return d, v
+
+
+# --- purge, verify, tombstone ------------------------------------------------------------------
+
+
+async def test_a_purge_writes_one_retained_receipt_the_tombstone_verifies(h: H) -> None:
+    d, v = await _deleting(h)
+    with h.owner() as c:
+        ops.purge(c, h.store, h.log, dataset_id=d, operator="op", environment="local")
+        sink, rid = c.execute(
+            "SELECT receipt_sink, receipt_id FROM dataset_events "
+            "WHERE version_id = %s AND event_type = 'VERSION_OBJECT_PURGED'",
+            (v,),
+        ).fetchone()  # type: ignore[misc]
+    assert sink == f"s3.{fake.BUCKET}"
+    [stored] = h.bucket.objects[receipt_key(ReceiptRef(h.tenant, d, v, rid))]
+    assert stored.mode == "GOVERNANCE" and stored.retain_until is not None
+    assert "a.csv" not in stored.data.decode() and "versions/" not in stored.data.decode()
+    with h.owner() as c:
+        assert ops.reconcile_receipts(c, h.log) == {
+            "unverified": [], "other_sink": [], "receipts_without_event": []
+        }  # fmt: skip
+        assert ops.tombstone(c, dataset_id=d, store=h.store, log=h.log)["dataset"] == "DELETED"
+    assert "delete_object" not in h.log._s3.calls  # type: ignore[attr-defined]
+
+
+async def test_no_byte_is_deleted_unless_the_log_can_retain_the_receipt(h: H) -> None:
+    d, v = await _deleting(h)
+    h.bucket.set_lock(None)
+    with h.owner() as c, pytest.raises(ops.TombstoneError, match="Object Lock"):
+        ops.purge(c, h.store, h.log, dataset_id=d, operator="op", environment="local")
+    assert TenantScopedBlobStore(h.store, h.tenant).list_version(d, v)  # bytes untouched
+    assert h.bucket.objects == {}
+    with h.owner() as c:
+        assert not ops._has_purge_evidence(c, v)
+
+
+async def test_a_receipt_that_lost_its_retention_blocks_the_tombstone(h: H) -> None:
+    d, v = await _deleting(h)
+    with h.owner() as c:
+        ops.purge(c, h.store, h.log, dataset_id=d, operator="op", environment="local")
+    [key] = h.bucket.objects
+    h.bucket.expire_retention(key)
+    with h.owner() as c:
+        assert ops.reconcile_receipts(c, h.log)["unverified"] == [f"{v}:NOT_RETAINED"]
+        with pytest.raises(ops.TombstoneError, match="NOT_RETAINED"):
+            ops.tombstone(c, dataset_id=d, store=h.store, log=h.log)
+    assert h.row(v)[0] == "DELETING"
+
+
+async def test_reconcile_lists_a_receipt_no_purge_event_names(h: H) -> None:
+    d, v = await _deleting(h)
+    h.bytes_deleted_after_snapshot(d, v)  # receipt written, purge never committed
+    with h.owner() as c:
+        assert ops.reconcile_receipts(c, h.log)["receipts_without_event"] == [str(v)]
+
+
+# --- re-applying the external log to a restored database ---------------------------------------
+
+
+async def test_reapply_runs_only_while_the_recovery_lock_holds_a_restored_database(h: H) -> None:
+    with h.owner() as c, pytest.raises(ops.TombstoneError, match="recovery lock"):
+        ops.reapply_receipts(c, h.log)
+
+
+async def test_reapply_restores_the_deletions_a_restored_database_forgot(h: H) -> None:
+    # The restored snapshot predates these purges:
+    d = await h.dataset()
+    live = await h.active(d)  # deleted and purged after the snapshot
+    keep = await h.profiled(d)  # never deleted
+    d2, deleting = await _deleting(h)  # requested before the snapshot, purged after
+    h.bytes_deleted_after_snapshot(d, live)
+    h.bytes_deleted_after_snapshot(d2, deleting)
+    gone_d, gone_v = uuid.uuid4(), uuid.uuid4()  # created after the snapshot
+    h.log.append(
+        DeletionReceipt.for_version(
+            sink=h.log.sink_id, environment="local", tenant_id=h.tenant, dataset_id=gone_d,
+            version_id=gone_v, content_sha256=None, deleted_keys=[], operator="op",
+        )
+    )  # fmt: skip
+    assert h.row(live) == ("ACTIVE", live)
+    lock = h.lock()
+
+    with h.owner() as c:
+        dry = ops.reapply_receipts(c, h.log, dry_run=True)
+    assert (dry["reapplied"], dry["recorded"], dry["absent"]) == (1, 1, 1)
+    assert h.row(live) == ("ACTIVE", live)  # a dry run changes nothing
+
+    with h.owner() as c:
+        result = ops.reapply_receipts(c, h.log)
+    assert result == {
+        "receipts": 3, "reapplied": 1, "recorded": 1, "already_recorded": 0,
+        "already_tombstoned": 0, "absent": 1, "conflict": [], "unreadable": [], "dry_run": 0,
+    }  # fmt: skip
+    assert h.row(live) == ("DELETING", None)  # unusable, no longer the active version
+    assert h.row(keep)[0] == "PROFILED"
+    assert h.reasons(live) == [
+        ("VERSION_DELETION_REQUESTED", "RESTORE_REAPPLY"),
+        ("VERSION_OBJECT_PURGED", "RESTORE_REAPPLY"),
+    ]
+    assert h.reasons(deleting) == [("VERSION_OBJECT_PURGED", "RESTORE_REAPPLY")]
+
+    with h.owner() as c:  # idempotent
+        again = ops.reapply_receipts(c, h.log)
+    assert (again["reapplied"], again["recorded"], again["already_recorded"]) == (0, 0, 2)
+
+    h.unlock(lock)
+    with h.owner() as c:
+        # The re-applied receipts predate the re-created requests, yet verify.
+        assert ops.reconcile_receipts(c, h.log)["unverified"] == []
+        ops.tombstone(c, dataset_id=d, version_id=live, store=h.store, log=h.log)
+        assert ops.tombstone(c, dataset_id=d2, store=h.store, log=h.log)["dataset"] == "DELETED"
+    assert h.row(live)[0] == "DELETED" and h.row(deleting)[0] == "DELETED"
+
+
+async def test_reapply_never_alters_a_conflicting_or_untrustworthy_receipt(h: H) -> None:
+    d = await h.dataset()
+    conflicting = await h.profiled(d)
+    expired = await h.profiled(d)
+    h.bytes_deleted_after_snapshot(d, conflicting, content="0" * 64)
+    r = h.bytes_deleted_after_snapshot(d, expired)
+    h.bucket.expire_retention(receipt_key(ReceiptRef(h.tenant, d, expired, r.receipt_id)))
+    h.lock()
+    with h.owner() as c:
+        result = ops.reapply_receipts(c, h.log)
+    assert result["conflict"] == [str(conflicting)]
+    assert result["unreadable"] == [str(expired)]
+    assert result["reapplied"] == result["recorded"] == 0
+    assert h.row(conflicting)[0] == "PROFILED" and h.row(expired)[0] == "PROFILED"
+
+
+async def test_reapply_ignores_a_retained_receipt_that_is_not_self_consistent(h: H) -> None:
+    """A receipt S3 serves intact and retained, but filed under a live version
+    while naming another one, or whose digest does not recompute, changes
+    nothing."""
+    d = await h.dataset()
+    live = await h.profiled(d)
+    other = await h.profiled(d)
+    r = DeletionReceipt.for_version(
+        sink=h.log.sink_id, environment="local", tenant_id=h.tenant, dataset_id=d,
+        version_id=other, content_sha256=h.digest(other), deleted_keys=[], operator="op",
+    )  # fmt: skip
+    misfiled = receipt_key(ReceiptRef(h.tenant, d, live, r.receipt_id))
+    h.bucket.plant(misfiled, r.to_json().encode())
+    changes = {"receipt_id": str(uuid.uuid4()), "version_id": str(live),
+               "deletion_set_sha256": "f" * 64}  # fmt: skip
+    bad_digest = DeletionReceipt(**{**r.__dict__, **changes})
+    h.bucket.plant(
+        receipt_key(ReceiptRef(h.tenant, d, live, bad_digest.receipt_id)),
+        bad_digest.to_json().encode(),
+    )
+    h.lock()
+    with h.owner() as c:
+        result = ops.reapply_receipts(c, h.log)
+    assert result["unreadable"] == [str(live)]
+    assert result["reapplied"] == result["recorded"] == 0
+    assert h.row(live)[0] == "PROFILED" and h.row(other)[0] == "PROFILED"
+
+
+async def test_a_genuinely_stale_receipt_still_blocks_an_ordinary_tombstone(h: H) -> None:
+    """The relaxed time check applies to RESTORE_REAPPLY evidence only: an
+    ordinary purge event naming a receipt older than its deletion request is
+    refused."""
+    d, v = await _deleting(h)
+    keys, _ = TenantScopedBlobStore(h.store, h.tenant).delete_version_and_verify(d, v)
+    early = DeletionReceipt.for_version(
+        sink=h.log.sink_id, environment="local", tenant_id=h.tenant, dataset_id=d,
+        version_id=v, content_sha256=h.digest(v), deleted_keys=keys, operator="op",
+    )  # fmt: skip
+    early = DeletionReceipt(**{**early.__dict__, "deleted_at": "2020-01-01T00:00:00+00:00"})
+    h.log.append(early)
+    with h.owner() as c:
+        ops._event(
+            c, h.tenant, d, v, EventType.VERSION_OBJECT_PURGED, "DELETING",
+            to_status="DELETING", reason=ReasonCode.OPERATOR_PURGE,
+            receipt=(h.log.sink_id, early.receipt_id, early.deletion_set_sha256),
+        )  # fmt: skip
+        with pytest.raises(ops.TombstoneError, match="STALE"):
+            ops.tombstone(c, dataset_id=d, store=h.store, log=h.log)
+        assert ops.reconcile_receipts(c, h.log)["unverified"] == [f"{v}:STALE"]
+
+
+def test_only_reapplied_evidence_relaxes_the_time_check() -> None:
+    requested = datetime(2026, 10, 14, tzinfo=UTC)
+    assert ops._not_before(requested, "OPERATOR_PURGE") == requested
+    assert ops._not_before(requested, None) == requested
+    assert ops._not_before(requested, "RESTORE_REAPPLY") < requested
