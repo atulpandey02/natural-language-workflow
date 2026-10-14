@@ -116,8 +116,12 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    moves each version a receipt proves deleted to `DELETING` (reason
    `RESTORE_REAPPLY`), records the receipt as its purge evidence, and is
    idempotent. Exit 1 lists `conflict` (content digest differs; nothing changed)
-   or `unreadable` (receipt not trustworthy; nothing changed) version ids:
-   investigate before enabling. NOT RUN against AWS.
+   or `unreadable` (receipt not trustworthy; nothing changed) version ids, or
+   counts `unexpected_objects` (objects in the log that are not receipts; never
+   read): investigate before enabling. Exit 2 is a refusal (lock, listing or
+   configuration); exit 3 an operational failure, printed without details,
+   with partial progress as counts: fix the cause and re-run. NOT RUN against
+   AWS.
 
 7. **Operator ENABLE — a separate, explicit command (operator credential).** Get the
    generation id and enable exactly it:

@@ -50,6 +50,10 @@ from nlw.datasets.deletion_log import (
 
 PREFIX = "receipts/"
 MAX_RECEIPT_BYTES = 64 * 1024
+# A receipt is a flat object holding one list: anything nested deeper is not a
+# receipt, and is refused BEFORE parsing (a deeply nested document would
+# otherwise exhaust the parser's recursion limit).
+MAX_JSON_DEPTH = 4
 RETENTION_MODES = frozenset({"GOVERNANCE", "COMPLIANCE"})
 # Listing bound: far above any pilot volume; reaching it refuses the listing.
 _PAGE = 1000
@@ -62,6 +66,9 @@ _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _KEY = re.compile(
     rf"receipts/(?P<t>{_UUID})/(?P<d>{_UUID})/(?P<v>{_UUID})/(?P<r>[A-Za-z0-9._:-]{{1,128}})\.json"
 )
+
+
+_NOT_ASKED = "the deletion log listing is not what was asked for"
 
 
 class ReceiptUnreadable(DeletionLogUnavailable):
@@ -115,6 +122,42 @@ def _code(exc: BaseException) -> tuple[str, int]:
 
 def _sha256_b64(data: bytes) -> str:
     return base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
+
+
+def json_depth_within(body: bytes, limit: int = MAX_JSON_DEPTH) -> bool:
+    """Whether the JSON text's array/object nesting stays within ``limit``
+    (brackets inside strings are ignored). Linear, no recursion."""
+    depth = 0
+    in_string = escaped = False
+    for byte in body:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:  # backslash
+                escaped = True
+            elif byte == 0x22:  # quote
+                in_string = False
+        elif byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):  # [ {
+            depth += 1
+            if depth > limit:
+                return False
+        elif byte in (0x5D, 0x7D):  # ] }
+            depth -= 1
+    return True
+
+
+def parse_receipt(body: bytes) -> dict[str, Any] | None:
+    """The receipt object, or ``None`` for anything that is not one: oversized,
+    too deeply nested, not JSON, or not an object. Never raises."""
+    if len(body) > MAX_RECEIPT_BYTES or not json_depth_within(body):
+        return None
+    try:
+        record = json.loads(body)
+    except (ValueError, RecursionError):
+        return None
+    return record if isinstance(record, dict) else None
 
 
 def _retained(response: dict[str, Any], now: datetime) -> bool:
@@ -225,11 +268,8 @@ class S3DeletionLog:
             return None, ReceiptCheck.MALFORMED
         if not _retained(got, datetime.now(UTC)):
             return None, ReceiptCheck.NOT_RETAINED
-        try:
-            record = json.loads(body)
-        except ValueError:
-            return None, ReceiptCheck.MALFORMED
-        if not isinstance(record, dict) or record.get("receipt_id") != ref.receipt_id:
+        record = parse_receipt(body)
+        if record is None or record.get("receipt_id") != ref.receipt_id:
             return None, ReceiptCheck.MALFORMED
         return record, ReceiptCheck.VERIFIED
 
@@ -254,7 +294,14 @@ class S3DeletionLog:
         return record
 
     def refs(self) -> Iterator[ReceiptRef]:
+        """Every receipt, listed in full or not at all: a listing that is not
+        exactly what was asked for (prefix echo, encoding, a key outside
+        ``receipts/``, a truncated page without a token, a repeated token, or
+        more than ``_MAX_PAGES`` pages) raises before the caller acts on it.
+        Objects under ``receipts/`` that are not receipts are counted in
+        ``unexpected_objects`` and never read."""
         token: str | None = None
+        seen_tokens: set[str] = set()
         self.unexpected_objects = 0
         for _ in range(_MAX_PAGES):
             kw: dict[str, Any] = {"Bucket": self._bucket, "Prefix": PREFIX, "MaxKeys": _PAGE}
@@ -267,10 +314,13 @@ class S3DeletionLog:
                 raise DeletionLogUnavailable(
                     f"the deletion log could not be listed ({code or type(exc).__name__})"
                 ) from None
-            if page.get("Prefix", PREFIX) != PREFIX or page.get("EncodingType"):
-                raise DeletionLogUnavailable("the deletion log listing is not what was asked for")
+            if page.get("Prefix") != PREFIX or page.get("EncodingType"):
+                raise DeletionLogUnavailable(_NOT_ASKED)
             for item in page.get("Contents") or []:
-                m = _KEY.fullmatch(str(item.get("Key", "")))
+                key = str(item.get("Key", ""))
+                if not key.startswith(PREFIX):
+                    raise DeletionLogUnavailable(_NOT_ASKED)
+                m = _KEY.fullmatch(key)
                 if m is None:
                     self.unexpected_objects += 1
                     continue
@@ -280,4 +330,7 @@ class S3DeletionLog:
             token = page.get("NextContinuationToken")
             if not token:
                 raise DeletionLogUnavailable("the deletion log listing is truncated")
+            if token in seen_tokens:
+                raise DeletionLogUnavailable("the deletion log listing does not advance")
+            seen_tokens.add(token)
         raise DeletionLogUnavailable("the deletion log listing exceeds its bound")

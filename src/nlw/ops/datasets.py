@@ -77,6 +77,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
+from pydantic import ValidationError
 
 from nlw.core.config import Settings
 from nlw.datasets.deletion_log import (
@@ -437,8 +438,8 @@ def _require_purged(
     sink, receipt_id, digest, content_sha256, requested_at, reason = evidence
     if sink != log.sink_id:
         raise TombstoneError(
-            f"deletion receipt for version {version_id} is held by sink {sink!r}; "
-            f"the configured verifier is {log.sink_id!r}"
+            f"deletion receipt for version {version_id} is held by another sink "
+            f"({sink_kind(sink)}); the configured verifier is {sink_kind(log.sink_id)}"
         )
     check = log.verify(
         ExpectedReceipt(
@@ -459,6 +460,14 @@ def _require_purged(
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def sink_kind(sink: str) -> str:
+    """A sink's kind for operator output: an S3 sink id names its bucket (and
+    so the AWS account), which is never printed."""
+    if sink.startswith("s3."):
+        return "s3"
+    return sink if sink in ("local-fake", "unconfigured") else "other"
 
 
 def _not_before(requested_at: datetime, reason: str | None) -> datetime:
@@ -673,11 +682,15 @@ _SQL_PURGE_EVIDENCE = (
 )
 
 
-def reconcile_receipts(conn: psycopg.Connection[Any], log: DeletionLog) -> dict[str, list[str]]:
+def reconcile_receipts(conn: psycopg.Connection[Any], log: DeletionLog) -> dict[str, Any]:
     """Every purge event checked against its receipt, and every receipt no event
-    names (ids only). ``unverified`` entries are ``<version>:<check>``; only they
-    (and ``other_sink``) indicate a problem: a receipt without an event is the
-    documented trace of a purge that failed after writing it (ADR-033 note 3)."""
+    names (ids only). ``unverified`` entries are ``<version>:<check>``. Problems
+    (the command exits 1): ``unverified``, ``other_sink``, and
+    ``unexpected_objects`` (objects in the log that are not receipts: never
+    read, only counted). A receipt without an event is the documented trace of
+    a purge that failed after writing it (ADR-033 note 3), not a problem.
+    A malformed or malicious receipt is reported as unverified; it never stops
+    the check of the others."""
     unverified: list[str] = []
     other_sink: list[str] = []
     named: set[str] = set()
@@ -706,7 +719,12 @@ def reconcile_receipts(conn: psycopg.Connection[Any], log: DeletionLog) -> dict[
         "unverified": sorted(unverified),
         "other_sink": sorted(other_sink),
         "receipts_without_event": without_event,
+        "unexpected_objects": log.unexpected_objects,
     }
+
+
+def reconcile_failed(report: dict[str, Any]) -> bool:
+    return bool(report["unverified"] or report["other_sink"] or report["unexpected_objects"])
 
 
 def _self_consistent(record: dict[str, Any], ref: ReceiptRef, sink: str) -> bool:
@@ -749,20 +767,34 @@ def _require_recovery_locked(conn: psycopg.Connection[Any]) -> None:
     )
 
 
+_REAPPLY_COUNTS = (
+    "receipts", "reapplied", "recorded", "already_recorded", "already_tombstoned", "absent",
+)  # fmt: skip
+
+
 def reapply_receipts(
-    conn: psycopg.Connection[Any], log: DeletionLog, *, dry_run: bool = False
+    conn: psycopg.Connection[Any],
+    log: DeletionLog,
+    *,
+    dry_run: bool = False,
+    progress: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Re-apply every deletion receipt to a restored database (see the module
-    docstring). Counts, plus version ids for ``conflict`` and ``unreadable``."""
+    docstring). Counts, plus version ids for ``conflict`` and ``unreadable``,
+    and ``unexpected_objects``; any of those three makes the command exit 1.
+
+    The log is listed IN FULL before anything changes: a listing that fails
+    or is not what was asked for changes nothing. Each receipt is then applied
+    in its own transaction; ``progress`` (if given) holds the counts so far, so
+    a run stopped by an operational failure reports its partial progress as
+    counts only. Re-running is safe (idempotent)."""
     _require_recovery_locked(conn)
     try:
         refs = sorted(set(log.refs()))
     except DeletionLogUnavailable as exc:
         raise TombstoneError(str(exc)) from None
-    counts = dict.fromkeys(
-        ("receipts", "reapplied", "recorded", "already_recorded", "already_tombstoned",
-         "absent"), 0,
-    )  # fmt: skip
+    counts = progress if progress is not None else {}
+    counts.update(dict.fromkeys(_REAPPLY_COUNTS, 0))
     conflict: list[str] = []
     unreadable: list[str] = []
     for ref in refs:
@@ -783,8 +815,13 @@ def reapply_receipts(
         **counts,
         "conflict": sorted(set(conflict)),
         "unreadable": sorted(set(unreadable)),
+        "unexpected_objects": log.unexpected_objects,
         "dry_run": int(dry_run),
     }
+
+
+def reapply_failed(result: dict[str, Any]) -> bool:
+    return bool(result["conflict"] or result["unreadable"] or result["unexpected_objects"])
 
 
 def _reapply_one(
@@ -943,83 +980,108 @@ def main(argv: list[str] | None = None) -> int:
         if name == "purge":
             sp.add_argument("--operator", required=True)
     args = p.parse_args(argv)
-    settings = Settings()
+    progress: dict[str, int] = {}
     try:
-        with psycopg.connect(_owner_url(), autocommit=True) as conn:
-            if args.cmd == "rejected-pending":
-                stats = rejected_stats(conn)
-                for row in rejected_pending(conn, limit=args.limit):
-                    print("\t".join(str(v) for v in row))
-                print(f"retained={stats['retained']} oldest_age_s={stats['oldest_age_s']}")
-                if args.metrics_file:
-                    write_rejected_metrics(args.metrics_file, stats)
-                return 0
-            if args.cmd == "pending":
-                for row in pending(conn):
-                    print("\t".join(str(v) for v in row))
-                return 0
-            if args.cmd == "dispatch-pending":
-                from dramatiq.brokers.redis import RedisBroker
-
-                broker = None if args.dry_run else RedisBroker(url=settings.redis_url)  # type: ignore[no-untyped-call]
-                result = dispatch_pending(conn, broker, dry_run=args.dry_run, limit=args.limit)
-                print(" ".join(f"{k}={v}" for k, v in result.items()))
-                return 0
-            if args.cmd in ("reconcile-receipts", "reapply-receipts"):
-                log = _configured_log(settings)
-                if args.cmd == "reconcile-receipts":
-                    report = reconcile_receipts(conn, log)
-                    for key, ids in report.items():
-                        print(f"{key}={len(ids)}" + ("" if not ids else " " + ",".join(ids)))
-                    return 0 if not (report["unverified"] or report["other_sink"]) else 1
-                result = reapply_receipts(conn, log, dry_run=args.dry_run)
-                print(
-                    " ".join(
-                        f"{k}={len(v)}" + ("" if not v else " " + ",".join(v))
-                        if isinstance(v, list)
-                        else f"{k}={v}"
-                        for k, v in result.items()
-                    )
-                )
-                return 0 if not (result["conflict"] or result["unreadable"]) else 1
-            store = dataset_store(settings, service="operator")
-            if args.cmd == "verify-objects":
-                if store is None:
-                    raise TombstoneError("no dataset store is configured")
-                report = verify_objects(conn, store)
-                for key, ids in report.items():
-                    print(f"{key}={len(ids)}" + ("" if not ids else " " + ",".join(ids)))
-                return 0 if not any(report.values()) else 1
-            log = _configured_log(settings)
-            if args.cmd == "purge-rejected":
-                rej = purge_rejected(
-                    conn, store, log, operator=args.operator, environment=settings.app_env,
-                    limit=args.limit, dry_run=args.dry_run,
-                )  # fmt: skip
-                print(" ".join(f"{k}={v}" for k, v in rej.items()))
-                return 0
-            try:
-                ds = uuid.UUID(args.dataset)
-                ver = uuid.UUID(args.version) if args.version else None
-            except ValueError as exc:
-                raise TombstoneError("--dataset and --version must be UUIDs") from exc
-            if args.cmd == "purge":
-                result = purge(
-                    conn,
-                    store,
-                    log,
-                    dataset_id=ds,
-                    version_id=ver,
-                    operator=args.operator,
-                    environment=settings.app_env,
-                )
-            else:
-                result = tombstone(conn, dataset_id=ds, version_id=ver, store=store, log=log)
-            print(" ".join(f"{k}={v}" for k, v in result.items()))
-            return 0
+        return _run(args, progress)
     except TombstoneError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except ValidationError as exc:
+        # Our validators' messages are author-controlled; pydantic's rendering
+        # would also echo the offending input (a bucket name, a path).
+        reasons = "; ".join(str(e.get("msg", "invalid")) for e in exc.errors())
+        print(f"error: invalid configuration: {reasons}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        # An operational failure (database, network, storage). Its text can
+        # carry hosts, bucket names, keys or row values, so only its class is
+        # printed; partial progress is reported as counts.
+        print(
+            f"error: {args.cmd} stopped by an unexpected {type(exc).__name__}; "
+            "details are not printed. It is safe to re-run.",
+            file=sys.stderr,
+        )
+        if progress:
+            print("partial " + " ".join(f"{k}={v}" for k, v in progress.items()), file=sys.stderr)
+        return 3
+
+
+def _run(args: argparse.Namespace, progress: dict[str, int]) -> int:
+    settings = Settings()
+    with psycopg.connect(_owner_url(), autocommit=True) as conn:
+        if args.cmd == "rejected-pending":
+            stats = rejected_stats(conn)
+            for row in rejected_pending(conn, limit=args.limit):
+                print("\t".join(str(v) for v in row))
+            print(f"retained={stats['retained']} oldest_age_s={stats['oldest_age_s']}")
+            if args.metrics_file:
+                write_rejected_metrics(args.metrics_file, stats)
+            return 0
+        if args.cmd == "pending":
+            for row in pending(conn):
+                print("\t".join(str(v) for v in row))
+            return 0
+        if args.cmd == "dispatch-pending":
+            from dramatiq.brokers.redis import RedisBroker
+
+            broker = None if args.dry_run else RedisBroker(url=settings.redis_url)  # type: ignore[no-untyped-call]
+            result = dispatch_pending(conn, broker, dry_run=args.dry_run, limit=args.limit)
+            print(" ".join(f"{k}={v}" for k, v in result.items()))
+            return 0
+        if args.cmd in ("reconcile-receipts", "reapply-receipts"):
+            log = _configured_log(settings)
+            if args.cmd == "reconcile-receipts":
+                report = reconcile_receipts(conn, log)
+                print(_summary(report))
+                return 1 if reconcile_failed(report) else 0
+            result = reapply_receipts(conn, log, dry_run=args.dry_run, progress=progress)
+            print(_summary(result))
+            return 1 if reapply_failed(result) else 0
+        store = dataset_store(settings, service="operator")
+        if args.cmd == "verify-objects":
+            if store is None:
+                raise TombstoneError("no dataset store is configured")
+            report = verify_objects(conn, store)
+            for key, ids in report.items():
+                print(f"{key}={len(ids)}" + ("" if not ids else " " + ",".join(ids)))
+            return 0 if not any(report.values()) else 1
+        log = _configured_log(settings)
+        if args.cmd == "purge-rejected":
+            rej = purge_rejected(
+                conn, store, log, operator=args.operator, environment=settings.app_env,
+                limit=args.limit, dry_run=args.dry_run,
+            )  # fmt: skip
+            print(" ".join(f"{k}={v}" for k, v in rej.items()))
+            return 0
+        try:
+            ds = uuid.UUID(args.dataset)
+            ver = uuid.UUID(args.version) if args.version else None
+        except ValueError as exc:
+            raise TombstoneError("--dataset and --version must be UUIDs") from exc
+        if args.cmd == "purge":
+            result = purge(
+                conn,
+                store,
+                log,
+                dataset_id=ds,
+                version_id=ver,
+                operator=args.operator,
+                environment=settings.app_env,
+            )
+        else:
+            result = tombstone(conn, dataset_id=ds, version_id=ver, store=store, log=log)
+        print(" ".join(f"{k}={v}" for k, v in result.items()))
+        return 0
+
+
+def _summary(result: dict[str, Any]) -> str:
+    """One line: counts, and the ids of listed items (ids only)."""
+    return " ".join(
+        f"{k}={len(v)}" + ("" if not v else " " + ",".join(v))
+        if isinstance(v, list)
+        else f"{k}={v}"
+        for k, v in result.items()
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

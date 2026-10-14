@@ -22,6 +22,7 @@ fake = importlib.util.module_from_spec(_spec)
 sys.modules["receipt_s3_fake"] = fake
 _spec.loader.exec_module(fake)
 
+from nlw.datasets import deletion_log_s3  # noqa: E402
 from nlw.datasets.deletion_log import (  # noqa: E402
     DeletionLogUnavailable,
     DeletionReceipt,
@@ -30,9 +31,12 @@ from nlw.datasets.deletion_log import (  # noqa: E402
     ReceiptRef,
 )
 from nlw.datasets.deletion_log_s3 import (  # noqa: E402
+    MAX_JSON_DEPTH,
     MAX_RECEIPT_BYTES,
     ReceiptUnreadable,
     S3DeletionLog,
+    json_depth_within,
+    parse_receipt,
     receipt_key,
     sink_for,
 )
@@ -232,3 +236,139 @@ def test_runtime_roles_cannot_touch_receipts_and_the_operator_cannot_delete() ->
     with pytest.raises(Exception, match="AccessDenied"):  # Object Lock, even for the admin
         admin.delete_object(Bucket=fake.BUCKET, Key=_key(r))
     assert bucket.objects[_key(r)]  # type: ignore[attr-defined]
+
+
+# --- review findings (PR #66): M-1 writers, M-2 nesting, L-1 listing, L-2 strays ------------
+
+
+@pytest.mark.parametrize("role", ["account-admin", "audit-admin", "api", "ingest"])
+def test_only_the_operator_role_can_create_a_receipt(role: str) -> None:
+    """M-1: whatever a principal's identity policy allows, the bucket policy
+    lets only nlw-<ENV>-dataset-operator create a receipt."""
+    bucket = fake.ReceiptBucket()
+    with pytest.raises(DeletionLogUnavailable):
+        _log(bucket, role=role).append(_receipt())
+    assert bucket.objects == {}
+    _log(bucket, role="operator").append(_receipt())
+    assert len(bucket.objects) == 1
+
+
+def _bomb(depth: int = 30_000) -> bytes:
+    return b"[" * depth + b"]" * depth
+
+
+def test_a_deeply_nested_receipt_is_malformed_never_a_crash() -> None:
+    """M-2: within the 64 KiB bound, but nested far past the parser's limit."""
+    bucket = fake.ReceiptBucket()
+    log = _log(bucket)
+    assert len(_bomb()) <= MAX_RECEIPT_BYTES
+    bucket.plant(receipt_key(ReceiptRef(T, D, V, "bomb")), _bomb())
+    assert log.verify(_expected(_receipt(), receipt_id="bomb")) is ReceiptCheck.MALFORMED
+    with pytest.raises(ReceiptUnreadable) as exc:
+        log.read(ReceiptRef(T, D, V, "bomb"))
+    assert exc.value.check is ReceiptCheck.MALFORMED
+
+
+def test_nesting_is_bounded_before_parsing_and_strings_do_not_count() -> None:
+    assert json_depth_within(b'{"a": [1, 2]}')
+    assert json_depth_within(b'{"operator": "[[[[[[{{{{{{"}')  # brackets inside a string
+    assert json_depth_within(b'{"x": "\\"[[[[[["}')  # escaped quotes stay inside it
+    nested = b"[" * (MAX_JSON_DEPTH + 1) + b"]" * (MAX_JSON_DEPTH + 1)
+    assert not json_depth_within(nested)
+    assert parse_receipt(nested) is None
+    # An OBJECT nested one level too deep is refused for its depth alone.
+    deep_object = b'{"a": ' + b"[" * MAX_JSON_DEPTH + b"]" * MAX_JSON_DEPTH + b"}"
+    assert not json_depth_within(deep_object)
+    assert parse_receipt(deep_object) is None
+    at_limit = b'{"a": ' + b"[" * (MAX_JSON_DEPTH - 1) + b"]" * (MAX_JSON_DEPTH - 1) + b"}"
+    assert parse_receipt(at_limit) == {"a": [[[]]]}
+    # A real receipt (an object holding one list) is well within the bound.
+    assert parse_receipt(_receipt().to_json().encode()) is not None
+
+
+def test_a_recursion_error_is_still_contained_if_the_depth_bound_were_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deletion_log_s3, "MAX_JSON_DEPTH", 10**9)
+    monkeypatch.setattr(deletion_log_s3, "json_depth_within", lambda body, limit=0: True)
+    assert parse_receipt(_bomb()) is None
+
+
+def test_a_receipt_whose_strings_hold_brackets_still_verifies() -> None:
+    bucket = fake.ReceiptBucket()
+    log = _log(bucket)
+    r = _receipt(operator="[[[[[[[[{{{{")
+    log.append(r)
+    assert log.verify(_expected(r)) is ReceiptCheck.VERIFIED
+
+
+class _Lister:
+    """A scripted ListObjectsV2: each call returns the next page (the last repeats)."""
+
+    def __init__(self, pages: list[dict[str, object]]) -> None:
+        self.pages, self.calls = pages, 0
+
+    def list_objects_v2(self, **kw: object) -> dict[str, object]:
+        page = self.pages[min(self.calls, len(self.pages) - 1)]
+        self.calls += 1
+        return page
+
+
+GOOD = {"Prefix": "receipts/", "Contents": [{"Key": f"receipts/{T}/{D}/{V}/r1.json"}]}
+
+
+@pytest.mark.parametrize(
+    "bad, reason",
+    [
+        ({"Prefix": "receipts/other/", "Contents": []}, "not what was asked for"),
+        ({"Contents": []}, "not what was asked for"),  # no prefix echo at all
+        ({"Prefix": "receipts/", "EncodingType": "url", "Contents": []}, "not what was asked for"),
+        ({"Prefix": "receipts/", "Contents": [{"Key": "versions/x"}]}, "not what was asked for"),
+        ({"Prefix": "receipts/", "IsTruncated": True, "Contents": []}, "truncated"),
+    ],
+)
+def test_a_malformed_listing_page_refuses_the_whole_listing(
+    bad: dict[str, object], reason: str
+) -> None:
+    """L-1: even after a good first page, nothing is returned from a bad listing."""
+    first = {**GOOD, "IsTruncated": True, "NextContinuationToken": "t1"}
+    log = S3DeletionLog(_Lister([first, bad]), fake.BUCKET)  # type: ignore[arg-type]
+    with pytest.raises(DeletionLogUnavailable, match=reason):
+        list(log.refs())
+
+
+def test_a_repeating_continuation_token_is_refused_at_once() -> None:
+    page = {**GOOD, "IsTruncated": True, "NextContinuationToken": "same"}
+    lister = _Lister([page])
+    with pytest.raises(DeletionLogUnavailable, match="does not advance"):
+        list(S3DeletionLog(lister, fake.BUCKET).refs())  # type: ignore[arg-type]
+    assert lister.calls == 2
+
+
+def test_the_listing_is_bounded_to_1000_pages() -> None:
+    class Endless:
+        calls = 0
+
+        def list_objects_v2(self, **kw: object) -> dict[str, object]:
+            self.calls += 1
+            return {"Prefix": "receipts/", "Contents": [], "IsTruncated": True,
+                    "NextContinuationToken": f"t{self.calls}"}  # fmt: skip
+
+    endless = Endless()
+    with pytest.raises(DeletionLogUnavailable, match="exceeds its bound"):
+        list(S3DeletionLog(endless, fake.BUCKET).refs())  # type: ignore[arg-type]
+    assert endless.calls == 1000
+
+
+def test_objects_that_are_not_receipts_are_counted_never_read() -> None:
+    """L-2: strays under receipts/ are counted (and reported by the commands)."""
+    bucket = fake.ReceiptBucket()
+    log = _log(bucket)
+    log.append(_receipt())
+    bucket.plant(f"receipts/{T}/{D}/{V}/not-json", b"x")
+    bucket.plant(f"receipts/{str(T).upper()}/{D}/{V}/r.json", b"x")
+    client: Any = log._s3
+    before = list(client.calls)
+    assert len(list(log.refs())) == 1
+    assert log.unexpected_objects == 2
+    assert "get_object" not in client.calls[len(before) :]

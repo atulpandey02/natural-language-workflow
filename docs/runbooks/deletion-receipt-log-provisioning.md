@@ -61,9 +61,12 @@ None of these may be replaced by a real value in this repository.
 ```
 
 **Bucket policy:** TLS only; this account only; never another environment's
-roles; never the dataset runtime roles; every write is a conditional,
-SSE-S3 creation under `receipts/`; no copy; no deletion, retention or legal-hold
-change and no configuration change except by the audit administrator.
+roles; never the dataset runtime roles; **only this environment's
+`nlw-<ENV>-dataset-operator` role may create a receipt** (no other principal in
+the account, whatever its identity policy grants); every write is a
+conditional, SSE-S3 creation under `receipts/`; no copy; no deletion, retention
+or legal-hold change and no configuration change except by the audit
+administrator.
 
 <!-- template: receipt-bucket-policy -->
 ```json
@@ -87,6 +90,9 @@ change and no configuration change except by the audit administrator.
         "arn:aws:iam::<ACCOUNT>:role/nlw-*-dataset-bootstrap"]}}},
     {"Sid": "DenyWritesOutsideReceipts", "Effect": "Deny", "Principal": "*",
      "Action": "s3:PutObject", "NotResource": "arn:aws:s3:::<RECEIPT_BUCKET>/receipts/*"},
+    {"Sid": "DenyReceiptWritesExceptOperator", "Effect": "Deny", "Principal": "*",
+     "Action": "s3:PutObject", "Resource": "arn:aws:s3:::<RECEIPT_BUCKET>/receipts/*",
+     "Condition": {"ArnNotEquals": {"aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"}}},
     {"Sid": "DenyUnconditionalCreate", "Effect": "Deny", "Principal": "*",
      "Action": "s3:PutObject", "Resource": "arn:aws:s3:::<RECEIPT_BUCKET>/*",
      "Condition": {"Null": {"s3:if-none-match": "true"}}},
@@ -218,6 +224,9 @@ refused in staging and production.
 | No purge without a protected place for its receipt | `preflight` (Object Lock default retention) before deletion; `append` re-reads the stored version and requires retention |
 | A receipt matches its purge | `verify` fetches by the ids the database expects; checksum; `check_receipt` (identity, digests, time) |
 | Runtime roles cannot read or write receipts | `DenyDatasetRuntimeRoles`; they hold no grant |
+| Only the operator role can create a receipt | `DenyReceiptWritesExceptOperator` (`ArnNotEquals` the exact `nlw-<ENV>-dataset-operator` role ARN), whatever any other principal's identity policy allows |
+| One bad receipt cannot stop reconciliation or a restore | receipts are size-bounded (64 KiB) and depth-bounded (4) before parsing; anything else is `MALFORMED`/unreadable and reported, and the run continues |
+| A listing is complete or refused | prefix echo, encoding, keys outside `receipts/`, truncation without a token, a repeated token and a 1000-page bound each refuse the listing before anything changes |
 | A database restore cannot erase the evidence | the log is outside PostgreSQL and its backups; `reapply-receipts` re-applies it before runtimes start |
 
 ## 6. Residual risks (recorded, not hidden)
@@ -225,13 +234,18 @@ refused in staging and production.
 - **GOVERNANCE until O-5.** The audit administrator could, with a separately
   granted `s3:BypassGovernanceRetention`, remove a receipt early. COMPLIANCE
   (irreversible) is required before customer data.
-- **The operator can write a receipt.** A trusted operator with this role could
-  file a well-formed receipt for a live version; `reapply-receipts` would then
-  move that version to DELETING during a restore. The operator can already
-  request any deletion, so this grants no new power over data, but it is a
-  path that does not go through the API. Receipts are attributable (the
-  `operator` label, and `PutObject` data events once the trail covers this
-  bucket; see below).
+- **The operator can write a receipt.** Only the operator role may (the
+  bucket policy denies every other principal). A trusted operator could file a
+  well-formed receipt for a live version; `reapply-receipts` would then move
+  that version to DELETING during a restore. The operator can already request
+  any deletion, so this grants no new power over data, but it is a path that
+  does not go through the API. Receipts are attributable (the `operator`
+  label, and `PutObject` data events once the trail covers this bucket; see
+  below).
+- **Objects that are not receipts** (a misfiled key under `receipts/`) are
+  never read; `reconcile-receipts` and `reapply-receipts` report their count
+  as `unexpected_objects` and exit 1 so an operator investigates. They cannot
+  be removed during retention.
 - **CloudTrail does not yet cover this bucket.** The reviewed trail
   (`dataset-s3-provisioning.md` §4) records data events for the dataset
   bucket only. Adding this bucket is a pinned-template change for the next

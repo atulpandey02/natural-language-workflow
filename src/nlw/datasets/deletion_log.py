@@ -234,6 +234,8 @@ def check_receipt(record: dict[str, Any] | None, expected: ExpectedReceipt) -> R
 
 class DeletionLog(Protocol):
     sink_id: str
+    # Objects in the sink that are not receipts, found by the last ``refs``.
+    unexpected_objects: int
 
     def preflight(self) -> None:
         """Raise ``DeletionLogUnavailable`` unless a receipt could be stored and
@@ -257,6 +259,7 @@ _UNCONFIGURED = "no deletion log is configured (the external deletion log is a l
 
 class UnconfiguredDeletionLog:
     sink_id = "unconfigured"
+    unexpected_objects = 0
 
     def preflight(self) -> None:
         raise DeletionLogUnavailable(_UNCONFIGURED)
@@ -282,6 +285,7 @@ class LocalFakeDeletionLog:
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
+        self.unexpected_objects = 0
 
     def preflight(self) -> None:
         directory = self.path.parent
@@ -305,9 +309,23 @@ class LocalFakeDeletionLog:
         return receipt.receipt_id
 
     def read_all(self) -> list[dict[str, Any]]:
+        """Every line as a record. Any line that is not a JSON object (including
+        one nested too deeply to parse) makes the whole file unreadable
+        (``ValueError``): the fake never guesses past a corrupt line."""
         if not self.path.exists():
             return []
-        return [json.loads(line) for line in self.path.read_text().splitlines() if line]
+        records: list[dict[str, Any]] = []
+        for line in self.path.read_text().splitlines():
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except RecursionError:
+                raise ValueError("a deletion log line nests too deeply") from None
+            if not isinstance(record, dict):
+                raise ValueError("a deletion log line is not an object")
+            records.append(record)
+        return records
 
     def verify(self, expected: ExpectedReceipt) -> ReceiptCheck:
         try:
@@ -323,9 +341,12 @@ class LocalFakeDeletionLog:
         except (OSError, ValueError):
             raise DeletionLogUnavailable("the local deletion log is unreadable") from None
         seen: set[ReceiptRef] = set()
+        self.unexpected_objects = 0
         for r in records:
             ref = _ref_of(r)
-            if ref is not None and ref not in seen:
+            if ref is None:
+                self.unexpected_objects += 1
+            elif ref not in seen:
                 seen.add(ref)
                 yield ref
 

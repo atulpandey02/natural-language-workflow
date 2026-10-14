@@ -144,3 +144,46 @@ def test_receipts_expire_only_after_their_retention() -> None:
 )
 def test_no_real_identifier_is_written_down(value: str) -> None:
     assert re.search(value, RUNBOOK.read_text()) is None
+
+
+OPERATOR_ROLE = "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"
+
+
+def test_only_the_environment_operator_role_may_create_receipts() -> None:
+    """M-1 (review of PR #66): the deny is pinned exactly: effect, principal,
+    action, resource, and the ONE exact principal exception."""
+    s = sids(templates()["receipt-bucket-policy"])
+    assert s["DenyReceiptWritesExceptOperator"] == {
+        "Sid": "DenyReceiptWritesExceptOperator",
+        "Effect": "Deny",
+        "Principal": "*",
+        "Action": "s3:PutObject",
+        "Resource": RECEIPTS,
+        "Condition": {"ArnNotEquals": {"aws:PrincipalArn": OPERATOR_ROLE}},
+    }
+    # No other statement opens a write path, and none was dropped.
+    assert list(s) == [
+        "DenyNonTLS",
+        "DenyOutsideAccount",
+        "DenyOtherEnvironmentRoles",
+        "DenyDatasetRuntimeRoles",
+        "DenyWritesOutsideReceipts",
+        "DenyReceiptWritesExceptOperator",
+        "DenyUnconditionalCreate",
+        "DenyMissingSseAlgorithmHeader",
+        "DenyWrongSseAlgorithm",
+        "DenyServerSideCopy",
+        "DenyRecordChangeExceptAuditAdmin",
+        "DenyBucketConfigExceptAuditAdmin",
+    ]
+    assert s["DenyOutsideAccount"]["Condition"] == {
+        "StringNotEquals": {"aws:PrincipalAccount": "<ACCOUNT>"}
+    }
+    assert s["DenyOtherEnvironmentRoles"]["Condition"] == {
+        "ArnLike": {"aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/nlw-<OTHER_ENV>-*"}
+    }
+    assert s["DenyServerSideCopy"]["Condition"] == {"Null": {"s3:x-amz-copy-source": "false"}}
+    # The operator that the policy admits is the one the operator grants are for.
+    allows = [st for st in templates()["role-operator-receipts"]["Statement"]
+              if st["Effect"] == "Allow" and "s3:PutObject" in acts(st)]  # fmt: skip
+    assert [st["Resource"] for st in allows] == [RECEIPTS]

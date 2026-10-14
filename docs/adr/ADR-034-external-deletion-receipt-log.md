@@ -59,11 +59,20 @@ dependency is needed.
   retention mode and period. A log that cannot protect its receipt never
   allows a deletion.
 - `verify`: `GetObject` by the ids the database expects (never by receipt id
-  alone), bounded to 64 KiB, checksum intact, retention live
-  (`NOT_RETAINED` otherwise, a new `ReceiptCheck`), then the existing
-  provider-neutral `check_receipt`.
-- `refs` / `read`: bounded `ListObjectsV2` of `receipts/`; objects that are not
-  receipts are counted, never read.
+  alone), bounded to 64 KiB and to a JSON nesting depth of 4 (checked before
+  parsing, so a deeply nested document is `MALFORMED`, never a parser crash),
+  checksum intact, retention live (`NOT_RETAINED` otherwise, a new
+  `ReceiptCheck`), then the existing provider-neutral `check_receipt`.
+- `refs` / `read`: `ListObjectsV2` of `receipts/`, complete or refused: a page
+  whose prefix echo differs, an `EncodingType`, a key outside `receipts/`, a
+  truncated page without a token, a repeated token or more than 1000 pages
+  refuses the whole listing before any caller acts on it. Objects under
+  `receipts/` that are not receipts are counted (`unexpected_objects`), never
+  read.
+- Writers: the bucket policy denies `PutObject` to every principal except the
+  environment's `nlw-<env>-dataset-operator` role
+  (`DenyReceiptWritesExceptOperator`), whatever another principal's identity
+  policy allows.
 - Sink id `s3.<bucket>`: the purge event records it, so the tombstone verifies
   against the same bucket that holds the receipt.
 - Identity: the verified operator role `nlw-<env>-dataset-operator` and the
@@ -78,7 +87,10 @@ dependency is needed.
 **Reconcile** (`python -m nlw.ops.datasets reconcile-receipts`): every
 `VERSION_OBJECT_PURGED` event is verified against its receipt; receipts that
 no event names are listed (the documented trace of a purge that failed after
-writing its receipt). Exit 1 on any unverified event or foreign sink.
+writing its receipt). Exit 1 on any unverified event, foreign sink, or
+unexpected object in the log (`unexpected_objects`: never read, but an
+operator must look at it). A malformed receipt is reported as unverified and
+never stops the check of the others.
 
 **Restore re-application** (`reapply-receipts [--dry-run]`): refused unless the
 recovery lock holds a restored database. For each self-consistent receipt
@@ -93,9 +105,18 @@ recovery lock holds a restored database. For each self-consistent receipt
 | any live state | move to `DELETING` (clearing the dataset's active version), then record the evidence; both events `RESTORE_REAPPLY` |
 | any state with a different content digest | **conflict**: listed, never changed |
 
-An untrustworthy receipt (checksum, retention, shape) is listed as
-`unreadable` and changes nothing. The command is idempotent; exit 1 on any
-conflict or unreadable receipt.
+An untrustworthy receipt (checksum, retention, shape, nesting) is listed as
+`unreadable`, changes nothing, and the run continues. The log is listed in
+full before anything changes. The command is idempotent; exit 1 on any
+conflict, unreadable receipt or unexpected object.
+
+**Operator errors.** Both commands (and every other `nlw.ops.datasets`
+command) print only author-controlled messages: an operational failure
+(database, network, storage) prints its class and exits 3, with partial
+progress of `reapply-receipts` as counts only; a configuration error prints
+the validator's reason without the rejected value. No traceback, bucket name,
+account id, key, credential or receipt content is printed; a sink is named by
+its kind (`s3`, `local-fake`), never its id.
 
 **Migration `0029_deletion_receipt_reapply`:** reason code `RESTORE_REAPPLY`;
 `ck_dataset_events_purge_shape` admits it beside `OPERATOR_PURGE`. No grant,
@@ -121,14 +142,27 @@ purge with an older receipt is still `STALE`.
   yet record this bucket's data events (a pinned-template change for the next
   provisioning review).
 
+## Security review of PR #66 (2026-10-14) and fixes
+
+| Finding | Fix |
+|---|---|
+| M-1: any same-account principal but the runtime roles could create receipts | `DenyReceiptWritesExceptOperator`, pinned exactly; the in-memory S3 enforces it |
+| M-2: a deeply nested receipt raised `RecursionError` from `verify`/`read`, aborting reconcile, reapply and the tombstone | depth bound before parsing, `RecursionError` contained; reported as `MALFORMED`/unreadable; the runs continue |
+| L-1: the listing's fail-closed paths were untested | direct tests for each, plus "nothing changes, nothing is read" integration tests; a repeated token is refused at once |
+| L-2: `unexpected_objects` was never reported | printed by both commands, which then exit 1 |
+| L-3: an unexpected failure printed a traceback | sanitized CLI errors (class only, exit 3), partial progress as counts; sink kinds instead of sink ids |
+
 ## Residual risks
 
 - GOVERNANCE lets the audit administrator remove a receipt early with a
   separately granted bypass, until COMPLIANCE.
-- A trusted operator can write a well-formed receipt for a live version, which
-  `reapply-receipts` would honour during a restore. The operator can already
-  request any deletion; receipts carry the operator label and, once the trail
-  covers the bucket, `PutObject` data events.
+- A trusted operator (the only principal allowed to create receipts) can write
+  a well-formed receipt for a live version, which `reapply-receipts` would
+  honour during a restore. The operator can already request any deletion;
+  receipts carry the operator label and, once the trail covers the bucket,
+  `PutObject` data events.
+- A stray object under `receipts/` cannot be removed during retention, so the
+  commands keep exiting 1 until an operator records it as reviewed.
 - A receipt can exist without a purge event (ADR-033 note 3);
   `reconcile-receipts` lists it.
 - `reapply-receipts` does not move a dataset whose versions it re-applied to

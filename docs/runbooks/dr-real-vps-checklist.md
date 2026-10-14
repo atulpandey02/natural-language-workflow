@@ -51,7 +51,7 @@ action; nothing in the M11.5 P2 package performs it.
       environment's deletion log (step 6b of
       [dr-fresh-host-restore](dr-fresh-host-restore.md)). Record
       `deletion_log_step: applied` only when it exited 0 (no conflict, no
-      unreadable receipt). Where no deletion log is configured (uploads were
+      unreadable receipt, no unexpected object). Where no deletion log is configured (uploads were
       never enabled) and offboarding does not exist, record
       `deletion_log_step: not_applicable_no_offboarding_yet` — never "applied".
 

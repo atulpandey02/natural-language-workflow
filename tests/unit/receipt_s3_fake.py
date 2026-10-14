@@ -5,8 +5,9 @@ ADR-034 bucket rules enforced so a client mistake fails the way AWS would:
 
 - Object Lock: a versioned bucket whose DEFAULT retention (mode, days) is
   applied to every new object version; a retained version cannot be deleted;
-- the bucket policy (``receipt-bucket-policy``): a ``PutObject`` without
-  ``IfNoneMatch='*'`` or without ``ServerSideEncryption='AES256'`` is denied;
+- the bucket policy (``receipt-bucket-policy``): a ``PutObject`` by anyone but
+  the operator role, without ``IfNoneMatch='*'`` or without
+  ``ServerSideEncryption='AES256'`` is denied;
   dataset runtime roles (``api``, ``ingest``, ``bootstrap``) are denied
   everything; deletion and retention changes are denied to everyone but the
   audit administrator;
@@ -46,6 +47,9 @@ OPERATOR_GRANTS = {
     "s3:GetBucketObjectLockConfiguration": "",  # the bucket
 }
 RUNTIME_ROLES = ("api", "ingest", "bootstrap")
+# Principals whose IDENTITY policy allows anything here (an account
+# administrator, a broad automation role). The bucket policy still binds them.
+BROAD_ROLES = (None, "audit-admin", "account-admin")
 
 
 def error(code: str, status: int, op: str) -> ClientError:
@@ -120,7 +124,7 @@ class FakeReceiptS3:
         self.calls.append(op)
         if self.role in RUNTIME_ROLES:
             raise self._deny(op)  # bucket policy: DenyDatasetRuntimeRoles
-        if self.role in (None, "audit-admin"):
+        if self.role in BROAD_ROLES:
             return
         assert self.role == "operator", self.role
         scope = OPERATOR_GRANTS.get(action)
@@ -131,7 +135,7 @@ class FakeReceiptS3:
             raise self._deny(op)
 
     def _can_read_retention(self) -> bool:
-        return self.role in (None, "audit-admin") or "s3:GetObjectRetention" in OPERATOR_GRANTS
+        return self.role in BROAD_ROLES or "s3:GetObjectRetention" in OPERATOR_GRANTS
 
     def _bucket(self, kw: dict[str, Any], op: str) -> None:
         if kw.get("Bucket") != BUCKET:
@@ -155,6 +159,8 @@ class FakeReceiptS3:
         key = kw["Key"]
         self._authorize("put_object", "s3:PutObject", key=key)
         self._bucket(kw, "PutObject")
+        if self.role != "operator":
+            raise self._deny("put_object")  # bucket policy: DenyReceiptWritesExceptOperator
         if kw.get("IfNoneMatch") != "*" or kw.get("ServerSideEncryption") != "AES256":
             raise self._deny("put_object")  # bucket policy
         body = kw["Body"]
