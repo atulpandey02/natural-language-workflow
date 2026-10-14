@@ -39,24 +39,28 @@ prints one workspace's row counts per table; it changes nothing.
 | Planner-outcome events (`plan_outcome_events`) | PostgreSQL | n/a | Retained (codes, buckets, counts; no text); proposed 13 months, **no retention job exists yet** | Dump retention |
 | Connector credentials | Secret store (the `connectors` row holds only a reference) | n/a | `connectors` row purged; secret versions scheduled for deletion in the store | Provider retention window |
 | PostgreSQL backups | restic (client-side encrypted, immutable mode) | **Not edited** | **Not edited**; expire on the configured 14 daily / 8 weekly / 6 monthly retention | — |
-| External deletion log (interface + local FAKE only: `deletion-receipt-2`, ADR-030; real provider is owner decision O-3) | Outside PostgreSQL and its backups (see below) | One receipt per purged version (ids, digest, object count, hashed object refs, operator, time; no names or values) | One entry per offboarded workspace | Never rolled back by a restore |
+| External deletion log (`deletion-receipt-2`, ADR-030; provider: S3 Object Lock, ADR-034, NOT RUN on AWS; local FAKE for development) | Outside PostgreSQL and its backups (see below) | One receipt per purged version (ids, digest, object count, hashed object refs, operator, time; no names or values) | One entry per offboarded workspace | Never rolled back by a restore |
 | Legal or operational retention exceptions | Recorded per case with the owner's approval | Deletion paused only for a recorded hold (legal request, active incident); never silently | Same | A hold never extends backup expiry beyond the configured schedule |
 
 Physical erasure from immutable backups inside their retention window is not
 promised. "Beyond use" is achieved by encryption, access control, expiry and
 restore-time controls.
 
-## Restore-time control (design constraint, not yet implemented)
+## Restore-time control
 
-A restore must re-apply deletions for offboarded workspaces before any runtime
-starts. The deletion log therefore **cannot live only inside PostgreSQL**:
-restoring a snapshot taken before the deletion would restore the log to a
-state that does not know about it. Owner decision (2026-09-29): the deletion
-log will eventually live outside PostgreSQL backups, in a separately
-controlled, versioned or object-locked S3 location, and the restore runbook
-must re-apply it before any runtime starts. An S3 client is a new runtime
-dependency and needs its own ADR first; until the log exists, offboarding and
-customer uploads stay unavailable.
+A restore must re-apply deletions before any runtime starts. The deletion log
+therefore **cannot live only inside PostgreSQL**: restoring a snapshot taken
+before the deletion would restore the log to a state that does not know about
+it. Owner decisions (2026-09-29, 2026-10-14): the log lives outside PostgreSQL
+backups, in a dedicated S3 Object Lock bucket per environment
+([ADR-034](../adr/ADR-034-external-deletion-receipt-log.md)).
+
+- **Dataset version purges: implemented, NOT RUN on AWS.** While the recovery
+  lock holds the restored database, `python -m nlw.ops.datasets
+  reapply-receipts` moves every version a receipt proves deleted to `DELETING`
+  with its purge evidence ([dr-fresh-host-restore](../runbooks/dr-fresh-host-restore.md)).
+- **Workspace offboarding: not implemented.** Its per-workspace receipts and
+  their re-application remain open; offboarding stays unavailable.
 
 ## Customer-facing statement — AWAITING OWNER APPROVAL (plan §22)
 

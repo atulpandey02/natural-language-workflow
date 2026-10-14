@@ -44,10 +44,15 @@ action; nothing in the M11.5 P2 package performs it.
       local drill does not).
 - [ ] Confirm quiescence counts are sane and `restore_ready` is true before any
       runtime start.
-- [ ] **Deletion log** (mandatory once workspace offboarding exists; see
+- [ ] **Deletion log** (see
       [offboarding-and-deletion](../security/offboarding-and-deletion.md)):
-      before any runtime starts, re-apply every deletion recorded after the
-      restored snapshot's time. Until offboarding is implemented, record
+      before any runtime starts, while the recovery lock holds the restored
+      database, run `python -m nlw.ops.datasets reapply-receipts` against the
+      environment's deletion log (step 6b of
+      [dr-fresh-host-restore](dr-fresh-host-restore.md)). Record
+      `deletion_log_step: applied` only when it exited 0 (no conflict, no
+      unreadable receipt, no unexpected object). Where no deletion log is configured (uploads were
+      never enabled) and offboarding does not exist, record
       `deletion_log_step: not_applicable_no_offboarding_yet` — never "applied".
 
 ## Record & decide

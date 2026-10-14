@@ -114,6 +114,10 @@ class ReasonCode(enum.StrEnum):
     # 0028 (ADR-033 D2): the operator's purge-rejected moves a REJECTED version
     # to DELETING before the version-aware purge.
     REJECTED_RETENTION = "REJECTED_RETENTION"
+    # 0029 (ADR-034): after a database restore, ``reapply-receipts`` moves a
+    # version whose bytes a deletion receipt proves deleted to DELETING and
+    # records that receipt as its purge evidence.
+    RESTORE_REAPPLY = "RESTORE_REAPPLY"
 
 
 class ActorKind(enum.StrEnum):

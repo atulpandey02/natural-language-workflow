@@ -103,6 +103,26 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    visible in `docker compose ps` as *Restarting* — and never processes anything;
    its healthcheck reports `recovery_lock failed: RecoveryLocked`.
 
+6b. **Re-apply deletion receipts (before enabling; only where a deletion log is
+   configured, ADR-034).** A purge after the snapshot removed bytes the restored
+   database still references. With the operator credential and the
+   environment's `DATASET_DELETION_LOG*` settings, while the lock still holds:
+   ```bash
+   python -m nlw.ops.datasets reapply-receipts --dry-run   # counts only
+   python -m nlw.ops.datasets reapply-receipts
+   python -m nlw.ops.datasets verify-objects
+   ```
+   `reapply-receipts` refuses to run unless the recovery lock is active. It
+   moves each version a receipt proves deleted to `DELETING` (reason
+   `RESTORE_REAPPLY`), records the receipt as its purge evidence, and is
+   idempotent. Exit 1 lists `conflict` (content digest differs; nothing changed)
+   or `unreadable` (receipt not trustworthy; nothing changed) version ids, or
+   counts `unexpected_objects` (objects in the log that are not receipts; never
+   read): investigate before enabling. Exit 2 is a refusal (lock, listing or
+   configuration); exit 3 an operational failure, printed without details,
+   with partial progress as counts: fix the cause and re-run. NOT RUN against
+   AWS.
+
 7. **Operator ENABLE — a separate, explicit command (operator credential).** Get the
    generation id and enable exactly it:
    ```bash

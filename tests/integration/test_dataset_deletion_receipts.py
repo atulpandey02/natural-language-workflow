@@ -3,7 +3,9 @@
 A purge stores the receipt's sink, opaque id and deletion-set digest with its
 evidence row; the tombstone must verify that receipt through the configured
 verifier. A missing, stale, mismatched or unverifiable receipt blocks the
-tombstone. No real external deletion log exists (owner decision O-3).
+tombstone. This file exercises the contract through the LOCAL FAKE; the S3
+Object Lock provider (owner decision O-3, ADR-034) is covered by
+``test_deletion_receipt_log.py``.
 """
 
 import json

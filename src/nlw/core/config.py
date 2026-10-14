@@ -240,11 +240,15 @@ class Settings(BaseSettings):
     dataset_max_field_chars: int = 8_192
     dataset_profile_timeout_s: int = 60
     dataset_profile_memory_mb: int = 768
-    # Deletion receipts (ADR-030). ``none``: purge refuses to run without a sink.
-    # ``local``: an append-only JSON-lines FAKE for development and tests only;
-    # it is NOT the external deletion log (a launch gate, owner decision O-3).
-    dataset_deletion_log: Literal["none", "local"] = "none"
+    # Deletion receipts (ADR-030, ADR-034). ``none``: purge refuses to run
+    # without a sink. ``local``: an append-only JSON-lines FAKE for development
+    # and tests only. ``s3``: the external log (owner decision O-3), one
+    # write-once object per receipt in a dedicated Object Lock bucket
+    # ``nlw-<env>-deletion-receipts-<account>-us-east-1[-suffix]`` in the dataset
+    # bucket's account, written as the verified operator role. NOT RUN on AWS.
+    dataset_deletion_log: Literal["none", "local", "s3"] = "none"
     dataset_deletion_log_path: str | None = None
+    dataset_deletion_log_bucket: str | None = None
     # Unattended dispatch of lost enqueues (ADR-032, O-7): every interval the
     # dispatcher re-sends at most ``batch`` waiting requests older than
     # ``min_age`` (oldest first), each at most once per ``resend``.
@@ -391,6 +395,48 @@ class Settings(BaseSettings):
                 self.dataset_deletion_log_path
             ):
                 raise ValueError("DATASET_DELETION_LOG_PATH must be an absolute path")
+        if self.dataset_deletion_log == "s3":
+            self._validate_deletion_log_s3(deployed)
+        elif self.dataset_deletion_log_bucket is not None:
+            raise ValueError(
+                "DATASET_DELETION_LOG_BUCKET is used only with DATASET_DELETION_LOG=s3"
+            )
+
+    def _validate_deletion_log_s3(self, deployed: bool) -> None:
+        """ADR-034: receipts live in a dedicated bucket of THIS environment and
+        the dataset bucket's account, reached with the dataset operator role."""
+        if self.dataset_storage_backend != "s3":
+            raise ValueError("DATASET_DELETION_LOG=s3 requires DATASET_STORAGE_BACKEND=s3")
+        bucket = self.dataset_deletion_log_bucket or ""
+        m = re.match(
+            r"^nlw-(local|dev|staging|production)-deletion-receipts-(\d{12})-us-east-1"
+            r"(?:-[a-z0-9]{1,16})?$",
+            bucket,
+        )
+        if m is None or len(bucket) > 61:  # the sink id ``s3.<bucket>`` is at most 64
+            raise ValueError(
+                "DATASET_DELETION_LOG_BUCKET must be "
+                "nlw-<env>-deletion-receipts-<account>-us-east-1[-suffix] (at most 61 chars)"
+            )
+        data = re.match(r"^nlw-([a-z]+)-datasets-(\d{12})-", self.dataset_s3_bucket or "")
+        assert data is not None  # _validate_dataset_s3 ran first
+        if m.group(1) != data.group(1) or m.group(2) != data.group(2):
+            raise ValueError(
+                "DATASET_DELETION_LOG_BUCKET must be in the dataset bucket's "
+                "environment and account"
+            )
+        if deployed and m.group(1) != self.app_env:
+            raise ValueError(
+                f"DATASET_DELETION_LOG_BUCKET belongs to {m.group(1)}, not {self.app_env}"
+            )
+        if bucket == self.dataset_s3_bucket:
+            raise ValueError("the deletion log must not share the dataset bucket")
+        repo = self.backup_restic_repository.strip()
+        if repo.startswith("s3:"):
+            rest = re.sub(r"^s3:(https?://)?", "", repo)
+            parts = [p for p in rest.split("/") if p]
+            if len(parts) > 1 and parts[1] == bucket:
+                raise ValueError("the deletion log must not share the backup repository")
 
     @property
     def docs_enabled(self) -> bool:

@@ -314,3 +314,55 @@ def test_startup_still_refuses_bad_credentials_after_recording_the_expiry(tmp_pa
         creds.read_credentials_file(_file(tmp_path, extra="[default]\n"), now=NOW)
     with pytest.raises(creds.CredentialError, match="missing"):
         creds.read_credentials_file(str(tmp_path / "absent"), now=NOW)
+
+
+# --- the external deletion log (ADR-034, owner decision O-3) -------------------------------
+
+
+def _receipts(env: str, account: str = ACCOUNT, suffix: str = "") -> str:
+    return f"nlw-{env}-deletion-receipts-{account}-us-east-1{suffix}"
+
+
+@pytest.mark.parametrize("env", ["local", "staging", "production"])
+def test_the_s3_deletion_log_is_accepted_in_its_own_environment_and_account(env: str) -> None:
+    own = "local" if env == "local" else env
+    s = _s3(app_env=env, dataset_deletion_log="s3", dataset_deletion_log_bucket=_receipts(own))
+    assert (s.dataset_deletion_log, s.dataset_deletion_log_bucket) == ("s3", _receipts(own))
+
+
+@pytest.mark.parametrize(
+    "kw,match",
+    [
+        ({"dataset_deletion_log_bucket": None}, "DATASET_DELETION_LOG_BUCKET must be"),
+        ({"dataset_deletion_log_bucket": "receipts"}, "DATASET_DELETION_LOG_BUCKET must be"),
+        ({"dataset_deletion_log_bucket": _bucket("local")}, "DATASET_DELETION_LOG_BUCKET must be"),
+        (
+            {"dataset_deletion_log_bucket": _receipts("local", suffix="-abcdefghijklmnop")},
+            "at most 61",
+        ),
+        ({"dataset_deletion_log_bucket": _receipts("dev")}, "environment and account"),
+        (
+            {"dataset_deletion_log_bucket": _receipts("local", OTHER_ACCOUNT)},
+            "environment and account",
+        ),
+    ],
+)
+def test_the_s3_deletion_log_bucket_is_checked(kw: dict[str, Any], match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        _s3(dataset_deletion_log="s3", **kw)
+
+
+def test_the_s3_deletion_log_needs_the_s3_dataset_store_and_its_own_setting() -> None:
+    with pytest.raises(ValidationError, match="requires DATASET_STORAGE_BACKEND=s3"):
+        Settings(dataset_deletion_log="s3", dataset_deletion_log_bucket=_receipts("local"))
+    with pytest.raises(ValidationError, match="only with DATASET_DELETION_LOG=s3"):
+        _s3(dataset_deletion_log_bucket=_receipts("local"))
+
+
+def test_the_s3_deletion_log_never_shares_the_backup_repository() -> None:
+    with pytest.raises(ValidationError, match="backup repository"):
+        _s3(
+            dataset_deletion_log="s3",
+            dataset_deletion_log_bucket=_receipts("local"),
+            backup_restic_repository=f"s3:s3.amazonaws.com/{_receipts('local')}/restic",
+        )

@@ -12,7 +12,7 @@ A and B is closed by an owner-approved change.
 | # | Decision | Why it blocks staging |
 |---|---|---|
 | O-2 | **Decided (owner, 2026-10-09)**: AWS S3 in us-east-1, with one immutable `versions/` object per version, separate buckets, assumed roles and KMS keys per environment, and boto3 as the client ([ADR-033](../adr/ADR-033-s3-dataset-object-storage.md), D1–D6 approved). **Implemented without AWS contact** (`S3BlobStore`, pinned credentials, migration `0028`); no AWS resources exist; the real-AWS proof needs explicit authorization | There is no deployed object store; the local backend is refused outside development |
-| O-3 | External deletion-log provider and record retention | `purge` refuses to run without a log; the local fake is refused outside development |
+| O-3 | **Decided (owner, 2026-10-14)**: a dedicated S3 Object Lock bucket per environment in the dataset account, GOVERNANCE until O-5 ([ADR-034](../adr/ADR-034-external-deletion-receipt-log.md)). **Implemented without AWS contact** (`S3DeletionLog`, `reconcile-receipts`, `reapply-receipts`, migration `0029`); no bucket exists; the real-AWS proof needs explicit authorization. Record retention stays with O-5 | `purge` refuses to run without a log that can retain its receipt; the local fake is refused outside development |
 | O-4 | Object durability, replication and restore policy (RPO/RTO for uploaded files) | A database restore brings back no bytes (`verify-objects` would report every live version missing) |
 | O-5 | Retention periods (request → purge → tombstone; tombstones, events, receipts) | The deletion statement cannot be published without them |
 | O-6 | A deliberate code change that allows `DATASETS_API_ENABLED` in staging (and how it is scoped) | The configuration refuses it today |
@@ -25,9 +25,9 @@ A and B is closed by an owner-approved change.
       network (a fake), with write-once semantics (conditional put), streamed
       digests and verified per-version deletion; scanned and pinned per
       repository policy.
-- [ ] A real `DeletionLog` implementation for the chosen provider, plus a
+- [x] A real `DeletionLog` implementation for the chosen provider, plus a
       restore runbook step that re-applies deletion receipts before any runtime
-      starts.
+      starts (ADR-034; tested without AWS, NOT RUN against AWS).
 - [ ] `verify-objects` wired into the restore validation (`nlw.backup.validate`)
       for the deployed store, and an object restore drill.
 - [ ] Settings changes for O-6, with tests that keep refusing the local backend

@@ -19,7 +19,8 @@ The runtime role can never write `DELETED` or the purge evidence.
   `DATASET_STORAGE_BACKEND=local` are refused in staging and production), so
   only development has objects to purge.
 - The only deletion log is a **local fake**. The external, restore-proof
-  deletion log is a launch gate (owner decision O-3).
+  deletion log is a launch gate (owner decision O-3, decided in ADR-034: S3
+  Object Lock, implemented and NOT RUN against AWS).
 - This runbook does **not** make external uploads deletable to customer
   standard yet.
 
