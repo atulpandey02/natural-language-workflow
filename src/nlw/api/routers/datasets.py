@@ -99,7 +99,7 @@ def _version_out(v: VersionRecord) -> DatasetVersionOut:
 @router.get("/datasets", response_model=list[DatasetOut])
 async def list_datasets(
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0, le=100_000),
 ) -> list[DatasetOut]:
@@ -116,7 +116,7 @@ async def list_datasets(
 async def create_dataset(
     body: DatasetCreate,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> DatasetOut:
     try:
         d = await service.create_dataset(
@@ -135,7 +135,7 @@ async def create_dataset(
 async def get_dataset(
     dataset_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> DatasetOut:
     try:
         return _dataset_out(await service.get_dataset(session, ctx.tenant_id, dataset_id))
@@ -152,7 +152,7 @@ async def get_dataset(
 async def request_dataset_deletion(
     dataset_id: uuid.UUID,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> DatasetOut:
     """Deletion REQUEST: the dataset and its versions become DELETING (unusable).
     The tombstone is a separate operator step; no stored objects exist yet."""
@@ -169,7 +169,7 @@ async def request_dataset_deletion(
 async def list_versions(
     dataset_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0, le=100_000),
 ) -> list[DatasetVersionOut]:
@@ -187,7 +187,7 @@ async def get_version(
     dataset_id: uuid.UUID,
     version_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> DatasetVersionOut:
     try:
         await service.get_dataset(session, ctx.tenant_id, dataset_id)
@@ -208,7 +208,7 @@ async def request_version_deletion(
     dataset_id: uuid.UUID,
     version_id: uuid.UUID,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> DatasetVersionOut:
     try:
         v, _changed = await service.request_version_deletion(

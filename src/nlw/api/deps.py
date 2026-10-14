@@ -49,6 +49,13 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     # One transaction per request so that SET LOCAL app.* GUCs (set below) apply
     # to every query and are discarded when the transaction ends — pooled
     # connections never carry tenant context into a later request.
+    #
+    # Always depend on it as ``Depends(get_session, scope="function")``. A
+    # request-scoped yield dependency exits only AFTER FastAPI has sent the
+    # response, so the commit would follow a 2xx: a client could read stale
+    # state right after a success, and a failed commit would still have
+    # answered 2xx. Function scope commits (or fails, as a 500) before the
+    # response exists. tests/unit/test_session_scope_commits_first.py enforces it.
     sessionmaker = request.app.state.sessionmaker
     session = sessionmaker()
     async with session:
@@ -79,7 +86,7 @@ async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     provider: AuthProvider = Depends(get_auth_provider),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> User:
     if credentials is None or not credentials.credentials:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing bearer token")
@@ -103,7 +110,7 @@ async def get_tenant_context(
     request: Request,
     x_workspace_id: str | None = Header(default=None),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> TenantContext:
     if x_workspace_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "X-Workspace-Id header required")

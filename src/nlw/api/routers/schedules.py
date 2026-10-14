@@ -80,7 +80,7 @@ def _to_out(s: Schedule) -> ScheduleOut:
 async def create_schedule(
     body: ScheduleCreate,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
     settings: Settings = Depends(get_app_settings),
 ) -> ScheduleOut:
     workflow = (
@@ -131,7 +131,7 @@ async def create_schedule(
 @router.get("/schedules", response_model=list[ScheduleOut])
 async def list_schedules(
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[ScheduleOut]:
     schedules = await ScheduleRepository(session).list_for_tenant(ctx.tenant_id)
     return [_to_out(s) for s in schedules]
@@ -141,7 +141,7 @@ async def list_schedules(
 async def get_schedule(
     schedule_id: uuid.UUID,
     ctx: TenantContext = Depends(get_tenant_context),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> ScheduleOut:
     s = await ScheduleRepository(session).get(schedule_id, ctx.tenant_id)
     if s is None:
@@ -158,7 +158,7 @@ async def update_schedule(
     schedule_id: uuid.UUID,
     body: ScheduleUpdate,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> ScheduleOut:
     s = await ScheduleRepository(session).get(schedule_id, ctx.tenant_id)
     if s is None:
@@ -184,7 +184,7 @@ async def update_schedule(
 async def unblock_schedule(
     schedule_id: uuid.UUID,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> ScheduleOut:
     """Administrator remediation for a schedule blocked because its creator lost
     membership/role (M12B, Part 4). An admin/owner of THIS workspace, having
@@ -252,7 +252,7 @@ async def unblock_schedule(
 async def disable_schedule(
     schedule_id: uuid.UUID,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> ScheduleOut:
     """Disable (soft) rather than destroy — retains run history/audit (D7)."""
     s = await ScheduleRepository(session).get(schedule_id, ctx.tenant_id)

@@ -145,7 +145,7 @@ async def initiate_upload(
     request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> DatasetVersionOut:
     """A new QUARANTINED version awaiting its bytes. Retrying with the same
     ``Idempotency-Key`` returns the same version."""
@@ -282,7 +282,7 @@ async def get_profile(
     dataset_id: uuid.UUID,
     version_id: uuid.UUID,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> dict[str, Any]:
     try:
         v = await service.get_version(session, ctx.tenant_id, dataset_id, version_id)
@@ -310,7 +310,7 @@ async def list_semantics(
     dataset_id: uuid.UUID,
     version_id: uuid.UUID,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> list[SemanticRevisionOut]:
     try:
         await service.get_version(session, ctx.tenant_id, dataset_id, version_id)
@@ -331,7 +331,7 @@ async def confirm_semantics(
     version_id: uuid.UUID,
     body: SemanticConfirmIn,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> SemanticRevisionOut:
     """Confirm the column semantics for a PROFILED version (a new revision each
     time; earlier revisions stay). A person confirms: never automatic."""
@@ -368,7 +368,7 @@ async def activate(
     dataset_id: uuid.UUID,
     version_id: uuid.UUID,
     ctx: TenantContext = Depends(_require_admin),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session, scope="function"),
 ) -> DatasetVersionOut:
     """PROFILED -> ACTIVE (the previous active version becomes SUPERSEDED).
     Requires confirmed semantics that still match the profile."""
