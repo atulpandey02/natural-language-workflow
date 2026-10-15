@@ -65,6 +65,10 @@ class DrillRecord(BaseModel):
     # exists (docs/security/offboarding-and-deletion.md); until then it is
     # recorded as not applicable, never as done.
     deletion_log_step: str = Field(pattern=r"^(applied|not_applicable_no_offboarding_yet)$")
+    # O-4 (ADR-036): dataset objects are restored from the AWS Backup restore
+    # bucket and verified (``restore-objects`` then ``verify-objects`` clean), or
+    # no dataset store exists in the environment. Never "assumed".
+    objects_step: str = Field(pattern=r"^(restored_and_verified|not_applicable_no_dataset_store)$")
     issues: list[str] = Field(default_factory=list, max_length=50)
 
 

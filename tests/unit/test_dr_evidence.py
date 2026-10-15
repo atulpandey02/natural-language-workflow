@@ -25,6 +25,7 @@ GOOD: dict[str, Any] = {
     "validator_checks": {"security_definer_owners_and_search_path": True, "rls_forced": True},
     "quiescence_confirmed_before_runtime": True,
     "deletion_log_step": "not_applicable_no_offboarding_yet",
+    "objects_step": "restored_and_verified",
 }
 
 
@@ -69,6 +70,16 @@ def test_record_rejects_unknown_fields_and_a_claimed_deletion_step() -> None:
         DrillRecord.model_validate({**GOOD, "verdict": "PASS"})
     with pytest.raises(ValueError):
         DrillRecord.model_validate({**GOOD, "deletion_log_step": "done"})
+
+
+@pytest.mark.parametrize("step", ["done", "restored", "", "applied"])
+def test_an_objects_step_is_never_assumed(step: str) -> None:
+    with pytest.raises(ValueError):
+        DrillRecord.model_validate({**GOOD, "objects_step": step})
+    without = {k: v for k, v in GOOD.items() if k != "objects_step"}
+    with pytest.raises(ValueError):
+        DrillRecord.model_validate(without)
+    assert _eval(objects_step="not_applicable_no_dataset_store")["verdict"] == "PASS"
 
 
 def test_cli_exit_codes(tmp_path: Path) -> None:

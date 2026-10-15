@@ -505,7 +505,7 @@ AWS facts this design relies on (AWS documentation, checked 2026-10-09):
 | Hiding activity by altering the audit trail | A dedicated data-event trail; separate audit bucket and key; explicit denies on trail, audit bucket and audit key for every dataset role; Object Lock retention; log-file validation; confused-deputy conditions on CloudTrail delivery |
 | Public exposure | Block Public Access, `BucketOwnerEnforced`, a TLS-only bucket policy, and a deny for principals outside the account |
 | KMS misuse | A key per environment; the key policy allows use only through S3 in us-east-1 for this bucket's encryption context; API: `GenerateDataKey`+`Decrypt`; ingest and operator: `Decrypt` |
-| Restore inconsistency | `verify-objects` reconciles database keys and objects (O-4 designs replication and restore) |
+| Restore inconsistency | `verify-objects` reconciles database keys and objects; `restore-objects` restores from AWS Backup (O-4, ADR-036) |
 | Retaining rejected data too long | 7-day operator purge (`retention-sweep`) with listing, metric and alert (D2; O-5 policy, ADR-035) |
 | Leaking metadata through errors or logs | Closed error codes; the bucket, keys, ARNs and credentials never appear in responses or logs |
 
@@ -562,7 +562,7 @@ AWS facts this design relies on (AWS documentation, checked 2026-10-09):
   the key can no longer move.
 - **O-3** ([ADR-034](ADR-034-external-deletion-receipt-log.md)) receives one
   receipt per purged version, with hashed references to every deleted item.
-- **O-4** designs replication and restore for the `versions/` layout.
+- **O-4** ([ADR-036](ADR-036-dataset-object-backup.md)): AWS Backup continuous backups and `restore-objects` for the `versions/` layout.
 - **O-5** ([ADR-035](ADR-035-phase2-retention-policy.md)) confirms the 7-day rejected-file window and sets
   noncurrent-version expiry.
 - On ECS or EKS, the host credential refresher is replaced by native task or
