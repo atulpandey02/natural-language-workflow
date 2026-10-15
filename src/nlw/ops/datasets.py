@@ -734,16 +734,26 @@ def reconcile_receipts(conn: psycopg.Connection[Any], log: DeletionLog) -> dict[
     except DeletionLogUnavailable as exc:
         raise TombstoneError(str(exc)) from None
     without_event = sorted({str(r.version_id) for r in refs if r.receipt_id not in named})
+    unexpected = log.unexpected_objects
+    from nlw.ops.workspace_offboarding import reconcile_workspace_receipts
+
+    workspaces = reconcile_workspace_receipts(conn, log)
     return {
         "unverified": sorted(unverified),
         "other_sink": sorted(other_sink),
         "receipts_without_event": without_event,
-        "unexpected_objects": log.unexpected_objects,
+        **workspaces,
+        "unexpected_objects": max(unexpected, log.unexpected_objects),
     }
 
 
 def reconcile_failed(report: dict[str, Any]) -> bool:
-    return bool(report["unverified"] or report["other_sink"] or report["unexpected_objects"])
+    return bool(
+        report["unverified"]
+        or report["other_sink"]
+        or report["unexpected_objects"]
+        or report.get("workspace_unverified")
+    )
 
 
 def _self_consistent(record: dict[str, Any], ref: ReceiptRef, sink: str) -> bool:
@@ -830,17 +840,28 @@ def reapply_receipts(
             conflict.append(str(ref.version_id))
         else:
             counts[outcome] += 1
+    unexpected = log.unexpected_objects
+    # ADR-037: an offboarded workspace a restore brought back is blocked again.
+    from nlw.ops.workspace_offboarding import reapply_workspace_receipts
+
+    workspaces = reapply_workspace_receipts(conn, log, dry_run=dry_run)
     return {
         **counts,
         "conflict": sorted(set(conflict)),
         "unreadable": sorted(set(unreadable)),
-        "unexpected_objects": log.unexpected_objects,
+        **workspaces,
+        "unexpected_objects": max(unexpected, log.unexpected_objects),
         "dry_run": int(dry_run),
     }
 
 
 def reapply_failed(result: dict[str, Any]) -> bool:
-    return bool(result["conflict"] or result["unreadable"] or result["unexpected_objects"])
+    return bool(
+        result["conflict"]
+        or result["unreadable"]
+        or result["unexpected_objects"]
+        or result.get("workspace_unreadable")
+    )
 
 
 def _reapply_one(

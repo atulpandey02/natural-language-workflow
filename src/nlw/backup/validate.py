@@ -56,6 +56,8 @@ _SECURITY_DEFINER_FUNCS = {
     "manage_membership": "nlw_membership_admin",
     # M12B Part 4: fail-closed schedule authorization checker (0020).
     "schedule_creator_block_reason": "nlw_rls_bypass",
+    # ADR-037: the one workspace-active check (0031).
+    "workspace_is_active": "nlw_rls_bypass",
 }
 # The authorization audit must remain append-only for runtime roles after a
 # restore: neither nlw_app nor nlw_worker may hold UPDATE or DELETE on it.

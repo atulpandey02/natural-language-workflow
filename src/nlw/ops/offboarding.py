@@ -8,8 +8,16 @@ classified, so no tenant data can silently escape offboarding.
     DATABASE_MIGRATION_URL=... python -m nlw.ops.offboarding inventory --workspace <uuid>
 
 prints per-table row counts for one workspace (counts only, never values). It
-changes nothing. The purge itself is NOT implemented: its retention behaviour
-depends on the customer deletion statement awaiting owner approval (plan §22).
+changes nothing.
+
+    python -m nlw.ops.offboarding request  --workspace <uuid> --operator <name>
+    python -m nlw.ops.offboarding complete --workspace <uuid> --operator <name>
+    python -m nlw.ops.offboarding pending
+
+offboard a workspace (``nlw.ops.workspace_offboarding``, ADR-037): ``request``
+blocks every runtime at once and moves its datasets to DELETING; ``complete``
+purges and tombstones them with receipts, deletes every ``purge`` table's rows,
+writes one workspace receipt and leaves the workspace's tombstone.
 """
 
 from __future__ import annotations
@@ -51,7 +59,11 @@ class TableClass:
 # pilot policy proposals awaiting owner approval, never legal or compliance
 # commitments (owner decision, 2026-09-29), so none is stated as settled here.
 TABLES: dict[str, TableClass] = {
-    "workspaces": TableClass("workspace_metadata", "id", "purge after dependants; tombstone kept"),
+    "workspaces": TableClass(
+        "workspace_metadata",
+        "id",
+        "tombstone after dependants (OFFBOARDED; name and slug scrubbed; ids, times, counts kept)",
+    ),
     "memberships": TableClass("workspace_metadata", "workspace_id", "purge"),
     "workspace_invitations": TableClass("workspace_metadata", "tenant_id", "purge"),
     "workflows": TableClass("workflow_definitions", "tenant_id", "purge"),
@@ -67,7 +79,9 @@ TABLES: dict[str, TableClass] = {
         "retain as delivery audit; delivered Slack messages cannot be recalled",
     ),
     "connectors": TableClass(
-        "connector_reference", "tenant_id", "purge row; secret versions deleted in the store"
+        "connector_reference",
+        "tenant_id",
+        "purge row; secret references counted for the operator to remove from the store",
     ),
     "authz_audit_events": TableClass(
         "audit",
@@ -179,7 +193,16 @@ def main(argv: list[str] | None = None) -> int:
     inv = sub.add_parser("inventory")
     inv.add_argument("--workspace", required=True)
     sub.add_parser("check-contract")
+    for name in ("request", "complete"):
+        sp = sub.add_parser(name)
+        sp.add_argument("--workspace", required=True)
+        sp.add_argument("--operator", required=True)
+    sub.add_parser("pending")
     args = p.parse_args(argv)
+    if args.cmd in ("request", "complete", "pending"):
+        from nlw.ops.workspace_offboarding import run_cli
+
+        return run_cli(args)
     url = os.environ.get("DATABASE_MIGRATION_URL")
     if not url:
         raise SystemExit("DATABASE_MIGRATION_URL (owner credential) is required")

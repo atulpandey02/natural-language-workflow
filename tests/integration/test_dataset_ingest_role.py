@@ -778,7 +778,8 @@ async def test_grants_are_exact_and_distinct_for_every_role(st: Stack) -> None:
             "SELECT count(*) FROM information_schema.role_usage_grants "
             "WHERE grantee = 'nlw_ingest' AND object_type = 'SEQUENCE'"
         ).fetchone() == (0,)
-        # Functions: exactly the verifier and the two ingest accessors.
+        # Functions: exactly the verifier, the two ingest accessors and (0031,
+        # ADR-037) the workspace-active check the tenant accessor calls.
         fns = c.execute(
             "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
             "WHERE n.nspname = 'public' AND has_function_privilege('nlw_ingest', p.oid, 'EXECUTE') "
@@ -788,6 +789,7 @@ async def test_grants_are_exact_and_distinct_for_every_role(st: Stack) -> None:
             "app_ctx_claims",
             "ctx_ingest_tenant_id",
             "ctx_ingest_version_id",
+            "workspace_is_active",
         }
         # The worker, scheduler and PUBLIC still have nothing on any dataset table.
         for role in ("nlw_worker", "nlw_scheduler", "public"):
@@ -874,7 +876,7 @@ def test_0026_refuses_a_downgrade_with_an_ingest_key_and_goes_down_and_up_otherw
     command.upgrade(cfg, "head")
     head = _shape(pg_stack)
     # Head is 0030 (ADR-035); 0027-0030 add no policy on top of 0026.
-    assert head["revision"] == "0030_inactive_version_retention" and head["policies"] == 74
+    assert head["revision"] == "0031_workspace_offboarding" and head["policies"] == 74
     assert down_0025["revision"] == "0025_dataset_ingestion"
     assert (down_0025["policies"], down_0025["requests"], down_0025["ingest_grants"]) == (65, 0, 0)
     for fn in ("verifier", "guard", "required", "consistency"):
@@ -980,7 +982,12 @@ async def test_the_ingest_policies_admit_only_the_processing_states(st: Stack) -
 
 # --- independent review (effective privileges, escapes, keys, recovery, restore) -----
 
-_INGEST_FUNCTIONS = {"app_ctx_claims", "ctx_ingest_tenant_id", "ctx_ingest_version_id"}
+_INGEST_FUNCTIONS = {
+    "app_ctx_claims",
+    "ctx_ingest_tenant_id",
+    "ctx_ingest_version_id",
+    "workspace_is_active",  # 0031 (ADR-037): called by ctx_ingest_tenant_id
+}
 
 
 async def test_effective_privileges_match_the_exact_allowlist(st: Stack) -> None:
@@ -1028,7 +1035,10 @@ async def test_effective_privileges_match_the_exact_allowlist(st: Stack) -> None
         )
         own = {name for name, _, ext in fns if not ext}
         assert own == _INGEST_FUNCTIONS
-        assert [name for name, secdef, _ in fns if secdef] == ["app_ctx_claims"]
+        assert sorted(name for name, secdef, _ in fns if secdef) == [
+            "app_ctx_claims",
+            "workspace_is_active",
+        ]
         assert (
             rows(
                 "SELECT relname FROM pg_class WHERE relkind = 'S' AND ("
@@ -1503,9 +1513,9 @@ async def test_a_populated_0025_database_upgrades_to_0026_without_rewriting_anyt
     command.downgrade(cfg, "0025_dataset_ingestion")
     assert snapshot() == before  # the populated 0025 state
     command.upgrade(cfg, "head")
-    assert snapshot() == before  # 0025 -> 0030 rewrote nothing (legacy keys stay valid)
+    assert snapshot() == before  # 0025 -> 0031 rewrote nothing (legacy keys stay valid)
     with st.owner() as c:
         assert c.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0030_inactive_version_retention",
+            "0031_workspace_offboarding",
         )
         assert c.execute("SELECT count(*) FROM pg_policies").fetchone() == (74,)

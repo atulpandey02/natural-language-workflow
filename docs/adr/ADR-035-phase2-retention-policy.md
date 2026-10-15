@@ -144,7 +144,7 @@ The synthetic pilot uses **GOVERNANCE** on the receipt and audit buckets.
 
 ## Not covered
 
-- Workspace offboarding and its receipts (still not implemented).
+- Workspace offboarding and its receipts: [ADR-037](ADR-037-workspace-offboarding.md); the workspace receipts share the 365-day receipt retention.
 - CloudTrail coverage of the receipt bucket (a pinned trail-template change for
   the next provisioning review); its retention, once covered, is 365 days.
 - O-4 object backups (the 30-day value is a design constraint).

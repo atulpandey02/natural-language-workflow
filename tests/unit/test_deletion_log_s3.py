@@ -27,8 +27,12 @@ from nlw.datasets.deletion_log import (  # noqa: E402
     DeletionLogUnavailable,
     DeletionReceipt,
     ExpectedReceipt,
+    ExpectedWorkspaceReceipt,
     ReceiptCheck,
     ReceiptRef,
+    WorkspaceReceipt,
+    WorkspaceReceiptRef,
+    workspace_receipt_self_consistent,
 )
 from nlw.datasets.deletion_log_s3 import (  # noqa: E402
     MAX_JSON_DEPTH,
@@ -39,6 +43,7 @@ from nlw.datasets.deletion_log_s3 import (  # noqa: E402
     parse_receipt,
     receipt_key,
     sink_for,
+    workspace_receipt_key,
 )
 
 T, D, V = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -372,3 +377,110 @@ def test_objects_that_are_not_receipts_are_counted_never_read() -> None:
     assert len(list(log.refs())) == 1
     assert log.unexpected_objects == 2
     assert "get_object" not in client.calls[len(before) :]
+
+
+# --- workspace offboarding receipts (ADR-037) ---------------------------------------
+
+
+def _ws_receipt(**over: object) -> WorkspaceReceipt:
+    r = WorkspaceReceipt.for_workspace(
+        sink=SINK, environment="local", tenant_id=T, dataset_ids=[D],
+        table_counts={"workflows": 2, "memberships": 1}, operator="op",
+    )  # fmt: skip
+    return WorkspaceReceipt(**{**r.__dict__, **over})
+
+
+def _ws_expected(r: WorkspaceReceipt, **over: object) -> ExpectedWorkspaceReceipt:
+    base = {
+        "sink": SINK, "receipt_id": r.receipt_id, "tenant_id": T,
+        "offboarding_set_sha256": r.offboarding_set_sha256,
+        "not_before": datetime.now(UTC) - timedelta(minutes=5),
+    }  # fmt: skip
+    return ExpectedWorkspaceReceipt(**{**base, **over})  # type: ignore[arg-type]
+
+
+def test_a_workspace_receipt_is_written_once_retained_and_verified() -> None:
+    bucket = fake.ReceiptBucket()
+    log = _log(bucket)
+    r = _ws_receipt()
+    assert log.append_workspace(r) == r.receipt_id
+    key = workspace_receipt_key(WorkspaceReceiptRef(T, r.receipt_id))
+    assert key == f"receipts/{T}/workspace/{r.receipt_id}.json"
+    assert list(bucket.objects) == [key]
+    with pytest.raises(DeletionLogUnavailable, match="already exists"):
+        log.append_workspace(r)
+    assert log.verify_workspace(_ws_expected(r)) is ReceiptCheck.VERIFIED
+    # Its record holds counts and digests only: no dataset id, no name.
+    assert str(D) not in bucket.objects[key][-1].data.decode()
+
+
+@pytest.mark.parametrize(
+    "over,check",
+    [
+        ({"tenant_id": uuid.uuid4()}, ReceiptCheck.MISSING),  # looked up by workspace
+        ({"offboarding_set_sha256": "0" * 64}, ReceiptCheck.DIGEST_MISMATCH),
+        ({"not_before": datetime.now(UTC) + timedelta(days=1)}, ReceiptCheck.STALE),
+        ({"sink": "s3.other"}, ReceiptCheck.SINK_MISMATCH),
+    ],
+)
+def test_a_workspace_receipt_is_checked_against_the_database(
+    over: dict[str, Any], check: ReceiptCheck
+) -> None:
+    log = _log()
+    r = _ws_receipt()
+    log.append_workspace(r)
+    assert log.verify_workspace(_ws_expected(r, **over)) is check
+
+
+def test_a_tampered_or_unretained_workspace_receipt_never_verifies() -> None:
+    bucket = fake.ReceiptBucket()
+    log = _log(bucket)
+    r = _ws_receipt()
+    log.append_workspace(r)
+    key = workspace_receipt_key(WorkspaceReceiptRef(T, r.receipt_id))
+    forged = {**json.loads(r.to_json()), "table_counts": {"workflows": 0}}
+    bucket.corrupt(key, json.dumps(forged).encode())
+    assert log.verify_workspace(_ws_expected(r)) is ReceiptCheck.MALFORMED
+    good = _ws_receipt()
+    log.append_workspace(good)
+    bucket.expire_retention(workspace_receipt_key(WorkspaceReceiptRef(T, good.receipt_id)))
+    assert log.verify_workspace(_ws_expected(good)) is ReceiptCheck.NOT_RETAINED
+
+
+def test_workspace_and_version_receipts_are_listed_apart_and_neither_is_a_stranger() -> None:
+    bucket = fake.ReceiptBucket()
+    log = _log(bucket)
+    log.append(_receipt())
+    w = _ws_receipt()
+    log.append_workspace(w)
+    bucket.plant(f"receipts/{T}/workspaces/{w.receipt_id}.json", b"x")  # not the layout
+    assert [r.version_id for r in log.refs()] == [V]
+    assert log.unexpected_objects == 1
+    assert list(log.workspace_refs()) == [WorkspaceReceiptRef(T, w.receipt_id)]
+    assert log.unexpected_objects == 1
+    assert log.read_workspace(WorkspaceReceiptRef(T, w.receipt_id))["tenant_id"] == str(T)  # type: ignore[index]
+
+
+def test_only_the_operator_role_can_create_a_workspace_receipt() -> None:
+    bucket = fake.ReceiptBucket()
+    with pytest.raises(DeletionLogUnavailable):
+        _log(bucket, role="api").append_workspace(_ws_receipt())
+    assert bucket.objects == {}
+
+
+def test_the_local_fake_keeps_workspace_receipts_apart(tmp_path: Path) -> None:
+    from nlw.datasets.deletion_log import LocalFakeDeletionLog
+
+    log = LocalFakeDeletionLog(tmp_path / "log.jsonl")
+    log.append(_receipt(sink="local-fake"))
+    w = _ws_receipt(sink="local-fake")
+    log.append_workspace(w)
+    assert len(list(log.refs())) == 1 and log.unexpected_objects == 0
+    assert list(log.workspace_refs()) == [WorkspaceReceiptRef(T, w.receipt_id)]
+    expected = _ws_expected(w, sink="local-fake")
+    assert log.verify_workspace(expected) is ReceiptCheck.VERIFIED
+    assert workspace_receipt_self_consistent(
+        log.read_workspace(WorkspaceReceiptRef(T, w.receipt_id))
+    )
+    bad = {**json.loads(w.to_json()), "datasets_tombstoned": -1}
+    assert not workspace_receipt_self_consistent(bad)

@@ -3,6 +3,20 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Phase 2B — workspace offboarding and its receipts (branch `feat/workspace-offboarding`, awaiting review; NOT RUN on AWS)
+
+[ADR-037](adr/ADR-037-workspace-offboarding.md), migration `0031_workspace_offboarding`:
+
+- `workspaces.status` ACTIVE -> OFFBOARDING -> OFFBOARDED (guarded, operator only);
+  `ctx_tenant_id()` / `ctx_ingest_tenant_id()` deny a non-ACTIVE workspace for
+  every tenant policy (still 74); schedules blocked `WORKSPACE_NOT_ACTIVE`;
+  API 403 and hidden from discovery.
+- `python -m nlw.ops.offboarding request|complete|pending`: datasets purged and
+  tombstoned with receipts, every contract `purge` table emptied and verified,
+  one `workspace-offboarding-receipt-1` in the external log, a scrubbed tombstone.
+- `reapply-receipts` re-offboards a restored workspace; `reconcile-receipts`
+  verifies every OFFBOARDED workspace's receipt.
+
 ## Phase 2B — retention policy, O-5, and O-3 cleanup (branch `chore/phase2-retention-o3-cleanup`, awaiting review; NOT RUN on AWS)
 
 Owner decision O-5 (2026-10-15, [ADR-035](adr/ADR-035-phase2-retention-policy.md)),
@@ -35,8 +49,7 @@ GOVERNANCE retention (365 days, O-5). Implemented and tested without AWS contact
   (NOT RUN): bucket policy, lifecycle, and second inline policies for the
   operator and audit roles; the reviewed `role-operator` and D6 pins unchanged.
 
-Still open: workspace offboarding receipts, CloudTrail coverage
-of the receipt bucket, the real-AWS proof. **Uploads remain disabled.**
+Still open: CloudTrail coverage of the receipt bucket, the real-AWS proof. **Uploads remain disabled.**
 
 ## Phase 2B — O-2 D6 AWS proof package (branch `docs/o2-aws-proof-readiness`, awaiting review; NOT RUN)
 
@@ -177,7 +190,7 @@ revision `0021`, so deploying this branch is a migration-requiring release
   Starlette/FastAPI body-limit finding). No dataset tables, API or worker yet.
   **Customers cannot upload data**: ingestion is planned, not available.
 - **Offboarding contract:** every table classified; read-only inventory;
-  customer statement awaiting owner approval
+  workspace offboarding (ADR-037); customer statement awaiting owner approval
   ([offboarding-and-deletion](security/offboarding-and-deletion.md)).
 
 ## Pilot launch closure (merged as `b1a3058`, PR #40; deployed to staging)

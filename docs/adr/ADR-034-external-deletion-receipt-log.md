@@ -138,8 +138,8 @@ purge with an older receipt is still `STALE`.
 - Corrected wording: receipts hold **hashed** object references (S3 version,
   delete-marker and upload ids hashed with the key) and a count, not version
   ids in clear (ADR-033 and the provisioning runbook said "version ids").
-- **Remaining open:** workspace offboarding (and its per-workspace receipts) is
-  still not implemented; O-5 sets the retention; the CloudTrail trail does not
+- **Remaining open:** O-5 sets the retention; workspace offboarding and its
+  receipts are ADR-037 (in the same log and prefix); the CloudTrail trail does not
   yet record this bucket's data events (a pinned-template change for the next
   provisioning review).
 

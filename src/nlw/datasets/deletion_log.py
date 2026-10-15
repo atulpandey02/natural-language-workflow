@@ -45,6 +45,26 @@ deleted_at           UTC ISO-8601 time of the deletion
 
 Never recorded: names, filenames, labels, cell values, storage paths or keys,
 credentials.
+
+Record format ``workspace-offboarding-receipt-1`` (ADR-037), one per offboarded
+workspace, in the same log:
+
+=======================  ======================================================
+receipt_version          ``"workspace-offboarding-receipt-1"``
+receipt_id               opaque id chosen by the sink
+sink                     the sink's identifier
+environment              ``APP_ENV`` of the offboarding
+tenant_id                workspace id
+datasets_tombstoned      number of the workspace's datasets, all DELETED
+dataset_ids_sha256       SHA-256 over the sorted dataset ids (ids not exported)
+table_counts             rows removed per purged table (table name -> count)
+offboarding_set_sha256   SHA-256 over the canonical binding of the workspace,
+                         its datasets and the table counts
+verified_absent          always ``true`` (written only once every purged table
+                         holds no row of the workspace)
+operator                 the operator label given to the command
+offboarded_at            UTC ISO-8601 time
+=======================  ======================================================
 """
 
 from __future__ import annotations
@@ -62,6 +82,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 RECEIPT_VERSION = "deletion-receipt-2"
+WORKSPACE_RECEIPT_VERSION = "workspace-offboarding-receipt-1"
 LOCAL_FAKE_SINK = "local-fake"
 _DEPLOYED = ("staging", "production")
 
@@ -146,6 +167,147 @@ class DeletionReceipt:
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+
+
+def dataset_ids_digest(dataset_ids: list[uuid.UUID] | list[str]) -> str:
+    return hashlib.sha256(",".join(sorted(str(d) for d in dataset_ids)).encode()).hexdigest()
+
+
+def offboarding_set_digest(
+    *, tenant_id: str, datasets_tombstoned: int, dataset_ids_sha256: str,
+    table_counts: dict[str, int],
+) -> str:  # fmt: skip
+    """The digest a workspace receipt attests: binds the workspace, its
+    datasets and the rows removed from each purged table."""
+    canonical = json.dumps(
+        {
+            "tenant_id": tenant_id,
+            "datasets_tombstoned": datasets_tombstoned,
+            "dataset_ids_sha256": dataset_ids_sha256,
+            "table_counts": table_counts,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class WorkspaceReceipt:
+    sink: str
+    environment: str
+    tenant_id: str
+    datasets_tombstoned: int
+    dataset_ids_sha256: str
+    table_counts: dict[str, int]
+    offboarding_set_sha256: str
+    operator: str
+    verified_absent: bool = True
+    receipt_version: str = WORKSPACE_RECEIPT_VERSION
+    receipt_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    offboarded_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    @classmethod
+    def for_workspace(
+        cls, *, sink: str, environment: str, tenant_id: uuid.UUID,
+        dataset_ids: list[uuid.UUID], table_counts: dict[str, int], operator: str,
+    ) -> WorkspaceReceipt:  # fmt: skip
+        ids = dataset_ids_digest(dataset_ids)
+        counts = {k: int(v) for k, v in sorted(table_counts.items())}
+        return cls(
+            sink=sink,
+            environment=environment,
+            tenant_id=str(tenant_id),
+            datasets_tombstoned=len(dataset_ids),
+            dataset_ids_sha256=ids,
+            table_counts=counts,
+            offboarding_set_sha256=offboarding_set_digest(
+                tenant_id=str(tenant_id),
+                datasets_tombstoned=len(dataset_ids),
+                dataset_ids_sha256=ids,
+                table_counts=counts,
+            ),  # fmt: skip
+            operator=operator,
+        )
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+
+
+@dataclass(frozen=True, order=True)
+class WorkspaceReceiptRef:
+    tenant_id: uuid.UUID
+    receipt_id: str
+
+
+@dataclass(frozen=True)
+class ExpectedWorkspaceReceipt:
+    """What the database says a workspace's offboarding receipt must attest."""
+
+    sink: str
+    receipt_id: str
+    tenant_id: uuid.UUID
+    offboarding_set_sha256: str
+    not_before: datetime  # the offboarding request
+
+
+def check_workspace_receipt(
+    record: dict[str, Any] | None, expected: ExpectedWorkspaceReceipt
+) -> ReceiptCheck:
+    """Provider-neutral verification of one stored workspace receipt."""
+    if record is None:
+        return ReceiptCheck.MISSING
+    try:
+        if (
+            record.get("receipt_version") != WORKSPACE_RECEIPT_VERSION
+            or record.get("verified_absent") is not True
+            or record.get("receipt_id") != expected.receipt_id
+        ):
+            return ReceiptCheck.MALFORMED
+        if record["sink"] != expected.sink:
+            return ReceiptCheck.SINK_MISMATCH
+        if record["tenant_id"] != str(expected.tenant_id):
+            return ReceiptCheck.WORKSPACE_MISMATCH
+        counts = record["table_counts"]
+        if not isinstance(counts, dict) or not all(
+            isinstance(k, str) and type(v) is int and v >= 0 for k, v in counts.items()
+        ):
+            return ReceiptCheck.MALFORMED
+        datasets = record["datasets_tombstoned"]
+        if type(datasets) is not int or datasets < 0:
+            return ReceiptCheck.MALFORMED
+        recomputed = offboarding_set_digest(
+            tenant_id=record["tenant_id"], datasets_tombstoned=datasets,
+            dataset_ids_sha256=str(record["dataset_ids_sha256"]), table_counts=counts,
+        )  # fmt: skip
+        if (
+            record["offboarding_set_sha256"] != expected.offboarding_set_sha256
+            or recomputed != expected.offboarding_set_sha256
+        ):
+            return ReceiptCheck.DIGEST_MISMATCH
+        if datetime.fromisoformat(record["offboarded_at"]) < expected.not_before:
+            return ReceiptCheck.STALE
+    except (KeyError, TypeError, ValueError):
+        return ReceiptCheck.MALFORMED
+    return ReceiptCheck.VERIFIED
+
+
+def workspace_receipt_self_consistent(record: dict[str, Any] | None) -> bool:
+    """A listed workspace receipt that attests its own digest (used when there
+    is no database expectation, e.g. re-applying after a restore)."""
+    if record is None:
+        return False
+    try:
+        expected = ExpectedWorkspaceReceipt(
+            sink=str(record["sink"]),
+            receipt_id=str(record["receipt_id"]),
+            tenant_id=uuid.UUID(str(record["tenant_id"])),
+            offboarding_set_sha256=str(record["offboarding_set_sha256"]),
+            not_before=datetime.fromisoformat(str(record["offboarded_at"])),
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return check_workspace_receipt(record, expected) is ReceiptCheck.VERIFIED
 
 
 @dataclass(frozen=True)
@@ -253,6 +415,18 @@ class DeletionLog(Protocol):
     def read(self, ref: ReceiptRef) -> dict[str, Any] | None:
         """One receipt's record, or ``None`` if absent. Raises ``DeletionLogUnavailable``."""
 
+    def append_workspace(self, receipt: WorkspaceReceipt) -> str:
+        """Durably append a workspace offboarding receipt; return its id."""
+
+    def verify_workspace(self, expected: ExpectedWorkspaceReceipt) -> ReceiptCheck:
+        """Look a workspace receipt up and check it against ``expected``."""
+
+    def workspace_refs(self) -> Iterator[WorkspaceReceiptRef]:
+        """Every workspace receipt (ids only). Raises ``DeletionLogUnavailable``."""
+
+    def read_workspace(self, ref: WorkspaceReceiptRef) -> dict[str, Any] | None:
+        """One workspace receipt, or ``None``. Raises ``DeletionLogUnavailable``."""
+
 
 _UNCONFIGURED = "no deletion log is configured (the external deletion log is a launch gate)"
 
@@ -274,6 +448,18 @@ class UnconfiguredDeletionLog:
         raise DeletionLogUnavailable(_UNCONFIGURED)
 
     def read(self, ref: ReceiptRef) -> dict[str, Any] | None:
+        raise DeletionLogUnavailable(_UNCONFIGURED)
+
+    def append_workspace(self, receipt: WorkspaceReceipt) -> str:
+        raise DeletionLogUnavailable(_UNCONFIGURED)
+
+    def verify_workspace(self, expected: ExpectedWorkspaceReceipt) -> ReceiptCheck:
+        return ReceiptCheck.UNVERIFIABLE
+
+    def workspace_refs(self) -> Iterator[WorkspaceReceiptRef]:
+        raise DeletionLogUnavailable(_UNCONFIGURED)
+
+    def read_workspace(self, ref: WorkspaceReceiptRef) -> dict[str, Any] | None:
         raise DeletionLogUnavailable(_UNCONFIGURED)
 
 
@@ -298,7 +484,7 @@ class LocalFakeDeletionLog:
         ):
             raise DeletionLogUnavailable("the local deletion log is not writable")
 
-    def append(self, receipt: DeletionReceipt) -> str:
+    def append(self, receipt: DeletionReceipt | WorkspaceReceipt) -> str:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
@@ -343,6 +529,8 @@ class LocalFakeDeletionLog:
         seen: set[ReceiptRef] = set()
         self.unexpected_objects = 0
         for r in records:
+            if _workspace_ref_of(r) is not None:
+                continue  # a workspace receipt: listed by ``workspace_refs``
             ref = _ref_of(r)
             if ref is None:
                 self.unexpected_objects += 1
@@ -357,6 +545,53 @@ class LocalFakeDeletionLog:
             raise DeletionLogUnavailable("the local deletion log is unreadable") from None
         found = [r for r in records if r.get("receipt_id") == ref.receipt_id]
         return found[-1] if found else None
+
+    def append_workspace(self, receipt: WorkspaceReceipt) -> str:
+        return self.append(receipt)
+
+    def verify_workspace(self, expected: ExpectedWorkspaceReceipt) -> ReceiptCheck:
+        try:
+            records = self.read_all()
+        except (OSError, ValueError):
+            return ReceiptCheck.UNVERIFIABLE
+        found = [r for r in records if r.get("receipt_id") == expected.receipt_id]
+        return check_workspace_receipt(found[-1] if found else None, expected)
+
+    def workspace_refs(self) -> Iterator[WorkspaceReceiptRef]:
+        try:
+            records = self.read_all()
+        except (OSError, ValueError):
+            raise DeletionLogUnavailable("the local deletion log is unreadable") from None
+        seen: set[WorkspaceReceiptRef] = set()
+        for r in records:
+            ref = _workspace_ref_of(r)
+            if ref is not None and ref not in seen:
+                seen.add(ref)
+                yield ref
+
+    def read_workspace(self, ref: WorkspaceReceiptRef) -> dict[str, Any] | None:
+        try:
+            records = self.read_all()
+        except (OSError, ValueError):
+            raise DeletionLogUnavailable("the local deletion log is unreadable") from None
+        found = [
+            r for r in records
+            if r.get("receipt_id") == ref.receipt_id and _workspace_ref_of(r) == ref
+        ]  # fmt: skip
+        return found[-1] if found else None
+
+
+def _workspace_ref_of(record: dict[str, Any]) -> WorkspaceReceiptRef | None:
+    """The workspace receipt a record is, or ``None``."""
+    if record.get("receipt_version") != WORKSPACE_RECEIPT_VERSION:
+        return None
+    try:
+        rid = str(record["receipt_id"])
+        if not RECEIPT_ID.fullmatch(rid):
+            return None
+        return WorkspaceReceiptRef(uuid.UUID(str(record["tenant_id"])), rid)
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _ref_of(record: dict[str, Any]) -> ReceiptRef | None:
