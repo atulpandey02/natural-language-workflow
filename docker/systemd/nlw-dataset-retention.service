@@ -1,0 +1,37 @@
+# NLW dataset retention sweep and receipt reconciliation — one-shot (O-5/O-6,
+# ADR-035, ADR-038).
+#
+# DORMANT: install only with the separately authorized dataset enablement.
+#
+# Runs the operator commands in the one-shot `operator` service of
+# docker-compose.datasets.yml and writes their textfile metrics
+# (nlw_datasets_retention.prom, nlw_datasets_receipts.prom) for the dataset
+# exporter. The operator role trusts humans only: the run needs the operator's
+# per-session credential file at /run/nlw/aws/operator/credentials and FAILS
+# CLOSED without it (the application refuses a missing or expiring file), which
+# NlwDatasetRetentionSweepFailed/Stale then report. An unattended identity for
+# this timer is an open owner decision (ADR-038).
+[Unit]
+Description=NLW dataset retention sweep (one-shot)
+Documentation=file:/opt/nlw/docs/runbooks/dataset-staging-dormant.md
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/nlw/current
+TimeoutStartSec=3600
+# --no-deps: never recreate the running database container (see nlw-backup.service).
+ExecStart=/usr/bin/docker compose -p app --env-file /opt/nlw/current/.env.prod \
+    --env-file /opt/nlw/.env.datasets -f docker-compose.prod.yml \
+    -f docker-compose.staging.yml -f docker-compose.datasets.yml --profile operator \
+    run --rm --no-deps operator python -m nlw.ops.datasets retention-sweep \
+    --operator retention-timer --metrics-file /var/lib/node_exporter/textfile/nlw_datasets_retention.prom
+ExecStart=/usr/bin/docker compose -p app --env-file /opt/nlw/current/.env.prod \
+    --env-file /opt/nlw/.env.datasets -f docker-compose.prod.yml \
+    -f docker-compose.staging.yml -f docker-compose.datasets.yml --profile operator \
+    run --rm --no-deps operator python -m nlw.ops.datasets reconcile-receipts \
+    --metrics-file /var/lib/node_exporter/textfile/nlw_datasets_receipts.prom
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nlw-dataset-retention

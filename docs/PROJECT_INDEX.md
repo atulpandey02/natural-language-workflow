@@ -3,6 +3,21 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Phase 2B — O-6 dormant staging configuration (branch `feat/o6-dormant-staging`, awaiting review; NOT RUN, nothing installed)
+
+Owner scope (2026-10-15, [ADR-038](adr/ADR-038-o6-dormant-staging-configuration.md)):
+everything staging needs for the dataset path, inert;
+[runbook](runbooks/dataset-staging-dormant.md).
+
+- `docker-compose.datasets.yml` (never rendered by the rollout): API store
+  settings with `DATASETS_API_ENABLED: "false"`, `ingest`/`ingest-dispatch`
+  (profile `datasets`, own uids), one-shot `operator`, a dataset textfile
+  exporter, per-container credential mounts, IMDS disabled.
+- Credential refresher (`scripts/ops/nlw_aws_credential_refresh.py`) and
+  systemd units (refresher every 15 min, daily retention timer), not installed.
+- `prometheus.datasets.yml`: the reviewed config plus the dataset alerts and targets.
+- Still refused: the flag in staging, LOGIN for the dataset roles, an ingest key.
+
 ## Phase 2B — retention policy, O-5, and O-3 cleanup (branch `chore/phase2-retention-o3-cleanup`, awaiting review; NOT RUN on AWS)
 
 Owner decision O-5 (2026-10-15, [ADR-035](adr/ADR-035-phase2-retention-policy.md)),

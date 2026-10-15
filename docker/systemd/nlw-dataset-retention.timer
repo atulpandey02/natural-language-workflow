@@ -1,0 +1,13 @@
+# Daily dataset retention sweep (O-5/O-6, ADR-035, ADR-038). DORMANT: see the service.
+# Daily is well inside the 36 h staleness alert (SWEEP_STALE_AFTER_S).
+[Unit]
+Description=Daily NLW dataset retention sweep
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=nlw-dataset-retention.service
+
+[Install]
+WantedBy=timers.target
