@@ -98,7 +98,7 @@ timestamp advances **only** on a verified off-host snapshot.
 ## Retention
 
 Retention runs inside each backup (`restic forget --prune`) using
-`NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` (pilot defaults 14/8/6). If you enable
+`NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` (30/0/12, the O-5 policy in ADR-035; any other value is refused). If you enable
 provider object-lock/immutability for ransomware resistance, automated pruning
 cannot reclaim locked objects — see
 [`backup-providers.md`](backup-providers.md) and run pruning as a separate

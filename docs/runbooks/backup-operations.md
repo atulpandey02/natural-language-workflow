@@ -83,7 +83,8 @@ Retention has two modes (`NLW_BACKUP_RETENTION_MODE`, see
 [backup-providers](../ops/backup-providers.md)):
 
 - **simple** (default): `restic forget --prune` runs each backup using
-  `NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` (defaults 14/8/6). restic snapshots
+  `NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` (30/0/12, the O-5 policy in
+  ADR-035; any other value is refused). restic snapshots
   are deduplicated, so retained history is cheap.
 - **immutable**: the backup job **never** prunes; run retention as a separate,
   human-gated admin step off the VPS with delete-capable credentials:
