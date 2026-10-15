@@ -937,7 +937,8 @@ def test_drain_stops_on_non_terminal_work_and_never_stops_api() -> None:
     assert fake.ran(
         rf"cd '{STAGED}' && env -u DEMO_TOOLS_ENABLED -u PUBLIC_HOSTNAME "
         r"-u PUBLIC_HOSTNAME_FALLBACK -u NLW_LLM_PROVIDER -u NLW_LLM_MODEL -u NLW_LLM_API_KEY "
-        r"docker compose -p app .* "
+        r"-u NLW_BACKUP_RETENTION_DAILY -u NLW_BACKUP_RETENTION_WEEKLY "
+        r"-u NLW_BACKUP_RETENTION_MONTHLY docker compose -p app .* "
         r"up -d --no-deps --force-recreate caddy"
     )
 
@@ -2254,7 +2255,7 @@ def test_preflight_records_the_effective_o5_backup_retention() -> None:
     }
     # Only the retention lines are read: the file is never cat'ed or sourced, and
     # the grep names nothing but the three retention keys.
-    [cmd] = [c for c in fake.commands if "NLW_BACKUP_RETENTION" in c]
+    [cmd] = [c for c in fake.commands if c.startswith("grep -E ") and "NLW_BACKUP_RETENTION" in c]
     assert cmd.startswith("grep -E ") and "cat " not in cmd and "source" not in cmd
     assert "RESTIC" not in cmd and "AWS" not in cmd and "DATABASE_URL" not in cmd
 

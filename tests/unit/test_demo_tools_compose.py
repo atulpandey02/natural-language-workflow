@@ -52,7 +52,9 @@ def _render_authority(
     }[invocation]
     assert (
         "env -u DEMO_TOOLS_ENABLED -u PUBLIC_HOSTNAME -u PUBLIC_HOSTNAME_FALLBACK "
-        "-u NLW_LLM_PROVIDER -u NLW_LLM_MODEL -u NLW_LLM_API_KEY docker compose" in command
+        "-u NLW_LLM_PROVIDER -u NLW_LLM_MODEL -u NLW_LLM_API_KEY "
+        "-u NLW_BACKUP_RETENTION_DAILY -u NLW_BACKUP_RETENTION_WEEKLY "
+        "-u NLW_BACKUP_RETENTION_MONTHLY docker compose" in command
     )
     if not protected:
         command = re.sub(r"env( -u [A-Z_]+)+ ", "", command)  # the parent (unprotected) form

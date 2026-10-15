@@ -334,8 +334,22 @@ environment except the two hostname values):
 | `go-check` | both hostnames answer 200/404 |
 
 Every rollout Compose invocation runs under `env -u DEMO_TOOLS_ENABLED -u
-PUBLIC_HOSTNAME -u PUBLIC_HOSTNAME_FALLBACK`, so an operator shell variable can
-never override the staged reviewed values.
+PUBLIC_HOSTNAME -u PUBLIC_HOSTNAME_FALLBACK -u NLW_LLM_PROVIDER -u NLW_LLM_MODEL
+-u NLW_LLM_API_KEY -u NLW_BACKUP_RETENTION_DAILY -u NLW_BACKUP_RETENTION_WEEKLY
+-u NLW_BACKUP_RETENTION_MONTHLY` (`nlw.ops.rollout.remote.AMBIENT_UNSET`), so an
+operator shell variable can never override the staged reviewed values. Nothing
+else is removed from the environment.
+
+**Backup retention (O-5, ADR-035).** The rollout sanitizes the three
+`NLW_BACKUP_RETENTION_*` shell variables for every Compose render or run of the
+backup service (build, backup, evidence) and every full render, so the reviewed
+backup env file and the Compose defaults are the only sources of the backup
+retention. The preflight (and the backup phase) reads only those three lines of
+the backup env file and stops before activation unless the effective retention
+is 30 daily, 0 weekly and 12 monthly: the same values every backup render or run
+then uses. Compose defaults do not update an existing env file: a host file
+still carrying the pre-O-5 14/8/6 is refused by name; fix the file (or remove
+the three lines) and re-run the preflight.
 
 **Never edit a release checkout or an active/staged `.env.prod`** to change a
 hostname: the pin gates refuse the result and the next rollout's evidence would
