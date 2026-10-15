@@ -66,6 +66,7 @@ def test_the_runbook_holds_exactly_the_reviewed_templates() -> None:
         "role-audit-admin-receipts",
         "role-audit-reader-receipts",
         "role-operator-receipts",
+        "trail-advanced-event-selectors-with-receipts",
     ]
     # Nothing in the reviewed dataset/D6 templates is redefined here.
     assert not set(templates()) & set(templates(PROVISIONING))
@@ -218,3 +219,38 @@ def test_only_the_environment_operator_role_may_create_receipts() -> None:
     allows = [st for st in templates()["role-operator-receipts"]["Statement"]
               if st["Effect"] == "Allow" and "s3:PutObject" in acts(st)]  # fmt: skip
     assert [st["Resource"] for st in allows] == [RECEIPTS]
+
+
+# --- CloudTrail data events for the receipt bucket (runbook §8) ---------------------------
+
+
+def test_the_trail_selectors_add_the_receipt_bucket_and_keep_the_reviewed_selector() -> None:
+    """PutEventSelectors replaces the trail's selectors: the set applied where
+    O-3 is provisioned is the reviewed D6 selector, unchanged, plus one for
+    receipts; the D6 template itself is untouched."""
+    (dataset,) = templates(PROVISIONING)["trail-advanced-event-selectors"]
+    first, receipts = templates()["trail-advanced-event-selectors-with-receipts"]
+    assert first == dataset
+    assert receipts == {
+        "Name": "nlw-<ENV>-deletion-receipt-reads-and-writes",
+        "FieldSelectors": [
+            {"Field": "eventCategory", "Equals": ["Data"]},
+            {"Field": "resources.type", "Equals": ["AWS::S3::Object"]},
+            {"Field": "resources.ARN", "StartsWith": ["arn:aws:s3:::<RECEIPT_BUCKET>/"]},
+        ],
+    }  # no readOnly filter: reads, writes and refused calls are all recorded
+    assert first["Name"] != receipts["Name"]
+
+
+def test_only_the_audit_admin_may_change_the_selectors() -> None:
+    provisioning = templates(PROVISIONING)
+    admin = {s["Sid"]: s for s in provisioning["role-audit-admin"]["Statement"]}
+    assert "cloudtrail:PutEventSelectors" in acts(admin["AdministerThisTrail"])
+    assert admin["AdministerThisTrail"]["Resource"] == "<TRAIL_ARN>"
+    for role in ("role-api", "role-ingest", "role-operator", "role-bootstrap"):
+        denies = [s for s in provisioning[role]["Statement"] if s["Effect"] == "Deny"]
+        assert any("cloudtrail:PutEventSelectors" in acts(s) for s in denies), role
+    for name in ("role-operator-receipts", "role-audit-reader-receipts"):
+        for s in templates()[name]["Statement"]:
+            if s["Effect"] == "Allow":
+                assert not any(a.startswith("cloudtrail:") for a in acts(s)), name

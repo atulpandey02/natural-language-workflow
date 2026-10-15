@@ -34,9 +34,11 @@ GOVERNANCE retention (365 days, O-5). Implemented and tested without AWS contact
 - [provisioning templates](runbooks/deletion-receipt-log-provisioning.md)
   (NOT RUN): bucket policy, lifecycle, and second inline policies for the
   operator and audit roles; the reviewed `role-operator` and D6 pins unchanged.
+- CloudTrail data events for the receipt bucket: a pinned, complete selector
+  set for the existing trail (runbook §8, NOT RUN), the D6 selector unchanged
+  as its first element; events kept 365 days in the audit bucket.
 
-Still open: workspace offboarding receipts, CloudTrail coverage
-of the receipt bucket, the real-AWS proof. **Uploads remain disabled.**
+Still open: workspace offboarding receipts, the real-AWS proof. **Uploads remain disabled.**
 
 ## Phase 2B — O-2 D6 AWS proof package (branch `docs/o2-aws-proof-readiness`, awaiting review; NOT RUN)
 

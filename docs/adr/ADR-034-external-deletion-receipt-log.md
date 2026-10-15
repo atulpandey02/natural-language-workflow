@@ -139,9 +139,10 @@ purge with an older receipt is still `STALE`.
   delete-marker and upload ids hashed with the key) and a count, not version
   ids in clear (ADR-033 and the provisioning runbook said "version ids").
 - **Remaining open:** workspace offboarding (and its per-workspace receipts) is
-  still not implemented; O-5 sets the retention; the CloudTrail trail does not
-  yet record this bucket's data events (a pinned-template change for the next
-  provisioning review).
+  still not implemented; O-5 sets the retention. CloudTrail data events for
+  this bucket: a pinned selector set for the existing trail
+  (`trail-advanced-event-selectors-with-receipts`, runbook §8; NOT RUN), kept
+  365 days with the rest of the audit log.
 
 ## Security review of PR #66 (2026-10-14) and fixes
 

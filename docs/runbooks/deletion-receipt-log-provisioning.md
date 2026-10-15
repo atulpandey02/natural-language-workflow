@@ -270,16 +270,15 @@ refused in staging and production.
   that version to DELETING during a restore. The operator can already request
   any deletion, so this grants no new power over data, but it is a path that
   does not go through the API. Receipts are attributable (the `operator`
-  label, and `PutObject` data events once the trail covers this bucket; see
-  below).
+  label, and the `PutObject` data event, §8).
 - **Objects that are not receipts** (a misfiled key under `receipts/`) are
   never read; `reconcile-receipts` and `reapply-receipts` report their count
   as `unexpected_objects` and exit 1 so an operator investigates. They cannot
   be removed during retention.
-- **CloudTrail does not yet cover this bucket.** The reviewed trail
-  (`dataset-s3-provisioning.md` §4) records data events for the dataset
-  bucket only. Adding this bucket is a pinned-template change for the next
-  provisioning review.
+- **CloudTrail coverage depends on applying §8.** Until the audit
+  administrator applies `trail-advanced-event-selectors-with-receipts`, the
+  trail records the dataset bucket only. Bucket-level listings are the same
+  open question as for the dataset bucket (E13).
 - **Receipt without event** (ADR-033 note 3) remains possible: the receipt is
   written before the purge transaction commits. `reconcile-receipts` lists
   such receipts; they are evidence of a deletion attempt, not a completed purge.
@@ -296,3 +295,59 @@ refused in staging and production.
 5. Restore drill: restore a snapshot taken before step 1 into a locked
    database, run `reapply-receipts`, and confirm the version is DELETING with
    `RESTORE_REAPPLY` evidence before any runtime starts.
+6. CloudTrail (§8): `aws cloudtrail get-event-selectors --trail-name <TRAIL_ARN>`
+   returns exactly `trail-advanced-event-selectors-with-receipts`; the
+   `PutObject` of step 1, the `GetObject` of step 3 (denied) and the denied
+   `DeleteObject` of step 2 each appear as a data event in `<AUDIT_BUCKET>`
+   under `dataset-data-events`, attributed to the calling role; `aws
+   cloudtrail validate-logs` passes for the period.
+
+## 8. CloudTrail data events for this bucket
+
+Every call on a receipt (the operator's write, a reader's or the restore
+role's read, any refused delete or retention change) is recorded by the
+environment's existing data-event trail, `nlw-<ENV>-dataset-data-events`
+(`dataset-s3-provisioning.md` §4). No new trail, audit bucket or audit key:
+the events land in `<AUDIT_BUCKET>` under the same prefix, encrypted with the
+same audit key, kept 365 days by the same Object Lock retention and lifecycle
+(O-5, `AUDIT_RETENTION_DAYS`), and readable by the same audit reader.
+
+`PutEventSelectors` **replaces** a trail's selectors, so the audit
+administrator applies this complete set, never the receipt selector alone. Its
+first selector is the reviewed dataset selector, unchanged byte for byte; the
+second covers object-level reads and writes under `<RECEIPT_BUCKET>/` with no
+`readOnly` filter. The D6 proof account, which has no receipt bucket, keeps
+`trail-advanced-event-selectors` as reviewed.
+
+<!-- template: trail-advanced-event-selectors-with-receipts -->
+```json
+[{
+  "Name": "nlw-<ENV>-dataset-object-reads-and-writes",
+  "FieldSelectors": [
+    {"Field": "eventCategory", "Equals": ["Data"]},
+    {"Field": "resources.type", "Equals": ["AWS::S3::Object"]},
+    {"Field": "resources.ARN", "StartsWith": ["arn:aws:s3:::<BUCKET>/"]}
+  ]
+},
+{
+  "Name": "nlw-<ENV>-deletion-receipt-reads-and-writes",
+  "FieldSelectors": [
+    {"Field": "eventCategory", "Equals": ["Data"]},
+    {"Field": "resources.type", "Equals": ["AWS::S3::Object"]},
+    {"Field": "resources.ARN", "StartsWith": ["arn:aws:s3:::<RECEIPT_BUCKET>/"]}
+  ]
+}]
+```
+
+- **Who applies it:** the audit administrator (`<AUDIT_ADMIN_ROLE>`), the only
+  role allowed `cloudtrail:PutEventSelectors` on `<TRAIL_ARN>`; every dataset
+  role, the operator included, is denied every trail change
+  (`NeverAlterAnyTrail`).
+- **When:** in the same provisioning review that creates `<RECEIPT_BUCKET>`,
+  before the first receipt is written, so no receipt exists without a record.
+- **Management events** on the bucket (policy, Object Lock, lifecycle and
+  versioning changes) are not data events; they rely on the account-level
+  management trail, the same assumption as for the dataset bucket (§4 there).
+- **Not verified here (NOT RUN):** that AWS accepts two selectors with these
+  shapes, and that a request AWS denies on a receipt is recorded; both are
+  verification step 6.
