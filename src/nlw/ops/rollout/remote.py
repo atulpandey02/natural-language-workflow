@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from nlw.ops.rollout.gates import hostname_problem, sslip_ipv4
+from nlw.ops.rollout.gates import BACKUP_RETENTION_KEYS, hostname_problem, sslip_ipv4
 
 _TARGET_KEYS = (
     "NLW_STAGING_INSTANCE_ID",
@@ -55,6 +55,9 @@ _SINGLE_KEYS = (
 # removed from every rollout Compose invocation and only the staged .env.prod
 # supplies it (written by stage-release from the reviewed target/manifest, or,
 # for the planner provider/model/key, carried from the active .env.prod).
+# The backup retention (O-5, ADR-035) comes only from the reviewed backup env
+# file or the Compose defaults: the same sources the preflight gate reads, so
+# the retention it checks is the retention every backup render or run uses.
 AMBIENT_UNSET = (
     "DEMO_TOOLS_ENABLED",
     "PUBLIC_HOSTNAME",
@@ -62,6 +65,7 @@ AMBIENT_UNSET = (
     "NLW_LLM_PROVIDER",
     "NLW_LLM_MODEL",
     "NLW_LLM_API_KEY",
+    *BACKUP_RETENTION_KEYS,
 )
 _ENV_UNSET = "env " + " ".join(f"-u {name}" for name in AMBIENT_UNSET)
 _OPERATOR_ALERTING_KEYS = (

@@ -318,5 +318,5 @@ backup or alerting values.
 | O-2 | S3 client, per-environment bucket | open: production processing has no storage backend |
 | O-3 | external deletion-log provider | decided 2026-10-14 ([ADR-034](ADR-034-external-deletion-receipt-log.md)); implemented, NOT RUN on AWS |
 | O-4 | object backup/restore | open |
-| O-5 | retention periods | open |
+| O-5 | retention periods | decided 2026-10-15 ([ADR-035](ADR-035-phase2-retention-policy.md)); implemented, NOT RUN on AWS |
 | O-6 | enabling uploads and the ingest runtime outside development | open: role dormant, rollout refuses an ingest key |

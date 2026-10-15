@@ -49,9 +49,8 @@ groups:
             Database, Redis or recovery-lock trouble. Runbook:
             docs/adr/ADR-032-dataset-ingest-dispatcher.md
 
-      # ADR-033 D2 (PROVISIONAL, development/staging): a rejected object must be
-      # purged by the operator within 7 days. Fed by the operator's
-      # `rejected-pending --metrics-file` textfile. Not the O-5 retention policy.
+      # O-5 (ADR-035): a rejected object is purged within 7 days (a target).
+      # Fed by the operator's `retention-sweep` / `rejected-pending` textfile.
       - alert: NlwDatasetRejectedRetainedTooLong
         expr: nlw_dataset_rejected_oldest_age_seconds > 604800
         for: 1h
@@ -59,9 +58,82 @@ groups:
         annotations:
           summary: "A rejected dataset object has been retained for over 7 days"
           description: >
-            Run the operator's purge-rejected (bounded, dry-run first). The 7-day
-            window is provisional until O-5. Runbook:
-            docs/runbooks/dataset-s3-provisioning.md
+            Run the operator's retention-sweep (bounded, dry-run first). Policy:
+            docs/adr/ADR-035-phase2-retention-policy.md
+
+      # O-5: an unpublished or superseded version is kept 30 days, then the daily
+      # retention-sweep removes it; past 30 days for a full day, the sweep is not
+      # keeping up.
+      - alert: NlwDatasetInactiveRetainedTooLong
+        expr: nlw_dataset_inactive_oldest_age_seconds > 2592000
+        for: 24h
+        labels: { severity: warning, component: datasets }
+        annotations:
+          summary: "An unpublished or superseded dataset version is older than 30 days"
+          description: >
+            Run the operator's retention-sweep. Policy:
+            docs/adr/ADR-035-phase2-retention-policy.md
+
+      # O-5: logically deleted bytes are purged within 7 days (a target).
+      - alert: NlwDatasetDeletedNotPurged
+        expr: nlw_dataset_deleting_oldest_unpurged_age_seconds > 604800
+        for: 1h
+        labels: { severity: warning, component: datasets }
+        annotations:
+          summary: "A dataset deletion request has not been purged within 7 days"
+          description: >
+            Run the operator's retention-sweep (or purge). Policy:
+            docs/adr/ADR-035-phase2-retention-policy.md
+
+      # ADR-034/O-5: a purge event whose receipt is missing, unretained or does
+      # not verify. Fed by `reconcile-receipts --metrics-file`.
+      - alert: NlwDatasetReceiptsUnverified
+        expr: nlw_dataset_receipts_unverified > 0
+        for: 15m
+        labels: { severity: critical, component: datasets }
+        annotations:
+          summary: "A dataset deletion receipt is missing or does not verify"
+          description: >
+            Run reconcile-receipts and investigate before any tombstone. Runbook:
+            docs/runbooks/deletion-receipt-log-provisioning.md
+
+      # O-5: receipts are retained 365 days; a version still awaiting its
+      # tombstone needs its receipt, so flag 30 days before the retention ends.
+      - alert: NlwDatasetReceiptsExpiringBeforeTombstone
+        expr: nlw_dataset_receipts_expiring_untombstoned > 0
+        for: 1h
+        labels: { severity: warning, component: datasets }
+        annotations:
+          summary: "A deletion receipt expires within 30 days but its version is not tombstoned"
+          description: >
+            Tombstone the version while its receipt is still retained. Policy:
+            docs/adr/ADR-035-phase2-retention-policy.md
+
+      # O-5: the retention sweep reported a failure.
+      - alert: NlwDatasetRetentionSweepFailed
+        expr: nlw_dataset_retention_sweep_failed == 1
+        for: 30m
+        labels: { severity: warning, component: datasets }
+        annotations:
+          summary: "The dataset retention sweep failed"
+          description: >
+            Re-run retention-sweep; it is idempotent and resumes from the oldest
+            item. Policy: docs/adr/ADR-035-phase2-retention-policy.md
+
+      # O-5: the daily retention sweep has not succeeded for 36 hours, or has
+      # never reported a success at all (the metric is absent: no textfile, a
+      # sweep that was never scheduled, or a collector that lost the file).
+      - alert: NlwDatasetRetentionSweepStale
+        expr: >
+          (time() - nlw_dataset_retention_sweep_last_success_timestamp_seconds > 129600)
+          or absent(nlw_dataset_retention_sweep_last_success_timestamp_seconds)
+        for: 30m
+        labels: { severity: warning, component: datasets }
+        annotations:
+          summary: "The dataset retention sweep has not succeeded for 36 hours"
+          description: >
+            Check the sweep's schedule and its last result (a recovery lock also
+            stops it). Policy: docs/adr/ADR-035-phase2-retention-policy.md
 
       # ADR-033 D3: the pinned S3 credentials of an API or ingest process expire
       # within 15 minutes, so the host refresher has stopped rotating them. The

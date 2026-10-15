@@ -1317,6 +1317,16 @@
      "AbortIncompleteMultipartUpload": {
       "DaysAfterInitiation": 1
      }
+    },
+    {
+     "ID": "expire-noncurrent-versions",
+     "Status": "Enabled",
+     "Filter": {
+      "Prefix": "versions/"
+     },
+     "NoncurrentVersionExpiration": {
+      "NoncurrentDays": 30
+     }
     }
    ]
   },

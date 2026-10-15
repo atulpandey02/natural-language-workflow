@@ -158,18 +158,19 @@ class Restic:
         self._restic_checked("restore", snapshot, "--target", str(target), what="restore")
 
     def forget_prune(self, *, daily: int, weekly: int, monthly: int) -> None:
-        """Apply retention against the REPOSITORY (never shell globs) and prune."""
-        self._restic_checked(
-            "forget",
-            "--keep-daily",
-            str(daily),
-            "--keep-weekly",
-            str(weekly),
-            "--keep-monthly",
-            str(monthly),
-            "--prune",
-            what="forget/prune",
-        )
+        """Apply retention against the REPOSITORY (never shell globs) and prune.
+        A tier of 0 is omitted (no weekly tier under O-5); restic keeps nothing
+        for an omitted tier."""
+        keep: list[str] = []
+        for flag, n in (("--keep-daily", daily), ("--keep-weekly", weekly),
+                        ("--keep-monthly", monthly)):  # fmt: skip
+            if n < 0:
+                raise ValueError("a retention tier cannot be negative")
+            if n:
+                keep += [flag, str(n)]
+        if not keep:
+            raise ValueError("refusing to forget with no retention tier")
+        self._restic_checked("forget", *keep, "--prune", what="forget/prune")
 
 
 def _snapshot_time(snap: dict[str, Any]) -> datetime:

@@ -8408,9 +8408,19 @@ def test_lifecycle_rules_are_compared_semantically(
         assert "STOP S9: lifecycle differs from the rendered template" in result.stderr
 
 
+# O-5 (ADR-035): noncurrent object versions expire after 30 days; there is
+# still no current-version Expiration and no Transition.
+NONCURRENT_RULE = {
+    "ID": "expire-noncurrent-versions",
+    "Status": "Enabled",
+    "Filter": {"Prefix": "versions/"},
+    "NoncurrentVersionExpiration": {"NoncurrentDays": 30},
+}
+
+
 def test_the_lifecycle_documents_are_pinned_whole() -> None:
     t = load_templates()
-    assert t["dataset-bucket-lifecycle"] == {"Rules": [LIFECYCLE_RULE]}
+    assert t["dataset-bucket-lifecycle"] == {"Rules": [LIFECYCLE_RULE, NONCURRENT_RULE]}
     assert PINS["documents"]["dataset-bucket-lifecycle"] == t["dataset-bucket-lifecycle"]
     assert PINS["documents"]["audit-bucket-lifecycle"] == t["audit-bucket-lifecycle"]
 

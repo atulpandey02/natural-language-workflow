@@ -207,6 +207,43 @@ def verify_identity(sts: Any, bucket: str, service: Service) -> str:
     return f"arn:aws:iam::{account}:role/{role}"
 
 
+def verify_role_path(iam: Any, role_name: str) -> None:
+    """The role must be at IAM path ``/`` (ADR-034): the receipt bucket policy
+    names ``arn:aws:iam::<account>:role/<name>`` exactly, and STS session ARNs
+    omit the path, so a role at another path would pass the identity check and
+    then be refused only when writing a receipt, AFTER its bytes were deleted.
+
+    The operator may call ``iam:GetRole`` on exactly that path-``/`` ARN, so a
+    role at any other path is refused here (AccessDenied) before any deletion."""
+    try:
+        role = iam.get_role(RoleName=role_name)["Role"]
+    except Exception as exc:
+        code = ""
+        response = getattr(exc, "response", None)
+        if isinstance(response, dict):
+            code = str((response.get("Error") or {}).get("Code") or "")
+        raise CredentialError(
+            f"the operator role's IAM path could not be confirmed "
+            f"({code or type(exc).__name__}): it must be at path /"
+        ) from None
+    if role.get("Path") != "/" or role.get("RoleName") != role_name:
+        raise CredentialError("the operator role must be at IAM path / (ADR-034)")
+    if not str(role.get("Arn", "")).endswith(f":role/{role_name}"):
+        raise CredentialError("the operator role must be at IAM path / (ADR-034)")
+
+
+def build_operator_clients(settings: Settings) -> tuple[Any, Any, str]:
+    """(S3 client, IAM client, verified role ARN) for the operator commands,
+    from the same pinned session; the IAM client is used only to confirm the
+    role's path (``verify_role_path``)."""
+    s3, role_arn = build_clients(settings, "operator")
+    path = os.environ.get(CREDENTIALS_ENV)
+    assert path is not None and settings.dataset_s3_region  # build_clients checked both
+    session = _session(_refreshable(path), settings.dataset_s3_region)
+    iam = session.create_client("iam", config=_client_config(settings))
+    return s3, iam, role_arn
+
+
 def build_clients(settings: Settings, service: Service) -> tuple[Any, str]:
     """(S3 client, verified role ARN) for ``service``. Raises ``CredentialError``."""
     refuse_static_environment()
@@ -244,9 +281,11 @@ __all__ = [
     "Service",
     "bucket_identity",
     "build_clients",
+    "build_operator_clients",
     "expected_role",
     "read_credentials_file",
     "refuse_static_environment",
     "remaining_seconds",
     "verify_identity",
+    "verify_role_path",
 ]

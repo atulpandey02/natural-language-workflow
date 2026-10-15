@@ -34,7 +34,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -171,16 +171,28 @@ def _retained(response: dict[str, Any], now: datetime) -> bool:
 
 
 class S3DeletionLog:
-    def __init__(self, client: S3ReceiptClient, bucket: str) -> None:
+    def __init__(
+        self,
+        client: S3ReceiptClient,
+        bucket: str,
+        *,
+        role_check: Callable[[], None] | None = None,
+    ) -> None:
+        """``role_check`` (run by ``preflight``) confirms the writer's identity
+        can store a receipt, e.g. that the operator role is at IAM path ``/``
+        (ADR-034); it raises ``DeletionLogUnavailable`` otherwise."""
         self.sink_id = sink_for(bucket)
         self._s3 = client
         self._bucket = bucket
+        self._role_check = role_check
         # Objects under receipts/ that are not receipts (reported, never read).
         self.unexpected_objects = 0
 
     # --- before deleting anything -------------------------------------------------
 
     def preflight(self) -> None:
+        if self._role_check is not None:
+            self._role_check()
         try:
             cfg = self._s3.get_object_lock_configuration(Bucket=self._bucket)[
                 "ObjectLockConfiguration"

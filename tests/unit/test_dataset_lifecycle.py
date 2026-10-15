@@ -41,8 +41,8 @@ def _m0025() -> Any:
     return _load("m0025", "0025_dataset_ingestion.py")
 
 
-def _m0029() -> Any:
-    return _load("m0029", "0029_deletion_receipt_reapply.py")
+def _m0030() -> Any:
+    return _load("m0030", "0030_inactive_version_retention.py")
 
 
 # --- the Python rules equal the database rules --------------------------------
@@ -56,9 +56,9 @@ def test_state_vocabularies_match_the_migration() -> None:
     assert tuple(c.value for c in lc.RejectionCode) == head.rejection_codes()
     assert tuple(e.value for e in lc.EventType) == head.event_types()
     # 0028 (ADR-033 D2) widens the reason codes with REJECTED_RETENTION and
-    # 0029 (ADR-034) with RESTORE_REAPPLY.
+    # 0029 (ADR-034) with RESTORE_REAPPLY and 0030 (ADR-035) with INACTIVE_RETENTION.
     assert {r.value for r in lc.ReasonCode} | {c.value for c in lc.RejectionCode} == set(
-        _m0029().reason_codes()
+        _m0030().reason_codes()
     )
     assert head.rejection_codes()[: len(m.REJECTION_CODES)] == m.REJECTION_CODES
     assert head.event_types()[: len(m.EVENT_TYPES)] == m.EVENT_TYPES

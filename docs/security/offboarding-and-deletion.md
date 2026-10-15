@@ -38,7 +38,7 @@ prints one workspace's row counts per table; it changes nothing.
 | Audit evidence (`authz_audit_events`) | PostgreSQL | Retained (ids, event types; never values) | Retained; tenant marker after the tombstone period (period proposed, not approved) | Dump retention |
 | Planner-outcome events (`plan_outcome_events`) | PostgreSQL | n/a | Retained (codes, buckets, counts; no text); proposed 13 months, **no retention job exists yet** | Dump retention |
 | Connector credentials | Secret store (the `connectors` row holds only a reference) | n/a | `connectors` row purged; secret versions scheduled for deletion in the store | Provider retention window |
-| PostgreSQL backups | restic (client-side encrypted, immutable mode) | **Not edited** | **Not edited**; expire on the configured 14 daily / 8 weekly / 6 monthly retention | — |
+| PostgreSQL backups | restic (client-side encrypted, immutable mode) | **Not edited** | **Not edited**; expire on the O-5 retention of 30 daily and 12 monthly recovery points ([ADR-035](../adr/ADR-035-phase2-retention-policy.md)) | — |
 | External deletion log (`deletion-receipt-2`, ADR-030; provider: S3 Object Lock, ADR-034, NOT RUN on AWS; local FAKE for development) | Outside PostgreSQL and its backups (see below) | One receipt per purged version (ids, digest, object count, hashed object refs, operator, time; no names or values) | One entry per offboarded workspace | Never rolled back by a restore |
 | Legal or operational retention exceptions | Recorded per case with the owner's approval | Deletion paused only for a recorded hold (legal request, active incident); never silently | Same | A hold never extends backup expiry beyond the configured schedule |
 

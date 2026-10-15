@@ -18,6 +18,8 @@ from typing import Literal
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from nlw.core.retention import DB_BACKUP_DAILY, DB_BACKUP_MONTHLY, DB_BACKUP_WEEKLY
+
 Environment = Literal["local", "dev", "staging", "production"]
 
 # Backup-format version written into every manifest.
@@ -62,10 +64,12 @@ class BackupSettings(BaseSettings):
     # to the child, never on argv.
     backup_database_url: SecretStr = Field(default=SecretStr(""), alias="NLW_BACKUP_DATABASE_URL")
 
-    # Retention (pilot defaults; documented, not silently assumed).
-    retention_daily: int = Field(default=14, alias="NLW_BACKUP_RETENTION_DAILY")
-    retention_weekly: int = Field(default=8, alias="NLW_BACKUP_RETENTION_WEEKLY")
-    retention_monthly: int = Field(default=6, alias="NLW_BACKUP_RETENTION_MONTHLY")
+    # Retention: the owner's O-5 policy (nlw.core.retention, ADR-035): 30 daily
+    # and 12 monthly recovery points, no weekly tier. The settings exist so the
+    # value is explicit where it is deployed; any other value is refused.
+    retention_daily: int = Field(default=DB_BACKUP_DAILY, alias="NLW_BACKUP_RETENTION_DAILY")
+    retention_weekly: int = Field(default=DB_BACKUP_WEEKLY, alias="NLW_BACKUP_RETENTION_WEEKLY")
+    retention_monthly: int = Field(default=DB_BACKUP_MONTHLY, alias="NLW_BACKUP_RETENTION_MONTHLY")
 
     # Freshness: a successful backup older than this trips the dead-man alert. A
     # touch over 24h to tolerate the daily timer's randomized delay.
@@ -96,8 +100,14 @@ class BackupSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _fail_closed(self) -> "BackupSettings":
-        if self.retention_daily < 1 or self.retention_weekly < 1 or self.retention_monthly < 1:
-            raise ValueError("backup retention values must each be >= 1")
+        for name, value, policy in (
+            ("NLW_BACKUP_RETENTION_DAILY", self.retention_daily, DB_BACKUP_DAILY),
+            ("NLW_BACKUP_RETENTION_WEEKLY", self.retention_weekly, DB_BACKUP_WEEKLY),
+            ("NLW_BACKUP_RETENTION_MONTHLY", self.retention_monthly, DB_BACKUP_MONTHLY),
+        ):
+            if value != policy:
+                # The rejected value is never echoed (only the setting and the policy).
+                raise ValueError(f"{name} must be {policy} (retention policy O-5, ADR-035)")
         if self.max_age_hours < 1:
             raise ValueError("NLW_BACKUP_MAX_AGE_HOURS must be >= 1")
         # Contradiction: immutable writer mode + a local automatic prune. A non-delete

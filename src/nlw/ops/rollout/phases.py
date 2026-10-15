@@ -757,6 +757,16 @@ class Rollout:
             )
         return perms
 
+    def check_backup_retention(self) -> dict[str, str]:
+        """O-5: the effective backup retention (env-file overrides, else the
+        Compose defaults) is 30/0/12. Only the three retention lines are read
+        from the backup env file (``grep``); nothing else in it is read."""
+        path = self.target.backup_env_file
+        res = self.remote.run(f"grep -E '{gates.BACKUP_RETENTION_GREP}' '{path}' || true")
+        if not res.ok:
+            raise GateError(f"backup env file {path}: its retention lines could not be read")
+        return gates.check_backup_retention(res.text)
+
     def read_roles(self) -> dict[str, str]:
         text = self._psql(
             "SELECT rolname||':'||CASE WHEN rolcanlogin THEN 't' ELSE 'f' END"
@@ -833,6 +843,7 @@ class Rollout:
         drain = self.read_drain()
         current_shape = self.refuse_foreign_activation()
         backup_env_mode = self.check_backup_env_file()
+        backup_retention = self.check_backup_retention()
         am = self.check_alertmanager_authority()
         doc = self._state()
         if not state.phase_done(doc, "migrate"):
@@ -846,6 +857,7 @@ class Rollout:
                 "active_hostname": pins.get("PUBLIC_HOSTNAME"),
             },
             "backup_env_mode": backup_env_mode,
+            "backup_retention": backup_retention,
             "current_link": current_shape,
             "manifest_sha256": self.release.sha256,
             "release_sha": self.release.release_sha,
@@ -1140,6 +1152,7 @@ class Rollout:
         self.refuse_foreign_activation()
         self.verify_checkout(self.staged)
         self.check_backup_env_file()
+        self.check_backup_retention()
         gates.check_current_revision(self.read_revision(), self.release.expected_current_revision)
         env = (
             f"-e NLW_BACKUP_SOURCE_INSTANCE_ID={self.release.instance_id} "

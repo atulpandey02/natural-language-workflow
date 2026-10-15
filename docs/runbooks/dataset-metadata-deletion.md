@@ -145,6 +145,31 @@ A version with a recorded storage key ends with `VERSION_DELETION_REQUESTED`,
 `VERSION_OBJECT_PURGED`, `VERSION_TOMBSTONED` (and `DATASET_TOMBSTONED`). A
 version with no key and nothing stored has no `VERSION_OBJECT_PURGED`.
 
+## Retention sweep (O-5)
+
+[ADR-035](../adr/ADR-035-phase2-retention-policy.md) sets the retention policy;
+`retention-sweep` applies it with the purge above. Daily (scheduling is O-6):
+
+```bash
+python -m nlw.ops.datasets retention-status
+python -m nlw.ops.datasets retention-sweep --operator <name> --dry-run
+python -m nlw.ops.datasets retention-sweep --operator <name> --limit 100 \
+    --metrics-file /var/lib/node_exporter/textfile/nlw_datasets_retention.prom
+python -m nlw.ops.datasets reconcile-receipts \
+    --metrics-file /var/lib/node_exporter/textfile/nlw_datasets_receipts.prom
+```
+
+- One bounded batch, oldest first: logically deleted versions are purged;
+  rejected versions and versions inactive for 30 days are moved to DELETING
+  (`REJECTED_RETENTION`, `INACTIVE_RETENTION`) and purged, each with a receipt.
+  `more=1`: run it again.
+- Never an ACTIVE version, never a row deleted, never a tombstone: apply the
+  tombstone (§3) as before.
+- `busy=1`: another sweep holds the lock; nothing changed. Refused while the
+  recovery lock is active (the metrics record `recovery_locked`).
+- Exit 2 is a refusal, exit 3 an operational failure with its safe reason and
+  partial counts: the sweep is idempotent, so re-run it.
+
 ## Never
 
 - Never `DELETE` rows from the dataset tables by hand. The tombstone, the

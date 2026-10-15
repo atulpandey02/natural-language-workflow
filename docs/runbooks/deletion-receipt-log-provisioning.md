@@ -27,8 +27,6 @@ None of these may be replaced by a real value in this repository.
 | `<OTHER_ENV>` | the other environment, which is explicitly denied |
 | `<ACCOUNT>` | the AWS account id of the environment's dataset bucket |
 | `<RECEIPT_BUCKET>` | `nlw-<ENV>-deletion-receipts-<ACCOUNT>-us-east-1[-<suffix>]`, at most 61 characters (the sink id `s3.<bucket>` is at most 64). It is separate from the dataset bucket, the audit bucket and the Restic bucket; settings refuse a shared name. |
-| `<RECEIPT_RETENTION_DAYS>` | default Object Lock retention. **Undecided: set by O-5.** Until then the proof uses GOVERNANCE with a short placeholder; before any customer data it becomes COMPLIANCE with the O-5 value (D6 decisions E1/E2). |
-| `<RECEIPT_EXPIRY_DAYS>` | `<RECEIPT_RETENTION_DAYS>` + 1, the lifecycle expiry |
 | `<AUDIT_ADMIN_ROLE>` | the environment's audit administrator (`nlw-<ENV>-dataset-audit-admin`), the only principal that may change the bucket's configuration or the retention of a receipt |
 | `<AUDIT_READER_ROLE>` | the environment's read-only audit reviewer |
 
@@ -38,16 +36,22 @@ None of these may be replaced by a real value in this repository.
 
 - us-east-1, Block Public Access: all four settings on, `BucketOwnerEnforced`;
 - Versioning: on (required by Object Lock);
-- **Object Lock enabled at creation**, default retention **GOVERNANCE** for
-  `<RECEIPT_RETENTION_DAYS>` days. The code refuses to purge unless this default
-  exists (`preflight`) and refuses a receipt stored without retention;
+- **Object Lock enabled at creation**, default retention **GOVERNANCE for 365
+  days** (owner decision O-5, [ADR-035](../adr/ADR-035-phase2-retention-policy.md);
+  `nlw.core.retention.RECEIPT_RETENTION_DAYS`). GOVERNANCE is for the synthetic
+  pilot only: real customer data stays blocked until this bucket and the audit
+  bucket use **COMPLIANCE** and a separate GO decision is recorded. The code
+  refuses to purge unless a default retention exists (`preflight`) and refuses
+  a receipt stored without retention;
 - default encryption **SSE-S3** (`AES256`). Receipts hold ids, digests, counts,
   an operator label and a time: no names, keys, paths or values. SSE-S3 keeps
   the evidence readable without a KMS key whose policy could later be changed
   or scheduled for deletion. The bucket policy denies any other algorithm;
 - no replication, no event notifications, no website, no ACLs.
 
-**Expiry** (only after retention):
+**Expiry** (only after retention: day 366, one day after the 365-day lock, so
+no lifecycle action can remove a receipt while it is retained; Object Lock
+would refuse it anyway):
 
 <!-- template: receipt-bucket-lifecycle -->
 ```json
@@ -55,7 +59,7 @@ None of these may be replaced by a real value in this repository.
   "ID": "expire-after-retention",
   "Status": "Enabled",
   "Filter": {"Prefix": "receipts/"},
-  "Expiration": {"Days": "<RECEIPT_EXPIRY_DAYS>"},
+  "Expiration": {"Days": 366},
   "NoncurrentVersionExpiration": {"NoncurrentDays": 1}
 }]}
 ```
@@ -129,8 +133,9 @@ Attached to `nlw-<ENV>-dataset-operator` as an inline policy named
 `deletion-receipts`, beside the unchanged `role-operator` policy. The operator
 already runs `purge`, `purge-rejected` and `tombstone`; with this policy it
 also writes one receipt per purged version, reads receipts back to verify
-them, lists them for `reconcile-receipts` and `reapply-receipts`, and confirms
-the bucket's default retention before a purge deletes anything.
+them, lists them for `reconcile-receipts` and `reapply-receipts`, and, before a
+purge deletes anything, confirms the bucket's default retention and that its
+own role is at IAM path `/` (below).
 
 <!-- template: role-operator-receipts -->
 ```json
@@ -145,6 +150,8 @@ the bucket's default retention before a purge deletes anything.
    "Condition": {"StringLike": {"s3:prefix": ["receipts/*"]}}},
   {"Sid": "ConfirmRetention", "Effect": "Allow", "Action": "s3:GetBucketObjectLockConfiguration",
    "Resource": "arn:aws:s3:::<RECEIPT_BUCKET>"},
+  {"Sid": "ConfirmOwnRolePath", "Effect": "Allow", "Action": "iam:GetRole",
+   "Resource": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"},
   {"Sid": "NeverAlterReceipts", "Effect": "Deny",
    "Action": ["s3:DeleteObject", "s3:DeleteObjectVersion", "s3:BypassGovernanceRetention",
               "s3:PutObjectRetention", "s3:PutObjectLegalHold", "s3:PutBucket*",
@@ -160,6 +167,28 @@ the bucket's default retention before a purge deletes anything.
 - `s3:GetObjectRetention` lets the code see the retention mode and date it
   requires on every receipt. No delete, retention or configuration action is
   granted, and each is explicitly denied.
+- `iam:GetRole` is read-only and limited to **this role's own path-`/` ARN**.
+
+### Role path: `/` only
+
+Every `nlw-<ENV>-dataset-*` role is created at IAM path `/` (`aws iam
+create-role` without `--path`, or with `--path /`). The receipt bucket policy
+admits exactly `arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator`, and an
+STS session ARN does not carry the path, so a role at another path would pass
+the startup identity check and be refused only when writing a receipt, after
+its bytes were deleted. Two checks prevent that:
+
+- **before every purge** (`preflight`), the operator calls `iam:GetRole` on its
+  own role: a role at another path is outside `ConfirmOwnRolePath`'s ARN, the
+  call is AccessDenied, and the purge stops before deleting anything; a role
+  at `/` must report `Path: "/"`;
+- **at provisioning**, the provisioner records:
+
+  ```bash
+  aws iam get-role --role-name nlw-<ENV>-dataset-operator --query Role.Path --output text
+  ```
+
+  which must print `/` exactly.
 
 ## 3. The audit roles (second inline policies)
 
@@ -231,9 +260,10 @@ refused in staging and production.
 
 ## 6. Residual risks (recorded, not hidden)
 
-- **GOVERNANCE until O-5.** The audit administrator could, with a separately
-  granted `s3:BypassGovernanceRetention`, remove a receipt early. COMPLIANCE
-  (irreversible) is required before customer data.
+- **GOVERNANCE for the synthetic pilot.** The audit administrator could, with a
+  separately granted `s3:BypassGovernanceRetention`, remove a receipt before
+  its 365 days. COMPLIANCE (irreversible) and a separate GO decision are
+  required before customer data.
 - **The operator can write a receipt.** Only the operator role may (the
   bucket policy denies every other principal). A trusted operator could file a
   well-formed receipt for a live version; `reapply-receipts` would then move
@@ -258,7 +288,7 @@ refused in staging and production.
 
 1. `python -m nlw.ops.datasets purge ...` on one synthetic DELETING version:
    the receipt object exists once, with `ObjectLockMode=GOVERNANCE` and a
-   retain-until date `<RECEIPT_RETENTION_DAYS>` ahead.
+   retain-until date 365 days ahead.
 2. As the operator: `DeleteObject`, `PutObjectRetention` and an unconditional
    `PutObject` on that key are each `AccessDenied`.
 3. As the dataset API role: `GetObject` on that key is `AccessDenied`.

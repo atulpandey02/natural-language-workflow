@@ -118,6 +118,9 @@ class ReasonCode(enum.StrEnum):
     # version whose bytes a deletion receipt proves deleted to DELETING and
     # records that receipt as its purge evidence.
     RESTORE_REAPPLY = "RESTORE_REAPPLY"
+    # 0030 (ADR-035): ``retention-sweep`` moves an unpublished or superseded
+    # version to DELETING once its 30-day retention has ended.
+    INACTIVE_RETENTION = "INACTIVE_RETENTION"
 
 
 class ActorKind(enum.StrEnum):

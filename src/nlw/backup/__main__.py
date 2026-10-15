@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 import structlog
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 
 from nlw.backup.config import BackupSettings, RestoreSettings, sa_engine_url, validated_runtime_file
@@ -266,10 +267,32 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("backup.cli.already_running")
         print(f"{args.command}: {exc}", file=sys.stderr)
         return EXIT_ALREADY_RUNNING
+    except ValidationError as exc:
+        # The setting is named; the rejected input is never echoed (pydantic's
+        # own rendering includes it, and some settings are credentials or URLs).
+        log.error(f"backup.cli.{args.command}_failed", error_class="ValidationError")
+        reasons = "; ".join(
+            f"{_setting(e.get('loc') or ())}: "
+            f"{str(e.get('msg', 'invalid')).removeprefix('Value error, ')}".removeprefix(": ")
+            for e in exc.errors()
+        )
+        print(f"{args.command} FAILED: invalid configuration: {reasons}", file=sys.stderr)
+        return 2
     except Exception as exc:  # sanitized: class name only, never secrets/args
         log.error(f"backup.cli.{args.command}_failed", error_class=type(exc).__name__)
         print(f"{args.command} FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
+
+
+def _setting(loc: tuple[object, ...]) -> str:
+    """The environment variable of a backup or restore setting (its alias)."""
+    if not loc:
+        return ""
+    for model in (BackupSettings, RestoreSettings):
+        field = model.model_fields.get(str(loc[0]))
+        if field is not None and field.alias:
+            return str(field.alias)
+    return str(loc[0]).upper()
 
 
 if __name__ == "__main__":

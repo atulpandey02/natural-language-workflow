@@ -107,7 +107,8 @@ compromise resistance. Choose one with `NLW_BACKUP_RETENTION_MODE`:
 
 - The VPS backup job has permissions for both `backup` and retention.
 - `restic forget --prune` runs automatically after each **verified** backup, using
-  `NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` (defaults 14/8/6).
+  `NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` (30/0/12, the O-5 policy in
+  ADR-035; any other value is refused).
 - **Versioning is recommended** at the provider.
 - This mode does **not** claim protection from a fully compromised VPS deleting
   backups (the writer can delete).
