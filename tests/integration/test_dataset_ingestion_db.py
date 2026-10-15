@@ -221,7 +221,7 @@ def test_populated_0024_upgrades_without_rewriting_anything(
     # dispatcher 0027 (ADR-032) and the object layout 0028 (ADR-033; neither adds
     # a policy), still rewriting nothing.
     assert after == {
-        "revision": "0029_deletion_receipt_reapply",
+        "revision": "0030_inactive_version_retention",
         "policies": 74,
         "tables": 2,
         "column": 1,

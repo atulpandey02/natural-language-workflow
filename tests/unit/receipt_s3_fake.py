@@ -229,3 +229,29 @@ class FakeReceiptS3:
             raise error("AccessDenied", 403, "DeleteObject")  # Object Lock
         self.b.objects[kw["Key"]].remove(s)
         return {}
+
+
+# --- IAM (ConfirmOwnRolePath in role-operator-receipts) ---------------------------------
+
+# The operator may call iam:GetRole on exactly its own path-/ role ARN.
+IAM_GRANTS = {"iam:GetRole": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"}
+
+
+class FakeIAM:
+    """``get_role`` as IAM evaluates ``ConfirmOwnRolePath``: the grant names the
+    path-/ ARN, so a role created at another path is AccessDenied."""
+
+    def __init__(self, *, env: str = "local", path: str = "/", account: str = ACCOUNT) -> None:
+        self.env, self.path, self.account = env, path, account
+        self.calls: list[str] = []
+
+    def get_role(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append("get_role")
+        name = kw["RoleName"]
+        arn = f"arn:aws:iam::{self.account}:role{self.path}{name}"
+        granted = (
+            IAM_GRANTS["iam:GetRole"].replace("<ACCOUNT>", self.account).replace("<ENV>", self.env)
+        )
+        if arn != granted:
+            raise error("AccessDenied", 403, "GetRole")
+        return {"Role": {"RoleName": name, "Path": self.path, "Arn": arn}}

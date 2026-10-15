@@ -240,7 +240,7 @@ external provider is a launch gate (owner decision O-3).
 | O-2 | S3 client and per-environment bucket |
 | O-3 | external deletion-log provider: **decided 2026-10-14** ([ADR-034](ADR-034-external-deletion-receipt-log.md), S3 Object Lock; NOT RUN on AWS) |
 | O-4 | object backup and restore |
-| O-5 | retention periods |
+| O-5 | retention periods: **decided 2026-10-15** ([ADR-035](ADR-035-phase2-retention-policy.md); NOT RUN on AWS) |
 | O-6 | enabling the flag outside development |
 
 ## Threat model additions

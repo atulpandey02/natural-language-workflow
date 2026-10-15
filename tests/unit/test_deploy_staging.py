@@ -18,7 +18,7 @@ DEPLOY = ROOT / "scripts" / "ops" / "deploy-staging.sh"
 VERIFY = ROOT / "scripts" / "ops" / "verify-staging-deployment.sh"
 NAMED_REV = "0024_dataset_lifecycle"
 # The repository's Alembic head (staging is still recorded at NAMED_REV).
-HEAD_REV = "0029_deletion_receipt_reapply"
+HEAD_REV = "0030_inactive_version_retention"
 
 
 def _sh(call: str, stdin: str = "") -> subprocess.CompletedProcess[str]:

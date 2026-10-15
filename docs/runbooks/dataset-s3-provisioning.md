@@ -31,7 +31,7 @@ None of these may be replaced by a real value in this repository.
 | `<HUMAN_PRINCIPAL_ARNS>` | the IAM Identity Center permission-set role ARNs allowed to assume one human role (§3.5). Each human role has its own list; the operator and audit-administrator lists must not overlap. |
 | `<PROOF_BOUNDARY_ARN>` | the customer-managed policy `nlw-<ENV>-d6-proof-boundary` (§3.6) in the dedicated proof account, attached as the permissions boundary of every principal the D6 proof uses and every role it creates. Its companion, `nlw-<ENV>-d6-proof-denies`, has a fixed name in the same account |
 | `<AUDIT_EXPIRY_DAYS>` | `<AUDIT_RETENTION_DAYS>` + 1, the lifecycle expiry of audit log objects |
-| `<AUDIT_RETENTION_DAYS>` | audit-log retention. It is set with O-3 and O-5, and must outlast any deletion-evidence need. |
+| `<AUDIT_RETENTION_DAYS>` | audit-log retention: **365 days** for the staging and production audit buckets (owner decision O-5, ADR-035; `nlw.core.retention.AUDIT_RETENTION_DAYS`), the same as deletion receipts. The isolated D6 proof account's value remains decision E1. |
 
 ## 1. Dataset KMS key (one per environment)
 
@@ -108,10 +108,20 @@ so no request ever relies on the default.
   "Status": "Enabled",
   "Filter": {"Prefix": "versions/"},
   "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}
+}, {
+  "ID": "expire-noncurrent-versions",
+  "Status": "Enabled",
+  "Filter": {"Prefix": "versions/"},
+  "NoncurrentVersionExpiration": {"NoncurrentDays": 30}
 }]}
 ```
 
-Noncurrent-version expiry is deliberately absent until O-5. Lifecycle is never
+Retention (owner decision O-5, [ADR-035](../adr/ADR-035-phase2-retention-policy.md)):
+incomplete multipart uploads are aborted after 1 day, and a **noncurrent**
+object version expires 30 days after it became noncurrent. There is **no**
+current-version `Expiration` and no `Transition`: lifecycle never removes or
+moves the current object of a version, so a published (ACTIVE) source stays
+until its deletion is requested and the operator purges it. Lifecycle is never
 the evidence for an individual deletion.
 
 **Bucket policy** (explicit denies only; the role policies grant):
@@ -1006,8 +1016,9 @@ the provisioning review.
 **Object Lock:** enabled at creation, with default retention **GOVERNANCE**
 for `<AUDIT_RETENTION_DAYS>` days.
 
-- **COMPLIANCE mode** is stronger but irreversible. Choosing it is an owner
-  decision for the provisioning review.
+- **COMPLIANCE mode** is stronger but irreversible. The synthetic pilot uses
+  GOVERNANCE (O-5, ADR-035); real customer data stays blocked until this bucket
+  and the receipt bucket use COMPLIANCE and a separate GO decision is recorded.
 - **Expiry:** a lifecycle rule expires current and noncurrent log objects only
   after the retention period:
 
@@ -1107,9 +1118,9 @@ for `<AUDIT_RETENTION_DAYS>` days.
 
 **Retention assumptions:**
 
-- `<AUDIT_RETENTION_DAYS>` is undecided. It is set with O-3 and O-5, and must
-  cover the longest period for which deletion evidence or access review may be
-  needed.
+- `<AUDIT_RETENTION_DAYS>` is **365 days** for staging and production (O-5,
+  ADR-035), matching the deletion receipts, so access review and deletion
+  evidence cover the same year.
 - CloudTrail data events are billed per event. This is acceptable at pilot
   volume, and should be reviewed when uploads are enabled (O-6).
 
@@ -1185,9 +1196,12 @@ At startup it logs the effective role ARN and account, never a credential.
   the file;
 - the startup identity check failing.
 
-## 6. Rejected-object purge (D2, provisional 7 days)
+## 6. Rejected-object purge (D2; 7 days, O-5)
 
-**Cadence:** at least weekly, the operator runs:
+**Cadence:** daily, as part of the O-5 `retention-sweep`
+([dataset-metadata-deletion](dataset-metadata-deletion.md#retention-sweep-o-5)),
+which purges rejected objects with the same steps. The rejected-only commands
+remain for a targeted run:
 
 1. `python -m nlw.ops.datasets rejected-pending [--limit N] [--metrics-file PATH]`
    (ids, ages and aggregate counts; writes the node-exporter textfile with
@@ -1209,8 +1223,7 @@ Both commands:
 
 - `NlwDatasetRejectedRetainedTooLong` fires past 7 days. It is dormant until
   O-6, when it is wired with the other dataset alerts.
-- **The 7-day value is provisional** (development and staging). It is not the
-  customer retention policy, which O-5 sets.
+- **The 7-day value is the O-5 policy target** ([ADR-035](../adr/ADR-035-phase2-retention-policy.md)).
 
 ## 7. Isolated real-AWS proof (D6; only after explicit authorization)
 

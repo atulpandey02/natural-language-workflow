@@ -474,14 +474,24 @@
     "dataset-bucket-lifecycle": {
       "Rules": [
         {
-          "AbortIncompleteMultipartUpload": {
-            "DaysAfterInitiation": 1
-          },
+          "ID": "abort-incomplete-multipart",
+          "Status": "Enabled",
           "Filter": {
             "Prefix": "versions/"
           },
-          "ID": "abort-incomplete-multipart",
-          "Status": "Enabled"
+          "AbortIncompleteMultipartUpload": {
+            "DaysAfterInitiation": 1
+          }
+        },
+        {
+          "ID": "expire-noncurrent-versions",
+          "Status": "Enabled",
+          "Filter": {
+            "Prefix": "versions/"
+          },
+          "NoncurrentVersionExpiration": {
+            "NoncurrentDays": 30
+          }
         }
       ]
     },

@@ -79,11 +79,20 @@ def test_the_operator_grants_are_pinned_and_match_the_tested_fake() -> None:
         "ReadReceipts",
         "ListReceipts",
         "ConfirmRetention",
+        "ConfirmOwnRolePath",
         "NeverAlterReceipts",
     ]
+    # The only IAM grant: read its OWN role, at path /, nothing else (ADR-034).
+    assert s["ConfirmOwnRolePath"] == {
+        "Sid": "ConfirmOwnRolePath",
+        "Effect": "Allow",
+        "Action": "iam:GetRole",
+        "Resource": OPERATOR_ROLE,
+    }
+    assert {v: k for k, v in fake.IAM_GRANTS.items()} == {OPERATOR_ROLE: "iam:GetRole"}
     allowed: dict[str, str] = {}
     for st in doc["Statement"]:
-        if st["Effect"] != "Allow":
+        if st["Effect"] != "Allow" or st["Sid"] == "ConfirmOwnRolePath":
             continue
         for a in acts(st):
             res = st["Resource"]
@@ -132,11 +141,33 @@ def test_no_audit_role_can_shorten_retention() -> None:
 
 
 def test_receipts_expire_only_after_their_retention() -> None:
-    rule = templates()["receipt-bucket-lifecycle"]["Rules"][0]
-    assert rule["Filter"] == {"Prefix": "receipts/"}
-    assert rule["Expiration"] == {"Days": "<RECEIPT_EXPIRY_DAYS>"}
+    from nlw.core import retention
+
+    rules = templates()["receipt-bucket-lifecycle"]["Rules"]
+    assert rules == [
+        {
+            "ID": "expire-after-retention",
+            "Status": "Enabled",
+            "Filter": {"Prefix": "receipts/"},
+            "Expiration": {"Days": retention.RECEIPT_EXPIRY_DAYS},
+            "NoncurrentVersionExpiration": {"NoncurrentDays": 1},
+        }
+    ]
+    assert retention.RECEIPT_EXPIRY_DAYS == retention.RECEIPT_RETENTION_DAYS + 1 == 366
     text = RUNBOOK.read_text()
-    assert "`<RECEIPT_EXPIRY_DAYS>` | `<RECEIPT_RETENTION_DAYS>` + 1" in text
+    assert "default retention **GOVERNANCE for 365\n  days**" in text
+    assert "<RECEIPT_RETENTION_DAYS>" not in text and "<RECEIPT_EXPIRY_DAYS>" not in text
+
+
+def test_every_dataset_role_is_at_path_root() -> None:
+    text = RUNBOOK.read_text()
+    assert "aws iam get-role --role-name nlw-<ENV>-dataset-operator --query Role.Path" in text
+    for doc in (RUNBOOK, PROVISIONING, ROOT / "docs/runbooks/dataset-s3-d6-proof.md"):
+        for flag in re.findall(r"--path\s+([^\s`'\"),;]+)", doc.read_text()):
+            assert flag == "/", (doc.name, flag)
+    for doc in templates().values():
+        for arn in re.findall(r"arn:aws:iam::<ACCOUNT>:role/([^\"]+)", json.dumps(doc)):
+            assert "/" not in arn, arn
 
 
 @pytest.mark.parametrize(

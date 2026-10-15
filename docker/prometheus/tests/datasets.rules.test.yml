@@ -93,7 +93,118 @@ tests:
           - exp_labels: { severity: warning, component: datasets, role: backup }
             exp_annotations:
               summary: "A rejected dataset object has been retained for over 7 days"
-              description: "Run the operator's purge-rejected (bounded, dry-run first). The 7-day window is provisional until O-5. Runbook: docs/runbooks/dataset-s3-provisioning.md\n"
+              description: "Run the operator's retention-sweep (bounded, dry-run first). Policy: docs/adr/ADR-035-phase2-retention-policy.md\n"
+
+  # Inactive versions: 30 days (2592000 s) crossed at ~34 m, firing after 24 h.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_inactive_oldest_age_seconds{role="backup"}'
+        values: '2590000+60x1600'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: NlwDatasetInactiveRetainedTooLong
+        exp_alerts: []
+      - eval_time: 24h
+        alertname: NlwDatasetInactiveRetainedTooLong
+        exp_alerts: []  # pending since ~34 m, `for: 24h` not yet elapsed
+      - eval_time: 25h
+        alertname: NlwDatasetInactiveRetainedTooLong
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets, role: backup }
+            exp_annotations:
+              summary: "An unpublished or superseded dataset version is older than 30 days"
+              description: "Run the operator's retention-sweep. Policy: docs/adr/ADR-035-phase2-retention-policy.md\n"
+
+  # Deletion not purged: 7 days (604800 s) crossed at 80 m, firing after 1 h.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_deleting_oldest_unpurged_age_seconds{role="backup"}'
+        values: '600000+60x200'
+    alert_rule_test:
+      - eval_time: 79m
+        alertname: NlwDatasetDeletedNotPurged
+        exp_alerts: []
+      - eval_time: 130m
+        alertname: NlwDatasetDeletedNotPurged
+        exp_alerts: []  # pending
+      - eval_time: 150m
+        alertname: NlwDatasetDeletedNotPurged
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets, role: backup }
+            exp_annotations:
+              summary: "A dataset deletion request has not been purged within 7 days"
+              description: "Run the operator's retention-sweep (or purge). Policy: docs/adr/ADR-035-phase2-retention-policy.md\n"
+
+  # Receipts: an unverified receipt from 11 m fires after 15 m; the expiring
+  # warning from 11 m fires after 1 h.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_receipts_unverified{role="backup"}'
+        values: '0x10 1x90'
+      - series: 'nlw_dataset_receipts_expiring_untombstoned{role="backup"}'
+        values: '0x10 1x90'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NlwDatasetReceiptsUnverified
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: NlwDatasetReceiptsUnverified
+        exp_alerts: []  # pending
+      - eval_time: 30m
+        alertname: NlwDatasetReceiptsUnverified
+        exp_alerts:
+          - exp_labels: { severity: critical, component: datasets, role: backup }
+            exp_annotations:
+              summary: "A dataset deletion receipt is missing or does not verify"
+              description: "Run reconcile-receipts and investigate before any tombstone. Runbook: docs/runbooks/deletion-receipt-log-provisioning.md\n"
+      - eval_time: 60m
+        alertname: NlwDatasetReceiptsExpiringBeforeTombstone
+        exp_alerts: []  # pending
+      - eval_time: 80m
+        alertname: NlwDatasetReceiptsExpiringBeforeTombstone
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets, role: backup }
+            exp_annotations:
+              summary: "A deletion receipt expires within 30 days but its version is not tombstoned"
+              description: "Tombstone the version while its receipt is still retained. Policy: docs/adr/ADR-035-phase2-retention-policy.md\n"
+
+  # Sweep failed from 11 m: firing after 30 m.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_retention_sweep_failed{role="backup"}'
+        values: '0x10 1x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: NlwDatasetRetentionSweepFailed
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: NlwDatasetRetentionSweepFailed
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets, role: backup }
+            exp_annotations:
+              summary: "The dataset retention sweep failed"
+              description: "Re-run retention-sweep; it is idempotent and resumes from the oldest item. Policy: docs/adr/ADR-035-phase2-retention-policy.md\n"
+
+  # Sweep stale: the last success is t=0, so the age is time(); past 36 h
+  # (129600 s) it is pending, firing after 30 m.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_retention_sweep_last_success_timestamp_seconds{role="backup"}'
+        values: '0x2400'
+    alert_rule_test:
+      - eval_time: 36h
+        alertname: NlwDatasetRetentionSweepStale
+        exp_alerts: []
+      - eval_time: 36h20m
+        alertname: NlwDatasetRetentionSweepStale
+        exp_alerts: []  # pending
+      - eval_time: 37h
+        alertname: NlwDatasetRetentionSweepStale
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets, role: backup }
+            exp_annotations:
+              summary: "The dataset retention sweep has not succeeded for 36 hours"
+              description: "Check the sweep's schedule and its last result (a recovery lock also stops it). Policy: docs/adr/ADR-035-phase2-retention-policy.md\n"
 
   # Credentials: the gauge is the ABSOLUTE expiry (here t=3000 s, i.e. 50 m)
   # and is never re-read (the refresher stopped; the process makes no S3 call).

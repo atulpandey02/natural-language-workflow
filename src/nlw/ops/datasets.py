@@ -11,8 +11,14 @@ OWNER credential ``DATABASE_MIGRATION_URL``, exactly like ``python -m nlw.ops.gr
     python -m nlw.ops.datasets dispatch-pending [--dry-run] [--limit N]
     python -m nlw.ops.datasets rejected-pending [--limit N] [--metrics-file PATH]
     python -m nlw.ops.datasets purge-rejected --operator <name> [--dry-run] [--limit N]
-    python -m nlw.ops.datasets reconcile-receipts
+    python -m nlw.ops.datasets reconcile-receipts [--metrics-file PATH]
     python -m nlw.ops.datasets reapply-receipts [--dry-run]
+    python -m nlw.ops.datasets retention-status [--metrics-file PATH]
+    python -m nlw.ops.datasets retention-sweep --operator <name> [--dry-run] [--limit N]
+                                              [--metrics-file PATH]
+
+``retention-sweep`` / ``retention-status`` apply and report the O-5 retention
+policy (ADR-035; ``nlw.ops.dataset_retention``).
 
 ``reconcile-receipts`` (ADR-034) checks every recorded purge against its
 receipt in the configured deletion log, and lists receipts no purge event names
@@ -33,8 +39,8 @@ that still reference an object, moves each to DELETING (operator event,
 reason ``REJECTED_RETENTION``) and runs the same verified, version-aware purge
 as a deletion request; it refuses while the recovery lock is active and is
 idempotent (a re-run resumes versions a crash left between the two steps).
-The 7-day alert threshold is PROVISIONAL (development/staging), not the O-5
-retention policy.
+The 7-day deadline is the O-5 retention policy (ADR-035); ``retention-sweep``
+runs the same purge for rejected, inactive and logically deleted versions.
 
 ``dispatch-pending`` is the operator recovery sweep for the ingest queue
 (ADR-031): it (re)enqueues the work envelope of every committed, still fresh
@@ -71,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -79,7 +86,9 @@ from typing import Any
 import psycopg
 from pydantic import ValidationError
 
+from nlw.backup.recovery_lock import RecoveryLocked, RecoveryStateUnknown
 from nlw.core.config import Settings
+from nlw.core.retention import DAY_S, REJECTED_PURGE_DAYS
 from nlw.datasets.deletion_log import (
     DeletionLog,
     DeletionLogUnavailable,
@@ -92,8 +101,16 @@ from nlw.datasets.deletion_log import (
     deletion_log_from_settings,
 )
 from nlw.datasets.lifecycle import ActorKind, EventType, ReasonCode
-from nlw.storage.blob import AREAS, BlobStore, TenantScopedBlobStore, item_key, list_area
+from nlw.storage.blob import (
+    AREAS,
+    BlobStore,
+    BlobUnavailable,
+    TenantScopedBlobStore,
+    item_key,
+    list_area,
+)
 from nlw.storage.factory import dataset_store
+from nlw.storage.s3_credentials import CredentialError
 
 
 class TombstoneError(ValueError):
@@ -263,9 +280,8 @@ def _require_runtimes_permitted(conn: psycopg.Connection[Any]) -> None:
 # --- rejected objects (ADR-033 D2) -----------------------------------------------
 
 REJECTED_BATCH = 100
-# PROVISIONAL (development/staging, owner 2026-10-09): rejected objects must be
-# purged within 7 days. The alert fires past it. NOT the O-5 retention policy.
-REJECTED_ALERT_AFTER_S = 7 * 24 * 3600
+# O-5 (ADR-035): rejected objects are purged within 7 days; the alert fires past it.
+REJECTED_ALERT_AFTER_S = REJECTED_PURGE_DAYS * DAY_S
 
 _SQL_REJECTED = (
     "SELECT tenant_id, dataset_id, id, "
@@ -521,6 +537,9 @@ def tombstone(
     version whose stored objects were not purged, verified absent, and backed
     by a verified deletion receipt."""
     log = log or UnconfiguredDeletionLog()
+    # A restored database is not tombstoned before its deletions are re-applied
+    # (reapply-receipts) and its runtimes are enabled.
+    _require_runtimes_permitted(conn)
     with conn.transaction():
         ds = conn.execute(
             "SELECT tenant_id, status FROM datasets WHERE id = %s FOR UPDATE", (dataset_id,)
@@ -887,7 +906,7 @@ def _reapply_one(
 
 def verify_objects(conn: psycopg.Connection[Any], store: BlobStore) -> dict[str, list[str]]:
     """Metadata/object consistency (ids only). Every list must be empty except
-    ``noncurrent_versions`` (expected on S3 until O-5 sets noncurrent expiry,
+    ``noncurrent_versions`` (expected on S3 for up to 30 days, O-5 noncurrent expiry,
     reported for visibility). REJECTED objects are retained until
     ``purge-rejected`` (D2): their presence or absence is not an error."""
     rows = conn.execute(
@@ -938,14 +957,26 @@ def configured_deletion_log(settings: Settings) -> DeletionLog:
             settings.dataset_deletion_log, settings.dataset_deletion_log_path, settings.app_env
         )
     from nlw.datasets.deletion_log_s3 import S3DeletionLog
-    from nlw.storage.s3_credentials import CredentialError, build_clients
+    from nlw.storage.s3_credentials import (
+        build_operator_clients,
+        expected_role,
+        verify_role_path,
+    )
 
-    assert settings.dataset_deletion_log_bucket  # Settings validated it
+    assert settings.dataset_deletion_log_bucket and settings.dataset_s3_bucket  # validated
     try:
-        client, _ = build_clients(settings, "operator")
+        client, iam, _ = build_operator_clients(settings)
     except CredentialError as exc:
         raise DeletionLogUnavailable(str(exc)) from None
-    return S3DeletionLog(client, settings.dataset_deletion_log_bucket)
+    role_name, _account = expected_role(settings.dataset_s3_bucket, "operator")
+
+    def role_check() -> None:
+        try:
+            verify_role_path(iam, role_name)
+        except CredentialError as exc:
+            raise DeletionLogUnavailable(str(exc)) from None
+
+    return S3DeletionLog(client, settings.dataset_deletion_log_bucket, role_check=role_check)
 
 
 def _configured_log(settings: Settings) -> DeletionLog:
@@ -970,9 +1001,17 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--operator", required=True)
     pr.add_argument("--dry-run", action="store_true")
     pr.add_argument("--limit", type=int, default=REJECTED_BATCH)
-    sub.add_parser("reconcile-receipts")
+    rr = sub.add_parser("reconcile-receipts")
+    rr.add_argument("--metrics-file", default=None)
     ra = sub.add_parser("reapply-receipts")
     ra.add_argument("--dry-run", action="store_true")
+    rs = sub.add_parser("retention-status")
+    rs.add_argument("--metrics-file", default=None)
+    sw = sub.add_parser("retention-sweep")
+    sw.add_argument("--operator", required=True)
+    sw.add_argument("--dry-run", action="store_true")
+    sw.add_argument("--limit", type=int, default=100)
+    sw.add_argument("--metrics-file", default=None)
     for name in ("purge", "tombstone"):
         sp = sub.add_parser(name)
         sp.add_argument("--dataset", required=True)
@@ -987,11 +1026,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except ValidationError as exc:
-        # Our validators' messages are author-controlled; pydantic's rendering
-        # would also echo the offending input (a bucket name, a path).
-        reasons = "; ".join(str(e.get("msg", "invalid")) for e in exc.errors())
-        print(f"error: invalid configuration: {reasons}", file=sys.stderr)
+        print(f"error: invalid configuration: {config_reasons(exc, Settings)}", file=sys.stderr)
         return 2
+    except SAFE_MESSAGE_TYPES as exc:
+        # A known operational failure whose message is written by this code
+        # (pinned by tests/unit/test_operator_diagnostics.py). It is still
+        # checked: anything that looks like an identifier falls back to the class.
+        print(
+            f"error: {args.cmd} stopped: {safe_message(exc)}. It is safe to re-run.",
+            file=sys.stderr,
+        )
+        if progress:
+            print("partial " + " ".join(f"{k}={v}" for k, v in progress.items()), file=sys.stderr)
+        return 3
     except Exception as exc:
         # An operational failure (database, network, storage). Its text can
         # carry hosts, bucket names, keys or row values, so only its class is
@@ -1004,6 +1051,54 @@ def main(argv: list[str] | None = None) -> int:
         if progress:
             print("partial " + " ".join(f"{k}={v}" for k, v in progress.items()), file=sys.stderr)
         return 3
+
+
+# Exception types whose messages are author-controlled: fixed text, AWS error
+# codes, enum values and role NAMES only (never a value, key, bucket, account,
+# path or credential). Pinned at every raise site by an AST test.
+SAFE_MESSAGE_TYPES: tuple[type[BaseException], ...] = (
+    CredentialError,
+    BlobUnavailable,
+    DeletionLogUnavailable,
+    RecoveryLocked,
+    RecoveryStateUnknown,
+)
+# Defence in depth: a "safe" message that still looks like it carries an
+# identifier, a location or a secret is reduced to its class.
+_UNSAFE = re.compile(
+    r"\d{12}|arn:|://|@|AKIA|ASIA|(?i:secret|password|passwd|token=|session_token)"
+    r"|nlw-[a-z]+-(?:datasets|deletion-receipts|dataset-audit)-"
+    r"|(?:receipts|versions|quarantine)/|(?:^|\s)/[A-Za-z0-9._-]"
+    r"|(?i:\b(?:select|insert|update|delete)\b[^.]*\b(?:from|into|set|where)\b)"
+)
+_MAX_MESSAGE = 200
+
+
+def safe_message(exc: BaseException) -> str:
+    text = str(exc)
+    if not text or len(text) > _MAX_MESSAGE or "\n" in text or _UNSAFE.search(text):
+        return f"{type(exc).__name__} (details withheld)"
+    return f"{type(exc).__name__}: {text}"
+
+
+def config_reasons(exc: ValidationError, model: type[Any]) -> str:
+    """Each error as ``SETTING: reason``. The setting is named (its environment
+    variable); the rejected input is never echoed (pydantic's own rendering
+    would include it)."""
+    out = []
+    for e in exc.errors():
+        name = setting_name(model, e.get("loc") or ())
+        msg = str(e.get("msg", "invalid")).removeprefix("Value error, ")
+        out.append(f"{name}: {msg}" if name else msg)
+    return "; ".join(out)
+
+
+def setting_name(model: type[Any], loc: tuple[Any, ...]) -> str:
+    if not loc:
+        return ""
+    field = model.model_fields.get(str(loc[0]))
+    alias = getattr(field, "validation_alias", None) or getattr(field, "alias", None)
+    return str(alias) if isinstance(alias, str) and alias else str(loc[0]).upper()
 
 
 def _run(args: argparse.Namespace, progress: dict[str, int]) -> int:
@@ -1033,11 +1128,27 @@ def _run(args: argparse.Namespace, progress: dict[str, int]) -> int:
             if args.cmd == "reconcile-receipts":
                 report = reconcile_receipts(conn, log)
                 print(_summary(report))
+                if args.metrics_file:
+                    from nlw.ops import dataset_retention as dr
+
+                    dr.write_textfile(
+                        args.metrics_file, dr.receipt_metrics(report, now=datetime.now(UTC))
+                    )
                 return 1 if reconcile_failed(report) else 0
             result = reapply_receipts(conn, log, dry_run=args.dry_run, progress=progress)
             print(_summary(result))
             return 1 if reapply_failed(result) else 0
+        if args.cmd == "retention-status":
+            from nlw.ops import dataset_retention as dr
+
+            status = dr.retention_status(conn, datetime.now(UTC))
+            print(" ".join(f"{k}={v}" for k, v in status.items()))
+            if args.metrics_file:
+                dr.write_textfile(args.metrics_file, dr.status_metrics(status))
+            return 0
         store = dataset_store(settings, service="operator")
+        if args.cmd == "retention-sweep":
+            return _retention_sweep(args, conn, store, settings, progress)
         if args.cmd == "verify-objects":
             if store is None:
                 raise TombstoneError("no dataset store is configured")
@@ -1072,6 +1183,43 @@ def _run(args: argparse.Namespace, progress: dict[str, int]) -> int:
             result = tombstone(conn, dataset_id=ds, version_id=ver, store=store, log=log)
         print(" ".join(f"{k}={v}" for k, v in result.items()))
         return 0
+
+
+def _retention_sweep(
+    args: argparse.Namespace,
+    conn: psycopg.Connection[Any],
+    store: BlobStore | None,
+    settings: Settings,
+    progress: dict[str, int],
+) -> int:
+    """Run one sweep; the metrics file records the outcome either way."""
+    from nlw.ops import dataset_retention as dr
+
+    now = datetime.now(UTC)
+    outcome = "failed"
+    try:
+        log = _configured_log(settings)
+        result = dr.retention_sweep(
+            conn, store, log, operator=args.operator, environment=settings.app_env, now=now,
+            limit=args.limit, dry_run=args.dry_run, progress=progress,
+        )  # fmt: skip
+        outcome = "busy" if result["busy"] else "ok"
+        print(" ".join(f"{k}={v}" for k, v in result.items()))
+        return 0
+    except TombstoneError as exc:
+        if "recovery lock" in str(exc):
+            outcome = "locked"
+        raise
+    finally:
+        if args.metrics_file and not args.dry_run:
+            try:
+                status = dr.retention_status(conn, now)
+            except Exception:
+                status = None
+            dr.write_textfile(
+                args.metrics_file,
+                dr.sweep_metrics(args.metrics_file, now=now, outcome=outcome, status=status),
+            )
 
 
 def _summary(result: dict[str, Any]) -> str:

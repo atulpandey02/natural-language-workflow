@@ -3,11 +3,27 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Phase 2B — retention policy, O-5, and O-3 cleanup (branch `chore/phase2-retention-o3-cleanup`, awaiting review; NOT RUN on AWS)
+
+Owner decision O-5 (2026-10-15, [ADR-035](adr/ADR-035-phase2-retention-policy.md)),
+with every value in `nlw.core.retention` and pinned by contract tests:
+
+- `retention-sweep`: bounded, oldest-first, idempotent, mutually exclusive,
+  refused under the recovery lock; purges logically deleted, rejected and
+  30-day-inactive versions with receipts; never touches ACTIVE; never deletes
+  rows or tombstones. Migration `0030` (reason `INACTIVE_RETENTION`).
+- Lifecycle: noncurrent versions 30 days (dataset bucket), receipts and audit
+  events 365 days with GOVERNANCE for the synthetic pilot; backups 30 daily +
+  12 monthly. Customer data blocked until COMPLIANCE and a separate GO.
+- Textfile metrics and seven dormant alerts (promtool-tested), not loaded until O-6.
+- O-3 cleanup: author-controlled operator diagnostics, setting names in
+  configuration errors, the operator role required (and checked) at IAM path `/`.
+
 ## Phase 2B — external deletion-receipt log, O-3 (branch `feat/o3-s3-deletion-log`, awaiting review; NOT RUN on AWS)
 
 Owner decision O-3 (2026-10-14, [ADR-034](adr/ADR-034-external-deletion-receipt-log.md)):
 a dedicated S3 Object Lock bucket per environment, in the dataset account,
-GOVERNANCE retention until O-5. Implemented and tested without AWS contact:
+GOVERNANCE retention (365 days, O-5). Implemented and tested without AWS contact:
 
 - `S3DeletionLog`: one write-once, retained receipt per purged version; a
   preflight confirms Object Lock retention **before** any byte is deleted;
@@ -19,7 +35,7 @@ GOVERNANCE retention until O-5. Implemented and tested without AWS contact:
   (NOT RUN): bucket policy, lifecycle, and second inline policies for the
   operator and audit roles; the reviewed `role-operator` and D6 pins unchanged.
 
-Still open: O-5 retention, workspace offboarding receipts, CloudTrail coverage
+Still open: workspace offboarding receipts, CloudTrail coverage
 of the receipt bucket, the real-AWS proof. **Uploads remain disabled.**
 
 ## Phase 2B — O-2 D6 AWS proof package (branch `docs/o2-aws-proof-readiness`, awaiting review; NOT RUN)

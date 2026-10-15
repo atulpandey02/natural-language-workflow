@@ -77,7 +77,7 @@ below remove all three.
   - Versioning on;
   - **no Object Lock** initially, and no public endpoints.
 - **Lifecycle.** Incomplete multipart uploads are aborted, by the application
-  and by a lifecycle rule. Noncurrent-version expiry waits for O-5.
+  and by a lifecycle rule. Noncurrent versions expire after 30 days (O-5, ADR-035).
 - **Audit.** A dedicated CloudTrail trail records **object-level data events
   (read and write) for this environment's dataset bucket only**. See
   provisioning runbook §4.
@@ -90,7 +90,7 @@ below remove all three.
   - **Independence:** audit records are kept independently of dataset-object
     deletion.
   - **Not used:** server access logs.
-  - **Retention:** set with O-3 and O-5.
+  - **Retention:** 365 days (O-5, [ADR-035](ADR-035-phase2-retention-policy.md)).
   - **Assumption:** management events (policy, KMS and IAM changes) are
     covered by an existing account- or organization-level trail. This is
     confirmed at the provisioning review.
@@ -128,7 +128,7 @@ below remove all three.
 
 **Provisional policy:** a rejected object **must be purged within 7 days.** This
 is a temporary development and staging value, **not** the customer retention
-policy (O-5). Customer uploads stay disabled while O-3 and O-5 are open.
+policy (O-5, now ADR-035: 7 days is the policy target). Customer uploads stay disabled until O-6.
 
 **Required support:**
 
@@ -506,7 +506,7 @@ AWS facts this design relies on (AWS documentation, checked 2026-10-09):
 | Public exposure | Block Public Access, `BucketOwnerEnforced`, a TLS-only bucket policy, and a deny for principals outside the account |
 | KMS misuse | A key per environment; the key policy allows use only through S3 in us-east-1 for this bucket's encryption context; API: `GenerateDataKey`+`Decrypt`; ingest and operator: `Decrypt` |
 | Restore inconsistency | `verify-objects` reconciles database keys and objects (O-4 designs replication and restore) |
-| Retaining rejected data too long | Provisional 7-day operator purge with listing, metric and alert (D2); O-5 sets the final policy |
+| Retaining rejected data too long | 7-day operator purge (`retention-sweep`) with listing, metric and alert (D2; O-5 policy, ADR-035) |
 | Leaking metadata through errors or logs | Closed error codes; the bucket, keys, ARNs and credentials never appear in responses or logs |
 
 ## Implementation plan (separate code PR, no AWS contact)
@@ -563,7 +563,7 @@ AWS facts this design relies on (AWS documentation, checked 2026-10-09):
 - **O-3** ([ADR-034](ADR-034-external-deletion-receipt-log.md)) receives one
   receipt per purged version, with hashed references to every deleted item.
 - **O-4** designs replication and restore for the `versions/` layout.
-- **O-5** replaces the provisional 7-day rejected-file window and sets
+- **O-5** ([ADR-035](ADR-035-phase2-retention-policy.md)) confirms the 7-day rejected-file window and sets
   noncurrent-version expiry.
 - On ECS or EKS, the host credential refresher is replaced by native task or
   pod identities.

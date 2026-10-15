@@ -35,10 +35,11 @@ dependency is needed.
    (stronger isolation) and deferred: it needs cross-account roles and a second
    account to operate. A prefix in the dataset bucket was rejected: receipts
    would share the controls of the objects whose deletion they prove.
-2. **Retention: GOVERNANCE with a placeholder period until O-5.** Object Lock
-   is enabled at creation with a default retention `<RECEIPT_RETENTION_DAYS>`.
-   Before any customer data the mode becomes COMPLIANCE with the O-5 value,
-   matching D6 decisions E1/E2.
+2. **Retention: GOVERNANCE, 365 days.** Object Lock is enabled at creation
+   with a default retention of 365 days (set by O-5 on 2026-10-15,
+   [ADR-035](ADR-035-phase2-retention-policy.md)). GOVERNANCE is for the
+   synthetic pilot only; real customer data stays blocked until receipt and
+   audit storage use COMPLIANCE and a separate GO decision is recorded.
 3. **Scope of this change:** the provider, a reconcile command, the restore
    re-application, the provisioning templates and the runbook steps. The
    real-AWS proof is a later, separately authorized step.
@@ -151,6 +152,18 @@ purge with an older receipt is still `STALE`.
 | L-1: the listing's fail-closed paths were untested | direct tests for each, plus "nothing changes, nothing is read" integration tests; a repeated token is refused at once |
 | L-2: `unexpected_objects` was never reported | printed by both commands, which then exit 1 |
 | L-3: an unexpected failure printed a traceback | sanitized CLI errors (class only, exit 3), partial progress as counts; sink kinds instead of sink ids |
+
+## Operator role path (2026-10-15)
+
+Every `nlw-<env>-dataset-*` role is at IAM path `/`. The receipt bucket policy
+admits exactly `arn:aws:iam::<account>:role/nlw-<env>-dataset-operator`, and
+STS session ARNs omit the path, so a role at another path would pass the
+identity check and be refused only when writing a receipt, after its bytes
+were deleted. `preflight` therefore calls `iam:GetRole` on the operator's own
+role (granted on exactly that path-`/` ARN, `ConfirmOwnRolePath`): a role at
+another path is AccessDenied, a role at `/` must report `Path: "/"`, and the
+purge stops before deleting anything otherwise. The provisioner also records
+`aws iam get-role ... --query Role.Path` = `/`.
 
 ## Residual risks
 
