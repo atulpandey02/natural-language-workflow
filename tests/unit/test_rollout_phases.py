@@ -349,6 +349,8 @@ def _base_table(
 ) -> Table:
     return [
         (r"169\.254\.169\.254", IMDS),
+        # O-5: only the three backup-retention lines are read; none set by default.
+        (r"grep -E .*NLW_BACKUP_RETENTION_\(DAILY\|WEEKLY\|MONTHLY\).*\.env\.backup", ""),
         (r"docker inspect --format .*DEMO_TOOLS_ENABLED=.*ps -q api", "match"),
         (r"grep -E '\^\(NLW_IMAGE.*'/opt/nlw/app/\.env\.prod'", PINS_ACTIVE),
         (r"grep -E '\^\(NLW_IMAGE.*releases", staged_pins),
@@ -2231,3 +2233,87 @@ def test_every_staging_monitoring_service_is_recreated_by_the_rollout() -> None:
     assert added == set(MONITORING_SERVICES), (added, MONITORING_SERVICES)
     # node-exporter starts before Prometheus scrapes it.
     assert MONITORING_SERVICES.index("node-exporter") < MONITORING_SERVICES.index("prometheus")
+
+
+# --- O-5 backup retention (ADR-035) ------------------------------------------------
+
+RETENTION_CMD = r"grep -E .*NLW_BACKUP_RETENTION_\(DAILY\|WEEKLY\|MONTHLY\).*\.env\.backup"
+
+
+def _with_retention(lines: str, base: Table) -> Table:
+    return [(RETENTION_CMD, lines)] + base
+
+
+def test_preflight_records_the_effective_o5_backup_retention() -> None:
+    fake = FakeRemote(_base_table())
+    report = _rollout(fake).preflight()
+    assert report["backup_retention"] == {
+        "NLW_BACKUP_RETENTION_DAILY": "30",
+        "NLW_BACKUP_RETENTION_WEEKLY": "0",
+        "NLW_BACKUP_RETENTION_MONTHLY": "12",
+    }
+    # Only the retention lines are read: the file is never cat'ed or sourced, and
+    # the grep names nothing but the three retention keys.
+    [cmd] = [c for c in fake.commands if "NLW_BACKUP_RETENTION" in c]
+    assert cmd.startswith("grep -E ") and "cat " not in cmd and "source" not in cmd
+    assert "RESTIC" not in cmd and "AWS" not in cmd and "DATABASE_URL" not in cmd
+
+
+def test_preflight_stops_a_host_still_carrying_the_pre_o5_14_8_6() -> None:
+    legacy = (
+        "NLW_BACKUP_RETENTION_DAILY=14\nNLW_BACKUP_RETENTION_WEEKLY=8\n"
+        "NLW_BACKUP_RETENTION_MONTHLY=6\n"
+    )
+    fake = FakeRemote(_with_retention(legacy, _base_table()))
+    with pytest.raises(GateError, match="pre-O-5 14/8/6") as exc:
+        _rollout(fake).preflight()
+    assert "Compose defaults do not update an existing env file" in str(exc.value)
+
+
+def test_the_backup_phase_rechecks_retention_before_running_a_backup() -> None:
+    fake = FakeRemote(
+        _with_retention("NLW_BACKUP_RETENTION_DAILY=14\n", _stage_table()),
+        state=_done("stage-release"),
+    )
+    with pytest.raises(GateError, match="NLW_BACKUP_RETENTION_DAILY must be 30"):
+        _rollout(fake, authorization=AUTHORIZATION_PHRASE).backup()
+    assert not fake.ran(r"--profile backup run")
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        "",
+        "NLW_BACKUP_RETENTION_DAILY=30\nNLW_BACKUP_RETENTION_WEEKLY=0\nNLW_BACKUP_RETENTION_MONTHLY=12\n",
+        'export NLW_BACKUP_RETENTION_DAILY="30"\n',
+        "NLW_BACKUP_RETENTION_MONTHLY='12'  # O-5\n",
+        "NLW_BACKUP_RETENTION_WEEKLY=\n",  # empty: the Compose default (0) applies
+    ],
+)
+def test_the_o5_retention_or_the_defaults_pass(lines: str) -> None:
+    from nlw.ops.rollout import gates
+
+    assert gates.check_backup_retention(lines) == {
+        "NLW_BACKUP_RETENTION_DAILY": "30",
+        "NLW_BACKUP_RETENTION_WEEKLY": "0",
+        "NLW_BACKUP_RETENTION_MONTHLY": "12",
+    }
+
+
+@pytest.mark.parametrize(
+    "lines, match",
+    [
+        ("NLW_BACKUP_RETENTION_DAILY=14\n", "DAILY must be 30"),
+        ("NLW_BACKUP_RETENTION_WEEKLY=8\n", "WEEKLY must be 0"),
+        ("NLW_BACKUP_RETENTION_MONTHLY=24\n", "MONTHLY must be 12"),
+        ("NLW_BACKUP_RETENTION_DAILY=31\n", "DAILY must be 30"),  # longer is refused too
+        ("NLW_BACKUP_RETENTION_DAILY=30\nNLW_BACKUP_RETENTION_DAILY=14\n", "more than once"),
+        ("NLW_BACKUP_RETENTION_DAILY=$(echo 30)\n", "cannot parse"),
+        ("NLW_BACKUP_RETENTION_DAILY = 30 extra\n", "cannot parse"),
+    ],
+)
+def test_any_other_effective_retention_is_refused(lines: str, match: str) -> None:
+    from nlw.ops.rollout import gates
+
+    with pytest.raises(GateError, match=match):
+        gates.check_backup_retention(lines)

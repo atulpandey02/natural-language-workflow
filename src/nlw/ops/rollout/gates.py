@@ -239,6 +239,78 @@ def check_public_ip_matches_hostname(imds_public_ip: str, release: ReleaseSpec) 
             )
 
 
+# --- backup retention (O-5, ADR-035) --------------------------------------------
+
+BACKUP_RETENTION_KEYS = (
+    "NLW_BACKUP_RETENTION_DAILY",
+    "NLW_BACKUP_RETENTION_WEEKLY",
+    "NLW_BACKUP_RETENTION_MONTHLY",
+)
+LEGACY_BACKUP_RETENTION = {"NLW_BACKUP_RETENTION_DAILY": "14",
+                           "NLW_BACKUP_RETENTION_WEEKLY": "8",
+                           "NLW_BACKUP_RETENTION_MONTHLY": "6"}  # fmt: skip
+# Only these lines are ever read from the backup env file (it also holds
+# repository and provider credentials, which are never read by the rollout).
+BACKUP_RETENTION_GREP = (
+    r"^[[:space:]]*(export[[:space:]]+)?NLW_BACKUP_RETENTION_(DAILY|WEEKLY|MONTHLY)[[:space:]]*="
+)
+_RETENTION_LINE = re.compile(
+    r"^\s*(?:export\s+)?(NLW_BACKUP_RETENTION_(?:DAILY|WEEKLY|MONTHLY))\s*=\s*"
+    r"(?:\"([^\"]*)\"|'([^']*)'|([^\s#]*))\s*(?:#.*)?$"
+)
+
+
+def effective_backup_retention(retention_lines: str) -> dict[str, str]:
+    """The retention the backup job will run with: a key set in the backup env
+    file overrides the Compose default (``${VAR:-default}``); an absent or empty
+    key falls back to the default, which this release pins to the O-5 policy.
+    Raises ``GateError`` on a malformed or repeated key (ambiguous)."""
+    from nlw.core.retention import DB_BACKUP_DAILY, DB_BACKUP_MONTHLY, DB_BACKUP_WEEKLY
+
+    defaults = dict(zip(BACKUP_RETENTION_KEYS,
+                        (str(DB_BACKUP_DAILY), str(DB_BACKUP_WEEKLY), str(DB_BACKUP_MONTHLY)),
+                        strict=True))  # fmt: skip
+    seen: dict[str, str] = {}
+    for line in retention_lines.splitlines():
+        if not line.strip():
+            continue
+        m = _RETENTION_LINE.match(line)
+        if m is None:
+            raise GateError(
+                "the backup env file has a backup-retention line this check cannot parse"
+            )
+        key = m.group(1)
+        if key in seen:
+            raise GateError(f"the backup env file sets {key} more than once")
+        seen[key] = next(v for v in m.group(2, 3, 4) if v is not None)
+    return {k: (seen.get(k) or defaults[k]) for k in BACKUP_RETENTION_KEYS}
+
+
+def check_backup_retention(retention_lines: str) -> dict[str, str]:
+    """O-5: the backup job's EFFECTIVE retention must be 30 daily, 0 weekly and
+    12 monthly before activation. Changing the Compose defaults does not change
+    an existing env file: a host still carrying the pre-O-5 14/8/6 (or any other
+    value) is stopped here, before the new image's backup job would refuse it."""
+    from nlw.core.retention import DB_BACKUP_DAILY, DB_BACKUP_MONTHLY, DB_BACKUP_WEEKLY
+
+    effective = effective_backup_retention(retention_lines)
+    required = dict(zip(BACKUP_RETENTION_KEYS,
+                        (str(DB_BACKUP_DAILY), str(DB_BACKUP_WEEKLY), str(DB_BACKUP_MONTHLY)),
+                        strict=True))  # fmt: skip
+    wrong = [k for k in BACKUP_RETENTION_KEYS if effective[k] != required[k]]
+    if not wrong:
+        return effective
+    legacy = all(effective[k] == LEGACY_BACKUP_RETENTION[k] for k in BACKUP_RETENTION_KEYS)
+    raise GateError(
+        "the backup env file overrides the O-5 backup retention ("
+        + ", ".join(f"{k} must be {required[k]}" for k in wrong)
+        + ("; it still holds the pre-O-5 14/8/6" if legacy else "")
+        + "). Compose defaults do not update an existing env file: set "
+        "NLW_BACKUP_RETENTION_DAILY=30, NLW_BACKUP_RETENTION_WEEKLY=0 and "
+        "NLW_BACKUP_RETENTION_MONTHLY=12 (or remove the three lines) before activation"
+    )
+
+
 def parse_env_pins(env_text: str) -> dict[str, str]:
     """Extract ONLY the non-secret pin lines from .env.prod text."""
     wanted = {

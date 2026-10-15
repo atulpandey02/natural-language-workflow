@@ -5,19 +5,23 @@
                                               [--metrics-file PATH]
 
 ``retention-sweep`` applies the policy in ``nlw.core.retention`` with the same
-verified, receipted purge as a deletion request. In one bounded batch
-(``--limit`` items in all), oldest first:
+verified, receipted purge as a deletion request. One bounded batch (``--limit``
+items in all) is drawn from ONE candidate set, ordered globally by each item's
+effective due time (earliest deadline first), so no category can starve
+another:
 
-1. **logically deleted bytes**: every DELETING version that still references an
-   object and has no purge evidence since its deletion request is purged (the
-   7-day deadline is a target; the sweep purges as soon as it runs). This also
-   resumes versions a crashed sweep moved to DELETING;
-2. **rejected objects**: each REJECTED version that still references an object
-   is moved to DELETING (``REJECTED_RETENTION``) and purged;
-3. **inactive versions**: each QUARANTINED, PROFILING (lease expired),
-   PROFILED or SUPERSEDED version whose 30-day retention has ended is moved to
-   DELETING (``INACTIVE_RETENTION``) and purged. Its age runs from
-   ``superseded_at`` for a superseded version, otherwise from ``created_at``.
+- **logically deleted bytes** (due 7 days after the deletion request): a
+  DELETING version that still references an object and has no purge evidence
+  since its request is purged. This also resumes versions a crashed sweep
+  moved to DELETING;
+- **rejected objects** (due 7 days after rejection): moved to DELETING
+  (``REJECTED_RETENTION``) and purged;
+- **inactive versions** (due when the 30-day retention ends): a QUARANTINED,
+  PROFILING (lease expired), PROFILED or SUPERSEDED version is moved to
+  DELETING (``INACTIVE_RETENTION``) and purged. Its age runs from
+  ``superseded_at`` for a superseded version, otherwise from ``created_at``.
+
+Ties are broken by category (deleted, rejected, inactive), then by version id.
 
 What it never does: touch an ACTIVE version or the dataset's active version
 (both excluded in SQL and re-checked under the row lock); delete a database
@@ -71,20 +75,32 @@ _INACTIVE = (
 )
 _INACTIVE_SINCE = "coalesce(v.superseded_at, v.created_at)"
 
-_SQL_DELETING = (
-    "SELECT v.tenant_id, v.dataset_id, v.id FROM dataset_versions v "
-    f"WHERE {_UNPURGED} ORDER BY v.deletion_requested_at, v.id LIMIT %(limit)s"
-)
-_SQL_REJECTED = (
-    "SELECT v.tenant_id, v.dataset_id, v.id FROM dataset_versions v "
-    "WHERE v.status = 'REJECTED' AND v.storage_object_key IS NOT NULL "
-    "ORDER BY v.rejected_at, v.id LIMIT %(limit)s"
-)
-_SQL_INACTIVE = (
-    "SELECT v.tenant_id, v.dataset_id, v.id FROM dataset_versions v "
-    "JOIN datasets d ON d.id = v.dataset_id AND d.tenant_id = v.tenant_id "
+# One candidate set across the three categories, ordered by each item's
+# EFFECTIVE DUE TIME (earliest deadline first), so a backlog in one category
+# can never starve another: a deleted or rejected object is due 7 days after its
+# request or rejection; an inactive version when its 30-day retention ended.
+# Each branch keeps only its own first ``limit`` candidates (in the same order),
+# so the global first ``limit`` is exact and the query stays bounded.
+_SQL_CANDIDATES = (
+    "SELECT kind, tenant_id, dataset_id, id, due FROM ("
+    "(SELECT 'deleting' AS kind, v.tenant_id, v.dataset_id, v.id, "
+    "v.deletion_requested_at + make_interval(days => %(purge_days)s) AS due "
+    f"FROM dataset_versions v WHERE {_UNPURGED} "
+    "ORDER BY due, v.id LIMIT %(limit)s) "
+    "UNION ALL "
+    "(SELECT 'rejected', v.tenant_id, v.dataset_id, v.id, "
+    "v.rejected_at + make_interval(days => %(rejected_days)s) AS due "
+    "FROM dataset_versions v WHERE v.status = 'REJECTED' AND v.storage_object_key IS NOT NULL "
+    "ORDER BY due, v.id LIMIT %(limit)s) "
+    "UNION ALL "
+    "(SELECT 'inactive', v.tenant_id, v.dataset_id, v.id, "
+    f"{_INACTIVE_SINCE} + make_interval(days => %(days)s) AS due "
+    "FROM dataset_versions v JOIN datasets d ON d.id = v.dataset_id AND d.tenant_id = v.tenant_id "
     f"WHERE {_INACTIVE} AND {_INACTIVE_SINCE} <= %(now)s - make_interval(days => %(days)s) "
-    f"ORDER BY {_INACTIVE_SINCE}, v.id LIMIT %(limit)s"
+    "ORDER BY due, v.id LIMIT %(limit)s)"
+    ") candidates "
+    "ORDER BY due, CASE kind WHEN 'deleting' THEN 0 WHEN 'rejected' THEN 1 ELSE 2 END, id "
+    "LIMIT %(limit)s"
 )
 
 
@@ -192,6 +208,11 @@ def _move_to_deleting(
     return True
 
 
+_REASON: dict[str, ReasonCode | None] = {
+    "deleting": None,
+    "rejected": ReasonCode.REJECTED_RETENTION,
+    "inactive": ReasonCode.INACTIVE_RETENTION,
+}
 _COUNTS = (
     "deleting_purged", "rejected_moved", "rejected_purged", "inactive_moved",
     "inactive_purged", "selected",
@@ -223,36 +244,29 @@ def retention_sweep(
     try:
         if not dry_run:
             ops._preflight(log)
-        params = {"now": now, "days": policy.INACTIVE_RETENTION_DAYS, "limit": limit + 1}
-        phases = (
-            ("deleting", _SQL_DELETING, None),
-            ("rejected", _SQL_REJECTED, ReasonCode.REJECTED_RETENTION),
-            ("inactive", _SQL_INACTIVE, ReasonCode.INACTIVE_RETENTION),
-        )
-        budget, more = limit, False
-        for name, sql, reason in phases:
-            rows = conn.execute(sql, params).fetchall()
-            if len(rows) > budget:
-                more = True
-            for tenant_id, dataset_id, vid in rows[:budget]:
-                budget -= 1
-                counts["selected"] += 1
-                if dry_run:
-                    continue
-                if reason is not None:
-                    if not _move_to_deleting(
-                        conn, tenant_id, dataset_id, vid, reason=reason, now=now
-                    ):
-                        continue
-                    counts[f"{name}_moved"] += 1
-                result = ops.purge(
-                    conn, store, log, dataset_id=dataset_id, version_id=vid,
-                    operator=operator, environment=environment,
-                )  # fmt: skip
-                counts[f"{name}_purged"] += int(result["versions_purged"])
-            if budget == 0:
-                more = more or name != phases[-1][0]
-                break
+        params = {
+            "now": now,
+            "days": policy.INACTIVE_RETENTION_DAYS,
+            "purge_days": policy.DELETED_PURGE_DAYS,
+            "rejected_days": policy.REJECTED_PURGE_DAYS,
+            "limit": limit + 1,
+        }
+        rows = conn.execute(_SQL_CANDIDATES, params).fetchall()
+        more = len(rows) > limit
+        for kind, tenant_id, dataset_id, vid, _due in rows[:limit]:
+            counts["selected"] += 1
+            if dry_run:
+                continue
+            reason = _REASON[kind]
+            if reason is not None:
+                if not _move_to_deleting(conn, tenant_id, dataset_id, vid, reason=reason, now=now):
+                    continue  # no longer eligible (activated, deleted, swept concurrently)
+                counts[f"{kind}_moved"] += 1
+            result = ops.purge(
+                conn, store, log, dataset_id=dataset_id, version_id=vid,
+                operator=operator, environment=environment,
+            )  # fmt: skip
+            counts[f"{kind}_purged"] += int(result["versions_purged"])
         return {**counts, "more": int(more), "busy": 0, "dry_run": int(dry_run)}
     finally:
         conn.execute(_SQL_UNLOCK)

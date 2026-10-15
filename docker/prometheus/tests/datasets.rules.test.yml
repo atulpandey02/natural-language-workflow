@@ -185,7 +185,53 @@ tests:
               summary: "The dataset retention sweep failed"
               description: "Re-run retention-sweep; it is idempotent and resumes from the oldest item. Policy: docs/adr/ADR-035-phase2-retention-policy.md\n"
 
-  # Sweep stale: the last success is t=0, so the age is time(); past 36 h
+  # Sweep stale, ABSENT: no last-success metric at all is pending at once and
+  # fires after the 30 m `for` (labels: only the rule's own).
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_rejected_retained{role="backup"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NlwDatasetRetentionSweepStale
+        exp_alerts: []  # pending
+      - eval_time: 31m
+        alertname: NlwDatasetRetentionSweepStale
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets }
+            exp_annotations:
+              summary: "The dataset retention sweep has not succeeded for 36 hours"
+              description: "Check the sweep's schedule and its last result (a recovery lock also stops it). Policy: docs/adr/ADR-035-phase2-retention-policy.md\n"
+
+  # Sweep stale, FRESH: a success every minute (the gauge tracks time()) never fires.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_retention_sweep_last_success_timestamp_seconds{role="backup"}'
+        values: '0+60x2400'
+    alert_rule_test:
+      - eval_time: 37h
+        alertname: NlwDatasetRetentionSweepStale
+        exp_alerts: []
+
+  # Sweep stale, RECOVERY: stale and firing at 37 h; a success at 37 h 01 m
+  # (the gauge jumps to the current time) resolves it.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_dataset_retention_sweep_last_success_timestamp_seconds{role="backup"}'
+        values: '0x2220 133260+60x100'
+    alert_rule_test:
+      - eval_time: 37h
+        alertname: NlwDatasetRetentionSweepStale
+        exp_alerts:
+          - exp_labels: { severity: warning, component: datasets, role: backup }
+            exp_annotations:
+              summary: "The dataset retention sweep has not succeeded for 36 hours"
+              description: "Check the sweep's schedule and its last result (a recovery lock also stops it). Policy: docs/adr/ADR-035-phase2-retention-policy.md\n"
+      - eval_time: 37h05m
+        alertname: NlwDatasetRetentionSweepStale
+        exp_alerts: []
+
+  # Sweep stale, STALE: the last success is t=0, so the age is time(); past 36 h
   # (129600 s) it is pending, firing after 30 m.
   - interval: 1m
     input_series:

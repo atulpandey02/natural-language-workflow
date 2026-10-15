@@ -411,3 +411,135 @@ async def test_a_role_at_another_path_stops_the_sweep_before_any_byte_is_deleted
         ops.purge(c, h.store, log, dataset_id=d, version_id=v, operator="op",
                   environment="local")  # fmt: skip
     assert TenantScopedBlobStore(h.store, h.tenant).list_version(d, v)
+
+
+# --- fairness: one candidate set, earliest effective due time first ----------------------
+
+_SHIFTED = (
+    "created_at", "updated_at", "profiling_started_at", "profiled_at", "activated_at",
+    "superseded_at", "rejected_at", "deletion_requested_at",
+)  # fmt: skip
+
+
+def _backdate(h: H, v: uuid.UUID, days: int) -> None:
+    """Move every lifecycle timestamp of ``v`` ``days`` into the past (test
+    setup only: the guard keeps these immutable, so it is suspended for one
+    owner transaction)."""
+    sets = ", ".join(f"{c} = {c} - make_interval(days => %(days)s)" for c in _SHIFTED)
+    with h.owner() as c, c.transaction():
+        c.execute("ALTER TABLE dataset_versions DISABLE TRIGGER USER")
+        c.execute(f"UPDATE dataset_versions SET {sets} WHERE id = %(v)s", {"v": v, "days": days})
+        c.execute("ALTER TABLE dataset_versions ENABLE TRIGGER USER")
+
+
+def _order(h: H, now: datetime, limit: int = 100) -> list[tuple[str, uuid.UUID]]:
+    params = {"now": now, "days": policy.INACTIVE_RETENTION_DAYS,
+              "purge_days": policy.DELETED_PURGE_DAYS,
+              "rejected_days": policy.REJECTED_PURGE_DAYS, "limit": limit}  # fmt: skip
+    with h.owner() as c:
+        return [(str(r[0]), r[3]) for r in c.execute(dr._SQL_CANDIDATES, params).fetchall()]
+
+
+async def _deleting(h: H, d: uuid.UUID, n: int) -> list[uuid.UUID]:
+    vs = [await h.profiled(d) for _ in range(n)]
+    for v in vs:
+        await h.run(lambda s, v=v: svc.request_version_deletion(s, h.tenant, h.actor, d, v))
+    return vs
+
+
+async def test_an_older_rejected_item_runs_before_a_newer_deletion(h: H) -> None:
+    d = await h.dataset()
+    rejected = await _rejected(h, d)
+    [deleting] = await _deleting(h, d, 1)  # requested after the rejection
+    now = _db_now(h)
+    assert [k for k, _ in _order(h, now)] == ["rejected", "deleting"]
+    first = _sweep(h, now, limit=1)
+    assert (first["rejected_purged"], first["deleting_purged"], first["more"]) == (1, 0, 1)
+    assert h.row(rejected)[0] == "DELETING" and h.row(deleting)[0] == "DELETING"
+    assert ("VERSION_OBJECT_PURGED", "OPERATOR_PURGE") not in _events(h, deleting)
+    second = _sweep(h, now, limit=1)
+    assert second["deleting_purged"] == 1 and second["more"] == 0
+
+
+async def test_an_older_inactive_version_is_not_starved_by_a_deletion_backlog(h: H) -> None:
+    d = await h.dataset()
+    inactive = await h.profiled(d)
+    _backdate(h, inactive, 40)  # retention ended 10 days ago
+    backlog = await _deleting(h, d, 3)  # requested now: due in 7 days
+    now = _db_now(h)
+    assert [k for k, _ in _order(h, now)] == ["inactive", "deleting", "deleting", "deleting"]
+    first = _sweep(h, now, limit=1)
+    assert (first["inactive_moved"], first["inactive_purged"], first["deleting_purged"]) == (
+        1,
+        1,
+        0,
+    )
+    assert h.row(inactive)[0] == "DELETING"
+    assert all(("VERSION_OBJECT_PURGED", "OPERATOR_PURGE") not in _events(h, v) for v in backlog)
+
+
+async def test_every_category_progresses_across_bounded_runs_and_active_is_untouched(
+    h: H,
+) -> None:
+    d = await h.dataset()
+    active = await h.active(d)
+    _backdate(h, active, 400)  # very old, still the published source
+    inactive = [await h.profiled(d) for _ in range(2)]
+    for v in inactive:
+        _backdate(h, v, 31)  # due yesterday
+    rejected = [await _rejected(h, d) for _ in range(2)]
+    deleting = await _deleting(h, d, 3)
+    now = _db_now(h)
+    kinds = [k for k, _ in _order(h, now)]
+    assert kinds[:2] == ["inactive", "inactive"] and sorted(kinds[2:]) == sorted(
+        ["rejected", "rejected", "deleting", "deleting", "deleting"]
+    )
+    assert active not in {v for _, v in _order(h, now)}
+    totals = dict.fromkeys(("inactive_purged", "rejected_purged", "deleting_purged"), 0)
+    runs = 0
+    while True:
+        runs += 1
+        assert runs <= 4, "7 candidates in batches of 2 finish in 4 runs"
+        result = _sweep(h, now, limit=2)
+        for k in totals:
+            totals[k] += result[k]
+        if not result["more"]:
+            break
+    assert runs == 4
+    assert totals == {"inactive_purged": 2, "rejected_purged": 2, "deleting_purged": 3}
+    assert h.row(active) == ("ACTIVE", active)
+    assert TenantScopedBlobStore(h.store, h.tenant).list_version(d, active)
+    for v in inactive + rejected + deleting:
+        assert ("VERSION_OBJECT_PURGED", "OPERATOR_PURGE") in _events(h, v)
+
+
+async def test_a_partial_failure_across_categories_is_retried_without_loss(h: H) -> None:
+    d = await h.dataset()
+    inactive = await h.profiled(d)
+    _backdate(h, inactive, 40)
+    rejected = await _rejected(h, d)
+
+    class FailSecond(S3DeletionLog):
+        appends = 0
+
+        def append(self, receipt: Any) -> str:
+            FailSecond.appends += 1
+            if FailSecond.appends == 2:
+                raise DeletionLogUnavailable("the receipt could not be written (SlowDown)")
+            return super().append(receipt)
+
+    flaky = FailSecond(h.bucket.client("operator"), fake.BUCKET)
+    progress: dict[str, int] = {}
+    with h.owner() as c, pytest.raises(ops.TombstoneError, match="SlowDown"):
+        dr.retention_sweep(c, h.store, flaky, operator="op", environment="local",
+                           now=_db_now(h), progress=progress)  # fmt: skip
+    assert progress["inactive_purged"] == 1  # the older item committed first
+    assert progress["rejected_moved"] == 1 and progress["rejected_purged"] == 0
+    # The rejected version was moved (its own transaction) but not purged: the
+    # retry finds it as a deletion and finishes; nothing runs twice.
+    retry = _sweep(h, _db_now(h))
+    assert retry["deleting_purged"] == 1 and retry["selected"] == 1
+    assert ("VERSION_OBJECT_PURGED", "OPERATOR_PURGE") in _events(h, rejected)
+    assert [e for e in _events(h, inactive) if e[0] == "VERSION_OBJECT_PURGED"] == [
+        ("VERSION_OBJECT_PURGED", "OPERATOR_PURGE")
+    ]

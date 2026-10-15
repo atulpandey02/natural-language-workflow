@@ -84,7 +84,11 @@ Retention has two modes (`NLW_BACKUP_RETENTION_MODE`, see
 
 - **simple** (default): `restic forget --prune` runs each backup using
   `NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` (30/0/12, the O-5 policy in
-  ADR-035; any other value is refused). restic snapshots
+  ADR-035; any other value is refused). Changing the Compose defaults does not update an existing env file: a host
+  `.env.backup` that still sets the pre-O-5 `14`/`8`/`6` overrides them, and the
+  backup job then refuses to start. The rollout preflight (and the backup phase)
+  reads only these three lines and stops before activation unless the effective
+  values are `30`/`0`/`12`; set them (or delete the three lines) first. restic snapshots
   are deduplicated, so retained history is cheap.
 - **immutable**: the backup job **never** prunes; run retention as a separate,
   human-gated admin step off the VPS with delete-capable credentials:

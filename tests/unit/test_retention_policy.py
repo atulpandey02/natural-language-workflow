@@ -217,9 +217,11 @@ def test_alert_thresholds_are_the_policy() -> None:
     assert rules["NlwDatasetDeletedNotPurged"]["expr"].strip() == (
         f"nlw_dataset_deleting_oldest_unpurged_age_seconds > {r.DELETED_PURGE_DAYS * r.DAY_S}"
     )
-    assert rules["NlwDatasetRetentionSweepStale"]["expr"].strip() == (
-        "time() - nlw_dataset_retention_sweep_last_success_timestamp_seconds > "
-        f"{r.SWEEP_STALE_AFTER_S}"
+    stale = " ".join(rules["NlwDatasetRetentionSweepStale"]["expr"].split())
+    assert stale == (
+        "(time() - nlw_dataset_retention_sweep_last_success_timestamp_seconds > "
+        f"{r.SWEEP_STALE_AFTER_S}) "
+        "or absent(nlw_dataset_retention_sweep_last_success_timestamp_seconds)"
     )
     for name in ("NlwDatasetReceiptsUnverified", "NlwDatasetReceiptsExpiringBeforeTombstone",
                  "NlwDatasetRetentionSweepFailed"):  # fmt: skip

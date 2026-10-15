@@ -135,7 +135,11 @@ The synthetic pilot uses **GOVERNANCE** on the receipt and audit buckets.
   value is 365, and the operator's receipt policy gains `ConfirmOwnRolePath`
   (`iam:GetRole` on its own path-`/` ARN, ADR-034).
 - Deployed configuration: the production Compose backup retention defaults
-  become 30/0/12.
+  become 30/0/12. Compose defaults do not update an existing env file, so the
+  rollout preflight and the backup phase compute the EFFECTIVE retention (an
+  env-file value overrides the default) from the three retention lines alone
+  and stop before activation unless it is 30/0/12; a host still carrying the
+  pre-O-5 14/8/6 is named as such (`gates.check_backup_retention`).
 - The isolated D6 proof account keeps its own audit-retention decision (E1).
 
 ## Not covered
