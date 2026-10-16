@@ -141,7 +141,7 @@ purge with an older receipt is still `STALE`.
 - **Remaining open:** workspace offboarding (and its per-workspace receipts) is
   still not implemented; O-5 sets the retention. CloudTrail data events for
   this bucket: a pinned selector set for the existing trail
-  (`trail-advanced-event-selectors-with-receipts`, runbook §8; NOT RUN), kept
+  (`trail-advanced-event-selectors-all-buckets`, runbook §8, which also covers the dataset and O-4 restore buckets; NOT RUN), kept
   365 days with the rest of the audit log.
 
 ## Security review of PR #66 (2026-10-14) and fixes

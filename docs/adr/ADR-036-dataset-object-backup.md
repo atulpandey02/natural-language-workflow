@@ -81,7 +81,9 @@ retention of object recovery copies at 30 days as a design constraint.
 - A purged object stays in recovery points until they expire (30 days): the
   documented "beyond use" posture; restores cannot bring it back.
 - New, pinned templates, including the complete vault-key and restore-key
-  statements; the D6 package is unchanged.
+  statements; the D6 package is unchanged. The restore bucket's object calls
+  are CloudTrail data events in the same trail
+  (`trail-advanced-event-selectors-all-buckets`, ADR-034 runbook §8).
 - The restore role could write a purged key back outside `restore-objects`
   (IAM cannot know which keys a receipt proves deleted): it is a time-boxed,
   named human role used only during a declared recovery, and every write is a
