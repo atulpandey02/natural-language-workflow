@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
 import sys
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from pydantic import ValidationError
 
@@ -304,3 +306,37 @@ def test_the_receipt_log_checks_the_role_before_anything_else() -> None:
     iam.path = "/"
     log.preflight()
     assert client.calls == ["get_object_lock_configuration"]
+
+
+# --- verify-objects: noncurrent versions are reported, never a failure (ADR-036) -------
+
+
+@pytest.mark.parametrize(
+    "finding,code",
+    [
+        (None, 0),
+        ("noncurrent_versions", 0),
+        ("missing_objects", 1),
+        ("digest_mismatches", 1),
+        ("unaccounted_objects", 1),
+    ],
+)
+def test_verify_objects_fails_on_everything_but_noncurrent_versions(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    finding: str | None,
+    code: int,
+) -> None:
+    report: dict[str, list[str]] = {
+        k: [] for k in ("missing_objects", "digest_mismatches", "unaccounted_objects")
+    }
+    report["noncurrent_versions"] = []
+    if finding:
+        report[finding] = ["v-1"]
+    monkeypatch.setattr(ops, "_owner_url", lambda: "postgresql://unused")
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: contextlib.nullcontext(None))
+    monkeypatch.setattr(ops, "dataset_store", lambda settings, service: object())
+    monkeypatch.setattr(ops, "verify_objects", lambda conn, store: report)
+    assert ops.main(["verify-objects"]) == code
+    if finding:
+        assert f"{finding}=1 v-1" in capsys.readouterr().out

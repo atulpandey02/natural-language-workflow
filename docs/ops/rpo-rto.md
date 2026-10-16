@@ -55,10 +55,14 @@ stored under `docs/ops/dr-drills/`.
   semantic confirmations and lifecycle events, but **no file bytes**. After any
   restore, run `python -m nlw.ops.datasets verify-objects`: live versions whose
   objects did not come back are reported as `missing_objects` (never presented
-  as restored), and stray objects as `unaccounted_objects`. Object durability,
-  replication and restore policy (and therefore an RPO/RTO for uploaded files)
-  is an open owner decision (O-4); uploads stay disabled outside development
-  until it is made.
+  as restored), and stray objects as `unaccounted_objects`. Object backup and
+  restore is owner decision O-4 ([ADR-036](../adr/ADR-036-dataset-object-backup.md)):
+  AWS Backup continuous backups (point-in-time restore over 30 days), restored
+  into a separate bucket and copied back by `restore-objects` after the
+  receipts are re-applied ([dr-fresh-host-restore](../runbooks/dr-fresh-host-restore.md)
+  step 6c). The object RPO is the chosen restore point and the object RTO the
+  AWS restore job plus `restore-objects`: **NOT RUN, not measured**. Uploads
+  stay disabled outside development until O-6.
 
 - **Supabase Auth** (identity) has its **own** backup/restore and its own RPO/RTO.
   Full-platform recovery needs both. NLW's Postgres restore alone is not

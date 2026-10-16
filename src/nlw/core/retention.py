@@ -47,7 +47,8 @@ RECEIPT_EXPIRY_WARNING_DAYS = 30
 DB_BACKUP_DAILY = 30  # guarantee: 30 daily recovery points
 DB_BACKUP_WEEKLY = 0  # no separate weekly tier
 DB_BACKUP_MONTHLY = 12  # guarantee: 12 monthly recovery points
-OBJECT_BACKUP_RETENTION_DAYS = 30  # O-4 design constraint: object recovery copies, 30 days
+OBJECT_BACKUP_RETENTION_DAYS = 30  # O-4 (ADR-036): AWS Backup recovery points, 30 days
+RESTORE_COPY_EXPIRY_DAYS = 7  # O-4: the restore bucket is a staging area, emptied after 7 days
 
 # --- Object Lock ----------------------------------------------------------------
 # Synthetic pilot: GOVERNANCE. Real customer data stays blocked until receipt
@@ -95,7 +96,9 @@ POLICY: tuple[Rule, ...] = (
     Rule("database backup (monthly)", DB_BACKUP_MONTHLY * 30, "guarantee",
          "backup job (restic forget)", "keep-monthly 12"),
     Rule("object-backup recovery copies", OBJECT_BACKUP_RETENTION_DAYS, "guarantee",
-         "O-4 (not implemented)", "design constraint"),
+         "AWS Backup vault lock (O-4)", "continuous backup, point-in-time restore"),
+    Rule("restored object copy", RESTORE_COPY_EXPIRY_DAYS, "guarantee",
+         "S3 lifecycle (restore bucket)", "expiry after the restore"),
 )  # fmt: skip
 
 
