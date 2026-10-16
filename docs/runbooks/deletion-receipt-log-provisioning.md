@@ -300,7 +300,11 @@ refused in staging and production.
    `PutObject` of step 1, the `GetObject` of step 3 (denied) and the denied
    `DeleteObject` of step 2 each appear as a data event in `<AUDIT_BUCKET>`
    under `dataset-data-events`, attributed to the calling role; `aws
-   cloudtrail validate-logs` passes for the period.
+   cloudtrail validate-logs` passes for the period. In the O-4 restore drill
+   (where provisioned): the backup service's `PutObject` into
+   `<RESTORE_BUCKET>` and the restore role's `GetObject` from it appear too,
+   and every `PutObject` by the restore role in `<BUCKET>` names a version
+   `restore-objects` reported as `restored`.
 
 ## 8. CloudTrail data events for the receipt and restore buckets
 

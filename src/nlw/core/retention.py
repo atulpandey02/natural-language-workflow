@@ -35,7 +35,7 @@ NONCURRENT_RETENTION_DAYS = 30  # S3 lifecycle: a noncurrent object version expi
 
 # --- evidence ------------------------------------------------------------------
 RECEIPT_RETENTION_DAYS = 365  # guarantee: Object Lock default retention of a receipt
-AUDIT_RETENTION_DAYS = 365  # guarantee: CloudTrail data events (dataset and receipt buckets)
+AUDIT_RETENTION_DAYS = 365  # guarantee: CloudTrail data events (dataset, receipt, restore)
 # A lifecycle expiry is one day past the lock, so no rule acts while it holds.
 RECEIPT_EXPIRY_DAYS = RECEIPT_RETENTION_DAYS + 1
 AUDIT_EXPIRY_DAYS = AUDIT_RETENTION_DAYS + 1

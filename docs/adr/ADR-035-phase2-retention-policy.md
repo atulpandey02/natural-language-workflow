@@ -42,7 +42,7 @@ an alert and never deletes anything by itself.
 | Incomplete multipart upload | 1 day | guarantee | S3 lifecycle | `AbortIncompleteMultipartUpload` |
 | Noncurrent S3 object version | 30 days after it became noncurrent | guarantee | S3 lifecycle | `NoncurrentVersionExpiration` |
 | Deletion receipt | 365 days | guarantee | S3 Object Lock (GOVERNANCE) | default retention 365, lifecycle expiry at 366 |
-| CloudTrail data events (dataset and receipt buckets) | 365 days | guarantee | S3 Object Lock (GOVERNANCE) | `<AUDIT_RETENTION_DAYS>` = 365, expiry at 366 |
+| CloudTrail data events (dataset, receipt and restore buckets) | 365 days | guarantee | S3 Object Lock (GOVERNANCE) | `<AUDIT_RETENTION_DAYS>` = 365, expiry at 366 |
 | Database backups | 30 daily, 12 monthly recovery points | guarantee | backup job (`restic forget`) | `NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` = 30/0/12, refused otherwise |
 | Object-backup recovery copies | 30 days | guarantee | AWS Backup vault lock (O-4, [ADR-036](ADR-036-dataset-object-backup.md)) | continuous backup, point-in-time restore, exactly 30 days |
 | Restored object copy | 7 days | guarantee | S3 lifecycle (restore bucket) | expiry after the restore; `restore-objects` copies back what is still referenced |
