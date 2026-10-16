@@ -80,11 +80,16 @@ retention of object recovery copies at 30 days as a design constraint.
   here**); RTO: the AWS restore job plus `restore-objects` (not measured).
 - A purged object stays in recovery points until they expire (30 days): the
   documented "beyond use" posture; restores cannot bring it back.
-- New, pinned templates; the D6 package is unchanged.
+- New, pinned templates, including the complete vault-key and restore-key
+  statements; the D6 package is unchanged.
+- The restore role could write a purged key back outside `restore-objects`
+  (IAM cannot know which keys a receipt proves deleted): it is a time-boxed,
+  named human role used only during a declared recovery, and every write is a
+  CloudTrail data event reviewed after the restore (runbook §9).
 
 ## Unverified and remaining
 
-- U1-U4 in the runbook (AWS Backup notification permissions, managed-policy
+- U1-U5 in the runbook (AWS Backup notification permissions, managed-policy
   actions, key preservation on restore, multipart checksums).
 - An object restore drill against AWS (part of the authorized proof).
 - COMPLIANCE vault lock and a separate GO decision before customer data.

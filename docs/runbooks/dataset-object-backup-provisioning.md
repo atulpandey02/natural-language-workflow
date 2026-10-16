@@ -171,12 +171,79 @@ backup or restore role, keeps the base policy). Both carry the same
 ]
 ```
 
+### The vault key and the restore key (F2, review of PR #68)
+
+Each is a customer-managed key of its own. Their **complete** statement lists
+are pinned: the administrator administers and never uses them, and only the
+named O-4 role may use each one, only through the named service.
+
+<!-- template: vault-kms-key-statements -->
+```json
+[
+  {"Sid": "AdministerNeverUse", "Effect": "Allow",
+   "Principal": {"AWS": ["arn:aws:iam::<ACCOUNT>:root", "arn:aws:iam::<ACCOUNT>:role/<ADMIN_ROLE>"]},
+   "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:PutKeyPolicy", "kms:GetKeyRotationStatus",
+              "kms:EnableKeyRotation", "kms:ListGrants", "kms:ListResourceTags", "kms:TagResource",
+              "kms:UntagResource", "kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias", "kms:EnableKey",
+              "kms:DisableKey", "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion"],
+   "Resource": "*"},
+  {"Sid": "BackupServiceUsesViaBackupOnly", "Effect": "Allow",
+   "Principal": {"AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-backup-service"},
+   "Action": ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"],
+   "Resource": "*",
+   "Condition": {"StringEquals": {"kms:ViaService": "backup.us-east-1.amazonaws.com"}}},
+  {"Sid": "BackupServiceGrantsForBackupResourcesOnly", "Effect": "Allow",
+   "Principal": {"AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-backup-service"},
+   "Action": "kms:CreateGrant",
+   "Resource": "*",
+   "Condition": {"Bool": {"kms:GrantIsForAWSResource": "true"},
+                 "StringEquals": {"kms:ViaService": "backup.us-east-1.amazonaws.com"}}}
+]
+```
+
+<!-- template: restore-kms-key-statements -->
+```json
+[
+  {"Sid": "AdministerNeverUse", "Effect": "Allow",
+   "Principal": {"AWS": ["arn:aws:iam::<ACCOUNT>:root", "arn:aws:iam::<ACCOUNT>:role/<ADMIN_ROLE>"]},
+   "Action": ["kms:DescribeKey", "kms:GetKeyPolicy", "kms:PutKeyPolicy", "kms:GetKeyRotationStatus",
+              "kms:EnableKeyRotation", "kms:ListGrants", "kms:ListResourceTags", "kms:TagResource",
+              "kms:UntagResource", "kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias", "kms:EnableKey",
+              "kms:DisableKey", "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion"],
+   "Resource": "*"},
+  {"Sid": "BackupServiceWritesViaS3ForTheRestoreBucketOnly", "Effect": "Allow",
+   "Principal": {"AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-backup-service"},
+   "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+   "Resource": "*",
+   "Condition": {"StringEquals": {
+     "kms:ViaService": "s3.us-east-1.amazonaws.com",
+     "kms:EncryptionContext:aws:s3:arn": "arn:aws:s3:::<RESTORE_BUCKET>"}}},
+  {"Sid": "RestorerReadsViaS3ForTheRestoreBucketOnly", "Effect": "Allow",
+   "Principal": {"AWS": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-restore"},
+   "Action": "kms:Decrypt",
+   "Resource": "*",
+   "Condition": {"StringEquals": {
+     "kms:ViaService": "s3.us-east-1.amazonaws.com",
+     "kms:EncryptionContext:aws:s3:arn": "arn:aws:s3:::<RESTORE_BUCKET>"}}}
+]
+```
+
+- Both keys enable automatic rotation; neither is ever named in the dataset
+  key's or the receipt bucket's documents.
+- **U5** (unverified): the exact KMS actions AWS Backup needs on a vault key
+  for S3 recovery points; compare with the managed policy before relying on it.
+
 ## 4. The restore bucket
 
 - us-east-1, Block Public Access on, `BucketOwnerEnforced`, Versioning on,
   default encryption SSE-KMS with `<RESTORE_KEY_ARN>`, no Object Lock, no
   replication, no notifications.
 - Only the backup service role writes (a restore); only the restore role reads.
+- `restore-objects` relies on that single writer (F4): it hashes a restored
+  copy and then reads it again to write it, so nothing but the backup service
+  may change a copy in between. `DenyWritesExceptBackupService` is pinned
+  exactly; a copy that changed anyway is written once and reported as
+  `present_mismatch`, never silently accepted.
 
 <!-- template: restore-bucket-lifecycle -->
 ```json
@@ -301,8 +368,22 @@ recovery lock holds the restored database and after `reapply-receipts`:
   `versions/...` keys and each object's checksum;
 - **U4** the restore of objects created by a multipart upload (composite
   checksum) and the SHA-256 `restore-objects` recomputes.
+- **U5** the KMS actions AWS Backup needs on the vault key (§3).
 
 ## 9. Residual risks
+
+- **The restore role could recreate a purged key outside `restore-objects`**
+  (F1). A purge removes every version and delete marker of a key, so the key
+  is absent; the dataset bucket's write-once rule (`If-None-Match`) then
+  accepts a new object there from any principal allowed `PutObject`. IAM
+  cannot know which keys a receipt proves deleted: the guarantee that a restore
+  never resurrects a purged object is `restore-objects`' own checks (recovery
+  lock, receipts re-applied, never a DELETING or DELETED version). Therefore:
+  the restore role is assumed only during a declared recovery, by a named
+  human, for at most 1 h (`trust-human`; the role keeps the default `MaxSessionDuration` of 3600 s), and every
+  write is a CloudTrail data event on the dataset bucket (reviewed after each
+  restore: every `PutObject` by `nlw-<ENV>-dataset-restore` must name a
+  version `restore-objects` reported as `restored`).
 
 - A purged object remains in recovery points until they expire (30 days).
   This is the documented "beyond use" posture: physical erasure inside the

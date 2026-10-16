@@ -62,9 +62,11 @@ def test_the_runbook_holds_exactly_the_reviewed_templates() -> None:
         "dataset-kms-key-o4-statements",
         "restore-bucket-lifecycle",
         "restore-bucket-policy",
+        "restore-kms-key-statements",
         "role-backup-service",
         "role-dataset-restore",
         "trust-backup-service",
+        "vault-kms-key-statements",
     ]
     # The reviewed D6 and receipt packages are not redefined or extended here.
     assert not set(templates()) & set(templates(PROVISIONING))
@@ -228,3 +230,91 @@ def test_every_role_is_at_path_root() -> None:
 )
 def test_no_real_identifier_is_written_down(value: str) -> None:
     assert re.search(value, RUNBOOK.read_text()) is None
+
+
+# --- F2 (review of PR #68): the vault and restore keys are pinned in full ---------
+
+ADMIN_PRINCIPALS = {"AWS": ["arn:aws:iam::<ACCOUNT>:root", ADMIN_ROLE]}
+USE = {"kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey", "kms:ReEncryptFrom",
+       "kms:ReEncryptTo", "kms:CreateGrant", "kms:GenerateDataKeyWithoutPlaintext"}  # fmt: skip
+
+
+@pytest.mark.parametrize("name", ["vault-kms-key-statements", "restore-kms-key-statements"])
+def test_the_administrator_administers_and_never_uses_the_o4_keys(name: str) -> None:
+    statements = sids(templates()[name])
+    admin = statements["AdministerNeverUse"]
+    assert admin["Principal"] == ADMIN_PRINCIPALS
+    assert not as_set(admin["Action"]) & USE
+    # The administration statement is the dataset key's, byte for byte.
+    (d6,) = [
+        s
+        for s in templates(PROVISIONING)["dataset-kms-key-statements"]
+        if s["Sid"] == "AdministerNeverUse"
+    ]
+    assert admin == d6
+    for sid, s in statements.items():
+        assert s["Effect"] == "Allow", sid
+        if sid != "AdministerNeverUse":
+            assert s["Principal"]["AWS"] in (BACKUP_ROLE, RESTORE_ROLE), sid
+            assert "kms:ViaService" in json.dumps(s["Condition"]), sid
+
+
+def test_only_aws_backup_can_use_the_vault_key() -> None:
+    s = sids(templates()["vault-kms-key-statements"])
+    assert list(s) == [
+        "AdministerNeverUse",
+        "BackupServiceUsesViaBackupOnly",
+        "BackupServiceGrantsForBackupResourcesOnly",
+    ]
+    via = {"kms:ViaService": "backup.us-east-1.amazonaws.com"}
+    assert s["BackupServiceUsesViaBackupOnly"]["Condition"] == {"StringEquals": via}
+    assert s["BackupServiceGrantsForBackupResourcesOnly"]["Condition"] == {
+        "Bool": {"kms:GrantIsForAWSResource": "true"}, "StringEquals": via,
+    }  # fmt: skip
+    assert "dataset-restore" not in json.dumps(s)
+
+
+def test_the_restore_key_serves_the_restore_bucket_only() -> None:
+    s = sids(templates()["restore-kms-key-statements"])
+    assert list(s) == [
+        "AdministerNeverUse",
+        "BackupServiceWritesViaS3ForTheRestoreBucketOnly",
+        "RestorerReadsViaS3ForTheRestoreBucketOnly",
+    ]
+    context = {**VIA_S3, "kms:EncryptionContext:aws:s3:arn": RESTORE}
+    write = s["BackupServiceWritesViaS3ForTheRestoreBucketOnly"]
+    read = s["RestorerReadsViaS3ForTheRestoreBucketOnly"]
+    assert (write["Principal"], as_set(write["Action"])) == (
+        {"AWS": BACKUP_ROLE}, {"kms:GenerateDataKey", "kms:Decrypt"},
+    )  # fmt: skip
+    assert (read["Principal"], read["Action"]) == ({"AWS": RESTORE_ROLE}, "kms:Decrypt")
+    assert write["Condition"] == read["Condition"] == {"StringEquals": context}
+
+
+# --- F4: restore-objects relies on the restore bucket's single writer -------------
+
+
+def test_the_restore_bucket_has_exactly_one_writer_for_restore_objects() -> None:
+    s = sids(templates()["restore-bucket-policy"])["DenyWritesExceptBackupService"]
+    assert s == {
+        "Sid": "DenyWritesExceptBackupService", "Effect": "Deny", "Principal": "*",
+        "Action": "s3:PutObject", "Resource": f"{RESTORE}/*",
+        "Condition": {"ArnNotEquals": {"aws:PrincipalArn": BACKUP_ROLE}},
+    }  # fmt: skip
+    restorer = templates()["role-dataset-restore"]
+    for st in allows(restorer):
+        if any(r.startswith(RESTORE) for r in as_set(st["Resource"])):
+            assert not any(a.startswith(("s3:Put", "s3:Delete")) for a in as_set(st["Action"]))
+
+
+# --- F1: the residual risk is recorded, not hidden ----------------------------------
+
+
+def test_the_resurrection_risk_and_its_controls_are_documented() -> None:
+    text = RUNBOOK.read_text()
+    risks = text[text.index("## 9. Residual risks") :]
+    for phrase in ("recreate a purged key", "declared recovery", "CloudTrail data event",
+                   "MaxSessionDuration"):  # fmt: skip
+        assert phrase in risks, phrase
+    checklist = (ROOT / "docs/runbooks/dataset-uploads-staging-checklist.md").read_text()
+    assert "object-backup vault lock (O-4) use COMPLIANCE" in checklist
