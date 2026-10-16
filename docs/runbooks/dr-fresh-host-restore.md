@@ -126,6 +126,25 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    with partial progress as counts: fix the cause and re-run. NOT RUN against
    AWS.
 
+6c. **Restore dataset objects (after 6b; only where a dataset store is
+   configured, ADR-036).** A database restore brings back no bytes. The
+   administrator restores the dataset bucket's latest AWS Backup recovery point
+   from before the incident into the restore bucket
+   ([dataset-object-backup-provisioning](dataset-object-backup-provisioning.md) §7).
+   Then, as the restore role (`DATASET_RESTORE_BUCKET` set), while the lock holds:
+   ```bash
+   python -m nlw.ops.datasets restore-objects --dry-run
+   python -m nlw.ops.datasets restore-objects        # while more=1: --after <next>
+   python -m nlw.ops.datasets verify-objects
+   ```
+   `restore-objects` refuses unless the recovery lock is active and until every
+   deletion receipt has been re-applied (6b), never restores a DELETING,
+   DELETED or REJECTED version, verifies each copy's SHA-256 and size against
+   the database before writing it write-once, and never overwrites. Exit 1
+   lists `missing_in_backup`, `backup_mismatch`, `present_mismatch` or
+   `no_digest` version ids: investigate before enabling. `verify-objects` must
+   then report no missing object and no digest mismatch. NOT RUN against AWS.
+
 7. **Operator ENABLE — a separate, explicit command (operator credential).** Get the
    generation id and enable exactly it:
    ```bash

@@ -11,7 +11,7 @@ stay disabled until dataset and workspace deletion work end to end, including
 object bytes and the external deletion log.
 
 Retention periods in this document (backup horizon, `request_text`, outcome
-events, tombstones, the 24-hour deletion figure) are **pilot policy proposals**,
+events, tombstones, the customer-facing deletion figures) are **pilot policy proposals**,
 not legal or compliance commitments, until the owner approves them (owner
 decision, 2026-09-29).
 
@@ -28,7 +28,7 @@ prints one workspace's row counts per table; it changes nothing.
 | Workspace metadata (workspaces, memberships, invitations) | PostgreSQL | n/a | Purged after dependants; tombstone kept (ids, actor, timestamps, counts, digests; no names or values) | Remain in PostgreSQL dumps until they expire |
 | Dataset metadata (`datasets`, `dataset_versions`, migrations `0024`/`0025`; [ADR-029](../adr/ADR-029-dataset-lifecycle-foundation.md), [ADR-030](../adr/ADR-030-csv-ingestion-and-profiling.md)) | PostgreSQL | Request → `DELETING` (unusable at once); operator `purge` deletes and verifies the objects (receipt + `VERSION_OBJECT_PURGED`); operator tombstone → `DELETED`: names, description, filename and storage key scrubbed to `NULL`, ids/sizes/digests/actors/timestamps kept ([runbook](../runbooks/dataset-metadata-deletion.md)). The tombstone refuses any version with a storage key or an earlier purge event unless an operator purge event was recorded after the request AND the configured deletion log verifies its receipt AND a live store check finds nothing; a version with neither needs only the live check (none when no store is configured), exactly as in [ADR-033](../adr/ADR-033-s3-dataset-object-storage.md) note 3 | All datasets deleted first | As above |
 | Dataset lifecycle events (`dataset_events`) | PostgreSQL | Retained (ids, states, closed reason codes; never names or values); append-only for runtime roles | Retained like audit evidence (period proposed, not approved) | Dump retention |
-| Object bytes (quarantine, published raw file) | Dataset object store (local backend only today; `{root}/{APP_ENV}/{area}/{tenant}/{dataset}/{version}`) | `purge`: deleted and verified absent per version (both areas, incl. partials); a rejected file's bytes are deleted at rejection; the dataset stays `DELETING` until verification holds | Prefix deleted, verified empty | Not in the PostgreSQL backup; object durability/restore policy is an open owner decision (O-4) |
+| Object bytes (quarantine, published raw file) | Dataset object store (local in development; S3 `versions/` per ADR-033, NOT RUN) | `purge`: every version, delete marker and upload deleted and verified absent, with a receipt; a rejected file's bytes are kept immutable until the operator's retention sweep purges them (7 days, ADR-035); the dataset stays `DELETING` until verification holds | Prefix deleted, verified empty | Not in the PostgreSQL backup. AWS Backup recovery points keep them exactly 30 days (O-4, [ADR-036](../adr/ADR-036-dataset-object-backup.md)); a restore never brings back a version a receipt proves deleted |
 | Derived artefacts (Parquet, temp files, partial uploads) | Object store / ingest temp dir | Deleted with the version; partial `.upload-*` files are listed and deleted with the dataset | Same | Same |
 | Derived profiles (`profile-2`: counts, types, bounded statistics, indicators; **no sample values**) | PostgreSQL `dataset_profiles` (0025) | Tombstone scrubs `profile` to `NULL` (row counts and digest kept) | Purged | Dump retention |
 | Semantic confirmations (`semantics-1` labels and choices) | PostgreSQL `dataset_semantic_revisions` (0025) | Tombstone scrubs `mapping` to `NULL` (revision numbers, confirming user and time kept) | Purged | Dump retention |
@@ -70,12 +70,17 @@ backups, in a dedicated S3 Object Lock bucket per environment
 ## Customer-facing statement — AWAITING OWNER APPROVAL (plan §22)
 
 > Deleting a dataset removes its files and processed data from live storage
-> within 24 hours and is verified before we report it as deleted. Metadata
-> copies inside our encrypted database backups expire on a fixed schedule of up
-> to six months and are never restored for a deleted workspace. Messages you
+> within 7 days and is verified before we report it as deleted. Copies of the
+> files inside our encrypted object backups expire after 30 days, and metadata
+> copies inside our encrypted database backups after at most twelve months;
+> neither is ever restored for a deleted dataset or workspace. Messages you
 > approved for delivery to Slack remain in Slack.
 
-Not to be published or implemented as UI copy until approved. The 24-hour
-figure, the six-month backup horizon, the 90-day `request_text` retention and
+*(Aligned with the O-5 policy, ADR-035, and O-4, ADR-036, on 2026-10-15: the
+earlier draft said 24 hours and six months. Still awaiting owner approval.)*
+
+Not to be published or implemented as UI copy until approved. The 7-day
+purge figure, the 30-day object-backup and twelve-month database-backup
+horizons, the 90-day `request_text` retention and
 the 13-month outcome-event retention are all part of that approval; until then
 they are pilot proposals, not legal or compliance commitments.

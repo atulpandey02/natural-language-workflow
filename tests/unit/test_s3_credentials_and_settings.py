@@ -366,3 +366,49 @@ def test_the_s3_deletion_log_never_shares_the_backup_repository() -> None:
             dataset_deletion_log_bucket=_receipts("local"),
             backup_restic_repository=f"s3:s3.amazonaws.com/{_receipts('local')}/restic",
         )
+
+
+# --- O-4 restore bucket (ADR-036) -------------------------------------------------------
+
+
+def _restore(env: str, account: str = ACCOUNT, suffix: str = "") -> str:
+    return f"nlw-{env}-datasets-restore-{account}-us-east-1{suffix}"
+
+
+@pytest.mark.parametrize("env", ["local", "staging", "production"])
+def test_the_restore_bucket_is_accepted_in_its_own_environment_and_account(env: str) -> None:
+    s = _s3(app_env=env, dataset_restore_bucket=_restore(env))
+    assert s.dataset_restore_bucket == _restore(env)
+
+
+@pytest.mark.parametrize(
+    "bucket,match",
+    [
+        ("restore", "DATASET_RESTORE_BUCKET must be"),
+        (_bucket("local"), "DATASET_RESTORE_BUCKET must be"),
+        (_receipts("local"), "DATASET_RESTORE_BUCKET must be"),
+        (_restore("local", suffix="-abcdefghijklmnop"), "at most 63"),
+        (_restore("staging"), "environment and account"),
+        (_restore("local", OTHER_ACCOUNT), "environment and account"),
+    ],
+)
+def test_the_restore_bucket_is_checked(bucket: str, match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        _s3(dataset_restore_bucket=bucket)
+
+
+def test_the_restore_bucket_needs_the_s3_store_and_never_shares_the_backup_repository() -> None:
+    with pytest.raises(ValidationError, match="requires DATASET_STORAGE_BACKEND=s3"):
+        Settings(dataset_restore_bucket=_restore("local"))
+    with pytest.raises(ValidationError, match="backup repository"):
+        _s3(
+            dataset_restore_bucket=_restore("local"),
+            backup_restic_repository=f"s3:s3.amazonaws.com/{_restore('local')}/restic",
+        )
+
+
+def test_the_restore_role_is_the_environment_dataset_restore_role() -> None:
+    assert creds.expected_role(_bucket("staging"), "restore") == (
+        "nlw-staging-dataset-restore",
+        ACCOUNT,
+    )
