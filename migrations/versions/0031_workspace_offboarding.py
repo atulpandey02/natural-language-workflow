@@ -13,6 +13,11 @@
   workspace is not ACTIVE, so offboarding can remove its memberships.
 - Reason code ``WORKSPACE_OFFBOARDING``: the operator moves the workspace's
   datasets to DELETING with it.
+- Independent review of PR #70: ``accept_workspace_invitation`` refuses an
+  invitation into a workspace that is not ACTIVE (it is SECURITY DEFINER and
+  never read the tenant context); the discovery policy ``workspaces_app_select``
+  and the scheduler's ``workflow_runs`` policies exclude a non-ACTIVE workspace.
+  Policies are altered in place (the count stays 74).
 
 No table and no RLS policy is added (the signed policy count stays 74).
 
@@ -74,6 +79,37 @@ def _load(filename: str) -> ModuleType:
 
 def _m0030() -> ModuleType:
     return _load("0030_inactive_version_retention.py")
+
+
+def _m0016() -> ModuleType:
+    return _load("0016_signed_database_context.py")
+
+
+_INVALID = "           OR v_inv.email <> v_email THEN\n"
+_INVALID_0031 = (
+    "           OR v_inv.email <> v_email\n"
+    "           OR NOT public.workspace_is_active(v_inv.tenant_id) THEN\n"
+)
+
+
+def accept_0031() -> str:
+    original: str = _m0016()._SQL_ACCEPT
+    assert original.count(_INVALID) == 1
+    return original.replace(_INVALID, _INVALID_0031)
+
+
+_DISCOVERY_0016 = "(public.is_current_user_member(id))"
+_DISCOVERY_0031 = "(public.is_current_user_member(id) AND public.workspace_is_active(id))"
+_SCHED_0016 = "(public.ctx_purpose() = 'scheduler_reconcile')"
+_SCHED_0031 = (
+    "(public.ctx_purpose() = 'scheduler_reconcile' AND public.workspace_is_active(tenant_id))"
+)
+
+
+def _alter_policies(discovery: str, sched: str) -> None:
+    op.execute(f"ALTER POLICY workspaces_app_select ON workspaces USING {discovery}")
+    op.execute(f"ALTER POLICY workflow_runs_sched_select ON workflow_runs USING {sched}")
+    op.execute(f"ALTER POLICY workflow_runs_sched_insert ON workflow_runs WITH CHECK {sched}")
 
 
 def reason_codes() -> tuple[str, ...]:
@@ -282,6 +318,8 @@ def upgrade() -> None:
     op.execute(CTX_INGEST_TENANT_ID)
     op.execute(_OWNER_PRESENT_0031)
     op.execute(_schedule_block(True))
+    op.execute(accept_0031())
+    _alter_policies(_DISCOVERY_0031, _SCHED_0031)
     _m0030()._m0029()._m0028()._replace_reason_check(reason_codes())
 
 
@@ -299,6 +337,8 @@ def downgrade() -> None:
         """
     )
     _m0030()._m0029()._m0028()._replace_reason_check(_m0030().reason_codes())
+    _alter_policies(_DISCOVERY_0016, _SCHED_0016)
+    op.execute(_m0016()._SQL_ACCEPT)
     op.execute(_schedule_block(False))
     op.execute(_OWNER_PRESENT_0015)
     op.execute(_CTX_INGEST_TENANT_ID_0026)

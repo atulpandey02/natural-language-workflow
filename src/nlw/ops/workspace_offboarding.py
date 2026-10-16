@@ -1,7 +1,7 @@
 """Workspace offboarding (Phase 2 plan section 0.6; ADR-037). Operator only.
 
     python -m nlw.ops.offboarding request  --workspace <id> --operator <name>
-    python -m nlw.ops.offboarding complete --workspace <id> --operator <name>
+    python -m nlw.ops.offboarding complete --workspace <id> --operator <name> --secrets-file <f>
     python -m nlw.ops.offboarding pending
 
 ``request`` moves the workspace ACTIVE -> OFFBOARDING. From that commit on, no
@@ -23,10 +23,19 @@ is clear:
 
 Retained by design (the contract, ``nlw.ops.offboarding.TABLES``): audit and
 lifecycle events, the delivery record of external actions, the processing
-requests, and the dataset and workspace tombstones. Connector secrets live in
-the secret store, which this code cannot delete: ``complete`` reports how many
-connector secret references the operator must remove there
-(``connector_secret_refs``), by count only.
+requests, and the dataset and workspace tombstones.
+
+Connector secrets live in the secret store (``EnvironmentSecretStore``: the
+worker's secrets env file), which has no delete operation. Their removal is an
+explicit, FAIL-CLOSED operator step: the operator removes every
+``NLW_SECRET_<WORKSPACE_HEX>_*`` entry of the workspace from that file (and
+recreates the worker), then runs ``complete --secrets-file <that file>``.
+``complete`` reads the file read-only, before anything is purged and again
+inside the final transaction, and refuses while any entry of the workspace
+remains or the file cannot be read. The receipt records how many connector
+secret references the workspace had and that none remained in the store
+(``secret_refs``, ``secret_store``, ``secrets_verified_absent``). Values are
+never read into a message, a log or the receipt.
 
 A database restore can bring an offboarded workspace back. ``reapply-receipts``
 (``nlw.ops.datasets``) therefore also lists every workspace receipt and moves a
@@ -38,8 +47,11 @@ operator then re-runs ``complete`` once the runtimes are enabled.
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import uuid
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -154,7 +166,24 @@ def request_offboarding(
                 (workspace_id,),
             )
         moved = _datasets_to_deleting(conn, workspace_id)
-    return {"workspace_id": str(workspace_id), "changed": int(changed), "datasets_deleting": moved}
+        # Nothing new may join, and nothing open may be re-driven: pending
+        # invitations are revoked and open runs fail (the reconciler would
+        # otherwise re-enqueue runs no worker can process any more).
+        revoked = conn.execute(
+            "UPDATE workspace_invitations SET status = 'revoked', updated_at = now() "
+            "WHERE tenant_id = %s AND status = 'pending'",
+            (workspace_id,),
+        ).rowcount
+        failed = conn.execute(
+            "UPDATE workflow_runs SET status = 'FAILED', error = 'WORKSPACE_OFFBOARDING', "
+            "updated_at = now() WHERE tenant_id = %s "
+            "AND status IN ('PENDING', 'RUNNING', 'WAITING_APPROVAL')",
+            (workspace_id,),
+        ).rowcount
+    return {
+        "workspace_id": str(workspace_id), "changed": int(changed), "datasets_deleting": moved,
+        "invitations_revoked": revoked, "runs_failed": failed,
+    }  # fmt: skip
 
 
 # --- complete ------------------------------------------------------------------
@@ -190,11 +219,15 @@ def complete_offboarding(
     *,
     operator: str,
     environment: str,
+    secrets_file: Path | None,
 ) -> dict[str, Any]:
     """Purge and tombstone the workspace (see the module docstring). Re-running
     after a failure is safe: finished datasets are skipped and the row purge
     and the tombstone are one transaction."""
     _operator(operator)
+    # Fail closed BEFORE anything irreversible: the secret store must already
+    # hold no entry of the workspace.
+    _require_secrets_removed(secrets_file, workspace_id)
     ops._preflight(log)
     ops._require_runtimes_permitted(conn)
     if _status(conn, workspace_id) != "OFFBOARDING":
@@ -234,10 +267,19 @@ def complete_offboarding(
             "SELECT count(*) FROM connectors WHERE tenant_id = %s AND secret_ref IS NOT NULL",
             (workspace_id,),
         ).fetchone()
+        secret_refs = int(secrets[0]) if secrets else 0
+        _require_secrets_removed(secrets_file, workspace_id)  # again, at commit time
         counts = _purge_rows(conn, workspace_id)
+        # The retained delivery record keeps ids, status and times, never where
+        # it was sent (channel names, webhook hosts).
+        conn.execute(
+            "UPDATE external_actions SET destination_summary = NULL WHERE tenant_id = %s",
+            (workspace_id,),
+        )
         receipt = WorkspaceReceipt.for_workspace(
             sink=log.sink_id, environment=environment, tenant_id=workspace_id,
             dataset_ids=dataset_ids, table_counts=counts, operator=operator,
+            secret_refs=secret_refs, secret_store=SECRET_STORE_KIND,
         )  # fmt: skip
         try:
             receipt_id = log.append_workspace(receipt)
@@ -259,9 +301,59 @@ def complete_offboarding(
         "workspace_id": str(workspace_id),
         "datasets_tombstoned": len(dataset_ids),
         "rows_purged": sum(counts.values()),
-        "connector_secret_refs": int(secrets[0]) if secrets else 0,
+        "connector_secret_refs": secret_refs,
+        "secrets_verified_absent": 1,
         "receipt": receipt_id,
     }
+
+
+SECRET_STORE_KIND = "environment-file"
+# Every form an env file can name a variable in (docker compose ``env_file``
+# accepts ``KEY=V``, ``export KEY=V``, ``KEY: V`` and a bare ``KEY`` taken from
+# the host). Any other non-blank, non-comment line is refused (fail closed).
+_ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*(?:[=:]|$)")
+
+
+def remaining_secret_entries(secrets_file: Path, workspace_id: uuid.UUID) -> int:
+    """How many entries of the workspace the secret store file still holds
+    (names only are parsed; a value is never kept). Raises ``OffboardingError``
+    when the file is not a readable regular file."""
+    from nlw.secrets.store import env_key_for
+
+    prefix = env_key_for(workspace_id, "X")[:-1]  # NLW_SECRET_<HEX>_
+    try:
+        st = os.stat(secrets_file)
+        if not stat.S_ISREG(st.st_mode):
+            raise OffboardingError("--secrets-file must be the secret store's regular file")
+        lines = secrets_file.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        raise OffboardingError("the secret store file cannot be read") from None
+    names: list[str] = []
+    for number, raw in enumerate(lines, start=1):
+        line = raw.lstrip("\ufeff").strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _ENV_LINE.match(line)
+        if m is None:
+            raise OffboardingError(
+                f"the secret store file has a line it cannot read (line {number}): fix it"
+            )
+        names.append(m.group(1))
+    return sum(1 for name in names if name.upper().startswith(prefix))
+
+
+def _require_secrets_removed(secrets_file: Path | None, workspace_id: uuid.UUID) -> None:
+    if secrets_file is None:
+        raise OffboardingError(
+            "--secrets-file is required: remove the workspace's connector secrets from "
+            "the secret store first, then name the store's file"
+        )
+    left = remaining_secret_entries(secrets_file, workspace_id)
+    if left:
+        raise OffboardingError(
+            f"{left} connector secret entr{'y' if left == 1 else 'ies'} of the workspace "
+            "remain in the secret store: remove them, recreate the worker, then re-run"
+        )
 
 
 def _counts_json(receipt: WorkspaceReceipt) -> str:
@@ -272,6 +364,7 @@ def _counts_json(receipt: WorkspaceReceipt) -> str:
             "table_counts": receipt.table_counts,
             "offboarding_set_sha256": receipt.offboarding_set_sha256,
             "receipt_sink": receipt.sink,
+            "secret_refs": receipt.secret_refs,
         },
         sort_keys=True,
     )
@@ -409,7 +502,7 @@ def run_cli(args: Any) -> int:
                 result = complete_offboarding(
                     conn, dataset_store(settings, service="operator"),
                     ops._configured_log(settings), workspace_id, operator=args.operator,
-                    environment=settings.app_env,
+                    environment=settings.app_env, secrets_file=Path(args.secrets_file),
                 )  # fmt: skip
             print(" ".join(f"{k}={v}" for k, v in result.items()))
             return 0

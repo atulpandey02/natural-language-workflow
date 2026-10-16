@@ -385,7 +385,8 @@ def test_objects_that_are_not_receipts_are_counted_never_read() -> None:
 def _ws_receipt(**over: object) -> WorkspaceReceipt:
     r = WorkspaceReceipt.for_workspace(
         sink=SINK, environment="local", tenant_id=T, dataset_ids=[D],
-        table_counts={"workflows": 2, "memberships": 1}, operator="op",
+        table_counts={"workflows": 2, "memberships": 1}, operator="op", secret_refs=1,
+        secret_store="environment-file",
     )  # fmt: skip
     return WorkspaceReceipt(**{**r.__dict__, **over})
 
@@ -484,3 +485,17 @@ def test_the_local_fake_keeps_workspace_receipts_apart(tmp_path: Path) -> None:
     )
     bad = {**json.loads(w.to_json()), "datasets_tombstoned": -1}
     assert not workspace_receipt_self_consistent(bad)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("secrets_verified_absent", False), ("secret_refs", 0), ("secret_refs", -1),
+     ("secret_store", 3)],
+)  # fmt: skip
+def test_the_secret_check_is_bound_into_the_workspace_receipt(field: str, value: Any) -> None:
+    from nlw.datasets.deletion_log import workspace_receipt_self_consistent
+
+    r = _ws_receipt()
+    record = json.loads(r.to_json())
+    assert workspace_receipt_self_consistent(record)
+    assert not workspace_receipt_self_consistent({**record, field: value})

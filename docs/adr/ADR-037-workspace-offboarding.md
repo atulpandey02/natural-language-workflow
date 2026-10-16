@@ -65,9 +65,19 @@ dataset and workspace tombstones. Their periods follow ADR-035.
 
 ## Consequences and limits
 
-- **Connector secrets** live in the secret store, which has no delete API
-  (`EnvironmentSecretStore`). `complete` reports `connector_secret_refs` (a
-  count); the operator removes those entries. Not automated, not verified.
+- **Connector secrets: a fail-closed operator step** (review of PR #70). The
+  secret store (`EnvironmentSecretStore`, the worker's secrets env file) has no
+  delete operation, so the operator removes every `NLW_SECRET_<WORKSPACE_HEX>_*`
+  entry and recreates the worker. `complete --secrets-file <that file>` is
+  required: it reads the file read-only before anything is purged and again in
+  the final transaction, and refuses while any entry of the workspace remains
+  or the file is not a readable regular file. The receipt binds
+  `secret_refs`, `secret_store: environment-file` and
+  `secrets_verified_absent: true` into its digest. Limits: it verifies the
+  file it is given (the operator names the store's real file; the
+  O-6 operator container mounts it read-only), not a worker process that was
+  not recreated; a store with a delete API would replace this step. Before
+  customer data, a store with verifiable deletion is still recommended.
 - **Users** are platform identities, not workspace data: a user who belonged
   only to this workspace keeps a `users` row (no workspace access).
 - **A run in flight** fails at its next transaction (its context no longer
@@ -78,3 +88,25 @@ dataset and workspace tombstones. Their periods follow ADR-035.
   leaves a receipt without a tombstone (reported); re-running `complete` writes
   a new one.
 - The customer-facing statement still awaits owner approval.
+
+## Independent review (PR #70) and fixes
+
+| Finding | Fix |
+|---|---|
+| Medium: the secret-store check missed forms `docker compose env_file` loads (`KEY: v`, a bare `KEY`, a UTF-8 BOM) | every such form counts; any other non-blank, non-comment line refuses `complete` (fail closed) |
+| Medium: `accept_workspace_invitation` (SECURITY DEFINER, no tenant context) could add a member to an OFFBOARDING workspace | it refuses a workspace that is not ACTIVE (0031); `request` also revokes pending invitations |
+| Low: the discovery policy still showed an OFFBOARDING workspace | `workspaces_app_select` adds `workspace_is_active(id)` (altered in place; 74 policies) |
+| Low: the scheduler's cross-tenant `workflow_runs` policies read and could create the workspace's runs; the reconciler would re-enqueue runs no worker can process | both policies add `workspace_is_active(tenant_id)`; `request` fails open runs (`error = WORKSPACE_OFFBOARDING`) |
+| Low: the retained delivery record kept where it was sent (`destination_summary`) | `complete` scrubs it to NULL (ids, status and times kept) |
+| Low: the receipt is written before the tombstone commits | documented above; `reconcile-receipts` reports such a receipt, re-running `complete` converges |
+| Sound | `workspace_is_active` (owner, `search_path`, grants, NULL id), the replaced functions and their exact downgrade, the state trigger, purge order and NOT NULL scopes, B unaffected |
+
+**Open owner decision:** `workspace_creation_grants` (a platform table) keeps
+the founder's normalized email with `consumed_workspace_id`, linking it to the
+tombstone. It is the operator's grant ledger; whether to scrub the email or the
+link on offboarding is a retention decision for the owner, not changed here.
+
+Not covered by the check: secrets injected into the worker by any other means
+than the named file (compose `environment:`, other env files). The runbook
+step also lists the worker's live variable names
+(`docker compose exec worker env | cut -d= -f1`, names only) after recreating it.

@@ -11,7 +11,8 @@ prints per-table row counts for one workspace (counts only, never values). It
 changes nothing.
 
     python -m nlw.ops.offboarding request  --workspace <uuid> --operator <name>
-    python -m nlw.ops.offboarding complete --workspace <uuid> --operator <name>
+    python -m nlw.ops.offboarding complete --workspace <uuid> --operator <name> \
+        --secrets-file <the secret store's env file>
     python -m nlw.ops.offboarding pending
 
 offboard a workspace (``nlw.ops.workspace_offboarding``, ADR-037): ``request``
@@ -197,6 +198,9 @@ def main(argv: list[str] | None = None) -> int:
         sp = sub.add_parser(name)
         sp.add_argument("--workspace", required=True)
         sp.add_argument("--operator", required=True)
+        if name == "complete":
+            # The secret store's file, read-only (ADR-037): fail closed.
+            sp.add_argument("--secrets-file", required=True)
     sub.add_parser("pending")
     args = p.parse_args(argv)
     if args.cmd in ("request", "complete", "pending"):

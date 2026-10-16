@@ -58,6 +58,10 @@ tenant_id                workspace id
 datasets_tombstoned      number of the workspace's datasets, all DELETED
 dataset_ids_sha256       SHA-256 over the sorted dataset ids (ids not exported)
 table_counts             rows removed per purged table (table name -> count)
+secret_refs              connector secret references the workspace had
+secret_store             the secret store checked (``environment-file``)
+secrets_verified_absent  always ``true``: the store held no entry of the
+                         workspace when the offboarding committed
 offboarding_set_sha256   SHA-256 over the canonical binding of the workspace,
                          its datasets and the table counts
 verified_absent          always ``true`` (written only once every purged table
@@ -175,16 +179,19 @@ def dataset_ids_digest(dataset_ids: list[uuid.UUID] | list[str]) -> str:
 
 def offboarding_set_digest(
     *, tenant_id: str, datasets_tombstoned: int, dataset_ids_sha256: str,
-    table_counts: dict[str, int],
+    table_counts: dict[str, int], secret_refs: int, secret_store: str,
 ) -> str:  # fmt: skip
     """The digest a workspace receipt attests: binds the workspace, its
-    datasets and the rows removed from each purged table."""
+    datasets, the rows removed from each purged table and the secret check."""
     canonical = json.dumps(
         {
             "tenant_id": tenant_id,
             "datasets_tombstoned": datasets_tombstoned,
             "dataset_ids_sha256": dataset_ids_sha256,
             "table_counts": table_counts,
+            "secret_refs": secret_refs,
+            "secret_store": secret_store,
+            "secrets_verified_absent": True,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -202,6 +209,9 @@ class WorkspaceReceipt:
     table_counts: dict[str, int]
     offboarding_set_sha256: str
     operator: str
+    secret_refs: int
+    secret_store: str
+    secrets_verified_absent: bool = True
     verified_absent: bool = True
     receipt_version: str = WORKSPACE_RECEIPT_VERSION
     receipt_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -211,6 +221,7 @@ class WorkspaceReceipt:
     def for_workspace(
         cls, *, sink: str, environment: str, tenant_id: uuid.UUID,
         dataset_ids: list[uuid.UUID], table_counts: dict[str, int], operator: str,
+        secret_refs: int, secret_store: str,
     ) -> WorkspaceReceipt:  # fmt: skip
         ids = dataset_ids_digest(dataset_ids)
         counts = {k: int(v) for k, v in sorted(table_counts.items())}
@@ -226,8 +237,12 @@ class WorkspaceReceipt:
                 datasets_tombstoned=len(dataset_ids),
                 dataset_ids_sha256=ids,
                 table_counts=counts,
+                secret_refs=secret_refs,
+                secret_store=secret_store,
             ),  # fmt: skip
             operator=operator,
+            secret_refs=secret_refs,
+            secret_store=secret_store,
         )
 
     def to_json(self) -> str:
@@ -261,6 +276,7 @@ def check_workspace_receipt(
         if (
             record.get("receipt_version") != WORKSPACE_RECEIPT_VERSION
             or record.get("verified_absent") is not True
+            or record.get("secrets_verified_absent") is not True
             or record.get("receipt_id") != expected.receipt_id
         ):
             return ReceiptCheck.MALFORMED
@@ -273,12 +289,17 @@ def check_workspace_receipt(
             isinstance(k, str) and type(v) is int and v >= 0 for k, v in counts.items()
         ):
             return ReceiptCheck.MALFORMED
-        datasets = record["datasets_tombstoned"]
-        if type(datasets) is not int or datasets < 0:
+        datasets, secret_refs = record["datasets_tombstoned"], record["secret_refs"]
+        if (
+            type(datasets) is not int or datasets < 0
+            or type(secret_refs) is not int or secret_refs < 0
+            or not isinstance(record["secret_store"], str)
+        ):  # fmt: skip
             return ReceiptCheck.MALFORMED
         recomputed = offboarding_set_digest(
             tenant_id=record["tenant_id"], datasets_tombstoned=datasets,
             dataset_ids_sha256=str(record["dataset_ids_sha256"]), table_counts=counts,
+            secret_refs=secret_refs, secret_store=record["secret_store"],
         )  # fmt: skip
         if (
             record["offboarding_set_sha256"] != expected.offboarding_set_sha256

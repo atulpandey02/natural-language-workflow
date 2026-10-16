@@ -38,7 +38,7 @@ prints one workspace's row counts per table; it changes nothing.
 | Messages already delivered to Slack | Slack workspace | **Cannot be recalled by NLW**; `external_actions` rows kept as the delivery record | Same | n/a |
 | Audit evidence (`authz_audit_events`) | PostgreSQL | Retained (ids, event types; never values) | Retained; tenant marker after the tombstone period (period proposed, not approved) | Dump retention |
 | Planner-outcome events (`plan_outcome_events`) | PostgreSQL | n/a | Retained (codes, buckets, counts; no text); proposed 13 months, **no retention job exists yet** | Dump retention |
-| Connector credentials | Secret store (the `connectors` row holds only a reference) | n/a | `connectors` row purged; secret versions scheduled for deletion in the store | Provider retention window |
+| Connector credentials | Secret store (the `connectors` row holds only a reference) | n/a | `connectors` row purged; the operator removes the workspace's entries from the store and `complete --secrets-file` refuses until none remain (recorded in the workspace receipt, ADR-037) | Provider retention window |
 | PostgreSQL backups | restic (client-side encrypted, immutable mode) | **Not edited** | **Not edited**; expire on the O-5 retention of 30 daily and 12 monthly recovery points ([ADR-035](../adr/ADR-035-phase2-retention-policy.md)) | — |
 | External deletion log (`deletion-receipt-2`, ADR-030; provider: S3 Object Lock, ADR-034, NOT RUN on AWS; local FAKE for development) | Outside PostgreSQL and its backups (see below) | One receipt per purged version (ids, digest, object count, hashed object refs, operator, time; no names or values) | One entry per offboarded workspace | Never rolled back by a restore |
 | Legal or operational retention exceptions | Recorded per case with the owner's approval | Deletion paused only for a recorded hold (legal request, active incident); never silently | Same | A hold never extends backup expiry beyond the configured schedule |
@@ -64,8 +64,9 @@ backups, in a dedicated S3 Object Lock bucket per environment
   `workspace-offboarding-receipt-1` per offboarded workspace; `reapply-receipts`
   moves a restored ACTIVE workspace back to OFFBOARDING (no runtime can reach
   it) before any runtime starts, and the operator re-runs `complete` after
-  enabling. Connector secrets in the secret store are removed by the operator
-  (counted by `complete`, not automated).
+  enabling. Connector secrets: `complete` refuses until the secret store file
+  (`--secrets-file`) holds no entry of the workspace, and records the check in
+  the receipt (ADR-037; the removal itself is an operator step).
 
 ## Customer-facing statement — AWAITING OWNER APPROVAL (plan §22)
 
