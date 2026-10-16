@@ -36,14 +36,15 @@ def test_every_policy_value_is_the_owner_decision() -> None:
     assert (r.RECEIPT_RETENTION_DAYS, r.AUDIT_RETENTION_DAYS) == (365, 365)
     assert (r.RECEIPT_EXPIRY_DAYS, r.AUDIT_EXPIRY_DAYS) == (366, 366)
     assert (r.DB_BACKUP_DAILY, r.DB_BACKUP_WEEKLY, r.DB_BACKUP_MONTHLY) == (30, 0, 12)
-    assert r.OBJECT_BACKUP_RETENTION_DAYS == 30
+    assert r.OBJECT_BACKUP_RETENTION_DAYS == 30 and r.RESTORE_COPY_EXPIRY_DAYS == 7
     assert r.PILOT_OBJECT_LOCK_MODE == "GOVERNANCE"
     assert r.CUSTOMER_DATA_OBJECT_LOCK_MODE == "COMPLIANCE"
     assert r.RECEIPT_EXPIRY_WARNING_DAYS == 30 and r.SWEEP_STALE_AFTER_S == 36 * 3600
     kinds = {rule.subject: rule.kind for rule in r.POLICY}
     assert kinds["REJECTED object"] == kinds["logically deleted bytes"] == "target"
     assert kinds["ACTIVE published source"] == kinds["deletion receipt"] == "guarantee"
-    assert len(r.POLICY) == 11
+    assert kinds["object-backup recovery copies"] == kinds["restored object copy"] == "guarantee"
+    assert len(r.POLICY) == 12
 
 
 # --- deadline arithmetic at every boundary ------------------------------------------
@@ -56,6 +57,7 @@ RETENTIONS = [
     r.RECEIPT_RETENTION_DAYS,
     r.AUDIT_RETENTION_DAYS,
     r.OBJECT_BACKUP_RETENTION_DAYS,
+    r.RESTORE_COPY_EXPIRY_DAYS,
     r.MULTIPART_ABORT_DAYS,
 ]
 DEADLINES = [r.REJECTED_PURGE_DAYS, r.DELETED_PURGE_DAYS]

@@ -44,7 +44,8 @@ an alert and never deletes anything by itself.
 | Deletion receipt | 365 days | guarantee | S3 Object Lock (GOVERNANCE) | default retention 365, lifecycle expiry at 366 |
 | CloudTrail data events (dataset and receipt buckets) | 365 days | guarantee | S3 Object Lock (GOVERNANCE) | `<AUDIT_RETENTION_DAYS>` = 365, expiry at 366 |
 | Database backups | 30 daily, 12 monthly recovery points | guarantee | backup job (`restic forget`) | `NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` = 30/0/12, refused otherwise |
-| Object-backup recovery copies | 30 days | guarantee (design constraint) | O-4 (not implemented) | to be implemented by O-4 |
+| Object-backup recovery copies | 30 days | guarantee | AWS Backup vault lock (O-4, [ADR-036](ADR-036-dataset-object-backup.md)) | continuous backup, point-in-time restore, exactly 30 days |
+| Restored object copy | 7 days | guarantee | S3 lifecycle (restore bucket) | expiry after the restore; `restore-objects` copies back what is still referenced |
 
 ## The distinct deletions
 
@@ -70,7 +71,9 @@ an alert and never deletes anything by itself.
 - **Database-backup retention**: restic keeps 30 daily and 12 monthly snapshots
   (no weekly tier). A restored snapshot may predate a deletion: the restore runs
   `reapply-receipts` before any runtime starts (ADR-034).
-- **Object-backup retention**: no object backup exists yet (O-4). When it does,
+- **Object-backup retention** (O-4, ADR-036): AWS Backup recovery points are
+  kept exactly 30 days, and a restore copies objects back only after every
+  receipt is re-applied (`restore-objects`). Before O-4 was decided:
   its recovery copies are kept 30 days, and a restore from them must likewise
   re-apply receipts.
 

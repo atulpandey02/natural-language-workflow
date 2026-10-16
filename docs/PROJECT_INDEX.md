@@ -3,6 +3,21 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Phase 2B — dataset object backup and restore, O-4 (branch `feat/o4-dataset-object-backup`, awaiting review; NOT RUN on AWS)
+
+Owner decision O-4 (2026-10-15, [ADR-036](adr/ADR-036-dataset-object-backup.md)):
+AWS Backup continuous backups of the dataset bucket (30-day point-in-time
+restore, vault lock) in the same account and us-east-1, restored into a
+separate 7-day restore bucket. Implemented and tested without AWS contact:
+
+- `restore-objects`: refused without the recovery lock and until every receipt
+  is re-applied; never restores DELETING, DELETED or REJECTED versions;
+  digest- and size-verified, write-once, never overwrites; bounded, idempotent.
+- Pinned templates ([dataset-object-backup-provisioning](runbooks/dataset-object-backup-provisioning.md),
+  NOT RUN); the D6 package is unchanged (O-4 key statements are a separate fragment).
+- Restore runbook step 6c and DR evidence `objects_step`; `verify-objects` no
+  longer fails on expected noncurrent versions.
+
 ## Phase 2B — retention policy, O-5, and O-3 cleanup (branch `chore/phase2-retention-o3-cleanup`, awaiting review; NOT RUN on AWS)
 
 Owner decision O-5 (2026-10-15, [ADR-035](adr/ADR-035-phase2-retention-policy.md)),

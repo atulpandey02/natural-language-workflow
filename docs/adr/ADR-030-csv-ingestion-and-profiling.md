@@ -218,8 +218,8 @@ external provider is a launch gate (owner decision O-3).
 ### Backup and restore
 
 - PostgreSQL backups hold metadata, profiles, semantics and events, never bytes
-  or storage credentials. Uploaded objects need their own durability and
-  restore policy (owner decision O-4).
+  or storage credentials. Uploaded objects have their own backup and restore
+  (owner decision O-4, [ADR-036](ADR-036-dataset-object-backup.md); NOT RUN on AWS).
 - `python -m nlw.ops.datasets verify-objects` reports missing objects, digest
   mismatches and unaccounted objects by id only. A database-only restore
   therefore shows its live versions as missing objects; it never presents them
@@ -239,7 +239,7 @@ external provider is a launch gate (owner decision O-3).
 | O-1 | ingest role |
 | O-2 | S3 client and per-environment bucket |
 | O-3 | external deletion-log provider: **decided 2026-10-14** ([ADR-034](ADR-034-external-deletion-receipt-log.md), S3 Object Lock; NOT RUN on AWS) |
-| O-4 | object backup and restore |
+| O-4 | object backup and restore: **decided 2026-10-15** ([ADR-036](ADR-036-dataset-object-backup.md); NOT RUN on AWS) |
 | O-5 | retention periods: **decided 2026-10-15** ([ADR-035](ADR-035-phase2-retention-policy.md); NOT RUN on AWS) |
 | O-6 | enabling the flag outside development |
 

@@ -54,6 +54,11 @@ action; nothing in the M11.5 P2 package performs it.
       unreadable receipt, no unexpected object). Where no deletion log is configured (uploads were
       never enabled) and offboarding does not exist, record
       `deletion_log_step: not_applicable_no_offboarding_yet` — never "applied".
+- [ ] **Dataset objects** (ADR-036): after the deletion log step, restore the
+      objects (step 6c of [dr-fresh-host-restore](dr-fresh-host-restore.md))
+      and record `objects_step: restored_and_verified` only when
+      `restore-objects` and `verify-objects` both exited 0. Where no dataset
+      store is configured, record `objects_step: not_applicable_no_dataset_store`.
 
 ## Record & decide
 
