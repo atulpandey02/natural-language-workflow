@@ -44,7 +44,7 @@ from nlw.observability.metrics import set_dataset_s3_credential_expiry
 
 log = structlog.get_logger(__name__)
 
-Service = Literal["api", "ingest", "operator"]
+Service = Literal["api", "ingest", "operator", "restore"]
 MIN_REMAINING_S = 300
 CREDENTIALS_ENV = "AWS_SHARED_CREDENTIALS_FILE"
 STATIC_ENV = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")

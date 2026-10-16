@@ -13,12 +13,22 @@ OWNER credential ``DATABASE_MIGRATION_URL``, exactly like ``python -m nlw.ops.gr
     python -m nlw.ops.datasets purge-rejected --operator <name> [--dry-run] [--limit N]
     python -m nlw.ops.datasets reconcile-receipts [--metrics-file PATH]
     python -m nlw.ops.datasets reapply-receipts [--dry-run]
+    python -m nlw.ops.datasets restore-objects [--dry-run] [--limit N] [--after VERSION_ID]
     python -m nlw.ops.datasets retention-status [--metrics-file PATH]
     python -m nlw.ops.datasets retention-sweep --operator <name> [--dry-run] [--limit N]
                                               [--metrics-file PATH]
 
 ``retention-sweep`` / ``retention-status`` apply and report the O-5 retention
 policy (ADR-035; ``nlw.ops.dataset_retention``).
+
+``restore-objects`` (O-4, ADR-036) is a RESTORE step, after ``reapply-receipts``
+and before ``enable-runtime``: it copies back, from the bucket AWS Backup
+restored a point in time into, each object the restored database still
+references (never a DELETING, DELETED or REJECTED version), verified against
+its recorded SHA-256 before it is written write-once. Present objects are left
+alone; a mismatch is reported, never overwritten. It runs as the restore role
+(``nlw-<env>-dataset-restore``), which reads the deletion log but never writes
+it; each run is one bounded page, continued with ``--after <next>``.
 
 ``reconcile-receipts`` (ADR-034) checks every recorded purge against its
 receipt in the configured deletion log, and lists receipts no purge event names
@@ -768,7 +778,7 @@ def _self_consistent(record: dict[str, Any], ref: ReceiptRef, sink: str) -> bool
     )
 
 
-def _require_recovery_locked(conn: psycopg.Connection[Any]) -> None:
+def _require_recovery_locked(conn: psycopg.Connection[Any], command: str) -> None:
     from nlw.backup.recovery_lock import (
         RecoveryLocked,
         RecoveryStateUnknown,
@@ -781,9 +791,7 @@ def _require_recovery_locked(conn: psycopg.Connection[Any]) -> None:
         return
     except RecoveryStateUnknown:
         raise TombstoneError("refused: the recovery lock state is unknown") from None
-    raise TombstoneError(
-        "reapply-receipts runs only while the recovery lock holds a restored database"
-    )
+    raise TombstoneError(f"{command} runs only while the recovery lock holds a restored database")
 
 
 _REAPPLY_COUNTS = (
@@ -807,7 +815,7 @@ def reapply_receipts(
     in its own transaction; ``progress`` (if given) holds the counts so far, so
     a run stopped by an operational failure reports its partial progress as
     counts only. Re-running is safe (idempotent)."""
-    _require_recovery_locked(conn)
+    _require_recovery_locked(conn, "reapply-receipts")
     try:
         refs = sorted(set(log.refs()))
     except DeletionLogUnavailable as exc:
@@ -901,6 +909,118 @@ def _reapply_one(
         return outcome
 
 
+# --- object restore (O-4, ADR-036) ------------------------------------------------
+
+RESTORE_BATCH = 500
+_SQL_RESTORE_CANDIDATES = (
+    "SELECT id, status, storage_object_key, content_sha256, declared_size_bytes "
+    "FROM dataset_versions WHERE storage_object_key IS NOT NULL "
+    "AND status NOT IN ('DELETING', 'DELETED') "
+    "AND (%(after)s::uuid IS NULL OR (created_at, id) > "
+    "(SELECT created_at, id FROM dataset_versions WHERE id = %(after)s::uuid)) "
+    "ORDER BY created_at, id LIMIT %(limit)s"
+)
+_LIVE = ("QUARANTINED", "PROFILING", "PROFILED", "ACTIVE", "SUPERSEDED", "REJECTED")
+
+
+def _require_receipts_reapplied(conn: psycopg.Connection[Any], log: DeletionLog) -> None:
+    """Every deletion the external log proves must already be re-applied, so a
+    purged object can never be resurrected by a backup taken before its purge."""
+    if isinstance(log, UnconfiguredDeletionLog):
+        return  # no log: no purge was ever possible in this environment
+    try:
+        refs = list(log.refs())
+    except DeletionLogUnavailable as exc:
+        raise TombstoneError(str(exc)) from None
+    for ref in refs:
+        row = conn.execute(
+            "SELECT status FROM dataset_versions WHERE id = %s AND dataset_id = %s "
+            "AND tenant_id = %s",
+            (ref.version_id, ref.dataset_id, ref.tenant_id),
+        ).fetchone()
+        if row is not None and row[0] in _LIVE:
+            raise TombstoneError(
+                "a deletion receipt is not yet re-applied: run reapply-receipts first"
+            )
+
+
+def restore_objects(
+    conn: psycopg.Connection[Any],
+    source: BlobStore,
+    dest: BlobStore,
+    log: DeletionLog,
+    *,
+    max_bytes: int,
+    dry_run: bool = False,
+    limit: int = RESTORE_BATCH,
+    after: str | None = None,
+) -> dict[str, Any]:
+    """Copy missing objects back from the restore bucket (see the module
+    docstring). One bounded page, oldest first, after version ``after``;
+    ``next`` is the cursor for the following page (empty when none is left).
+    Idempotent (a present, matching object counts as ``present``). Counts,
+    plus version ids for every case an operator must look at."""
+    limit = _bounded(limit)
+    _require_recovery_locked(conn, "restore-objects")
+    _require_receipts_reapplied(conn, log)
+    if after is not None:
+        try:
+            after = str(uuid.UUID(after))
+        except ValueError:
+            raise TombstoneError("--after must be a version id") from None
+        if (
+            conn.execute("SELECT 1 FROM dataset_versions WHERE id = %s", (after,)).fetchone()
+            is None
+        ):
+            raise TombstoneError("--after names no dataset version")
+    rows = conn.execute(_SQL_RESTORE_CANDIDATES, {"after": after, "limit": limit + 1}).fetchall()
+    more, rows = len(rows) > limit, rows[:limit]
+    cursor = str(rows[-1][0]) if more else ""
+    counts = dict.fromkeys(("present", "restored", "rejected_skipped"), 0)
+    problems: dict[str, list[str]] = {
+        "missing_in_backup": [],
+        "backup_mismatch": [],
+        "present_mismatch": [],
+        "no_digest": [],
+    }
+    for vid, status, key, digest, size in rows:
+        if status == "REJECTED":
+            counts["rejected_skipped"] += 1  # purged by retention, never restored
+            continue
+        if digest is None:
+            problems["no_digest"].append(str(vid))
+            continue
+        if dest.exists(key):
+            bucket = "present" if dest.digest(key)[1] == digest else "present_mismatch"
+            if bucket == "present":
+                counts["present"] += 1
+            else:
+                problems["present_mismatch"].append(str(vid))
+            continue
+        if not source.exists(key):
+            problems["missing_in_backup"].append(str(vid))
+            continue
+        if source.digest(key) != (size, digest):
+            problems["backup_mismatch"].append(str(vid))
+            continue
+        if dry_run:
+            counts["restored"] += 1
+            continue
+        with source.open(key) as stream:
+            written = dest.put_stream(key, stream, max_bytes=max_bytes, expected_size=size)
+        if written != (size, digest):  # pragma: no cover - verified before writing
+            problems["present_mismatch"].append(str(vid))
+            continue
+        counts["restored"] += 1
+    return {**counts, **problems, "more": int(more), "next": cursor, "dry_run": int(dry_run)}
+
+
+def restore_failed(result: dict[str, Any]) -> bool:
+    return any(
+        result[k] for k in ("missing_in_backup", "backup_mismatch", "present_mismatch", "no_digest")
+    )
+
+
 # --- restore validation --------------------------------------------------------
 
 
@@ -986,6 +1106,43 @@ def _configured_log(settings: Settings) -> DeletionLog:
         raise TombstoneError(str(exc)) from None
 
 
+def restore_receipt_log(settings: Settings) -> DeletionLog:
+    """The deletion log as the restore role reads it: listing only, never a
+    write (the restore role is granted no receipt write, ADR-036)."""
+    if settings.dataset_deletion_log != "s3":
+        return _configured_log(settings)
+    from nlw.datasets.deletion_log_s3 import S3DeletionLog
+    from nlw.storage.s3_credentials import build_clients
+
+    assert settings.dataset_deletion_log_bucket  # validated
+    try:
+        client, _ = build_clients(settings, "restore")
+    except CredentialError as exc:
+        raise TombstoneError(str(exc)) from None
+    return S3DeletionLog(client, settings.dataset_deletion_log_bucket)
+
+
+def _restore_objects_cli(
+    args: argparse.Namespace, conn: psycopg.Connection[Any], settings: Settings
+) -> int:
+    from nlw.storage.factory import restore_source_store
+
+    if settings.dataset_storage_backend != "s3" or not settings.dataset_restore_bucket:
+        raise TombstoneError(
+            "restore-objects needs the S3 dataset store and DATASET_RESTORE_BUCKET"
+        )
+    source = restore_source_store(settings)
+    dest = dataset_store(settings, service="restore")
+    assert source is not None and dest is not None
+    result = restore_objects(
+        conn, source, dest, restore_receipt_log(settings),
+        max_bytes=settings.dataset_max_upload_bytes, dry_run=args.dry_run,
+        limit=args.limit, after=args.after,
+    )  # fmt: skip
+    print(_summary(result))
+    return 1 if restore_failed(result) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m nlw.ops.datasets")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1005,6 +1162,10 @@ def main(argv: list[str] | None = None) -> int:
     rr.add_argument("--metrics-file", default=None)
     ra = sub.add_parser("reapply-receipts")
     ra.add_argument("--dry-run", action="store_true")
+    ro = sub.add_parser("restore-objects")
+    ro.add_argument("--dry-run", action="store_true")
+    ro.add_argument("--limit", type=int, default=RESTORE_BATCH)
+    ro.add_argument("--after", default=None)
     rs = sub.add_parser("retention-status")
     rs.add_argument("--metrics-file", default=None)
     sw = sub.add_parser("retention-sweep")
@@ -1146,6 +1307,9 @@ def _run(args: argparse.Namespace, progress: dict[str, int]) -> int:
             if args.metrics_file:
                 dr.write_textfile(args.metrics_file, dr.status_metrics(status))
             return 0
+        if args.cmd == "restore-objects":
+            # The restore role only: never the operator credentials (ADR-036).
+            return _restore_objects_cli(args, conn, settings)
         store = dataset_store(settings, service="operator")
         if args.cmd == "retention-sweep":
             return _retention_sweep(args, conn, store, settings, progress)
@@ -1155,7 +1319,9 @@ def _run(args: argparse.Namespace, progress: dict[str, int]) -> int:
             report = verify_objects(conn, store)
             for key, ids in report.items():
                 print(f"{key}={len(ids)}" + ("" if not ids else " " + ",".join(ids)))
-            return 0 if not any(report.values()) else 1
+            # Noncurrent versions are expected for up to 30 days (O-5 lifecycle):
+            # reported, never a failure.
+            return 1 if any(v for k, v in report.items() if k != "noncurrent_versions") else 0
         log = _configured_log(settings)
         if args.cmd == "purge-rejected":
             rej = purge_rejected(

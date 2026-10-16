@@ -185,7 +185,9 @@ python -m nlw.ops.datasets reconcile-receipts \
   staging or production (both are refused), and never point dataset storage at
   the backup repository (refused).
 
-Retention periods (how soon after a request the purge and tombstone run, and
-how long tombstones, events and receipts are kept) are not set. They are pilot
-proposals awaiting owner approval (owner decision O-5; see
-[offboarding-and-deletion](../security/offboarding-and-deletion.md)).
+Retention periods are set by owner decision O-5
+([ADR-035](../adr/ADR-035-phase2-retention-policy.md)): bytes are purged within 7
+days of a request, receipts and audit events are kept 365 days, object backups
+30 days (O-4, [ADR-036](../adr/ADR-036-dataset-object-backup.md)). How long
+tombstones and lifecycle events are kept in the database follows the database
+backup retention; the tombstone itself stays an operator step.
