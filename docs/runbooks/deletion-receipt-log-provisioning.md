@@ -270,16 +270,15 @@ refused in staging and production.
   that version to DELETING during a restore. The operator can already request
   any deletion, so this grants no new power over data, but it is a path that
   does not go through the API. Receipts are attributable (the `operator`
-  label, and `PutObject` data events once the trail covers this bucket; see
-  below).
+  label, and the `PutObject` data event, §8).
 - **Objects that are not receipts** (a misfiled key under `receipts/`) are
   never read; `reconcile-receipts` and `reapply-receipts` report their count
   as `unexpected_objects` and exit 1 so an operator investigates. They cannot
   be removed during retention.
-- **CloudTrail does not yet cover this bucket.** The reviewed trail
-  (`dataset-s3-provisioning.md` §4) records data events for the dataset
-  bucket only. Adding this bucket is a pinned-template change for the next
-  provisioning review.
+- **CloudTrail coverage depends on applying §8.** Until the audit
+  administrator applies `trail-advanced-event-selectors-all-buckets`, the
+  trail records the dataset bucket only. Bucket-level listings are the same
+  open question as for the dataset bucket (E13).
 - **Receipt without event** (ADR-033 note 3) remains possible: the receipt is
   written before the purge transaction commits. `reconcile-receipts` lists
   such receipts; they are evidence of a deletion attempt, not a completed purge.
@@ -296,3 +295,91 @@ refused in staging and production.
 5. Restore drill: restore a snapshot taken before step 1 into a locked
    database, run `reapply-receipts`, and confirm the version is DELETING with
    `RESTORE_REAPPLY` evidence before any runtime starts.
+6. CloudTrail (§8): `aws cloudtrail get-event-selectors --trail-name <TRAIL_ARN>`
+   returns exactly `trail-advanced-event-selectors-all-buckets`; the
+   `PutObject` of step 1, the `GetObject` of step 3 (denied) and the denied
+   `DeleteObject` of step 2 each appear as a data event in `<AUDIT_BUCKET>`
+   under `dataset-data-events`, attributed to the calling role; `aws
+   cloudtrail validate-logs` passes for the period. In the O-4 restore drill
+   (where provisioned): the backup service's `PutObject` into
+   `<RESTORE_BUCKET>` and the restore role's `GetObject` from it appear too,
+   and every `PutObject` by the restore role in `<BUCKET>` names a version
+   `restore-objects` reported as `restored`.
+
+## 8. CloudTrail data events for the receipt and restore buckets
+
+Every object call on the three buckets that hold dataset bytes or their
+evidence is recorded by the environment's existing data-event trail,
+`nlw-<ENV>-dataset-data-events` (`dataset-s3-provisioning.md` §4):
+
+- the **dataset bucket** (`<BUCKET>`, the reviewed D6 selector);
+- the **deletion-receipt bucket** (`<RECEIPT_BUCKET>`): the operator's write,
+  a reader's or the restore role's read, any refused delete or retention change;
+- the **restore bucket** (`<RESTORE_BUCKET>`, O-4,
+  [ADR-036](../adr/ADR-036-dataset-object-backup.md)): the backup service's
+  writes during a restore and the restore role's reads.
+
+No new trail, audit bucket or audit key: the events land in `<AUDIT_BUCKET>`
+under the same prefix, encrypted with the same audit key, kept 365 days by the
+same Object Lock retention and lifecycle (O-5, `AUDIT_RETENTION_DAYS`), and
+readable by the same audit reader.
+
+`PutEventSelectors` **replaces** a trail's selectors, so the audit
+administrator applies this complete set, never one selector alone, and never
+a subset. Its first selector is the reviewed dataset selector, unchanged byte
+for byte; each of the others covers object-level reads and writes under one
+bucket, with no `readOnly`, event-name or exclusion filter. A selector for a
+bucket that does not exist yet (no O-4 restore bucket) records nothing and
+does no harm, so the same set applies whatever is provisioned. The D6 proof
+account, which has neither bucket, keeps `trail-advanced-event-selectors` as
+reviewed. `tests/unit/test_deletion_receipt_templates.py` fails if a selector
+is removed, narrowed or reordered, or if a bucket that holds objects in these
+runbooks has no selector.
+
+<!-- template: trail-advanced-event-selectors-all-buckets -->
+```json
+[{
+  "Name": "nlw-<ENV>-dataset-object-reads-and-writes",
+  "FieldSelectors": [
+    {"Field": "eventCategory", "Equals": ["Data"]},
+    {"Field": "resources.type", "Equals": ["AWS::S3::Object"]},
+    {"Field": "resources.ARN", "StartsWith": ["arn:aws:s3:::<BUCKET>/"]}
+  ]
+},
+{
+  "Name": "nlw-<ENV>-deletion-receipt-reads-and-writes",
+  "FieldSelectors": [
+    {"Field": "eventCategory", "Equals": ["Data"]},
+    {"Field": "resources.type", "Equals": ["AWS::S3::Object"]},
+    {"Field": "resources.ARN", "StartsWith": ["arn:aws:s3:::<RECEIPT_BUCKET>/"]}
+  ]
+},
+{
+  "Name": "nlw-<ENV>-restore-copy-reads-and-writes",
+  "FieldSelectors": [
+    {"Field": "eventCategory", "Equals": ["Data"]},
+    {"Field": "resources.type", "Equals": ["AWS::S3::Object"]},
+    {"Field": "resources.ARN", "StartsWith": ["arn:aws:s3:::<RESTORE_BUCKET>/"]}
+  ]
+}]
+```
+
+- **Who applies it:** the audit administrator (`<AUDIT_ADMIN_ROLE>`), the only
+  role allowed `cloudtrail:PutEventSelectors` on `<TRAIL_ARN>`; every dataset
+  role, the operator included, is denied every trail change
+  (`NeverAlterAnyTrail`).
+- **When:** in the same provisioning review that creates `<RECEIPT_BUCKET>`,
+  before the first receipt is written, and again (unchanged) when O-4 creates
+  `<RESTORE_BUCKET>`, before the first restore.
+- **After every restore:** every `PutObject` by `nlw-<ENV>-dataset-restore` in
+  the dataset bucket must name a version `restore-objects` reported as
+  `restored` ([dataset-object-backup-provisioning](dataset-object-backup-provisioning.md) §9).
+- **Not the audit bucket itself:** recording the trail's own writes into
+  `<AUDIT_BUCKET>` would feed back on itself; its log files are protected by
+  Object Lock and checked by log-file validation (`aws cloudtrail validate-logs`).
+- **Management events** on the buckets (policy, Object Lock, lifecycle and
+  versioning changes) are not data events; they rely on the account-level
+  management trail, the same assumption as for the dataset bucket (§4 there).
+- **Not verified here (NOT RUN):** that AWS accepts three selectors with these
+  shapes, and that a request AWS denies on a receipt is recorded; both are
+  verification step 6.
