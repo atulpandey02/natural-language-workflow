@@ -1,0 +1,176 @@
+# O-6 dormant dataset overlay (ADR-038). NOT USED BY THE ROLLOUT.
+#
+# The reviewed rollout renders docker-compose.prod.yml + docker-compose.staging.yml
+# only (nlw.ops.rollout.remote). This file is the reviewed, inert configuration
+# the later, separately authorized enablement adds on top:
+#
+#   docker compose -p app --env-file .env.prod --env-file .env.datasets \
+#     -f docker-compose.prod.yml -f docker-compose.staging.yml \
+#     -f docker-compose.datasets.yml config
+#
+# Dormant by construction:
+#   - DATASETS_API_ENABLED is "false" and staging/production configuration
+#     refuses "true" (nlw.core.config); with the flag off the API builds no
+#     dataset store and mounts no dataset route, so its credential mount is unused;
+#   - ingest and ingest-dispatch run only under the `datasets` profile, and their
+#     roles stay NOLOGIN (the rollout gate expects `fff`) until enablement;
+#   - the operator runs only under the `operator` profile, as a one-shot command;
+#   - Prometheus keeps the reviewed prometheus.yml until enablement swaps in
+#     docker/prometheus/prometheus.datasets.yml (dataset alerts + dispatch target).
+#
+# Credentials (dataset-s3-provisioning.md §5): per-container, short-lived files
+# written by the host refresher (scripts/ops/nlw_aws_credential_refresh.py) on
+# tmpfs under /run/nlw/aws/<service>/; each container mounts only its own
+# directory, read-only. No static keys, no IMDS. The dispatcher, worker,
+# scheduler and web get no AWS mount.
+
+x-dataset-hardening: &dataset-hardening
+  image: ${NLW_IMAGE:?set NLW_IMAGE to the GHCR image digest}
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+  mem_limit: 512m
+  cpus: 1.0
+  pids_limit: 256
+  networks:
+    - internal
+
+x-dataset-store: &dataset-store
+  DATASET_STORAGE_BACKEND: s3
+  DATASET_S3_BUCKET: ${NLW_DATASET_S3_BUCKET:?NLW_DATASET_S3_BUCKET is required}
+  DATASET_S3_REGION: us-east-1
+  DATASET_S3_KMS_KEY_ARN: ${NLW_DATASET_S3_KMS_KEY_ARN:?NLW_DATASET_S3_KMS_KEY_ARN is required}
+  DATASET_S3_PREFIX: versions
+  AWS_SHARED_CREDENTIALS_FILE: /run/nlw/aws/credentials
+  AWS_EC2_METADATA_DISABLED: "true"
+
+services:
+  api:
+    environment:
+      <<: *dataset-store
+      # Refused as "true" in staging/production until the enablement PR (O-6).
+      DATASETS_API_ENABLED: "false"
+    user: "10001:10001"
+    volumes:
+      - /run/nlw/aws/api:/run/nlw/aws:ro
+
+  # Mounted only when this overlay is used (the enablement): the reviewed
+  # config plus the dataset alerts and targets.
+  prometheus:
+    volumes:
+      - ./docker/prometheus/prometheus.datasets.yml:/etc/prometheus/prometheus.yml:ro
+
+  ingest:
+    <<: *dataset-hardening
+    profiles: ["datasets"]
+    # Its own runtime user (R7, o2-aws-policy-review): never the API's uid.
+    user: "10002:10002"
+    init: true
+    command:
+      ["dramatiq", "nlw.ingest_service.actors", "--queues", "dataset_ingest",
+       "--processes", "1", "--threads", "1"]
+    stop_grace_period: 180s
+    environment:
+      <<: *dataset-store
+      APP_ENV: staging
+      LOG_LEVEL: info
+      DATABASE_URL: ${INGEST_DATABASE_URL:?INGEST_DATABASE_URL is required (nlw_ingest)}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
+      NLW_CTX_KEY_ID: ${NLW_CTX_INGEST_KEY_ID:?NLW_CTX_INGEST_KEY_ID is required}
+      NLW_CTX_KEY_FILE: /run/nlw/keys/ingest.key
+    volumes:
+      - ${NLW_CTX_KEYS_DIR:?NLW_CTX_KEYS_DIR is required}/ingest.key:/run/nlw/keys/ingest.key:ro
+      - /run/nlw/aws/ingest:/run/nlw/aws:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "nlw.ops.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  ingest-dispatch:
+    <<: *dataset-hardening
+    profiles: ["datasets"]
+    user: "10003:10003"
+    init: true
+    command: ["python", "-m", "nlw.ingest_dispatch.dispatcher"]
+    stop_grace_period: 30s
+    environment:
+      APP_ENV: staging
+      LOG_LEVEL: info
+      DATABASE_URL: ${INGEST_DISPATCH_DATABASE_URL:?INGEST_DISPATCH_DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "nlw.ops.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # One-shot operator commands (purge, tombstone, receipts, retention, restore
+  # objects, offboarding), run by an operator or the retention timer:
+  #   ... --profile operator run --rm --no-deps operator python -m nlw.ops.datasets ...
+  # The only holder of the owner credential besides `migrate`; the operator
+  # role's credential file is supplied per session (human trust, never IMDS).
+  operator:
+    <<: *dataset-hardening
+    profiles: ["operator"]
+    restart: "no"
+    user: "10004:10004"
+    command: ["python", "-m", "nlw.ops.datasets", "pending"]
+    environment:
+      <<: *dataset-store
+      APP_ENV: staging
+      LOG_LEVEL: info
+      DATABASE_MIGRATION_URL: ${DATABASE_MIGRATION_URL:?DATABASE_MIGRATION_URL is required}
+      DATASET_DELETION_LOG: s3
+      DATASET_DELETION_LOG_BUCKET: ${NLW_DELETION_LOG_BUCKET:?NLW_DELETION_LOG_BUCKET is required}
+    volumes:
+      - /run/nlw/aws/operator:/run/nlw/aws:ro
+      - datasets_textfile:/var/lib/node_exporter/textfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Dataset metrics exporter: serves the operator's textfiles (retention,
+  # receipts) READ-ONLY. Separate from the backup exporter, whose volume has the
+  # backup job as its only writer. Textfile collector only, as there.
+  node-exporter-datasets:
+    image: prom/node-exporter:v1.12.1
+    profiles: ["datasets"]
+    restart: unless-stopped
+    user: "65534:65534"
+    command:
+      - --collector.disable-defaults
+      - --collector.textfile
+      - --collector.textfile.directory=/textfile
+      - --web.listen-address=:9100
+    volumes:
+      - datasets_textfile:/textfile:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    expose:
+      - "9100"
+    networks:
+      - internal
+
+volumes:
+  datasets_textfile:
