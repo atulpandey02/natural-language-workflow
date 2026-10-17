@@ -16,6 +16,7 @@ from typing import Literal
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -128,6 +129,13 @@ async def get_tenant_context(
     if membership is None:
         # Same response whether the workspace is foreign or nonexistent.
         raise HTTPException(status.HTTP_403_FORBIDDEN, "not a member of the workspace")
+    # ADR-037: an offboarding workspace is unreachable. The database enforces it
+    # for every tenant policy (``ctx_tenant_id()``); this answers clearly.
+    active = (
+        await session.execute(text("SELECT public.workspace_is_active(:w)"), {"w": workspace_id})
+    ).scalar_one()
+    if not active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "the workspace is unavailable")
     ctx = TenantContext(user_id=user.id, tenant_id=workspace_id, role=Role(membership.role))
     await set_request_context(session, get_ctx_signer(request, Purpose.API_REQUEST), ctx)
     return ctx

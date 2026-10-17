@@ -82,7 +82,7 @@ A and B is closed by an owner-approved change.
 
 - The customer deletion statement is approved and published (owner decision,
   [offboarding-and-deletion](../security/offboarding-and-deletion.md)).
-- Workspace offboarding purge exists and covers dataset objects.
+- Workspace offboarding purge exists and covers dataset objects (ADR-037; implemented, NOT RUN in staging).
 - An independent security review of the upload path, the profiler process and
   the object store policy is complete.
 - The real-provider, fresh-host DR drill (Phase 2 B03) includes object restore

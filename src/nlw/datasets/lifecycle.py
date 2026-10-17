@@ -121,6 +121,9 @@ class ReasonCode(enum.StrEnum):
     # 0030 (ADR-035): ``retention-sweep`` moves an unpublished or superseded
     # version to DELETING once its 30-day retention has ended.
     INACTIVE_RETENTION = "INACTIVE_RETENTION"
+    # 0031 (ADR-037): the operator's ``offboard request`` moves every dataset of
+    # the workspace to DELETING with the workspace.
+    WORKSPACE_OFFBOARDING = "WORKSPACE_OFFBOARDING"
 
 
 class ActorKind(enum.StrEnum):

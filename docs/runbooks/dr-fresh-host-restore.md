@@ -114,8 +114,13 @@ start. See [ADR-022](../adr/ADR-022-encrypted-offhost-backup-dr.md).
    ```
    `reapply-receipts` refuses to run unless the recovery lock is active. It
    moves each version a receipt proves deleted to `DELETING` (reason
-   `RESTORE_REAPPLY`), records the receipt as its purge evidence, and is
-   idempotent. Exit 1 lists `conflict` (content digest differs; nothing changed)
+   `RESTORE_REAPPLY`), records the receipt as its purge evidence, moves each
+   workspace a workspace receipt proves offboarded back to `OFFBOARDING`
+   (ADR-037; no runtime can reach it), and is idempotent. After step 7, run
+   `python -m nlw.ops.offboarding pending` and `complete --secrets-file <the
+   worker's secrets env file>` (after removing that workspace's entries, recreating the
+   worker and confirming `docker compose exec worker env | cut -d= -f1` lists none) for each listed
+   workspace. Exit 1 also lists `workspace_unreadable` workspace ids. Exit 1 lists `conflict` (content digest differs; nothing changed)
    or `unreadable` (receipt not trustworthy; nothing changed) version ids, or
    counts `unexpected_objects` (objects in the log that are not receipts; never
    read): investigate before enabling. Exit 2 is a refusal (lock, listing or

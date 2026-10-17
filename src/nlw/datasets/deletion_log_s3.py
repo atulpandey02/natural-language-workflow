@@ -5,6 +5,7 @@ One immutable object per receipt in a DEDICATED bucket
 dataset bucket, the audit bucket and the database backups:
 
     receipts/<workspace>/<dataset>/<version>/<receipt_id>.json
+    receipts/<workspace>/workspace/<receipt_id>.json   (offboarding, ADR-037)
 
 - ``append`` writes the canonical ``deletion-receipt-2`` JSON exactly once:
   ``If-None-Match: *`` (never over an existing receipt), a SHA-256 checksum S3
@@ -43,9 +44,13 @@ from nlw.datasets.deletion_log import (
     DeletionLogUnavailable,
     DeletionReceipt,
     ExpectedReceipt,
+    ExpectedWorkspaceReceipt,
     ReceiptCheck,
     ReceiptRef,
+    WorkspaceReceipt,
+    WorkspaceReceiptRef,
     check_receipt,
+    check_workspace_receipt,
 )
 
 PREFIX = "receipts/"
@@ -66,6 +71,8 @@ _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _KEY = re.compile(
     rf"receipts/(?P<t>{_UUID})/(?P<d>{_UUID})/(?P<v>{_UUID})/(?P<r>[A-Za-z0-9._:-]{{1,128}})\.json"
 )
+# The literal segment can never be mistaken for a dataset id.
+_WS_KEY = re.compile(rf"receipts/(?P<t>{_UUID})/workspace/(?P<r>[A-Za-z0-9._:-]{{1,128}})\.json")
 
 
 _NOT_ASKED = "the deletion log listing is not what was asked for"
@@ -105,6 +112,12 @@ def receipt_key(ref: ReceiptRef) -> str:
     if not RECEIPT_ID.fullmatch(ref.receipt_id):
         raise DeletionLogUnavailable("malformed receipt id")
     return f"{PREFIX}{ref.tenant_id}/{ref.dataset_id}/{ref.version_id}/{ref.receipt_id}.json"
+
+
+def workspace_receipt_key(ref: WorkspaceReceiptRef) -> str:
+    if not RECEIPT_ID.fullmatch(ref.receipt_id):
+        raise DeletionLogUnavailable("malformed receipt id")
+    return f"{PREFIX}{ref.tenant_id}/workspace/{ref.receipt_id}.json"
 
 
 def _code(exc: BaseException) -> tuple[str, int]:
@@ -227,8 +240,16 @@ class S3DeletionLog:
         )
         if receipt.sink != self.sink_id:
             raise DeletionLogUnavailable("the receipt names another sink")
-        key = receipt_key(ref)
-        body = receipt.to_json().encode()
+        return self._put_once(receipt_key(ref), receipt.to_json().encode(), receipt.receipt_id)
+
+    def append_workspace(self, receipt: WorkspaceReceipt) -> str:
+        ref = WorkspaceReceiptRef(uuid.UUID(receipt.tenant_id), receipt.receipt_id)
+        if receipt.sink != self.sink_id:
+            raise DeletionLogUnavailable("the receipt names another sink")
+        key = workspace_receipt_key(ref)
+        return self._put_once(key, receipt.to_json().encode(), receipt.receipt_id)
+
+    def _put_once(self, key: str, body: bytes, receipt_id: str) -> str:
         checksum = _sha256_b64(body)
         try:
             put = self._s3.put_object(
@@ -259,13 +280,18 @@ class S3DeletionLog:
             raise DeletionLogUnavailable("the stored receipt does not match what was written")
         if not _retained(head, datetime.now(UTC)):
             raise DeletionLogUnavailable("the receipt was stored without Object Lock retention")
-        return receipt.receipt_id
+        return receipt_id
 
     # --- read -----------------------------------------------------------------------
 
-    def _fetch(self, ref: ReceiptRef) -> tuple[dict[str, Any] | None, ReceiptCheck]:
+    def _fetch(
+        self, ref: ReceiptRef | WorkspaceReceiptRef
+    ) -> tuple[dict[str, Any] | None, ReceiptCheck]:
         try:
-            key = receipt_key(ref)
+            if isinstance(ref, WorkspaceReceiptRef):
+                key = workspace_receipt_key(ref)
+            else:
+                key = receipt_key(ref)
         except DeletionLogUnavailable:
             return None, ReceiptCheck.MALFORMED
         try:
@@ -297,7 +323,18 @@ class S3DeletionLog:
             return status
         return check_receipt(record, expected)
 
-    def read(self, ref: ReceiptRef) -> dict[str, Any] | None:
+    def verify_workspace(self, expected: ExpectedWorkspaceReceipt) -> ReceiptCheck:
+        if expected.sink != self.sink_id:
+            return ReceiptCheck.SINK_MISMATCH
+        record, status = self._fetch(WorkspaceReceiptRef(expected.tenant_id, expected.receipt_id))
+        if record is None:
+            return status
+        return check_workspace_receipt(record, expected)
+
+    def read_workspace(self, ref: WorkspaceReceiptRef) -> dict[str, Any] | None:
+        return self.read(ref)
+
+    def read(self, ref: ReceiptRef | WorkspaceReceiptRef) -> dict[str, Any] | None:
         record, status = self._fetch(ref)
         if status is ReceiptCheck.MISSING:
             return None
@@ -306,12 +343,29 @@ class S3DeletionLog:
         return record
 
     def refs(self) -> Iterator[ReceiptRef]:
-        """Every receipt, listed in full or not at all: a listing that is not
-        exactly what was asked for (prefix echo, encoding, a key outside
+        """Every version receipt, listed in full or not at all: a listing that
+        is not exactly what was asked for (prefix echo, encoding, a key outside
         ``receipts/``, a truncated page without a token, a repeated token, or
         more than ``_MAX_PAGES`` pages) raises before the caller acts on it.
-        Objects under ``receipts/`` that are not receipts are counted in
-        ``unexpected_objects`` and never read."""
+        Objects under ``receipts/`` that are neither a version nor a workspace
+        receipt are counted in ``unexpected_objects`` and never read."""
+        for key in self._keys():
+            m = _KEY.fullmatch(key)
+            if m is not None:
+                yield ReceiptRef(uuid.UUID(m["t"]), uuid.UUID(m["d"]), uuid.UUID(m["v"]), m["r"])
+            elif _WS_KEY.fullmatch(key) is None:
+                self.unexpected_objects += 1
+
+    def workspace_refs(self) -> Iterator[WorkspaceReceiptRef]:
+        """Every workspace offboarding receipt, listed like ``refs``."""
+        for key in self._keys():
+            m = _WS_KEY.fullmatch(key)
+            if m is not None:
+                yield WorkspaceReceiptRef(uuid.UUID(m["t"]), m["r"])
+            elif _KEY.fullmatch(key) is None:
+                self.unexpected_objects += 1
+
+    def _keys(self) -> Iterator[str]:
         token: str | None = None
         seen_tokens: set[str] = set()
         self.unexpected_objects = 0
@@ -332,11 +386,7 @@ class S3DeletionLog:
                 key = str(item.get("Key", ""))
                 if not key.startswith(PREFIX):
                     raise DeletionLogUnavailable(_NOT_ASKED)
-                m = _KEY.fullmatch(key)
-                if m is None:
-                    self.unexpected_objects += 1
-                    continue
-                yield ReceiptRef(uuid.UUID(m["t"]), uuid.UUID(m["d"]), uuid.UUID(m["v"]), m["r"])
+                yield key
             if not page.get("IsTruncated"):
                 return
             token = page.get("NextContinuationToken")

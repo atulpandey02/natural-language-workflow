@@ -18,6 +18,20 @@ everything staging needs for the dataset path, inert;
 - `prometheus.datasets.yml`: the reviewed config plus the dataset alerts and targets.
 - Still refused: the flag in staging, LOGIN for the dataset roles, an ingest key.
 
+## Phase 2B — workspace offboarding and its receipts (branch `feat/workspace-offboarding`, awaiting review; NOT RUN on AWS)
+
+[ADR-037](adr/ADR-037-workspace-offboarding.md), migration `0031_workspace_offboarding`:
+
+- `workspaces.status` ACTIVE -> OFFBOARDING -> OFFBOARDED (guarded, operator only);
+  `ctx_tenant_id()` / `ctx_ingest_tenant_id()` deny a non-ACTIVE workspace for
+  every tenant policy (still 74); schedules blocked `WORKSPACE_NOT_ACTIVE`;
+  API 403 and hidden from discovery.
+- `python -m nlw.ops.offboarding request|complete|pending`: datasets purged and
+  tombstoned with receipts, every contract `purge` table emptied and verified,
+  one `workspace-offboarding-receipt-1` in the external log, a scrubbed tombstone.
+- `reapply-receipts` re-offboards a restored workspace; `reconcile-receipts`
+  verifies every OFFBOARDED workspace's receipt.
+
 ## Phase 2B — dataset object backup and restore, O-4 (branch `feat/o4-dataset-object-backup`, awaiting review; NOT RUN on AWS)
 
 Owner decision O-4 (2026-10-15, [ADR-036](adr/ADR-036-dataset-object-backup.md)):
@@ -64,9 +78,12 @@ GOVERNANCE retention (365 days, O-5). Implemented and tested without AWS contact
 - [provisioning templates](runbooks/deletion-receipt-log-provisioning.md)
   (NOT RUN): bucket policy, lifecycle, and second inline policies for the
   operator and audit roles; the reviewed `role-operator` and D6 pins unchanged.
+- CloudTrail data events for the dataset, receipt and O-4 restore buckets: one
+  pinned, atomic selector set for the existing trail (runbook §8, NOT RUN), the
+  D6 selector unchanged as its first element; a test fails if any selector is
+  removed or narrowed or an object bucket lacks one; events kept 365 days.
 
-Still open: workspace offboarding receipts, CloudTrail coverage
-of the receipt bucket, the real-AWS proof. **Uploads remain disabled.**
+Still open: the real-AWS proof. **Uploads remain disabled.**
 
 ## Phase 2B — O-2 D6 AWS proof package (branch `docs/o2-aws-proof-readiness`, awaiting review; NOT RUN)
 
@@ -207,7 +224,7 @@ revision `0021`, so deploying this branch is a migration-requiring release
   Starlette/FastAPI body-limit finding). No dataset tables, API or worker yet.
   **Customers cannot upload data**: ingestion is planned, not available.
 - **Offboarding contract:** every table classified; read-only inventory;
-  customer statement awaiting owner approval
+  workspace offboarding (ADR-037); customer statement awaiting owner approval
   ([offboarding-and-deletion](security/offboarding-and-deletion.md)).
 
 ## Pilot launch closure (merged as `b1a3058`, PR #40; deployed to staging)

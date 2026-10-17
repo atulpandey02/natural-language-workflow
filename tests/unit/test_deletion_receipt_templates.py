@@ -66,6 +66,7 @@ def test_the_runbook_holds_exactly_the_reviewed_templates() -> None:
         "role-audit-admin-receipts",
         "role-audit-reader-receipts",
         "role-operator-receipts",
+        "trail-advanced-event-selectors-all-buckets",
     ]
     # Nothing in the reviewed dataset/D6 templates is redefined here.
     assert not set(templates()) & set(templates(PROVISIONING))
@@ -218,3 +219,80 @@ def test_only_the_environment_operator_role_may_create_receipts() -> None:
     allows = [st for st in templates()["role-operator-receipts"]["Statement"]
               if st["Effect"] == "Allow" and "s3:PutObject" in acts(st)]  # fmt: skip
     assert [st["Resource"] for st in allows] == [RECEIPTS]
+
+
+# --- CloudTrail data events for every object bucket (runbook §8) ------------------------
+
+OBJECT_BACKUP = ROOT / "docs/runbooks/dataset-object-backup-provisioning.md"
+SELECTORS = "trail-advanced-event-selectors-all-buckets"
+
+
+def _selector(name: str, bucket: str) -> dict[str, Any]:
+    return {
+        "Name": name,
+        "FieldSelectors": [
+            {"Field": "eventCategory", "Equals": ["Data"]},
+            {"Field": "resources.type", "Equals": ["AWS::S3::Object"]},
+            {"Field": "resources.ARN", "StartsWith": [f"arn:aws:s3:::<{bucket}>/"]},
+        ],
+    }
+
+
+def test_the_trail_selector_set_is_atomic_and_exact() -> None:
+    """PutEventSelectors replaces the trail's selectors, so the one set applied
+    is pinned whole: the reviewed D6 selector unchanged and first, then one per
+    bucket. Removing, narrowing (readOnly, eventName, NotStartsWith, a deeper
+    prefix), widening or reordering any of them fails here."""
+    (dataset,) = templates(PROVISIONING)["trail-advanced-event-selectors"]
+    assert templates()[SELECTORS] == [
+        dataset,
+        _selector("nlw-<ENV>-deletion-receipt-reads-and-writes", "RECEIPT_BUCKET"),
+        _selector("nlw-<ENV>-restore-copy-reads-and-writes", "RESTORE_BUCKET"),
+    ]
+    assert dataset == _selector("nlw-<ENV>-dataset-object-reads-and-writes", "BUCKET")
+
+
+def test_every_bucket_that_holds_objects_has_a_selector() -> None:
+    """Any bucket whose objects these runbooks grant or deny access to must be
+    covered: a new bucket cannot be added without its data events."""
+    buckets: set[str] = set()
+    for path in (PROVISIONING, RUNBOOK, OBJECT_BACKUP):
+        for name, doc in templates(path).items():
+            if name.startswith("trail-") or name.startswith("audit-"):
+                continue
+            buckets |= set(re.findall(r"arn:aws:s3:::<([A-Z_]+)>/", json.dumps(doc)))
+    covered = {
+        re.fullmatch(r"arn:aws:s3:::<([A-Z_]+)>/", f["StartsWith"][0]).group(1)  # type: ignore[union-attr]
+        for sel in templates()[SELECTORS]
+        for f in sel["FieldSelectors"]
+        if f["Field"] == "resources.ARN"
+    }
+    # The trail's own log bucket is the one deliberate exception: recording the
+    # trail's writes into it would feed back on itself, and its objects are
+    # protected by Object Lock and log-file validation (runbook §8).
+    assert buckets - {"AUDIT_BUCKET"} == {"BUCKET", "RECEIPT_BUCKET", "RESTORE_BUCKET"}
+    assert buckets - {"AUDIT_BUCKET"} <= covered and "AUDIT_BUCKET" not in covered
+
+
+def test_every_selector_records_reads_writes_and_refusals_alike() -> None:
+    for sel in templates()[SELECTORS]:
+        fields = [f["Field"] for f in sel["FieldSelectors"]]
+        assert fields == ["eventCategory", "resources.type", "resources.ARN"], sel["Name"]
+        for f in sel["FieldSelectors"]:
+            assert set(f) == {"Field", "Equals"} or set(f) == {"Field", "StartsWith"}, f
+    names = [sel["Name"] for sel in templates()[SELECTORS]]
+    assert len(names) == len(set(names))
+
+
+def test_only_the_audit_admin_may_change_the_selectors() -> None:
+    provisioning = templates(PROVISIONING)
+    admin = {s["Sid"]: s for s in provisioning["role-audit-admin"]["Statement"]}
+    assert "cloudtrail:PutEventSelectors" in acts(admin["AdministerThisTrail"])
+    assert admin["AdministerThisTrail"]["Resource"] == "<TRAIL_ARN>"
+    for role in ("role-api", "role-ingest", "role-operator", "role-bootstrap"):
+        denies = [s for s in provisioning[role]["Statement"] if s["Effect"] == "Deny"]
+        assert any("cloudtrail:PutEventSelectors" in acts(s) for s in denies), role
+    for name in ("role-operator-receipts", "role-audit-reader-receipts"):
+        for s in templates()[name]["Statement"]:
+            if s["Effect"] == "Allow":
+                assert not any(a.startswith("cloudtrail:") for a in acts(s)), name

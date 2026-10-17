@@ -24,7 +24,7 @@ GOOD: dict[str, Any] = {
     "runtime_ready_at": "2026-10-05T11:10:00Z",
     "validator_checks": {"security_definer_owners_and_search_path": True, "rls_forced": True},
     "quiescence_confirmed_before_runtime": True,
-    "deletion_log_step": "not_applicable_no_offboarding_yet",
+    "deletion_log_step": "applied",
     "objects_step": "restored_and_verified",
 }
 
@@ -70,6 +70,25 @@ def test_record_rejects_unknown_fields_and_a_claimed_deletion_step() -> None:
         DrillRecord.model_validate({**GOOD, "verdict": "PASS"})
     with pytest.raises(ValueError):
         DrillRecord.model_validate({**GOOD, "deletion_log_step": "done"})
+
+
+def test_the_obsolete_no_offboarding_value_is_refused() -> None:
+    """ADR-037: offboarding exists, so evidence can no longer claim it does not."""
+    with pytest.raises(ValueError):
+        DrillRecord.model_validate(
+            {**GOOD, "deletion_log_step": "not_applicable_no_offboarding_yet"}
+        )
+
+
+def test_no_deletion_log_is_accepted_only_where_no_dataset_store_exists() -> None:
+    none = {
+        "deletion_log_step": "not_applicable_no_deletion_log",
+        "objects_step": "not_applicable_no_dataset_store",
+    }
+    assert _eval(**none)["verdict"] == "PASS"
+    r = _eval(**{**none, "objects_step": "restored_and_verified"})
+    assert r["verdict"] == "FAIL"
+    assert any("deletion log must be re-applied" in x for x in r["reasons"])
 
 
 @pytest.mark.parametrize("step", ["done", "restored", "", "applied"])

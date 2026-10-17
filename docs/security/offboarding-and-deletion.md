@@ -1,9 +1,10 @@
 # Offboarding and deletion contract (Phase 2 plan §0.6)
 
 Status: **contract and read-only inventory implemented; dataset purge and
-tombstone implemented locally (ADR-030, development only); no workspace purge
-exists.** Today, in deployed environments, the platform deletes only
-memberships (removal) and disables schedules.
+tombstone implemented locally (ADR-030, development only); workspace
+offboarding implemented locally ([ADR-037](../adr/ADR-037-workspace-offboarding.md):
+`python -m nlw.ops.offboarding request|complete`, with a workspace receipt in
+the external log); NOT RUN in staging or against AWS.**
 Customer data must not be accepted until the purge below exists and is
 verified (plan §1, condition 2). Owner decision (2026-09-29): customer uploads
 stay disabled until dataset and workspace deletion work end to end, including
@@ -37,7 +38,7 @@ prints one workspace's row counts per table; it changes nothing.
 | Messages already delivered to Slack | Slack workspace | **Cannot be recalled by NLW**; `external_actions` rows kept as the delivery record | Same | n/a |
 | Audit evidence (`authz_audit_events`) | PostgreSQL | Retained (ids, event types; never values) | Retained; tenant marker after the tombstone period (period proposed, not approved) | Dump retention |
 | Planner-outcome events (`plan_outcome_events`) | PostgreSQL | n/a | Retained (codes, buckets, counts; no text); proposed 13 months, **no retention job exists yet** | Dump retention |
-| Connector credentials | Secret store (the `connectors` row holds only a reference) | n/a | `connectors` row purged; secret versions scheduled for deletion in the store | Provider retention window |
+| Connector credentials | Secret store (the `connectors` row holds only a reference) | n/a | `connectors` row purged; the operator removes the workspace's entries from the store and `complete --secrets-file` refuses until none remain (recorded in the workspace receipt, ADR-037) | Provider retention window |
 | PostgreSQL backups | restic (client-side encrypted, immutable mode) | **Not edited** | **Not edited**; expire on the O-5 retention of 30 daily and 12 monthly recovery points ([ADR-035](../adr/ADR-035-phase2-retention-policy.md)) | — |
 | External deletion log (`deletion-receipt-2`, ADR-030; provider: S3 Object Lock, ADR-034, NOT RUN on AWS; local FAKE for development) | Outside PostgreSQL and its backups (see below) | One receipt per purged version (ids, digest, object count, hashed object refs, operator, time; no names or values) | One entry per offboarded workspace | Never rolled back by a restore |
 | Legal or operational retention exceptions | Recorded per case with the owner's approval | Deletion paused only for a recorded hold (legal request, active incident); never silently | Same | A hold never extends backup expiry beyond the configured schedule |
@@ -59,8 +60,13 @@ backups, in a dedicated S3 Object Lock bucket per environment
   lock holds the restored database, `python -m nlw.ops.datasets
   reapply-receipts` moves every version a receipt proves deleted to `DELETING`
   with its purge evidence ([dr-fresh-host-restore](../runbooks/dr-fresh-host-restore.md)).
-- **Workspace offboarding: not implemented.** Its per-workspace receipts and
-  their re-application remain open; offboarding stays unavailable.
+- **Workspace offboarding: implemented, NOT RUN on AWS** (ADR-037). One
+  `workspace-offboarding-receipt-1` per offboarded workspace; `reapply-receipts`
+  moves a restored ACTIVE workspace back to OFFBOARDING (no runtime can reach
+  it) before any runtime starts, and the operator re-runs `complete` after
+  enabling. Connector secrets: `complete` refuses until the secret store file
+  (`--secrets-file`) holds no entry of the workspace, and records the check in
+  the receipt (ADR-037; the removal itself is an operator step).
 
 ## Customer-facing statement — AWAITING OWNER APPROVAL (plan §22)
 

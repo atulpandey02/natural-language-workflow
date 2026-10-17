@@ -42,7 +42,7 @@ an alert and never deletes anything by itself.
 | Incomplete multipart upload | 1 day | guarantee | S3 lifecycle | `AbortIncompleteMultipartUpload` |
 | Noncurrent S3 object version | 30 days after it became noncurrent | guarantee | S3 lifecycle | `NoncurrentVersionExpiration` |
 | Deletion receipt | 365 days | guarantee | S3 Object Lock (GOVERNANCE) | default retention 365, lifecycle expiry at 366 |
-| CloudTrail data events (dataset and receipt buckets) | 365 days | guarantee | S3 Object Lock (GOVERNANCE) | `<AUDIT_RETENTION_DAYS>` = 365, expiry at 366 |
+| CloudTrail data events (dataset, receipt and restore buckets) | 365 days | guarantee | S3 Object Lock (GOVERNANCE) | `<AUDIT_RETENTION_DAYS>` = 365, expiry at 366 |
 | Database backups | 30 daily, 12 monthly recovery points | guarantee | backup job (`restic forget`) | `NLW_BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY` = 30/0/12, refused otherwise |
 | Object-backup recovery copies | 30 days | guarantee | AWS Backup vault lock (O-4, [ADR-036](ADR-036-dataset-object-backup.md)) | continuous backup, point-in-time restore, exactly 30 days |
 | Restored object copy | 7 days | guarantee | S3 lifecycle (restore bucket) | expiry after the restore; `restore-objects` copies back what is still referenced |
@@ -147,8 +147,9 @@ The synthetic pilot uses **GOVERNANCE** on the receipt and audit buckets.
 
 ## Not covered
 
-- Workspace offboarding and its receipts (still not implemented).
-- CloudTrail coverage of the receipt bucket (a pinned trail-template change for
-  the next provisioning review); its retention, once covered, is 365 days.
+- Workspace offboarding and its receipts: [ADR-037](ADR-037-workspace-offboarding.md); the workspace receipts share the 365-day receipt retention.
+- CloudTrail coverage of the receipt bucket is now a pinned selector set
+  ([deletion-receipt-log-provisioning](../runbooks/deletion-receipt-log-provisioning.md) §8,
+  NOT RUN); its events are kept 365 days with the rest of the audit log.
 - O-4 object backups (the 30-day value is a design constraint).
 - Scheduling of the sweep, and enabling the alerts (O-6).
