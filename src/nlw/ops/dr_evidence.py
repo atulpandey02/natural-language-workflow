@@ -61,10 +61,12 @@ class DrillRecord(BaseModel):
     download_duration_s: float | None = Field(default=None, ge=0)
     validator_checks: dict[str, bool] = Field(min_length=1)
     quiescence_confirmed_before_runtime: bool
-    # The deletion-log re-application step becomes mandatory once offboarding
-    # exists (docs/security/offboarding-and-deletion.md); until then it is
-    # recorded as not applicable, never as done.
-    deletion_log_step: str = Field(pattern=r"^(applied|not_applicable_no_offboarding_yet)$")
+    # The deletion-log re-application step (``reapply-receipts``: version and,
+    # ADR-037, workspace receipts). Offboarding exists, so "no offboarding yet"
+    # is no longer an accepted reason: the only exemption is an environment that
+    # has never had a deletion log, and then it cannot have dataset objects
+    # either (checked in ``evaluate``). Never "assumed".
+    deletion_log_step: str = Field(pattern=r"^(applied|not_applicable_no_deletion_log)$")
     # O-4 (ADR-036): dataset objects are restored from the AWS Backup restore
     # bucket and verified (``restore-objects`` then ``verify-objects`` clean), or
     # no dataset store exists in the environment. Never "assumed".
@@ -88,6 +90,14 @@ def evaluate(record: DrillRecord) -> dict[str, Any]:
         reasons.append(f"restore validator checks not ok: {failed}")
     if not record.quiescence_confirmed_before_runtime:
         reasons.append("quiescence was not confirmed before runtime start")
+    if (
+        record.deletion_log_step == "not_applicable_no_deletion_log"
+        and record.objects_step != "not_applicable_no_dataset_store"
+    ):
+        reasons.append(
+            "dataset objects were restored, so the deletion log must be re-applied "
+            "(deletion_log_step: applied)"
+        )
     order = [
         record.snapshot_time,
         record.incident_declared_at,

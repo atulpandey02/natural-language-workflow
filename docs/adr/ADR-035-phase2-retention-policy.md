@@ -147,7 +147,7 @@ The synthetic pilot uses **GOVERNANCE** on the receipt and audit buckets.
 
 ## Not covered
 
-- Workspace offboarding and its receipts (still not implemented).
+- Workspace offboarding and its receipts: [ADR-037](ADR-037-workspace-offboarding.md); the workspace receipts share the 365-day receipt retention.
 - CloudTrail coverage of the receipt bucket is now a pinned selector set
   ([deletion-receipt-log-provisioning](../runbooks/deletion-receipt-log-provisioning.md) §8,
   NOT RUN); its events are kept 365 days with the rest of the audit log.

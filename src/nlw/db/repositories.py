@@ -98,7 +98,7 @@ class WorkspaceRepository:
         rows = await self.session.execute(
             select(Workspace, Membership.role)
             .join(Membership, Membership.workspace_id == Workspace.id)
-            .where(Membership.user_id == user_id)
+            .where(Membership.user_id == user_id, Workspace.status == "ACTIVE")
             .order_by(Workspace.created_at)
         )
         return [(ws, role) for ws, role in rows.all()]

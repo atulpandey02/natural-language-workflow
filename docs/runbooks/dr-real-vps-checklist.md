@@ -51,9 +51,13 @@ action; nothing in the M11.5 P2 package performs it.
       environment's deletion log (step 6b of
       [dr-fresh-host-restore](dr-fresh-host-restore.md)). Record
       `deletion_log_step: applied` only when it exited 0 (no conflict, no
-      unreadable receipt, no unexpected object). Where no deletion log is configured (uploads were
-      never enabled) and offboarding does not exist, record
-      `deletion_log_step: not_applicable_no_offboarding_yet` — never "applied".
+      unreadable receipt, no unexpected object, no unreadable workspace
+      receipt). Only an environment that has never had a deletion log, and
+      therefore no dataset store, records
+      `deletion_log_step: not_applicable_no_deletion_log` (with
+      `objects_step: not_applicable_no_dataset_store`; any other combination
+      fails the evidence check). "No offboarding yet" is no longer accepted:
+      workspace offboarding exists (ADR-037).
 - [ ] **Dataset objects** (ADR-036): after the deletion log step, restore the
       objects (step 6c of [dr-fresh-host-restore](dr-fresh-host-restore.md))
       and record `objects_step: restored_and_verified` only when

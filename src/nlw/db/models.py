@@ -66,6 +66,15 @@ class Workspace(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String, nullable=False)
     slug: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # 0031 (ADR-037): ACTIVE -> OFFBOARDING -> OFFBOARDED, operator only (guarded).
+    status: Mapped[str] = mapped_column(String, nullable=False, server_default="ACTIVE")
+    offboarding_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    offboarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    offboarded_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    offboard_receipt_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    offboard_counts: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
 class Membership(TimestampMixin, Base):
