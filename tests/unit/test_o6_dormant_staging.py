@@ -66,7 +66,7 @@ def _render(*profiles: str, overlay: bool = True) -> dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def services() -> dict[str, Any]:
-    return dict(_render("datasets", "operator")["services"])
+    return dict(_render("datasets", "operator", "retention", "object-restore")["services"])
 
 
 def _aws_mounts(service: dict[str, Any]) -> list[tuple[str, str, bool]]:
@@ -92,7 +92,8 @@ def test_the_rollout_never_renders_the_dataset_overlay() -> None:
 
 def test_without_the_overlay_staging_is_exactly_as_reviewed() -> None:
     reviewed = _render(overlay=False)["services"]
-    assert not {"ingest", "ingest-dispatch", "operator", "node-exporter-datasets"} & set(reviewed)
+    assert not {"ingest", "ingest-dispatch", "operator", "retention", "object-restore",
+                "node-exporter-datasets"} & set(reviewed)  # fmt: skip
     assert "DATASETS_API_ENABLED" not in reviewed["api"].get("environment", {})
     assert not _aws_mounts(reviewed["api"])
 
@@ -102,13 +103,15 @@ def test_without_the_overlay_staging_is_exactly_as_reviewed() -> None:
 
 def test_dataset_runtimes_run_only_under_their_profiles() -> None:
     default = _render()["services"]
-    assert not {"ingest", "ingest-dispatch", "operator", "node-exporter-datasets"} & set(default)
+    assert not {"ingest", "ingest-dispatch", "operator", "retention", "object-restore",
+                "node-exporter-datasets"} & set(default)  # fmt: skip
     raw = yaml.safe_load((ROOT / OVERLAY).read_text())["services"]
     assert raw["ingest"]["profiles"] == ["datasets"]
     assert raw["ingest-dispatch"]["profiles"] == ["datasets"]
     assert raw["node-exporter-datasets"]["profiles"] == ["datasets"]
-    assert raw["operator"]["profiles"] == ["operator"]
-    assert raw["operator"]["restart"] == "no"
+    for one_shot in ("operator", "retention", "object-restore"):
+        assert raw[one_shot]["profiles"] == [one_shot]
+        assert raw[one_shot]["restart"] == "no"
 
 
 def test_the_flag_stays_off_and_configuration_refuses_it(services: dict[str, Any]) -> None:
@@ -133,12 +136,15 @@ def test_each_container_mounts_only_its_own_credentials(services: dict[str, Any]
         "api": [("/run/nlw/aws/api", "/run/nlw/aws", True)],
         "ingest": [("/run/nlw/aws/ingest", "/run/nlw/aws", True)],
         "operator": [("/run/nlw/aws/operator", "/run/nlw/aws", True)],
+        "retention": [("/run/nlw/aws/retention", "/run/nlw/aws", True)],
+        "object-restore": [("/run/nlw/aws/restore", "/run/nlw/aws", True)],
+        "node-exporter-datasets": [("/run/nlw/aws-metrics", "/textfile-aws", True)],
     }
     for name, service in services.items():
         assert _aws_mounts(service) == expected.get(name, []), name
         env = service.get("environment") or {}
         assert not {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"} & set(env)
-        if name in expected:
+        if name in expected and name != "node-exporter-datasets":
             assert env["AWS_SHARED_CREDENTIALS_FILE"] == "/run/nlw/aws/credentials"
             assert env["AWS_EC2_METADATA_DISABLED"] == "true"
         elif name not in ("backup", "restore"):
@@ -146,23 +152,47 @@ def test_each_container_mounts_only_its_own_credentials(services: dict[str, Any]
 
 
 def test_runtimes_have_separate_users_keys_and_credentials(services: dict[str, Any]) -> None:
-    users = {n: services[n]["user"] for n in ("api", "ingest", "ingest-dispatch", "operator")}
+    names = ("api", "ingest", "ingest-dispatch", "operator", "retention", "object-restore")
+    users = {n: services[n]["user"] for n in names}
     assert users == {
-        "api": "10001:10001", "ingest": "10002:10002",
-        "ingest-dispatch": "10003:10003", "operator": "10004:10004",
+        "api": "10001:10001", "ingest": "10002:10002", "ingest-dispatch": "10003:10003",
+        "operator": "10004:10004", "retention": "10005:10005", "object-restore": "10006:10006",
     }  # fmt: skip
+    assert len(set(users.values())) == len(users)
     for name, service in services.items():
         blob = json.dumps(service.get("volumes") or [])
         assert ("ingest.key" in blob) is (name == "ingest"), name
         env = service.get("environment") or {}
-        assert ("DATABASE_MIGRATION_URL" in env) is (name in ("migrate", "operator")), name
+        owner_holders = ("migrate", "operator", "retention", "object-restore", "restore")
+        assert ("DATABASE_MIGRATION_URL" in env) is (name in owner_holders), name
     dispatch = services["ingest-dispatch"]
     assert set(dispatch["environment"]) == {"APP_ENV", "LOG_LEVEL", "DATABASE_URL", "REDIS_URL"}
     assert services["ingest"]["environment"]["APP_ENV"] == "staging"
     assert services["operator"]["environment"]["DATASET_DELETION_LOG"] == "s3"
+    # Only the retention one-shot runs as the retention identity.
+    identities = {
+        n: (svc.get("environment") or {}).get("DATASET_OPERATOR_IDENTITY")
+        for n, svc in services.items()
+    }
+    assert {n for n, v in identities.items() if v} == {"retention"}
+    assert identities["retention"] == "retention"
+    assert services["object-restore"]["environment"]["DATASET_RESTORE_BUCKET"]
+    # The secret store reaches the operator alone, read-only, never created.
+    secret_mounts = {
+        n: [v for v in svc.get("volumes") or [] if "worker.secrets.env" in str(v.get("source"))]
+        for n, svc in services.items()
+    }
+    assert {n for n, v in secret_mounts.items() if v} == {"operator"} | (
+        {"worker"} if secret_mounts.get("worker") else set()
+    )
+    (m,) = secret_mounts["operator"]
+    assert m["target"] == "/run/nlw/secrets/worker.secrets.env" and m["read_only"] is True
+    assert m["bind"]["create_host_path"] is False
 
 
-@pytest.mark.parametrize("name", ["ingest", "ingest-dispatch", "operator"])
+@pytest.mark.parametrize(
+    "name", ["ingest", "ingest-dispatch", "operator", "retention", "object-restore"]
+)
 def test_dataset_runtimes_are_hardened_like_the_reviewed_api(
     services: dict[str, Any], name: str
 ) -> None:
@@ -175,7 +205,13 @@ def test_dataset_runtimes_are_hardened_like_the_reviewed_api(
 def test_the_dataset_exporter_reads_its_own_volume_only(services: dict[str, Any]) -> None:
     exp = services["node-exporter-datasets"]
     assert [(v["source"], v["target"], v.get("read_only")) for v in exp["volumes"]] == [
-        ("datasets_textfile", "/textfile", True)
+        ("datasets_textfile", "/textfile", True),
+        ("/run/nlw/aws-metrics", "/textfile-aws", True),
+    ]
+    dirs = [c for c in exp["command"] if c.startswith("--collector.textfile.directory=")]
+    assert dirs == [
+        "--collector.textfile.directory=/textfile",
+        "--collector.textfile.directory=/textfile-aws",
     ]
     op = [v["source"] for v in services["operator"]["volumes"]]
     assert "datasets_textfile" in op
@@ -254,8 +290,9 @@ def test_the_refresher_writes_a_file_the_application_accepts(
         "arn:aws:iam::111122223333:role/nlw-staging-dataset-ingest",
     ]
     assert all(a[a.index("--duration-seconds") + 1] == "3600" for a in argv)
+    # The fixed names trust-api / trust-ingest require (AWS refuses any other).
     assert [a[a.index("--role-session-name") + 1] for a in argv] == [
-        "nlw-staging-api-refresher", "nlw-staging-ingest-refresher",
+        "nlw-staging-api", "nlw-staging-ingest",
     ]  # fmt: skip
     assert all("AWS_ACCESS_KEY_ID" not in env for _, env in calls)
     out = capsys.readouterr().out
@@ -263,8 +300,8 @@ def test_the_refresher_writes_a_file_the_application_accepts(
     assert out.count('"result": "ok"') == 2
 
 
-def test_the_refresher_serves_only_the_api_and_ingest_roles() -> None:
-    assert set(refresher.SERVICES) == {"api", "ingest"}
+def test_the_refresher_serves_only_the_host_trusted_roles() -> None:
+    assert refresher.SERVICES == {"api": 10001, "ingest": 10002, "retention": 10005}
     for service in ("operator", "restore", "bootstrap"):
         with pytest.raises(refresher.RefreshError):
             refresher.role_arn("staging", "111122223333", service)
@@ -305,7 +342,10 @@ def test_the_units_run_only_the_reviewed_commands() -> None:
     runs = [line for line in retention.splitlines() if "nlw.ops.datasets" in line]
     assert len(runs) == 2
     assert "retention-sweep" in runs[0] and "reconcile-receipts" in runs[1]
-    assert retention.count("--profile operator") == 2 and retention.count("--no-deps") >= 2
+    assert retention.count("--profile retention") == 2 and retention.count("--no-deps") >= 2
+    # The unattended timer never runs as (or through) the human operator.
+    assert "--profile operator" not in retention and "run --rm --no-deps operator" not in retention
+    assert all("run --rm --no-deps retention python" in r for r in runs)
     assert "OnCalendar=" in (SYSTEMD / "nlw-dataset-retention.timer").read_text()
     for unit in SYSTEMD.glob("nlw-*"):
         assert "DORMANT" in unit.read_text() or unit.name.startswith("nlw-backup"), unit
@@ -319,3 +359,50 @@ def test_the_settings_template_holds_placeholders_only() -> None:
     }  # fmt: skip
     assert re.search(r"\b\d{12}\b", text) is None
     assert all("<" in line for line in text.splitlines() if "=" in line and line[0] != "#")
+
+
+def test_the_refresher_reports_success_expiry_and_failure_per_service(tmp_path: Path) -> None:
+    metrics = tmp_path / "metrics"
+    expiry = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=1)
+    ok = refresher.refresh(
+        "staging", "111122223333", tmp_path / "aws", ["api", "ingest", "retention"],
+        run=_fake(expiry, []), sleep=lambda s: None, chown=False, metrics_dir=metrics,
+        now=lambda: 1000.0,
+    )  # fmt: skip
+    assert ok == 0
+    path = metrics / refresher.METRICS_FILE
+    assert path.stat().st_mode & 0o777 == 0o644
+    text = path.read_text()
+    assert SECRET not in text and TOKEN not in text and "ASIA" not in text
+    first = refresher.read_metrics(metrics)
+    for service in ("api", "ingest", "retention"):
+        assert first[("nlw_aws_credential_refresh_last_success_timestamp_seconds", service)] == 1000
+        assert first[("nlw_aws_credential_refresh_expiry_timestamp_seconds", service)] == (
+            expiry.timestamp()
+        )
+        assert first[("nlw_aws_credential_refresh_last_run_ok", service)] == 1
+
+    def broken(argv: Any, env: dict[str, str]) -> str:
+        raise refresher.RefreshError("assume-role failed (exit 255)")
+
+    bad = refresher.refresh(
+        "staging", "111122223333", tmp_path / "aws", ["retention"], run=broken,
+        sleep=lambda s: None, chown=False, metrics_dir=metrics, now=lambda: 5000.0,
+    )  # fmt: skip
+    assert bad == 1
+    after = refresher.read_metrics(metrics)
+    # The failed service keeps its last success (so the stale alert can fire),
+    # and the others keep theirs.
+    assert after[("nlw_aws_credential_refresh_last_success_timestamp_seconds", "retention")] == 1000
+    assert after[("nlw_aws_credential_refresh_last_run_ok", "retention")] == 0
+    assert after[("nlw_aws_credential_refresh_last_run_ok", "api")] == 1
+    assert [p.name for p in metrics.iterdir()] == [refresher.METRICS_FILE]
+
+
+def test_the_stale_alert_watches_every_refreshed_service() -> None:
+    rules = (ROOT / "docker/prometheus/alerts/datasets.rules.yml").read_text()
+    for service in refresher.SERVICES:
+        assert (
+            f'absent(nlw_aws_credential_refresh_last_success_timestamp_seconds{{service="{service}"}})'
+            in rules
+        ), service

@@ -16,6 +16,13 @@ everything staging needs for the dataset path, inert;
 - Credential refresher (`scripts/ops/nlw_aws_credential_refresh.py`) and
   systemd units (refresher every 15 min, daily retention timer), not installed.
 - `prometheus.datasets.yml`: the reviewed config plus the dataset alerts and targets.
+- Integrated after #68-#70: `retention` one-shot as the new narrow role
+  `nlw-<env>-dataset-retention` (owner decision; CLI limited to the sweep,
+  status and reconciliation), `object-restore` one-shot (O-4), the operator's
+  read-only secret-store mount (offboarding), refresher metrics with
+  `NlwDatasetCredentialRefreshStale`, `ingest.key` held to uid 10002.
+- **Active now:** the rollout's IMDS gate (`recreate-runtime` stops if any
+  container reaches instance metadata).
 - Still refused: the flag in staging, LOGIN for the dataset roles, an ingest key.
 
 ## Phase 2B — workspace offboarding and its receipts (branch `feat/workspace-offboarding`, awaiting review; NOT RUN on AWS)

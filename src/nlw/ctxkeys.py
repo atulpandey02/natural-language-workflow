@@ -31,6 +31,10 @@ File-only commands (NO database; production key preparation, M12A-Prep §E):
   verify-files --dir DIR [--owner UID] [--include-ingest]
            Placement checks only (exit 0 iff every required file is valid).
 
+``ingest.key`` is always checked against (and prepared for) uid 10002, the
+ingest runtime's own user (O-6, ADR-038), whatever ``--owner`` says for the
+other three classes.
+
 The three runtime classes api/worker/scheduler are always required. ``ingest``
 (ADR-031) is OPTIONAL: it is covered only when explicitly named
 (``--key-id-ingest`` / ``--include-ingest``), so a three-key host is unchanged.
@@ -65,6 +69,10 @@ log = structlog.get_logger(__name__)
 REQUIRED_CLASSES = ("api", "worker", "scheduler")
 OPTIONAL_CLASSES = ("ingest",)
 _CLASSES = (*REQUIRED_CLASSES, *OPTIONAL_CLASSES)
+# The ingest runtime runs as its own user (O-6, ADR-038: uid 10002, never the
+# API's 10001), so its key file must be owned by that user and no other. The
+# three original classes keep the operator-given owner (default 10001).
+CLASS_OWNER_UID: dict[str, int] = {"ingest": 10002}
 
 
 class KeyMismatch(RuntimeError):
@@ -242,6 +250,9 @@ def prepare_key_file(directory: Path, key_class: str, *, owner: tuple[int, int])
     else:
         directory.mkdir(mode=KEY_DIR_MODE, parents=False)
         os.chmod(directory, KEY_DIR_MODE)
+    required = CLASS_OWNER_UID.get(key_class)
+    if required is not None and owner[0] != required:
+        raise KeyFileError(f"{key_class}.key must be owned by uid {required} (its runtime user)")
     target = directory / f"{key_class}.key"
     if target.exists() or target.is_symlink():
         raise KeyFileError(f"refusing to overwrite existing {target.name}")
@@ -302,7 +313,10 @@ def _run_file_command(args: argparse.Namespace) -> int:
         if args.cmd == "fingerprint" and args.insecure_permissions:
             load_key_file(path, strict_permissions=False)  # format only
         else:
-            check_key_file_placement(path, owner_uid=owner_uid_opt)
+            owner = owner_uid_opt
+            if owner is not None:
+                owner = CLASS_OWNER_UID.get(c, owner)
+            check_key_file_placement(path, owner_uid=owner)
         if args.cmd == "fingerprint":
             kid = validate_key_id(getattr(args, f"key_id_{c}"))
             print(f"{c} {kid} {file_fingerprint(path)}")

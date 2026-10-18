@@ -66,7 +66,8 @@ would refuse it anyway):
 
 **Bucket policy:** TLS only; this account only; never another environment's
 roles; never the dataset runtime roles; **only this environment's
-`nlw-<ENV>-dataset-operator` role may create a receipt** (no other principal in
+`nlw-<ENV>-dataset-operator` role, and its unattended retention role
+`nlw-<ENV>-dataset-retention` (ADR-038), may create a receipt** (no other principal in
 the account, whatever its identity policy grants); every write is a
 conditional, SSE-S3 creation under `receipts/`; no copy; no deletion, retention
 or legal-hold change and no configuration change except by the audit
@@ -96,7 +97,9 @@ administrator.
      "Action": "s3:PutObject", "NotResource": "arn:aws:s3:::<RECEIPT_BUCKET>/receipts/*"},
     {"Sid": "DenyReceiptWritesExceptOperator", "Effect": "Deny", "Principal": "*",
      "Action": "s3:PutObject", "Resource": "arn:aws:s3:::<RECEIPT_BUCKET>/receipts/*",
-     "Condition": {"ArnNotEquals": {"aws:PrincipalArn": "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"}}},
+     "Condition": {"ArnNotEquals": {"aws:PrincipalArn": [
+        "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator",
+        "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-retention"]}}},
     {"Sid": "DenyUnconditionalCreate", "Effect": "Deny", "Principal": "*",
      "Action": "s3:PutObject", "Resource": "arn:aws:s3:::<RECEIPT_BUCKET>/*",
      "Condition": {"Null": {"s3:if-none-match": "true"}}},
@@ -173,7 +176,8 @@ own role is at IAM path `/` (below).
 
 Every `nlw-<ENV>-dataset-*` role is created at IAM path `/` (`aws iam
 create-role` without `--path`, or with `--path /`). The receipt bucket policy
-admits exactly `arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator`, and an
+admits exactly `arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator` (and the
+retention role's ARN, ADR-038), and an
 STS session ARN does not carry the path, so a role at another path would pass
 the startup identity check and be refused only when writing a receipt, after
 its bytes were deleted. Two checks prevent that:
@@ -253,7 +257,7 @@ refused in staging and production.
 | No purge without a protected place for its receipt | `preflight` (Object Lock default retention) before deletion; `append` re-reads the stored version and requires retention |
 | A receipt matches its purge | `verify` fetches by the ids the database expects; checksum; `check_receipt` (identity, digests, time) |
 | Runtime roles cannot read or write receipts | `DenyDatasetRuntimeRoles`; they hold no grant |
-| Only the operator role can create a receipt | `DenyReceiptWritesExceptOperator` (`ArnNotEquals` the exact `nlw-<ENV>-dataset-operator` role ARN), whatever any other principal's identity policy allows |
+| Only the operator role (and the unattended retention role, ADR-038) can create a receipt | `DenyReceiptWritesExceptOperator` (`ArnNotEquals` the exact `nlw-<ENV>-dataset-operator` and `nlw-<ENV>-dataset-retention` role ARNs), whatever any other principal's identity policy allows |
 | One bad receipt cannot stop reconciliation or a restore | receipts are size-bounded (64 KiB) and depth-bounded (4) before parsing; anything else is `MALFORMED`/unreadable and reported, and the run continues |
 | A listing is complete or refused | prefix echo, encoding, keys outside `receipts/`, truncation without a token, a repeated token and a 1000-page bound each refuse the listing before anything changes |
 | A database restore cannot erase the evidence | the log is outside PostgreSQL and its backups; `reapply-receipts` re-applies it before runtimes start |

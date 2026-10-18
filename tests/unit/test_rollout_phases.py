@@ -22,6 +22,7 @@ import pytest
 from nlw.ops import release_manifest as rm
 from nlw.ops.release_provenance import ProvenanceReceipt
 from nlw.ops.roles import EXPECTED_DISPATCH_GRANTS, EXPECTED_INGEST_GRANTS
+from nlw.ops.rollout import gates
 from nlw.ops.rollout.gates import AUTHORIZATION_PHRASE, ESCROW_PHRASE, GateError
 from nlw.ops.rollout.phases import Operator, Rollout, RolloutStop
 from nlw.ops.rollout.remote import CommandResult, LocalRemote, OperatorAlerting, TargetConfig
@@ -348,6 +349,9 @@ def _base_table(
     rev: str = "0010_readiness_schema_grant",
 ) -> Table:
     return [
+        # O-6 (ADR-038): containers never reach instance metadata. Scripted before
+        # the host's own identity read, which also names the address.
+        (r"nlw-imds-probe", "blocked"),
         (r"169\.254\.169\.254", IMDS),
         # O-5: only the three backup-retention lines are read; none set by default.
         (r"grep -E .*NLW_BACKUP_RETENTION_\(DAILY\|WEEKLY\|MONTHLY\).*\.env\.backup", ""),
@@ -2318,3 +2322,109 @@ def test_any_other_effective_retention_is_refused(lines: str, match: str) -> Non
 
     with pytest.raises(GateError, match=match):
         gates.check_backup_retention(lines)
+
+
+# --- O-6 (ADR-038): instance metadata is unreachable from every container -----------
+
+
+def test_activation_stops_before_the_link_when_the_network_reaches_imds() -> None:
+    base = _base_table(roles=ROLES_ALL, rev="0016_signed_database_context") + [
+        (r"config >/dev/null", ""),
+        (r"ln -sfn", ""),
+        (r"up -d --force-recreate", ""),
+    ]
+    fake = FakeRemote(
+        [(r"docker run --rm --network app_internal .*nlw-imds-probe", "reachable")] + base,
+        state=_done("install-context-keys"),
+    )
+    with pytest.raises(GateError, match="instance metadata is reachable"):
+        _rollout(fake, authorization=AUTHORIZATION_PHRASE).recreate_runtime(keys_dir=KEYS)
+    assert not fake.ran(r"ln -sfn") and not fake.ran(r"up -d")
+    probe = next(c for c in fake.commands if "nlw-imds-probe" in c)
+    assert f"--entrypoint python {REL.backend_image}" in probe
+
+
+@pytest.mark.parametrize("bad", ["api", "worker", "scheduler", "web"])
+@pytest.mark.parametrize("verdict", ["reachable", "", "noprobe", "blocked\nreachable"])
+def test_every_application_container_must_be_blocked(bad: str, verdict: str) -> None:
+    table: Table = [
+        (rf"exec -T {bad} .*nlw-imds-probe", verdict),
+        (r"exec -T (api|worker|scheduler|web) .*nlw-imds-probe", "blocked"),
+    ]
+    fake = FakeRemote(table)
+    with pytest.raises(GateError, match=rf"reachable \(or could not be probed\) from \['{bad}'\]"):
+        _rollout_op(fake).verify_imds_blocked_in_containers()
+    ok = FakeRemote([(r"exec -T (api|worker|scheduler|web) .*nlw-imds-probe", "blocked")])
+    _rollout_op(ok).verify_imds_blocked_in_containers()
+    probes = {c.split("exec -T ")[1].split()[0]: c for c in ok.commands}
+    assert set(probes) == {"api", "worker", "scheduler", "web"}
+    assert "node -e" in probes["web"] and all(
+        "python -c" in probes[s] for s in ("api", "worker", "scheduler")
+    )
+
+
+def test_the_imds_gate_refuses_an_empty_probe_set() -> None:
+    with pytest.raises(GateError, match="no container was probed"):
+        gates.check_imds_blocked({})
+
+
+def _probe_against(url: str, code: str, runner: list[str]) -> str:
+    import subprocess
+
+    patched = code.replace("http://169.254.169.254", url).replace(
+        "host:'169.254.169.254'", f"host:'127.0.0.1',port:{url.rsplit(':', 1)[1]}"
+    )
+    out = subprocess.run([*runner, patched], capture_output=True, text=True, timeout=30)
+    return out.stdout.strip()
+
+
+@pytest.mark.parametrize("status", [200, 401, 404])
+@pytest.mark.parametrize("language", ["python", "node"])
+def test_the_probes_report_any_answer_as_reachable(status: int, language: str) -> None:
+    import shutil
+    import sys
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Answer(BaseHTTPRequestHandler):
+        def _reply(self) -> None:
+            self.send_response(status)
+            self.end_headers()
+
+        do_GET = do_PUT = _reply
+
+        def log_message(self, *a: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Answer)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        if language == "python":
+            got = _probe_against(url, gates.IMDS_PROBE_PY, [sys.executable, "-c"])
+        else:
+            if shutil.which("node") is None:
+                pytest.skip("node unavailable")
+            got = _probe_against(url, gates.IMDS_PROBE_JS, ["node", "-e"])
+    finally:
+        server.shutdown()
+    assert got == "reachable"
+
+
+@pytest.mark.parametrize("language", ["python", "node"])
+def test_the_probes_report_a_refused_connection_as_blocked(language: str) -> None:
+    import shutil
+    import socket
+    import sys
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]  # closed again: nothing listens there
+    url = f"http://127.0.0.1:{port}"
+    if language == "python":
+        got = _probe_against(url, gates.IMDS_PROBE_PY, [sys.executable, "-c"])
+    else:
+        if shutil.which("node") is None:
+            pytest.skip("node unavailable")
+        got = _probe_against(url, gates.IMDS_PROBE_JS, ["node", "-e"])
+    assert got == "blocked"

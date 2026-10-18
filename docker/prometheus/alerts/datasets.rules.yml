@@ -148,3 +148,19 @@ groups:
           description: >
             The credential refresher is not rotating the per-container files.
             Runbook: docs/runbooks/dataset-s3-provisioning.md
+      # O-6 (ADR-038): the host refresher's own dead-man. A refresh runs every
+      # 15 min; two missed runs (30 min) or a service that never reported fires,
+      # well before a 1 h credential expires.
+      - alert: NlwDatasetCredentialRefreshStale
+        expr: >
+          (time() - nlw_aws_credential_refresh_last_success_timestamp_seconds > 1800)
+          or absent(nlw_aws_credential_refresh_last_success_timestamp_seconds{service="api"})
+          or absent(nlw_aws_credential_refresh_last_success_timestamp_seconds{service="ingest"})
+          or absent(nlw_aws_credential_refresh_last_success_timestamp_seconds{service="retention"})
+        for: 5m
+        labels: { severity: critical, component: datasets }
+        annotations:
+          summary: "The dataset credential refresher has not refreshed a role"
+          description: >
+            nlw-aws-credentials.service is failing or not installed for this
+            service. Runbook: docs/runbooks/dataset-staging-dormant.md

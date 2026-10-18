@@ -190,3 +190,34 @@ def test_dev_helper_is_not_a_production_path() -> None:
         "scripts/ops/rehearse-0010-to-0016.sh",
     ):
         assert "ctx-keys-dev" not in (root / f).read_text(), f
+
+
+# --- O-6 (ADR-038): ingest.key belongs to the ingest runtime's own user -------------
+
+
+def test_the_ingest_key_is_prepared_only_for_uid_10002(tmp_path: Path) -> None:
+    assert ctxkeys.CLASS_OWNER_UID == {"ingest": 10002}
+    with pytest.raises(ctxkeys.KeyFileError, match="must be owned by uid 10002"):
+        ctxkeys.prepare_key_file(tmp_path / "k", "ingest", owner=(10001, 10001))
+    assert not (tmp_path / "k" / "ingest.key").exists()
+
+
+def test_placement_checks_hold_ingest_key_to_uid_10002_whatever_owner_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    d = tmp_path / "ctx-keys"
+    for c in ("api", "worker", "scheduler"):
+        ctxkeys.prepare_key_file(d, c, owner=(UID, os.getgid()))
+    # Written as our own user (a test cannot chown to 10002): placement must refuse it.
+    monkeypatch.setitem(ctxkeys.CLASS_OWNER_UID, "ingest", UID)
+    ctxkeys.prepare_key_file(d, "ingest", owner=(UID, os.getgid()))
+    monkeypatch.setitem(ctxkeys.CLASS_OWNER_UID, "ingest", 10002)
+    args = ["verify-files", "--dir", str(d), "--owner", str(UID), "--include-ingest"]
+    assert ctxkeys.main(args) != 0
+    assert f"owner uid {UID} != 10002: ingest.key" in capsys.readouterr().err
+    # The three original classes still follow --owner; without ingest all is well.
+    assert ctxkeys.main(["verify-files", "--dir", str(d), "--owner", str(UID)]) == 0
+    # When the runtime user is the owner, the ingest key passes.
+    monkeypatch.setitem(ctxkeys.CLASS_OWNER_UID, "ingest", UID)
+    assert ctxkeys.main(args) == 0
+    capsys.readouterr()

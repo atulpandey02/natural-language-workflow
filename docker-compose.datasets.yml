@@ -143,6 +143,65 @@ services:
     volumes:
       - /run/nlw/aws/operator:/run/nlw/aws:ro
       - datasets_textfile:/var/lib/node_exporter/textfile
+      # The secret store's file, read-only, for `offboarding complete
+      # --secrets-file /run/nlw/secrets/worker.secrets.env` (ADR-037). Never
+      # created by Compose: a missing file fails the run instead of mounting
+      # an empty directory.
+      - type: bind
+        source: ./docker/worker.secrets.env
+        target: /run/nlw/secrets/worker.secrets.env
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The unattended retention timer's one-shot (ADR-038): its own host-trusted
+  # role `nlw-<env>-dataset-retention` (refreshed like the runtimes), which may
+  # only list, purge with receipts and reconcile; the application refuses every
+  # other command under DATASET_OPERATOR_IDENTITY=retention.
+  retention:
+    <<: *dataset-hardening
+    profiles: ["retention"]
+    restart: "no"
+    user: "10005:10005"
+    command: ["python", "-m", "nlw.ops.datasets", "retention-status"]
+    environment:
+      <<: *dataset-store
+      APP_ENV: staging
+      LOG_LEVEL: info
+      DATASET_OPERATOR_IDENTITY: retention
+      DATABASE_MIGRATION_URL: ${DATABASE_MIGRATION_URL:?DATABASE_MIGRATION_URL is required}
+      DATASET_DELETION_LOG: s3
+      DATASET_DELETION_LOG_BUCKET: ${NLW_DELETION_LOG_BUCKET:?NLW_DELETION_LOG_BUCKET is required}
+    volumes:
+      - /run/nlw/aws/retention:/run/nlw/aws:ro
+      - datasets_textfile:/var/lib/node_exporter/textfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Object restore one-shot (O-4, ADR-036): `restore-objects` as the human
+  # restore role during a declared recovery only (per-session credential
+  # file, never refreshed by the host).
+  # Named apart from docker-compose.prod.yml's `restore` (the database restore).
+  object-restore:
+    <<: *dataset-hardening
+    profiles: ["object-restore"]
+    restart: "no"
+    user: "10006:10006"
+    command: ["python", "-m", "nlw.ops.datasets", "restore-objects", "--dry-run"]
+    environment:
+      <<: *dataset-store
+      APP_ENV: staging
+      LOG_LEVEL: info
+      DATABASE_MIGRATION_URL: ${DATABASE_MIGRATION_URL:?DATABASE_MIGRATION_URL is required}
+      DATASET_DELETION_LOG: s3
+      DATASET_DELETION_LOG_BUCKET: ${NLW_DELETION_LOG_BUCKET:?NLW_DELETION_LOG_BUCKET is required}
+      DATASET_RESTORE_BUCKET: ${NLW_DATASET_RESTORE_BUCKET:?NLW_DATASET_RESTORE_BUCKET is required}
+    volumes:
+      - /run/nlw/aws/restore:/run/nlw/aws:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -159,9 +218,12 @@ services:
       - --collector.disable-defaults
       - --collector.textfile
       - --collector.textfile.directory=/textfile
+      # The host credential refresher's own metrics (last success, expiry).
+      - --collector.textfile.directory=/textfile-aws
       - --web.listen-address=:9100
     volumes:
       - datasets_textfile:/textfile:ro
+      - /run/nlw/aws-metrics:/textfile-aws:ro
     read_only: true
     cap_drop:
       - ALL

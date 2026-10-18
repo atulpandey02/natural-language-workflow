@@ -2,8 +2,9 @@
 """Per-container AWS credential refresher (O-6, ADR-038; dataset-s3-provisioning.md §5).
 
 Run as root by ``nlw-aws-credentials.service`` (every 15 min). For each runtime
-service it assumes ONLY ``nlw-<env>-dataset-<service>`` (1 h, a fixed session
-name) with the host's own identity, and writes the temporary credential to
+service (api, ingest, and the unattended retention identity) it assumes ONLY
+``nlw-<env>-dataset-<service>`` (1 h, the fixed session name its trust policy
+requires) with the host's own identity, and writes the temporary credential to
 
     <root>/<service>/credentials        directory 0700, file 0400, owned by the
                                          service's container uid
@@ -14,7 +15,15 @@ directory). The format is the one ``nlw.storage.s3_credentials`` accepts: a
 ``x_nlw_expiration`` (ISO-8601 UTC). Logs are one JSON line per service with
 the role ARN, the expiry and the result: never a credential value.
 
-The operator role trusts humans only (MFA); it is never refreshed here.
+The operator and restore roles trust humans only (MFA); they are never
+refreshed here.
+
+After every run it writes ``<metrics-dir>/nlw_aws_credentials.prom`` (0644,
+atomically; no credential, only times and results) for the dataset exporter:
+``nlw_aws_credential_refresh_last_success_timestamp_seconds``,
+``nlw_aws_credential_refresh_expiry_timestamp_seconds`` and
+``nlw_aws_credential_refresh_last_run_ok`` per service. A failed service keeps
+its previous success time, so ``NlwDatasetCredentialRefreshStale`` fires.
 
 Standard library only: the host does not run the application. NOT RUN against
 AWS.
@@ -35,7 +44,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-SERVICES: dict[str, int] = {"api": 10001, "ingest": 10002}
+SERVICES: dict[str, int] = {"api": 10001, "ingest": 10002, "retention": 10005}
 DURATION_S = 3600
 MIN_REMAINING = timedelta(minutes=5)
 BACKOFF_S = (5, 20, 60)
@@ -65,7 +74,8 @@ def role_arn(env: str, account: str, service: str) -> str:
 
 
 def session_name(env: str, service: str) -> str:
-    return f"nlw-{env}-{service}-refresher"
+    """The fixed name each role's trust policy requires (``trust-<service>``)."""
+    return f"nlw-{env}-{service}"
 
 
 def _aws_cli(argv: Sequence[str], env: dict[str, str]) -> str:
@@ -146,6 +156,52 @@ def write_atomically(directory: Path, body: str, uid: int, *, chown: bool = True
     return target
 
 
+METRICS_FILE = "nlw_aws_credentials.prom"
+_SAMPLE = re.compile(r'^(nlw_aws_credential_refresh_[a-z_]+)\{service="([a-z]+)"\} (\S+)$')
+
+
+def read_metrics(directory: Path) -> dict[tuple[str, str], float]:
+    try:
+        lines = (directory / METRICS_FILE).read_text().splitlines()
+    except OSError:
+        return {}
+    out: dict[tuple[str, str], float] = {}
+    for line in lines:
+        m = _SAMPLE.match(line)
+        if m and m.group(2) in SERVICES:
+            try:
+                out[(m.group(1), m.group(2))] = float(m.group(3))
+            except ValueError:
+                continue
+    return out
+
+
+def write_metrics(directory: Path, samples: dict[tuple[str, str], float]) -> None:
+    """Prometheus textfile, written atomically (temp file, fsync, rename)."""
+    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+    names = (
+        ("nlw_aws_credential_refresh_last_success_timestamp_seconds",
+         "Unix time of the last successful refresh"),
+        ("nlw_aws_credential_refresh_expiry_timestamp_seconds",
+         "Unix time the last written credential expires"),
+        ("nlw_aws_credential_refresh_last_run_ok", "1 if the latest run refreshed it"),
+    )  # fmt: skip
+    lines: list[str] = []
+    for name, help_text in names:
+        lines += [f"# HELP {name} {help_text}", f"# TYPE {name} gauge"]
+        for service in sorted(SERVICES):
+            if (name, service) in samples:
+                lines.append(f'{name}{{service="{service}"}} {samples[(name, service)]:.0f}')
+    fd, tmp = tempfile.mkstemp(prefix=".metrics-", dir=directory)
+    try:
+        os.fchmod(fd, 0o644)
+        os.write(fd, ("\n".join(lines) + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, directory / METRICS_FILE)
+
+
 def _log(**fields: Any) -> None:
     print(json.dumps({"event": "nlw.aws_credential_refresh", **fields}, sort_keys=True))
 
@@ -159,8 +215,11 @@ def refresh(
     run: Runner = _aws_cli,
     sleep: Callable[[float], None] = time.sleep,
     chown: bool = True,
+    metrics_dir: Path | None = None,
+    now: Callable[[], float] = time.time,
 ) -> int:
     failed = 0
+    samples = read_metrics(metrics_dir) if metrics_dir is not None else {}
     for service in services:
         arn = role_arn(env, account, service)
         for attempt, pause in enumerate((0, *BACKOFF_S)):
@@ -174,8 +233,20 @@ def refresh(
                 _log(role_arn=arn, result="error", attempt=attempt + 1, reason=reason)
                 continue
             _log(role_arn=arn, result="ok", expiry=record["expiry"].isoformat())
+            samples[("nlw_aws_credential_refresh_last_success_timestamp_seconds", service)] = now()
+            samples[("nlw_aws_credential_refresh_expiry_timestamp_seconds", service)] = record[
+                "expiry"
+            ].timestamp()
+            samples[("nlw_aws_credential_refresh_last_run_ok", service)] = 1
             break
         else:
+            failed += 1
+            samples[("nlw_aws_credential_refresh_last_run_ok", service)] = 0
+    if metrics_dir is not None:
+        try:
+            write_metrics(metrics_dir, samples)
+        except OSError as exc:
+            _log(result="metrics_error", reason=type(exc).__name__)
             failed += 1
     return 1 if failed else 0
 
@@ -185,10 +256,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--env", required=True)
     p.add_argument("--account", required=True)
     p.add_argument("--root", default="/run/nlw/aws")
+    p.add_argument("--metrics-dir", default="/run/nlw/aws-metrics")
     p.add_argument("--service", action="append", choices=sorted(SERVICES))
     args = p.parse_args(argv)
     try:
-        return refresh(args.env, args.account, Path(args.root), args.service or sorted(SERVICES))
+        return refresh(
+            args.env, args.account, Path(args.root), args.service or sorted(SERVICES),
+            metrics_dir=Path(args.metrics_dir),
+        )  # fmt: skip
     except RefreshError as exc:
         _log(result="refused", reason=str(exc))
         return 2

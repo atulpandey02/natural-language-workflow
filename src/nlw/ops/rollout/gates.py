@@ -578,3 +578,54 @@ def check_image_info(info: dict[str, object], release: ReleaseSpec) -> None:
     absent = [m for m, ok in mods.items() if not ok] or (["<none reported>"] if not mods else [])
     if absent:
         raise GateError(f"image lacks required module(s): {absent}")
+
+
+# --- instance metadata (IMDS) is unreachable from every container (O-6, ADR-038) -----
+#
+# The host itself reads IMDS (check_instance_identity). No container may: a
+# container that reached it could take the host's instance-profile role. Two
+# probes per container (IMDSv2 token PUT, IMDSv1 GET), no proxy, 2 s each; any
+# HTTP answer at all means reachable. The marker line lets reviewers (and the
+# rollout tests) tell the probe from the host's own identity read.
+IMDS_PROBE_MARKER = "nlw-imds-probe"
+IMDS_PROBE_PY = (
+    f"# {IMDS_PROBE_MARKER}\n"
+    "import urllib.request as u\n"
+    "o = u.build_opener(u.ProxyHandler({}))\n"
+    "def hit(r):\n"
+    "    try:\n"
+    "        o.open(r, timeout=2)\n"
+    "        return True\n"
+    "    except u.HTTPError:\n"
+    "        return True\n"
+    "    except Exception:\n"
+    "        return False\n"
+    "t = u.Request('http://169.254.169.254/latest/api/token', method='PUT',\n"
+    "              headers={'X-aws-ec2-metadata-token-ttl-seconds': '10'})\n"
+    "m = u.Request('http://169.254.169.254/latest/meta-data/')\n"
+    "print('reachable' if hit(t) or hit(m) else 'blocked')\n"
+)
+IMDS_PROBE_JS = (
+    f"/* {IMDS_PROBE_MARKER} */"
+    "const h=require('http');let n=0,ok=false;"
+    "function done(){if(++n===2)console.log(ok?'reachable':'blocked')}"
+    "function p(o){const q=h.request(Object.assign({host:'169.254.169.254',timeout:2000},o),"
+    "r=>{ok=true;r.resume();done()});q.on('timeout',()=>q.destroy(new Error('t')));"
+    "q.on('error',done);q.end()}"
+    "p({method:'PUT',path:'/latest/api/token',"
+    "headers:{'X-aws-ec2-metadata-token-ttl-seconds':'10'}});"
+    "p({method:'GET',path:'/latest/meta-data/'})"
+)
+
+
+def check_imds_blocked(results: dict[str, str]) -> None:
+    """Every probed container answered exactly ``blocked``; anything else (an
+    answer, an error, no probe at all) stops the rollout before traffic."""
+    if not results:
+        raise GateError("no container was probed for instance-metadata access")
+    bad = sorted(name for name, verdict in results.items() if verdict.strip() != "blocked")
+    if bad:
+        raise GateError(
+            f"instance metadata is reachable (or could not be probed) from {bad}: block it "
+            "(IMDSv2 hop limit 1 and the host rule, dataset-staging-dormant.md) and re-run"
+        )

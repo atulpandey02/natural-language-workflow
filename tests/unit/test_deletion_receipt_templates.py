@@ -179,11 +179,13 @@ def test_no_real_identifier_is_written_down(value: str) -> None:
 
 
 OPERATOR_ROLE = "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-operator"
+RETENTION_ROLE = "arn:aws:iam::<ACCOUNT>:role/nlw-<ENV>-dataset-retention"
 
 
 def test_only_the_environment_operator_role_may_create_receipts() -> None:
     """M-1 (review of PR #66): the deny is pinned exactly: effect, principal,
-    action, resource, and the ONE exact principal exception."""
+    action, resource, and the exact principal exceptions: the operator and,
+    since ADR-038, the unattended retention role, and no other."""
     s = sids(templates()["receipt-bucket-policy"])
     assert s["DenyReceiptWritesExceptOperator"] == {
         "Sid": "DenyReceiptWritesExceptOperator",
@@ -191,7 +193,7 @@ def test_only_the_environment_operator_role_may_create_receipts() -> None:
         "Principal": "*",
         "Action": "s3:PutObject",
         "Resource": RECEIPTS,
-        "Condition": {"ArnNotEquals": {"aws:PrincipalArn": OPERATOR_ROLE}},
+        "Condition": {"ArnNotEquals": {"aws:PrincipalArn": [OPERATOR_ROLE, RETENTION_ROLE]}},
     }
     # No other statement opens a write path, and none was dropped.
     assert list(s) == [

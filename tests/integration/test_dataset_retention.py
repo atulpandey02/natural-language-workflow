@@ -543,3 +543,28 @@ async def test_a_partial_failure_across_categories_is_retried_without_loss(h: H)
     assert [e for e in _events(h, inactive) if e[0] == "VERSION_OBJECT_PURGED"] == [
         ("VERSION_OBJECT_PURGED", "OPERATOR_PURGE")
     ]
+
+
+# --- ADR-038: the unattended retention identity ----------------------------------------
+
+
+async def test_the_retention_role_sweeps_and_receipts_as_the_operator_would(h: H) -> None:
+    """The bucket policy admits the retention role's receipts (as the in-memory
+    S3 enforces); the sweep purges and the operator later verifies the receipt."""
+    retention_log = S3DeletionLog(h.bucket.client("retention"), fake.BUCKET)
+    d = await h.dataset()
+    v = await h.profiled(d)
+    since = _since(h, v)
+    with h.owner() as c:
+        result = dr.retention_sweep(
+            c, h.store, retention_log, operator="retention-timer", environment="local",
+            now=since + DAYS + SECOND, limit=100,
+        )  # fmt: skip
+    assert (result["inactive_moved"], result["inactive_purged"]) == (1, 1)
+    assert not TenantScopedBlobStore(h.store, h.tenant).list_version(d, v)
+    with h.owner() as c:
+        assert ops.reconcile_receipts(c, h.log)["unverified"] == []
+    # A runtime role is still refused every receipt.
+    api_log = S3DeletionLog(h.bucket.client("api"), fake.BUCKET)
+    with pytest.raises(DeletionLogUnavailable):
+        list(api_log.refs())

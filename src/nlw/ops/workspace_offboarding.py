@@ -487,6 +487,8 @@ def run_cli(args: Any) -> int:
 
     try:
         settings = Settings()
+        if settings.dataset_operator_identity != "operator":
+            raise OffboardingError("offboarding needs the operator identity (ADR-038)")
         with psycopg.connect(ops._owner_url(), autocommit=True) as conn:
             if args.cmd == "pending":
                 for row in pending_offboardings(conn):

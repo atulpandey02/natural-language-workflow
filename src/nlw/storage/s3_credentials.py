@@ -44,7 +44,7 @@ from nlw.observability.metrics import set_dataset_s3_credential_expiry
 
 log = structlog.get_logger(__name__)
 
-Service = Literal["api", "ingest", "operator", "restore"]
+Service = Literal["api", "ingest", "operator", "restore", "retention"]
 MIN_REMAINING_S = 300
 CREDENTIALS_ENV = "AWS_SHARED_CREDENTIALS_FILE"
 STATIC_ENV = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
@@ -232,11 +232,14 @@ def verify_role_path(iam: Any, role_name: str) -> None:
         raise CredentialError("the operator role must be at IAM path / (ADR-034)")
 
 
-def build_operator_clients(settings: Settings) -> tuple[Any, Any, str]:
-    """(S3 client, IAM client, verified role ARN) for the operator commands,
-    from the same pinned session; the IAM client is used only to confirm the
-    role's path (``verify_role_path``)."""
-    s3, role_arn = build_clients(settings, "operator")
+def build_operator_clients(
+    settings: Settings, service: Service = "operator"
+) -> tuple[Any, Any, str]:
+    """(S3 client, IAM client, verified role ARN) for the operator commands
+    (``operator``, or the unattended ``retention`` identity, ADR-038), from the
+    same pinned session; the IAM client is used only to confirm the role's path
+    (``verify_role_path``)."""
+    s3, role_arn = build_clients(settings, service)
     path = os.environ.get(CREDENTIALS_ENV)
     assert path is not None and settings.dataset_s3_region  # build_clients checked both
     session = _session(_refreshable(path), settings.dataset_s3_region)

@@ -299,3 +299,47 @@ tests:
       - eval_time: 46m
         alertname: NlwDatasetS3CredentialsExpiring
         exp_alerts: []
+
+  # O-6: a refresher that stops for one service fires after 30 min + 5 m;
+  # the others, refreshed every minute here, never do.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_aws_credential_refresh_last_success_timestamp_seconds{service="api"}'
+        values: '0x60'
+      - series: 'nlw_aws_credential_refresh_last_success_timestamp_seconds{service="ingest"}'
+        values: '0+60x60'
+      - series: 'nlw_aws_credential_refresh_last_success_timestamp_seconds{service="retention"}'
+        values: '0+60x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: NlwDatasetCredentialRefreshStale
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: NlwDatasetCredentialRefreshStale
+        exp_alerts: []  # pending since 31 m
+      - eval_time: 37m
+        alertname: NlwDatasetCredentialRefreshStale
+        exp_alerts:
+          - exp_labels: { severity: critical, component: datasets, service: api }
+            exp_annotations:
+              summary: "The dataset credential refresher has not refreshed a role"
+              description: "nlw-aws-credentials.service is failing or not installed for this service. Runbook: docs/runbooks/dataset-staging-dormant.md\n"
+
+  # A service that never reported (the refresher not installed for it) fires too.
+  - interval: 1m
+    input_series:
+      - series: 'nlw_aws_credential_refresh_last_success_timestamp_seconds{service="api"}'
+        values: '0+60x20'
+      - series: 'nlw_aws_credential_refresh_last_success_timestamp_seconds{service="ingest"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: NlwDatasetCredentialRefreshStale
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: NlwDatasetCredentialRefreshStale
+        exp_alerts:
+          - exp_labels: { severity: critical, component: datasets, service: retention }
+            exp_annotations:
+              summary: "The dataset credential refresher has not refreshed a role"
+              description: "nlw-aws-credentials.service is failing or not installed for this service. Runbook: docs/runbooks/dataset-staging-dormant.md\n"

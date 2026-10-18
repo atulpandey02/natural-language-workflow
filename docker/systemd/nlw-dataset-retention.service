@@ -3,14 +3,15 @@
 #
 # DORMANT: install only with the separately authorized dataset enablement.
 #
-# Runs the operator commands in the one-shot `operator` service of
+# Runs the retention commands in the one-shot `retention` service of
 # docker-compose.datasets.yml and writes their textfile metrics
 # (nlw_datasets_retention.prom, nlw_datasets_receipts.prom) for the dataset
-# exporter. The operator role trusts humans only: the run needs the operator's
-# per-session credential file at /run/nlw/aws/operator/credentials and FAILS
-# CLOSED without it (the application refuses a missing or expiring file), which
-# NlwDatasetRetentionSweepFailed/Stale then report. An unattended identity for
-# this timer is an open owner decision (ADR-038).
+# exporter. It runs as the unattended retention role nlw-<env>-dataset-retention
+# (ADR-038; host-trusted, refreshed every 15 min by nlw-aws-credentials), never
+# the human operator role; the application refuses every command but the
+# sweep, its status and receipt reconciliation under that identity. A missing
+# or expiring credential file fails the run closed, which
+# NlwDatasetRetentionSweepFailed/Stale and NlwDatasetCredentialRefreshStale report.
 [Unit]
 Description=NLW dataset retention sweep (one-shot)
 Documentation=file:/opt/nlw/docs/runbooks/dataset-staging-dormant.md
@@ -24,13 +25,13 @@ TimeoutStartSec=3600
 # --no-deps: never recreate the running database container (see nlw-backup.service).
 ExecStart=/usr/bin/docker compose -p app --env-file /opt/nlw/current/.env.prod \
     --env-file /opt/nlw/.env.datasets -f docker-compose.prod.yml \
-    -f docker-compose.staging.yml -f docker-compose.datasets.yml --profile operator \
-    run --rm --no-deps operator python -m nlw.ops.datasets retention-sweep \
+    -f docker-compose.staging.yml -f docker-compose.datasets.yml --profile retention \
+    run --rm --no-deps retention python -m nlw.ops.datasets retention-sweep \
     --operator retention-timer --metrics-file /var/lib/node_exporter/textfile/nlw_datasets_retention.prom
 ExecStart=/usr/bin/docker compose -p app --env-file /opt/nlw/current/.env.prod \
     --env-file /opt/nlw/.env.datasets -f docker-compose.prod.yml \
-    -f docker-compose.staging.yml -f docker-compose.datasets.yml --profile operator \
-    run --rm --no-deps operator python -m nlw.ops.datasets reconcile-receipts \
+    -f docker-compose.staging.yml -f docker-compose.datasets.yml --profile retention \
+    run --rm --no-deps retention python -m nlw.ops.datasets reconcile-receipts \
     --metrics-file /var/lib/node_exporter/textfile/nlw_datasets_receipts.prom
 StandardOutput=journal
 StandardError=journal
