@@ -187,7 +187,12 @@ def test_runtimes_have_separate_users_keys_and_credentials(services: dict[str, A
     )
     (m,) = secret_mounts["operator"]
     assert m["target"] == "/run/nlw/secrets/worker.secrets.env" and m["read_only"] is True
-    assert m["bind"]["create_host_path"] is False
+    # The source of truth is the overlay itself (some Compose versions omit a
+    # false create_host_path from the rendered config); never rendered as true.
+    assert m.get("bind", {}).get("create_host_path", False) is False
+    raw = yaml.safe_load((ROOT / OVERLAY).read_text())["services"]["operator"]["volumes"]
+    (raw_mount,) = [v for v in raw if isinstance(v, dict) and "worker.secrets.env" in v["source"]]
+    assert raw_mount["bind"] == {"create_host_path": False} and raw_mount["read_only"] is True
 
 
 @pytest.mark.parametrize(
