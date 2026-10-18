@@ -249,6 +249,7 @@ of a `0600` file and **never** echoed, logged, passed on argv, or committed.
 | `drain` STOP | edge on maintenance, scheduler stopped | DB untouched; manual: `cd /opt/nlw/releases/<sha> && docker compose -p app --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.staging.yml exec -T caddy rm -f /srv/maint/MAINTENANCE` and `… start scheduler` to resume the OLD runtime |
 | `prepare-roles` / `migrate` / `install-context-keys` STOP | DB mutated, runtimes stopped | **halted state, never silently old code**: fix forward (`failed-migration.md`) and re-run the failed phase; the verified backup is the rollback |
 | `recreate-runtime` STOP | `current` may already point at the release | re-run the phase; do not touch `/opt/nlw/app` |
+| `recreate-runtime` STOP: instance metadata reachable (O-6, ADR-038) | before the link: nothing changed; after recreation: traffic stays closed | set IMDSv2 hop limit 1 and the host rule dropping `169.254.169.254` from Docker bridges, then re-run |
 
 ### After activation: every later rollout follows `current` (N → N+1)
 

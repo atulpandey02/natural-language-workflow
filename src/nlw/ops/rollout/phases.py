@@ -1401,6 +1401,9 @@ class Rollout:
             raise GateError(
                 f"{cur} exists and is not a symlink; refusing to activate over a directory"
             )
+        # Before activation: a throwaway container of the release image on the
+        # deployed network must not reach instance metadata (O-6, ADR-038).
+        self.verify_imds_blocked_on_network()
         self._run(f"ln -sfn '{self.staged}' '{cur}'")
         pointed = self._run(f"readlink '{cur}'").strip()
         if pointed != self.staged:
@@ -1426,6 +1429,7 @@ class Rollout:
         images = self.read_running_images()
         gates.check_running_images(images, self.release)
         self.verify_mount_isolation(keys_dir)
+        self.verify_imds_blocked_in_containers()
         self.verify_alertmanager_runtime(am)
         state.mark_phase(
             doc,
@@ -1435,6 +1439,30 @@ class Rollout:
             alertmanager={**am.evidence(), "config_source": "running-alertmanager"},
         )
         self._save(doc)
+
+    def verify_imds_blocked_on_network(self) -> None:
+        network = f"{self.target.compose_project}_internal"
+        verdict = self._run(
+            f"docker run --rm --network {shlex.quote(network)} --entrypoint python "
+            f"{shlex.quote(self.release.backend_image)} -c {shlex.quote(gates.IMDS_PROBE_PY)}",
+            timeout=120,
+        )
+        gates.check_imds_blocked({f"network:{network}": verdict})
+        self.log("instance metadata from the deployed network: blocked")
+
+    def verify_imds_blocked_in_containers(self) -> None:
+        """Inside every running application container (api, worker, scheduler
+        with Python; web with Node): instance metadata must be unreachable."""
+        results: dict[str, str] = {}
+        for svc in (*RUNTIME_SERVICES, "web"):
+            probe = (
+                f"node -e {shlex.quote(gates.IMDS_PROBE_JS)}"
+                if svc == "web"
+                else f"python -c {shlex.quote(gates.IMDS_PROBE_PY)}"
+            )
+            results[svc] = self._run(f"{self.dc_staged} exec -T {svc} {probe}", timeout=60)
+        gates.check_imds_blocked(results)
+        self.log("instance metadata from every application container: blocked")
 
     def verify_mount_isolation(self, keys_dir: str) -> None:
         out = self._run(

@@ -1106,10 +1106,12 @@ def configured_deletion_log(settings: Settings) -> DeletionLog:
 
     assert settings.dataset_deletion_log_bucket and settings.dataset_s3_bucket  # validated
     try:
-        client, iam, _ = build_operator_clients(settings)
+        client, iam, _ = build_operator_clients(settings, settings.dataset_operator_identity)
     except CredentialError as exc:
         raise DeletionLogUnavailable(str(exc)) from None
-    role_name, _account = expected_role(settings.dataset_s3_bucket, "operator")
+    role_name, _account = expected_role(
+        settings.dataset_s3_bucket, settings.dataset_operator_identity
+    )
 
     def role_check() -> None:
         try:
@@ -1283,8 +1285,19 @@ def setting_name(model: type[Any], loc: tuple[Any, ...]) -> str:
     return str(alias) if isinstance(alias, str) and alias else str(loc[0]).upper()
 
 
+# The only commands the unattended retention identity may run (ADR-038): the
+# sweep (moves and purges with receipts), its status, and receipt
+# reconciliation. Never a tombstone, a restore step, a dispatch or offboarding.
+RETENTION_COMMANDS = ("retention-sweep", "retention-status", "reconcile-receipts")
+
+
 def _run(args: argparse.Namespace, progress: dict[str, int]) -> int:
     settings = Settings()
+    if settings.dataset_operator_identity == "retention" and args.cmd not in RETENTION_COMMANDS:
+        raise TombstoneError(
+            f"{args.cmd} needs the operator identity; the retention identity runs only "
+            + ", ".join(RETENTION_COMMANDS)
+        )
     with psycopg.connect(_owner_url(), autocommit=True) as conn:
         if args.cmd == "rejected-pending":
             stats = rejected_stats(conn)
@@ -1331,7 +1344,7 @@ def _run(args: argparse.Namespace, progress: dict[str, int]) -> int:
         if args.cmd == "restore-objects":
             # The restore role only: never the operator credentials (ADR-036).
             return _restore_objects_cli(args, conn, settings)
-        store = dataset_store(settings, service="operator")
+        store = dataset_store(settings, service=settings.dataset_operator_identity)
         if args.cmd == "retention-sweep":
             return _retention_sweep(args, conn, store, settings, progress)
         if args.cmd == "verify-objects":

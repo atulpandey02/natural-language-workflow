@@ -253,6 +253,12 @@ class Settings(BaseSettings):
     # time into, ``nlw-<env>-datasets-restore-<account>-us-east-1[-suffix]``,
     # read by ``restore-objects`` as the verified restore role. NOT RUN on AWS.
     dataset_restore_bucket: str | None = None
+    # Which verified role the operator commands run as (O-6, ADR-038):
+    # ``operator`` (a named human, MFA) for every command, or ``retention``
+    # (``nlw-<env>-dataset-retention``, host-trusted, refreshed like the
+    # runtimes) for the unattended retention timer, which may run only the
+    # retention sweep, its status and receipt reconciliation.
+    dataset_operator_identity: Literal["operator", "retention"] = "operator"
     # Unattended dispatch of lost enqueues (ADR-032, O-7): every interval the
     # dispatcher re-sends at most ``batch`` waiting requests older than
     # ``min_age`` (oldest first), each at most once per ``resend``.

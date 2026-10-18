@@ -425,7 +425,7 @@ def _key_dir(tmp: Path, classes: tuple[str, ...]) -> Path:
 
 
 def test_ctxkeys_ingest_is_optional_and_explicit(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     uid = str(os.getuid())
     three = ("api", "worker", "scheduler")
@@ -441,6 +441,12 @@ def test_ctxkeys_ingest_is_optional_and_explicit(
                          "--include-ingest"]) == 1  # fmt: skip
     _key_dir(tmp_path, ("ingest",))
     capsys.readouterr()
+    # ADR-038: ingest.key must be owned by the ingest runtime's own uid (10002),
+    # never the --owner of the other classes: written as us, it is refused ...
+    assert ctxkeys.main(["fingerprint", *args, "--key-id-ingest", "k-ingest"]) == 1
+    assert "!= 10002: ingest.key" in capsys.readouterr().err
+    # ... and accepted once that uid is the owner (here: our own, for the test).
+    monkeypatch.setitem(ctxkeys.CLASS_OWNER_UID, "ingest", int(uid))
     assert ctxkeys.main(["fingerprint", *args, "--key-id-ingest", "k-ingest"]) == 0
     assert [ln.split()[0] for ln in capsys.readouterr().out.splitlines()] == [*three, "ingest"]
     assert "ingest" in ctxkeys._CLASSES and three == ctxkeys.REQUIRED_CLASSES

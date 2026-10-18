@@ -47,6 +47,11 @@ OPERATOR_GRANTS = {
     "s3:GetBucketObjectLockConfiguration": "",  # the bucket
 }
 RUNTIME_ROLES = ("api", "ingest", "bootstrap")
+# Principals the bucket policy lets create receipts (DenyReceiptWritesExceptOperator)
+# and that hold the receipt grants: the operator, and the unattended retention
+# role (ADR-038; its role-dataset-retention receipt statements equal the
+# operator's, pinned by test_retention_identity_templates).
+RECEIPT_WRITERS = ("operator", "retention")
 # Principals whose IDENTITY policy allows anything here (an account
 # administrator, a broad automation role). The bucket policy still binds them.
 BROAD_ROLES = (None, "audit-admin", "account-admin")
@@ -126,7 +131,7 @@ class FakeReceiptS3:
             raise self._deny(op)  # bucket policy: DenyDatasetRuntimeRoles
         if self.role in BROAD_ROLES:
             return
-        assert self.role == "operator", self.role
+        assert self.role in RECEIPT_WRITERS, self.role
         scope = OPERATOR_GRANTS.get(action)
         if scope is None:
             raise self._deny(op)
@@ -159,7 +164,7 @@ class FakeReceiptS3:
         key = kw["Key"]
         self._authorize("put_object", "s3:PutObject", key=key)
         self._bucket(kw, "PutObject")
-        if self.role != "operator":
+        if self.role not in RECEIPT_WRITERS:
             raise self._deny("put_object")  # bucket policy: DenyReceiptWritesExceptOperator
         if kw.get("IfNoneMatch") != "*" or kw.get("ServerSideEncryption") != "AES256":
             raise self._deny("put_object")  # bucket policy

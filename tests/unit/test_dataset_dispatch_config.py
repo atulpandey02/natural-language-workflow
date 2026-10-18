@@ -63,6 +63,7 @@ def test_dataset_alerts_are_low_cardinality_and_not_yet_deployed() -> None:
         "NlwDatasetDispatcherStalled",
         "NlwDatasetRejectedRetainedTooLong",  # O-5: 7 days (ADR-035)
         "NlwDatasetS3CredentialsExpiring",  # ADR-033 D3
+        "NlwDatasetCredentialRefreshStale",  # ADR-038 (the host refresher)
         # O-5 retention (ADR-035)
         "NlwDatasetInactiveRetainedTooLong",
         "NlwDatasetDeletedNotPurged",

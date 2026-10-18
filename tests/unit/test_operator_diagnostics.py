@@ -340,3 +340,47 @@ def test_verify_objects_fails_on_everything_but_noncurrent_versions(
     assert ops.main(["verify-objects"]) == code
     if finding:
         assert f"{finding}=1 v-1" in capsys.readouterr().out
+
+
+# --- ADR-038: the unattended retention identity runs only its three commands --------
+
+_DS = "11111111-2222-3333-4444-555555555555"
+REFUSED_UNDER_RETENTION = [
+    ["pending"], ["verify-objects"], ["dispatch-pending"], ["rejected-pending"],
+    ["purge-rejected", "--operator", "t"], ["reapply-receipts"], ["restore-objects"],
+    ["purge", "--dataset", _DS, "--operator", "t"], ["tombstone", "--dataset", _DS],
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("argv", REFUSED_UNDER_RETENTION, ids=lambda a: a[0])
+def test_the_retention_identity_is_refused_every_other_command(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    monkeypatch.setenv("DATASET_OPERATOR_IDENTITY", "retention")
+
+    def no_db(*a: Any, **k: Any) -> Any:
+        raise AssertionError("refused before any database connection")
+
+    monkeypatch.setattr(psycopg, "connect", no_db)
+    assert ops.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "needs the operator identity" in err and argv[0] in err
+    assert ops.RETENTION_COMMANDS == ("retention-sweep", "retention-status", "reconcile-receipts")
+
+
+def test_offboarding_refuses_the_retention_identity(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from nlw.ops import offboarding
+
+    monkeypatch.setenv("DATASET_OPERATOR_IDENTITY", "retention")
+    monkeypatch.setenv("DATABASE_MIGRATION_URL", "postgresql://unused")
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+    assert offboarding.main(["request", "--workspace", _DS, "--operator", "t"]) == 2
+    assert "offboarding needs the operator identity" in capsys.readouterr().err
+
+
+def test_the_identity_setting_is_closed() -> None:
+    assert Settings().dataset_operator_identity == "operator"
+    with pytest.raises(ValidationError):
+        Settings(dataset_operator_identity="restore")  # type: ignore[arg-type]
