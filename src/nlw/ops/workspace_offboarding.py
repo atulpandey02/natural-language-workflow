@@ -270,6 +270,8 @@ def complete_offboarding(
         secret_refs = int(secrets[0]) if secrets else 0
         _require_secrets_removed(secrets_file, workspace_id)  # again, at commit time
         counts = _purge_rows(conn, workspace_id)
+        # The founding grant keeps no personal data (owner decision 2026-10-24).
+        counts[GRANTS_SCRUBBED] = scrub_grants(conn, workspace_id, operator=operator)
         # The retained delivery record keeps ids, status and times, never where
         # it was sent (channel names, webhook hosts).
         conn.execute(
@@ -356,6 +358,38 @@ def _require_secrets_removed(secrets_file: Path | None, workspace_id: uuid.UUID)
         )
 
 
+# The workspace-creation grant ledger (owner decision 2026-10-24, migration
+# 0032): when offboarding completes, the grant that founded the workspace keeps
+# no personal data. Recorded in the receipt's table counts under this key.
+GRANTS_SCRUBBED = "workspace_creation_grants:scrubbed"
+RESTORE_SCRUB_OPERATOR = "restore-reapply"
+
+
+def unscrubbed_grants(conn: psycopg.Connection[Any], workspace_id: uuid.UUID) -> int:
+    row = conn.execute(
+        "SELECT count(*) FROM workspace_creation_grants "
+        "WHERE consumed_workspace_id = %s AND scrubbed_at IS NULL",
+        (workspace_id,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def scrub_grants(conn: psycopg.Connection[Any], workspace_id: uuid.UUID, *, operator: str) -> int:
+    """NULL the founder's email, founder id and note of every grant that
+    founded the workspace (the 0032 guard allows it only for a non-ACTIVE
+    workspace and freezes the row after); verified, idempotent."""
+    _operator(operator)
+    scrubbed = conn.execute(
+        "UPDATE workspace_creation_grants SET email_normalized = NULL, "
+        "consumed_by_user_id = NULL, note = NULL, scrubbed_at = now(), scrubbed_by = %s "
+        "WHERE consumed_workspace_id = %s AND scrubbed_at IS NULL",
+        (operator, workspace_id),
+    ).rowcount
+    if unscrubbed_grants(conn, workspace_id):
+        raise OffboardingError("a workspace-creation grant of the workspace is not scrubbed")
+    return int(scrubbed)
+
+
 def _counts_json(receipt: WorkspaceReceipt) -> str:
     return json.dumps(
         {
@@ -398,6 +432,7 @@ def reapply_workspace_receipts(
             "workspaces_reoffboarded",
             "workspaces_already",
             "workspaces_absent",
+            "grants_scrubbed",
         ),
         0,
     )
@@ -424,14 +459,22 @@ def reapply_workspace_receipts(
                 continue
             if row[0] != "ACTIVE":
                 out["workspaces_already"] += 1
-                continue
-            if not dry_run:
-                conn.execute(
-                    "UPDATE workspaces SET status = 'OFFBOARDING', "
-                    "offboarding_requested_at = now() WHERE id = %s AND status = 'ACTIVE'",
-                    (ref.tenant_id,),
+            else:
+                if not dry_run:
+                    conn.execute(
+                        "UPDATE workspaces SET status = 'OFFBOARDING', "
+                        "offboarding_requested_at = now() WHERE id = %s AND status = 'ACTIVE'",
+                        (ref.tenant_id,),
+                    )
+                out["workspaces_reoffboarded"] += 1
+            # A restored snapshot may predate the scrub: the founding grant loses
+            # its personal data again before any runtime starts.
+            if dry_run:
+                out["grants_scrubbed"] += unscrubbed_grants(conn, ref.tenant_id)
+            else:
+                out["grants_scrubbed"] += scrub_grants(
+                    conn, ref.tenant_id, operator=RESTORE_SCRUB_OPERATOR
                 )
-            out["workspaces_reoffboarded"] += 1
     return {**out, "workspace_unreadable": sorted(set(unreadable))}
 
 

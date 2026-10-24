@@ -369,5 +369,5 @@ def test_0028_downgrade_is_refused_once_versions_keys_exist(s3: SimpleNamespace)
         command.downgrade(cfg, "0027_dataset_ingest_dispatch")
     with psycopg.connect(s3.pg.owner_libpq) as c:
         assert c.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0031_workspace_offboarding",
+            "0032_workspace_grant_scrub",
         )

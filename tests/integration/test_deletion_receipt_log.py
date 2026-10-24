@@ -291,7 +291,7 @@ async def test_reapply_restores_the_deletions_a_restored_database_forgot(h: H) -
         "receipts": 3, "reapplied": 1, "recorded": 1, "already_recorded": 0,
         "already_tombstoned": 0, "absent": 1, "conflict": [], "unreadable": [],
         "workspace_receipts": 0, "workspaces_reoffboarded": 0, "workspaces_already": 0,
-        "workspaces_absent": 0, "workspace_unreadable": [],
+        "workspaces_absent": 0, "grants_scrubbed": 0, "workspace_unreadable": [],
         "unexpected_objects": 0, "dry_run": 0,
     }  # fmt: skip
     assert h.row(live) == ("DELETING", None)  # unusable, no longer the active version

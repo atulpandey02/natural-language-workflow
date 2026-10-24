@@ -3,6 +3,15 @@
 Navigation and status document. A new engineer or agent should be able to read
 this and know exactly where the project stands. Update it after each milestone.
 
+## Phase 2B — workspace grant-ledger scrub (branch `feat/grant-ledger-scrub`, awaiting review; NOT RUN)
+
+Owner decision (2026-10-24, [ADR-037 amendment](adr/ADR-037-workspace-offboarding.md)),
+migration `0032_workspace_grant_scrub`: offboarding scrubs the founding grant's
+email, founder id and note (guarded, idempotent, re-applied after a restore);
+only ids, operator labels and timestamps remain. Draft customer-facing deletion
+statement (approved periods, not published) in
+[offboarding-and-deletion](security/offboarding-and-deletion.md), pinned by a test.
+
 ## Phase 2B — O-6 dormant staging configuration (branch `feat/o6-dormant-staging`, awaiting review; NOT RUN, nothing installed)
 
 Owner scope (2026-10-15, [ADR-038](adr/ADR-038-o6-dormant-staging-configuration.md)):
