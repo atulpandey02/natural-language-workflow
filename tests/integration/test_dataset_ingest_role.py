@@ -876,7 +876,7 @@ def test_0026_refuses_a_downgrade_with_an_ingest_key_and_goes_down_and_up_otherw
     command.upgrade(cfg, "head")
     head = _shape(pg_stack)
     # Head is 0030 (ADR-035); 0027-0030 add no policy on top of 0026.
-    assert head["revision"] == "0031_workspace_offboarding" and head["policies"] == 74
+    assert head["revision"] == "0032_workspace_grant_scrub" and head["policies"] == 74
     assert down_0025["revision"] == "0025_dataset_ingestion"
     assert (down_0025["policies"], down_0025["requests"], down_0025["ingest_grants"]) == (65, 0, 0)
     for fn in ("verifier", "guard", "required", "consistency"):
@@ -1516,6 +1516,6 @@ async def test_a_populated_0025_database_upgrades_to_0026_without_rewriting_anyt
     assert snapshot() == before  # 0025 -> 0031 rewrote nothing (legacy keys stay valid)
     with st.owner() as c:
         assert c.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0031_workspace_offboarding",
+            "0032_workspace_grant_scrub",
         )
         assert c.execute("SELECT count(*) FROM pg_policies").fetchone() == (74,)
