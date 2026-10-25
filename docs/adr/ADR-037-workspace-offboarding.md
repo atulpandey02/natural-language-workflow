@@ -101,12 +101,51 @@ dataset and workspace tombstones. Their periods follow ADR-035.
 | Low: the receipt is written before the tombstone commits | documented above; `reconcile-receipts` reports such a receipt, re-running `complete` converges |
 | Sound | `workspace_is_active` (owner, `search_path`, grants, NULL id), the replaced functions and their exact downgrade, the state trigger, purge order and NOT NULL scopes, B unaffected |
 
-**Open owner decision:** `workspace_creation_grants` (a platform table) keeps
-the founder's normalized email with `consumed_workspace_id`, linking it to the
-tombstone. It is the operator's grant ledger; whether to scrub the email or the
-link on offboarding is a retention decision for the owner, not changed here.
+**Decided (owner, 2026-10-24): the grant ledger is scrubbed** (migration
+`0032_workspace_grant_scrub`; see the amendment below).
 
 Not covered by the check: secrets injected into the worker by any other means
 than the named file (compose `environment:`, other env files). The runbook
 step also lists the worker's live variable names
 (`docker compose exec worker env | cut -d= -f1`, names only) after recreating it.
+
+## Amendment (2026-10-24): the workspace-creation grant ledger
+
+Owner decision: when offboarding completes, the founder's raw email and every
+direct email-to-workspace link leave the grant ledger.
+
+- **Scrubbed** (set to NULL, in `complete`'s final transaction, verified):
+  `email_normalized`, `consumed_by_user_id` (it leads to the email through
+  `users`) and the operator's free-text `note`.
+- **Kept** (non-personal audit evidence): the immutable grant `id`, the
+  `consumed_workspace_id` (the tombstone), `granted_by` and `revoked_by`
+  (operator labels), `created_at`, `expires_at`, `consumed_at`, `revoked_at`,
+  and the new `scrubbed_at` / `scrubbed_by`. No email-derived value of any kind
+  (no hash, keyed or not): no actor reference is needed, so none is kept. The
+  workspace receipt binds the count (`table_counts["workspace_creation_grants:scrubbed"]`)
+  into its digest.
+- **Guarded** (0032): a scrub is allowed only for a non-ACTIVE workspace and may
+  change nothing but those columns; a scrubbed row never changes and is never
+  deleted; constraints refuse a half scrub. Runtime roles still hold no
+  privilege on the table.
+- **Reuse and replay**: a scrubbed grant stays consumed and its NULL email
+  matches no lookup, so it can never found another workspace; the
+  one-open-grant-per-email index covers open grants only, so a new, separate
+  grant for the same person still works. Scrubbing is idempotent.
+- **Restore**: a restored snapshot may predate the scrub. `reapply-receipts`
+  scrubs the founding grant of every workspace a receipt proves offboarded
+  (`scrubbed_by = restore-reapply`), under the recovery lock, before any runtime
+  starts; a dry run only counts.
+- **Migration**: additive; an upgrade from a populated 0031 changes no row.
+  Downgrade is refused while any grant is scrubbed (the 0022 schema cannot
+  hold a row without an email); otherwise it restores the 0022 checks by
+  definition. Database backups taken before the scrub keep the email until
+  they expire (twelve months, ADR-035); a restore re-scrubs as above.
+
+**Residual (not the ledger):** the founder's `users` row (the sign-in identity,
+with its email) is platform data and stays; retained audit events
+(`authz_audit_events`, e.g. `workspace.created`) keep the founder's user id with
+the tombstone id. An operator holding the owner credential can therefore still
+join them; no runtime role can (`users` is own-row only for `nlw_app`). Account
+deletion or pseudonymisation of retained actor ids is a separate decision,
+required before customer data.

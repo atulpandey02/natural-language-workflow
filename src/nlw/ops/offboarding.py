@@ -126,7 +126,12 @@ TABLES: dict[str, TableClass] = {
     ),
     # Platform tables: not tenant data.
     "users": TableClass("platform", "none", "identity rows are not workspace data"),
-    "workspace_creation_grants": TableClass("platform", "none", "operator grant ledger"),
+    "workspace_creation_grants": TableClass(
+        "platform",
+        "none",
+        "operator grant ledger; the founding grant is scrubbed on offboarding (no email, "
+        "no founder id, no note; ids, operator labels and timestamps kept)",
+    ),
     "ctx_keys": TableClass("platform", "none", "signing-key registry"),
     "ctx_key_events": TableClass("platform", "none", "signing-key audit"),
     "dr_restore_events": TableClass("platform", "none", "restore audit"),
